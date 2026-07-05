@@ -23,8 +23,9 @@ use runtime_domain::prompt_assembly::{
     PromptAssemblyToolCandidate, PromptSourceKind, PromptSourceOrigin, PromptSourceStatus,
     ResolvedPromptSource, SKILL_DISCOVERY_GENERATED_END, SKILL_DISCOVERY_GENERATED_START,
     TOOL_GUIDELINES_GENERATED_END, TOOL_GUIDELINES_GENERATED_START, default_extra_prompt_body,
-    natural_sort_text_cmp, next_default_extra_prompt_title,
+    next_default_extra_prompt_title,
 };
+use runtime_domain::text::natural_sort_text_cmp;
 
 use crate::{
     AppEffect, Model,

@@ -85,7 +85,7 @@ async fn tool_executor_registry_returns_model_visible_unknown_tool_error() {
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert_eq!(result.call_id, "call-1");
     assert!(result.content.contains("missing"));
 }

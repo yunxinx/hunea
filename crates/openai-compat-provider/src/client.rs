@@ -104,7 +104,7 @@ impl ProviderClient for OpenAiChatCompletionsClient {
             }
 
             let mut decoder = OpenAiSseDecoder::default();
-            let mut stream_state = OpenAiStreamState::new(request.model.clone());
+            let mut stream_state = OpenAiStreamState::new();
             let mut bytes = response.bytes_stream();
             while let Some(chunk) = bytes.next().await {
                 let chunk = chunk.map_err(|source| ProviderError::Transport(source.to_string()))?;

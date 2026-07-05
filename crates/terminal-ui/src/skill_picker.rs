@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::KeyEvent;
 use ratatui::text::Line;
 use runtime_domain::prompt_assembly::PromptAssemblyDiscoveredSkill;
 
@@ -9,6 +9,10 @@ use super::{
         attached_prompt_picker_name_column_width, attached_prompt_picker_selectable_range,
         render_attached_prompt_picker_row,
     },
+    composer_inline_picker::{
+        ComposerInlinePickerKey, ComposerInlinePickerState, classify_composer_inline_picker_key,
+        move_composer_inline_picker_selection, reconcile_composer_inline_picker_state,
+    },
     display_width::display_width,
     inline_panel::InlinePanelRenderResult,
     overlay_input_result::OverlayInputResult,
@@ -17,13 +21,7 @@ use super::{
 };
 
 /// `SkillPickerState` 保存 `$skill` 选择器的当前查询、结果和导航位置。
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(crate) struct SkillPickerState {
-    pub(crate) query: String,
-    pub(crate) items: Vec<PromptAssemblyDiscoveredSkill>,
-    pub(crate) selected: usize,
-    pub(crate) scroll: usize,
-}
+pub(crate) type SkillPickerState = ComposerInlinePickerState<PromptAssemblyDiscoveredSkill>;
 
 impl Model {
     pub(crate) fn skill_picker_active(&self) -> bool {
@@ -56,43 +54,26 @@ impl Model {
         let items = filter_manual_skill_items(&self.prompt_assembly.manual_skills, &query);
         let visible_rows = self.file_picker_list_visible_rows();
         let previous = self.skill_picker.as_ref();
-        let query_changed = previous.is_none_or(|state| state.query != query);
         let bound_skill_name = self
             .composer
             .current_skill_binding()
             .map(|binding| binding.skill_name);
-        let mut selected = if query_changed {
-            bound_skill_name
-                .as_deref()
-                .and_then(|skill_name| {
-                    items
-                        .iter()
-                        .position(|item| item.skill_name.as_str() == skill_name)
-                })
-                .unwrap_or(0)
-        } else {
-            previous.map(|state| state.selected).unwrap_or(0)
-        };
-        let mut scroll = if query_changed {
-            0
-        } else {
-            previous.map(|state| state.scroll).unwrap_or(0)
-        };
+        let initial_selected = bound_skill_name
+            .as_deref()
+            .and_then(|skill_name| {
+                items
+                    .iter()
+                    .position(|item| item.skill_name.as_str() == skill_name)
+            })
+            .unwrap_or(0);
 
-        if items.is_empty() {
-            selected = 0;
-            scroll = 0;
-        } else {
-            selected = selected.min(items.len() - 1);
-            scroll = clamp_skill_picker_scroll(scroll, selected, items.len(), visible_rows);
-        }
-
-        self.skill_picker = Some(SkillPickerState {
+        self.skill_picker = Some(reconcile_composer_inline_picker_state(
             query,
             items,
-            selected,
-            scroll,
-        });
+            previous,
+            visible_rows,
+            initial_selected,
+        ));
     }
 
     pub(crate) fn handle_skill_picker_key(&mut self, key: KeyEvent) -> OverlayInputResult {
@@ -100,37 +81,29 @@ impl Model {
             return OverlayInputResult::Ignored;
         }
 
-        match key.code {
-            KeyCode::Up if key.modifiers.is_empty() => {
+        match classify_composer_inline_picker_key(key) {
+            Some(ComposerInlinePickerKey::MovePrevious) => {
                 self.move_skill_picker_selection(-1);
                 OverlayInputResult::Handled
             }
-            KeyCode::Down if key.modifiers.is_empty() => {
+            Some(ComposerInlinePickerKey::MoveNext) => {
                 self.move_skill_picker_selection(1);
                 OverlayInputResult::Handled
             }
-            KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
-                self.move_skill_picker_selection(-1);
-                OverlayInputResult::Handled
-            }
-            KeyCode::Char('n') if key.modifiers == KeyModifiers::CONTROL => {
-                self.move_skill_picker_selection(1);
-                OverlayInputResult::Handled
-            }
-            KeyCode::Esc if key.modifiers.is_empty() => {
+            Some(ComposerInlinePickerKey::Dismiss) => {
                 self.dismiss_current_skill_picker_token();
                 self.close_skill_picker();
                 OverlayInputResult::Handled
             }
-            KeyCode::Tab if key.modifiers.is_empty() => {
+            Some(ComposerInlinePickerKey::Complete) => {
                 self.complete_skill_picker_common_prefix();
                 OverlayInputResult::Handled
             }
-            KeyCode::Enter if key.modifiers.is_empty() => {
+            Some(ComposerInlinePickerKey::Accept) => {
                 let _ = self.insert_selected_skill_picker_skill();
                 OverlayInputResult::Handled
             }
-            _ => OverlayInputResult::Ignored,
+            None => OverlayInputResult::Ignored,
         }
     }
 
@@ -233,22 +206,7 @@ impl Model {
         let Some(state) = self.skill_picker.as_mut() else {
             return;
         };
-        if state.items.is_empty() {
-            return;
-        }
-
-        let last = state.items.len() - 1;
-        if delta.is_negative() {
-            state.selected = state.selected.saturating_sub(delta.unsigned_abs());
-        } else {
-            state.selected = state.selected.saturating_add(delta as usize).min(last);
-        }
-        state.scroll = clamp_skill_picker_scroll(
-            state.scroll,
-            state.selected,
-            state.items.len(),
-            visible_rows,
-        );
+        move_composer_inline_picker_selection(state, delta, visible_rows);
     }
 
     fn complete_skill_picker_common_prefix(&mut self) {
@@ -318,27 +276,6 @@ impl Model {
     fn dismiss_current_skill_picker_token(&mut self) {
         self.dismissed_skill_picker_token = self.composer.current_skill_token();
     }
-}
-
-fn clamp_skill_picker_scroll(
-    scroll: usize,
-    selected: usize,
-    item_count: usize,
-    visible_rows: usize,
-) -> usize {
-    if item_count == 0 {
-        return 0;
-    }
-    let visible_rows = visible_rows.max(1);
-    let max_scroll = item_count.saturating_sub(visible_rows);
-    let mut scroll = scroll.min(max_scroll);
-    if selected < scroll {
-        scroll = selected;
-    }
-    if selected >= scroll + visible_rows {
-        scroll = selected + 1 - visible_rows;
-    }
-    scroll.min(max_scroll)
 }
 
 fn filter_manual_skill_items(

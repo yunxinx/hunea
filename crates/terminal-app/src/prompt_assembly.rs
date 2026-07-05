@@ -27,10 +27,10 @@ use runtime_domain::prompt_assembly::{
     PromptPreludeSnapshot, PromptSourceCandidate, PromptSourceInactiveReason, PromptSourceKind,
     PromptSourceOrigin, PromptSourceStatus, SKILL_DISCOVERY_GENERATED_END,
     SKILL_DISCOVERY_GENERATED_START, TOOL_GUIDELINES_GENERATED_END,
-    TOOL_GUIDELINES_GENERATED_START, derive_extra_prompt_title, natural_sort_text_cmp,
-    resolve_prompt_assembly,
+    TOOL_GUIDELINES_GENERATED_START, derive_extra_prompt_title, resolve_prompt_assembly,
 };
 use runtime_domain::session::{TranscriptCustomPromptBinding, TranscriptUserMessage};
+use runtime_domain::text::natural_sort_text_cmp;
 use serde::Deserialize;
 use session_store::SessionStore;
 use tool_runtime::ToolDefinition;
@@ -546,10 +546,11 @@ fn resolve_prompt_assembly_manager_snapshot_with_overrides(
         &mut effective_global_state,
         &mut effective_project_state,
     );
-    let (discovered_skills, diagnostics) =
+    let (discovered_skills, mut diagnostics) =
         discover_skills_with_diagnostics(work_dir, global_skill_root_override);
-    let discovered_instruction_files =
+    let (discovered_instruction_files, instruction_diagnostics) =
         discover_instruction_files(work_dir, global_instructions_path_override);
+    diagnostics.extend(instruction_diagnostics);
     ensure_discovered_instruction_entries(
         &mut effective_global_state,
         &mut effective_project_state,

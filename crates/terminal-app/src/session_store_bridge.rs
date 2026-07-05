@@ -2,12 +2,15 @@ use std::{
     future::Future,
     sync::{OnceLock, mpsc},
     thread,
+    time::Duration,
 };
 
 use color_eyre::eyre::{Result, WrapErr, eyre};
 use tokio::runtime::Runtime;
 
 type SessionStoreJob = Box<dyn FnOnce(&Runtime) + Send + 'static>;
+
+const SESSION_STORE_BRIDGE_WAIT: Duration = Duration::from_secs(5);
 
 static SESSION_STORE_BRIDGE: OnceLock<SessionStoreBridge> = OnceLock::new();
 
@@ -37,9 +40,23 @@ where
             let _ = result_sender.send(Ok(result));
         }))
         .map_err(|_| eyre!("session store bridge worker stopped"))?;
-    result_receiver
-        .recv()
-        .map_err(|_| eyre!("session store bridge worker stopped"))?
+    receive_session_store_result(result_receiver, SESSION_STORE_BRIDGE_WAIT, runtime_context)
+}
+
+fn receive_session_store_result<T>(
+    result_receiver: mpsc::Receiver<Result<T>>,
+    timeout: Duration,
+    runtime_context: &'static str,
+) -> Result<T> {
+    match result_receiver.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            Err(eyre!("{runtime_context} timed out after {timeout:?}"))
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err(eyre!("session store bridge worker stopped"))
+        }
+    }
 }
 
 fn session_store_bridge(runtime_context: &'static str) -> Result<SessionStoreBridge> {
@@ -78,4 +95,26 @@ fn session_store_bridge(runtime_context: &'static str) -> Result<SessionStoreBri
         .get()
         .cloned()
         .ok_or_else(|| eyre!("session store bridge was not initialized"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::mpsc, time::Duration};
+
+    #[test]
+    fn receive_session_store_result_times_out_while_sender_is_alive() {
+        let (_sender, receiver) = mpsc::sync_channel::<color_eyre::eyre::Result<()>>(1);
+
+        let error = super::receive_session_store_result(
+            receiver,
+            Duration::from_millis(1),
+            "test session store operation",
+        )
+        .expect_err("operation should time out");
+
+        assert_eq!(
+            error.to_string(),
+            "test session store operation timed out after 1ms"
+        );
+    }
 }

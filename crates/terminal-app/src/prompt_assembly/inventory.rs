@@ -120,21 +120,28 @@ pub(super) fn manual_skill_inventory(
 pub(super) fn discover_instruction_files(
     work_dir: &Path,
     global_instructions_path_override: Option<&Path>,
-) -> Vec<DiscoveredInstructionsFile> {
+) -> (
+    Vec<DiscoveredInstructionsFile>,
+    Vec<PromptAssemblyDiagnostic>,
+) {
     let mut discovered = Vec::new();
+    let mut diagnostics = Vec::new();
 
     if let Some(global_file) = global_instructions_path_override
         .map(Path::to_path_buf)
         .or_else(global_instructions_file_path)
         .filter(|path| path.is_file())
-        && let Some(file) = load_instructions_file(
+    {
+        match load_instructions_file(
             "instructions:global",
             "Global AGENTS.md".to_string(),
             &global_file,
             PromptSourceOrigin::Global,
-        )
-    {
-        discovered.push(file);
+        ) {
+            Ok(Some(file)) => discovered.push(file),
+            Ok(None) => {}
+            Err(diagnostic) => diagnostics.push(diagnostic),
+        }
     }
 
     let project_root = git_root(work_dir);
@@ -149,14 +156,14 @@ pub(super) fn discover_instruction_files(
         };
         let reference_id = project_instruction_reference_id(project_root.as_deref(), &directory);
         let title = project_instruction_title(project_root.as_deref(), &path);
-        if let Some(file) =
-            load_instructions_file(&reference_id, title, &path, PromptSourceOrigin::Project)
-        {
-            discovered.push(file);
+        match load_instructions_file(&reference_id, title, &path, PromptSourceOrigin::Project) {
+            Ok(Some(file)) => discovered.push(file),
+            Ok(None) => {}
+            Err(diagnostic) => diagnostics.push(diagnostic),
         }
     }
 
-    discovered
+    (discovered, diagnostics)
 }
 
 pub(super) fn load_instructions_file(
@@ -164,20 +171,24 @@ pub(super) fn load_instructions_file(
     title: String,
     path: &Path,
     origin: PromptSourceOrigin,
-) -> Option<DiscoveredInstructionsFile> {
-    let body = fs::read_to_string(path).ok()?;
+) -> Result<Option<DiscoveredInstructionsFile>, PromptAssemblyDiagnostic> {
+    let body = fs::read_to_string(path).map_err(|error| PromptAssemblyDiagnostic {
+        origin: Some(origin),
+        path: Some(path.to_path_buf()),
+        message: format!("read instructions file: {error}"),
+    })?;
     let body = body.trim().to_string();
     if body.is_empty() {
-        return None;
+        return Ok(None);
     }
 
-    Some(DiscoveredInstructionsFile {
+    Ok(Some(DiscoveredInstructionsFile {
         reference_id: reference_id.to_string(),
         title,
         path: path.to_path_buf(),
         body,
         origin,
-    })
+    }))
 }
 
 pub(super) fn global_instructions_file_path() -> Option<PathBuf> {
@@ -420,10 +431,10 @@ pub(super) fn discover_skill_dir(
                 seen_names.insert(seen_key, next_index);
                 discovered.push(skill);
             }
-            Err(message) => diagnostics.push(PromptAssemblyDiagnostic {
+            Err(error) => diagnostics.push(PromptAssemblyDiagnostic {
                 origin: Some(origin),
                 path: Some(skill_path),
-                message,
+                message: error.to_string(),
             }),
         }
         return;
@@ -462,26 +473,28 @@ pub(super) fn discover_skill_dir(
 pub(super) fn parse_skill_file(
     skill_path: &Path,
     origin: PromptSourceOrigin,
-) -> Result<DiscoveredSkill, String> {
-    let content =
-        fs::read_to_string(skill_path).map_err(|error| format!("read skill file: {error}"))?;
+) -> Result<DiscoveredSkill, SkillParseError> {
+    let content = fs::read_to_string(skill_path).map_err(|source| SkillParseError::Read {
+        path: skill_path.to_path_buf(),
+        source,
+    })?;
     let (frontmatter, body) =
-        split_frontmatter(&content).ok_or_else(|| "missing YAML frontmatter".to_string())?;
+        split_frontmatter(&content).ok_or(SkillParseError::MissingFrontmatter)?;
     let frontmatter: SkillFrontmatter = serde_yaml::from_str(frontmatter.as_str())
-        .map_err(|error| format!("decode skill frontmatter: {error}"))?;
+        .map_err(|source| SkillParseError::DecodeFrontmatter { source })?;
     let name = frontmatter
         .name
         .as_deref()
         .map(str::trim)
         .filter(|name| !name.is_empty())
-        .ok_or_else(|| "missing required name".to_string())?
+        .ok_or(SkillParseError::MissingName)?
         .to_string();
     let description = frontmatter
         .description
         .as_deref()
         .map(str::trim)
         .filter(|description| !description.is_empty())
-        .ok_or_else(|| "missing required description".to_string())?
+        .ok_or(SkillParseError::MissingDescription)?
         .to_string();
     Ok(DiscoveredSkill {
         name,
@@ -491,6 +504,27 @@ pub(super) fn parse_skill_file(
         origin,
         disable_model_invocation: frontmatter.disable_model_invocation,
     })
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(super) enum SkillParseError {
+    #[error("read skill file '{}': {source}", path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("missing YAML frontmatter")]
+    MissingFrontmatter,
+    #[error("decode skill frontmatter: {source}")]
+    DecodeFrontmatter {
+        #[source]
+        source: serde_yaml::Error,
+    },
+    #[error("missing required name")]
+    MissingName,
+    #[error("missing required description")]
+    MissingDescription,
 }
 
 pub(super) fn split_frontmatter(content: &str) -> Option<(String, String)> {
@@ -943,7 +977,9 @@ pub(super) fn observe_dynamic_environment_inventory(
     .into_iter()
     .filter_map(|source_kind| {
         crate::dynamic_environment::observe_dynamic_environment_sources(work_dir, &[source_kind])
+            .ok()
             .into_iter()
+            .flatten()
             .next()
             .map(|observation| (source_kind, observation))
     })

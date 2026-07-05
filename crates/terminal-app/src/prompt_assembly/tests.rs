@@ -49,6 +49,44 @@ fn tool_definitions_with_unguided_tool() -> Vec<ToolDefinition> {
 }
 
 #[test]
+fn load_instructions_file_reports_non_utf8_read_errors() {
+    let root = temp_dir("instructions-invalid-utf8");
+    let path = root.join("AGENTS.md");
+    fs::write(&path, [0xff, 0xfe]).expect("invalid utf8 fixture should be writable");
+
+    let diagnostic = load_instructions_file(
+        "instructions:project:.",
+        "AGENTS.md".to_string(),
+        &path,
+        PromptSourceOrigin::Project,
+    )
+    .expect_err("invalid UTF-8 should be diagnostic instead of silent absence");
+
+    assert_eq!(diagnostic.origin, Some(PromptSourceOrigin::Project));
+    assert_eq!(diagnostic.path, Some(path));
+    assert!(diagnostic.message.contains("read instructions file"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn parse_skill_file_preserves_yaml_decode_source() {
+    let root = temp_dir("skill-invalid-yaml");
+    let path = root.join("SKILL.md");
+    fs::write(
+        &path,
+        "---\nname: [unterminated\ndescription: broken\n---\nbody\n",
+    )
+    .expect("skill fixture should be writable");
+
+    let error = parse_skill_file(&path, PromptSourceOrigin::Project)
+        .expect_err("invalid YAML should preserve decode source");
+
+    assert!(error.to_string().contains("decode skill frontmatter"));
+    assert!(std::error::Error::source(&error).is_some());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn manager_snapshot_reports_invalid_skill_files_as_diagnostics() {
     let work_dir = temp_dir("invalid-skill-diagnostic");
     let skill_dir = work_dir.join(".agents/skills/broken-skill");

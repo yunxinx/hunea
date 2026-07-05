@@ -8,7 +8,22 @@ impl Widget for PromptOverlayLineListWidget<'_> {
     fn render(self, area: Rect, buf: &mut ratatui::buffer::Buffer) {
         for (row, line) in self.lines.iter().take(usize::from(area.height)).enumerate() {
             let y = area.y + u16::try_from(row).unwrap_or(u16::MAX);
+            // WHY: `Paragraph` 不会把每个 `Line` 的背景延展到未占用单元格；
+            // prompt overlay 的选中行需要整行背景铺满 pane 宽度。
             render_line_with_full_width_background(line, Rect::new(area.x, y, area.width, 1), buf);
+        }
+    }
+}
+
+pub(super) struct PromptOverlayVerticalRule {
+    pub(super) palette: crate::theme::TerminalPalette,
+}
+
+impl Widget for PromptOverlayVerticalRule {
+    fn render(self, area: Rect, buf: &mut ratatui::buffer::Buffer) {
+        let style = tertiary_text_style(self.palette);
+        for y in area.top()..area.bottom() {
+            buf[(area.x, y)].set_symbol("│").set_style(style);
         }
     }
 }

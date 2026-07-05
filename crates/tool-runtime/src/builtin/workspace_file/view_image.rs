@@ -15,6 +15,7 @@ use crate::{
 };
 
 use super::{
+    error::WorkspaceFileError,
     workspace::resolve_workspace_path,
     workspace_access::{SharedWorkspaceAccess, local_workspace_access},
 };
@@ -105,7 +106,23 @@ impl Tool for ViewImageTool {
 #[derive(Debug, Deserialize)]
 struct ViewImageArguments {
     path: String,
-    detail: Option<String>,
+    detail: Option<ViewImageDetail>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ViewImageDetail {
+    High,
+    Original,
+}
+
+impl From<ViewImageDetail> for ToolImageDetail {
+    fn from(detail: ViewImageDetail) -> Self {
+        match detail {
+            ViewImageDetail::High => Self::High,
+            ViewImageDetail::Original => Self::Original,
+        }
+    }
 }
 
 fn join_error_result(call_id: String, error: JoinError) -> ToolResult {
@@ -120,55 +137,64 @@ fn execute_view_image(
 ) -> ToolResult {
     let arguments = match serde_json::from_value::<ViewImageArguments>(call.arguments) {
         Ok(arguments) => arguments,
-        Err(error) => {
+        Err(source) => {
             return ToolResult::error(
                 call.call_id,
-                format!("view_image arguments are invalid: {error}"),
+                WorkspaceFileError::InvalidArguments {
+                    tool: "view_image",
+                    source,
+                }
+                .to_string(),
             );
         }
     };
 
-    let detail = match arguments.detail.as_deref() {
-        None | Some("high") => ToolImageDetail::High,
-        Some("original") => ToolImageDetail::Original,
-        Some(other) => {
-            return ToolResult::error(
-                call.call_id,
-                format!("view_image.detail only supports `high` or `original`; got `{other}`"),
-            );
-        }
-    };
+    let detail = arguments.detail.unwrap_or(ViewImageDetail::High).into();
 
     if cancellation.is_cancelled() {
-        return ToolResult::error(call.call_id, "Tool call interrupted");
+        return ToolResult::error(call.call_id, WorkspaceFileError::Interrupted.to_string());
     }
 
     let path = match resolve_workspace_path(access.as_ref(), &root, &arguments.path) {
         Ok(path) => path,
-        Err(message) => return ToolResult::error(call.call_id, message),
+        Err(message) => {
+            return ToolResult::error(
+                call.call_id,
+                WorkspaceFileError::InvalidPath { message }.to_string(),
+            );
+        }
     };
     let metadata = match access.metadata(&path) {
         Ok(metadata) => metadata,
-        Err(error) => {
+        Err(source) => {
             return ToolResult::error(
                 call.call_id,
-                format!("stat failed for '{}': {error}", arguments.path),
+                WorkspaceFileError::Metadata {
+                    path: arguments.path,
+                    source,
+                }
+                .to_string(),
             );
         }
     };
     if !metadata.is_file {
         return ToolResult::error(
             call.call_id,
-            format!("image path '{}' is not a file", arguments.path),
+            WorkspaceFileError::ImageNotFile {
+                path: arguments.path,
+            }
+            .to_string(),
         );
     }
     if metadata.len > VIEW_IMAGE_MAX_BYTES {
         return ToolResult::error(
             call.call_id,
-            format!(
-                "image file '{}' is too large for view_image ({} bytes, limit {} bytes)",
-                arguments.path, metadata.len, VIEW_IMAGE_MAX_BYTES
-            ),
+            WorkspaceFileError::ImageTooLarge {
+                path: arguments.path,
+                bytes: metadata.len,
+                limit: VIEW_IMAGE_MAX_BYTES,
+            }
+            .to_string(),
         );
     }
 
@@ -177,19 +203,26 @@ fn execute_view_image(
         None => {
             return ToolResult::error(
                 call.call_id,
-                format!("unsupported image type for '{}'", arguments.path),
+                WorkspaceFileError::UnsupportedImageType {
+                    path: arguments.path,
+                }
+                .to_string(),
             );
         }
     };
 
     let bytes = match read_file_bytes(access.as_ref(), &path, &cancellation) {
         Ok(bytes) => bytes,
-        Err(message) => return ToolResult::error(call.call_id, message),
+        Err(error) => return ToolResult::error(call.call_id, error.to_string()),
     };
     if !image_signature_matches(mime_type, &bytes) {
         return ToolResult::error(
             call.call_id,
-            format!("'{}' does not look like {mime_type}", arguments.path),
+            WorkspaceFileError::ImageSignatureMismatch {
+                path: arguments.path,
+                mime_type,
+            }
+            .to_string(),
         );
     }
 
@@ -208,19 +241,25 @@ fn read_file_bytes(
     access: &dyn super::workspace_access::WorkspaceAccess,
     path: &Path,
     cancellation: &CancellationToken,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, WorkspaceFileError> {
     if cancellation.is_cancelled() {
-        return Err("Tool call interrupted".to_string());
+        return Err(WorkspaceFileError::Interrupted);
     }
     let mut reader = access
         .open_reader(path)
-        .map_err(|error| format!("read image failed for '{}': {error}", path.display()))?;
+        .map_err(|source| WorkspaceFileError::ReadImage {
+            path: path.to_path_buf(),
+            source,
+        })?;
     let mut bytes = Vec::new();
     reader
         .read_to_end(&mut bytes)
-        .map_err(|error| format!("read image failed for '{}': {error}", path.display()))?;
+        .map_err(|source| WorkspaceFileError::ReadImage {
+            path: path.to_path_buf(),
+            source,
+        })?;
     if cancellation.is_cancelled() {
-        return Err("Tool call interrupted".to_string());
+        return Err(WorkspaceFileError::Interrupted);
     }
     Ok(bytes)
 }

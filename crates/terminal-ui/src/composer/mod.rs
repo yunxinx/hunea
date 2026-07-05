@@ -1,5 +1,5 @@
 mod grapheme;
-mod image_attachment;
+mod image_placeholder;
 mod layout;
 mod message;
 mod mouse;
@@ -21,7 +21,7 @@ use self::{
         grapheme_target_left, grapheme_target_right, logical_column_for_visual_offset,
         measure_width,
     },
-    image_attachment::ComposerImageAttachment,
+    image_placeholder::ComposerImageAttachment,
     layout::{visual_line_count, visual_lines_for_text},
     render::{DocumentRenderResult, render_document},
     viewport::{calculate_cursor_visual_position, sync_viewport_offset_for_cursor},

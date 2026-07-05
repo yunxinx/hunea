@@ -233,15 +233,8 @@ pub(crate) fn load_global_prompt_assembly_state(
                 let requested_order = row
                     .get::<_, Option<i64>>(4)?
                     .map(|value| {
-                        u16::try_from(value).map_err(|_| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                4,
-                                rusqlite::types::Type::Integer,
-                                Box::new(std::io::Error::other(
-                                    "requested_order exceeds u16 range",
-                                )),
-                            )
-                        })
+                        u16::try_from(value)
+                            .map_err(|_| stored_requested_order_out_of_range(4, value))
                     })
                     .transpose()?;
                 Ok(PersistedPromptAssemblyEntry {
@@ -310,15 +303,8 @@ pub(crate) fn load_global_prompt_assembly_state(
                 let requested_order = row
                     .get::<_, Option<i64>>(2)?
                     .map(|value| {
-                        u16::try_from(value).map_err(|_| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                2,
-                                rusqlite::types::Type::Integer,
-                                Box::new(std::io::Error::other(
-                                    "requested_order exceeds u16 range",
-                                )),
-                            )
-                        })
+                        u16::try_from(value)
+                            .map_err(|_| stored_requested_order_out_of_range(2, value))
                     })
                     .transpose()?;
                 Ok(PersistedSkillDiscoverySkillEntry {
@@ -356,15 +342,8 @@ pub(crate) fn load_global_prompt_assembly_state(
                 let requested_order = row
                     .get::<_, Option<i64>>(2)?
                     .map(|value| {
-                        u16::try_from(value).map_err(|_| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                2,
-                                rusqlite::types::Type::Integer,
-                                Box::new(std::io::Error::other(
-                                    "requested_order exceeds u16 range",
-                                )),
-                            )
-                        })
+                        u16::try_from(value)
+                            .map_err(|_| stored_requested_order_out_of_range(2, value))
                     })
                     .transpose()?;
                 Ok(PersistedToolSelectionEntry {
@@ -440,13 +419,7 @@ fn parse_prompt_source_kind(value: &str) -> Result<PromptSourceKind, rusqlite::E
         "tool_guidelines" => Ok(PromptSourceKind::ToolGuidelines),
         "dynamic_environment_baseline" => Ok(PromptSourceKind::DynamicEnvironmentBaseline),
         "dynamic_environment_changes" => Ok(PromptSourceKind::DynamicEnvironmentChanges),
-        _ => Err(rusqlite::Error::FromSqlConversionFailure(
-            1,
-            rusqlite::types::Type::Text,
-            Box::new(std::io::Error::other(format!(
-                "unknown prompt source kind `{value}`"
-            ))),
-        )),
+        _ => Err(unknown_stored_enum_value(1, "kind", value)),
     }
 }
 
@@ -463,13 +436,7 @@ fn parse_dynamic_environment_snapshot_kind(
     match value {
         "baseline" => Ok(DynamicEnvironmentSnapshotKind::Baseline),
         "changes" => Ok(DynamicEnvironmentSnapshotKind::Changes),
-        _ => Err(rusqlite::Error::FromSqlConversionFailure(
-            0,
-            rusqlite::types::Type::Text,
-            Box::new(std::io::Error::other(format!(
-                "unknown dynamic environment snapshot kind `{value}`"
-            ))),
-        )),
+        _ => Err(unknown_stored_enum_value(0, "snapshot_kind", value)),
     }
 }
 
@@ -490,14 +457,44 @@ fn parse_dynamic_environment_source_kind(
         "git_working_tree" => Ok(DynamicEnvironmentSourceKind::GitWorkingTree),
         "date" => Ok(DynamicEnvironmentSourceKind::Date),
         "workdir" => Ok(DynamicEnvironmentSourceKind::Workdir),
-        _ => Err(rusqlite::Error::FromSqlConversionFailure(
-            1,
-            rusqlite::types::Type::Text,
-            Box::new(std::io::Error::other(format!(
-                "unknown dynamic environment source kind `{value}`"
-            ))),
-        )),
+        _ => Err(unknown_stored_enum_value(1, "source_kind", value)),
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("unknown {column} value `{value}`")]
+struct UnknownStoredEnumValue {
+    column: &'static str,
+    value: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{column} value {value} exceeds u16 range")]
+struct StoredRequestedOrderOutOfRange {
+    column: &'static str,
+    value: i64,
+}
+
+fn unknown_stored_enum_value(index: usize, column: &'static str, value: &str) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        index,
+        rusqlite::types::Type::Text,
+        Box::new(UnknownStoredEnumValue {
+            column,
+            value: value.to_string(),
+        }),
+    )
+}
+
+fn stored_requested_order_out_of_range(index: usize, value: i64) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        index,
+        rusqlite::types::Type::Integer,
+        Box::new(StoredRequestedOrderOutOfRange {
+            column: "requested_order",
+            value,
+        }),
+    )
 }
 
 fn sqlite_err(source: rusqlite::Error) -> SessionStoreError {
@@ -599,6 +596,21 @@ mod tests {
             .expect("global prompt assembly should load");
 
         assert_eq!(loaded, state);
+    }
+
+    #[test]
+    fn prompt_source_kind_decode_uses_domain_error_source() {
+        let error = parse_prompt_source_kind("unknown_kind")
+            .expect_err("unknown prompt source kind should fail");
+        let rusqlite::Error::FromSqlConversionFailure(_, _, source) = error else {
+            panic!("unknown kind should be reported as a sqlite conversion failure");
+        };
+        let source = source
+            .downcast_ref::<UnknownStoredEnumValue>()
+            .expect("conversion failure should retain the domain decode error");
+
+        assert_eq!(source.column, "kind");
+        assert_eq!(source.value, "unknown_kind");
     }
 
     #[tokio::test]

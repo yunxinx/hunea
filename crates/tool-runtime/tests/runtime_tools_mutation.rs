@@ -29,7 +29,7 @@ async fn builtin_edit_rejects_partial_read_snapshot() {
             &CancellationToken::new(),
         )
         .await;
-    assert!(!read_result.is_error);
+    assert!(!read_result.is_error());
 
     let result = registry
         .execute_tool(
@@ -47,7 +47,7 @@ async fn builtin_edit_rejects_partial_read_snapshot() {
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(result.content.contains("has not been read"));
     assert_eq!(
         fs::read_to_string(root.join("notes.txt")).expect("read fixture"),
@@ -77,7 +77,7 @@ async fn builtin_edit_rejects_missing_files() {
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(result.content.contains("File does not exist"));
     assert!(!root.join("missing.txt").exists());
     cleanup(&root);
@@ -102,7 +102,7 @@ async fn builtin_write_and_edit_reject_directory_paths() {
             &CancellationToken::new(),
         )
         .await;
-    assert!(write_result.is_error);
+    assert!(write_result.is_error());
     assert!(write_result.content.contains("is a directory"));
 
     let edit_result = registry
@@ -120,7 +120,7 @@ async fn builtin_write_and_edit_reject_directory_paths() {
             &CancellationToken::new(),
         )
         .await;
-    assert!(edit_result.is_error);
+    assert!(edit_result.is_error());
     assert!(edit_result.content.contains("is a directory"));
 
     assert!(root.join("src").is_dir());
@@ -139,7 +139,7 @@ async fn builtin_edit_reports_noop_and_missing_match_without_modifying_file() {
             &CancellationToken::new(),
         )
         .await;
-    assert!(!read_result.is_error);
+    assert!(!read_result.is_error());
 
     let noop_result = registry
         .execute_tool(
@@ -156,7 +156,7 @@ async fn builtin_edit_reports_noop_and_missing_match_without_modifying_file() {
             &CancellationToken::new(),
         )
         .await;
-    assert!(noop_result.is_error);
+    assert!(noop_result.is_error());
     assert!(noop_result.content.contains("No changes"));
 
     let missing_match_result = registry
@@ -174,7 +174,7 @@ async fn builtin_edit_reports_noop_and_missing_match_without_modifying_file() {
             &CancellationToken::new(),
         )
         .await;
-    assert!(missing_match_result.is_error);
+    assert!(missing_match_result.is_error());
     assert!(missing_match_result.content.contains("not found"));
     assert_eq!(
         fs::read_to_string(root.join("notes.txt")).expect("read fixture"),
@@ -195,7 +195,7 @@ async fn builtin_write_can_follow_successful_edit_without_another_read() {
             &CancellationToken::new(),
         )
         .await;
-    assert!(!read_result.is_error);
+    assert!(!read_result.is_error());
 
     let edit_result = registry
         .execute_tool(
@@ -213,7 +213,7 @@ async fn builtin_write_can_follow_successful_edit_without_another_read() {
         )
         .await;
     assert!(
-        !edit_result.is_error,
+        !edit_result.is_error(),
         "edit should succeed: {edit_result:?}"
     );
 
@@ -232,7 +232,7 @@ async fn builtin_write_can_follow_successful_edit_without_another_read() {
         .await;
 
     assert!(
-        !write_result.is_error,
+        !write_result.is_error(),
         "write should trust the successful edit snapshot: {write_result:?}"
     );
     assert_eq!(
@@ -265,7 +265,7 @@ async fn builtin_write_can_use_permission_preview_snapshot_for_approved_update()
 
     let rejected_without_approval_snapshot =
         registry.execute_tool(call.clone(), &cancellation).await;
-    assert!(rejected_without_approval_snapshot.is_error);
+    assert!(rejected_without_approval_snapshot.is_error());
     assert!(
         rejected_without_approval_snapshot
             .content
@@ -285,7 +285,7 @@ async fn builtin_write_can_use_permission_preview_snapshot_for_approved_update()
         .await;
 
     assert!(
-        !write_result.is_error,
+        !write_result.is_error(),
         "approved write should trust the preview snapshot: {write_result:?}"
     );
     assert_eq!(
@@ -320,7 +320,7 @@ async fn builtin_edit_can_use_permission_preview_snapshot_for_approved_update() 
 
     let rejected_without_approval_snapshot =
         registry.execute_tool(call.clone(), &cancellation).await;
-    assert!(rejected_without_approval_snapshot.is_error);
+    assert!(rejected_without_approval_snapshot.is_error());
     assert!(
         rejected_without_approval_snapshot
             .content
@@ -340,7 +340,7 @@ async fn builtin_edit_can_use_permission_preview_snapshot_for_approved_update() 
         .await;
 
     assert!(
-        !edit_result.is_error,
+        !edit_result.is_error(),
         "approved edit should trust the preview snapshot: {edit_result:?}"
     );
     assert_eq!(
@@ -362,7 +362,7 @@ async fn builtin_write_after_edit_still_rejects_external_changes() {
             &CancellationToken::new(),
         )
         .await;
-    assert!(!read_result.is_error);
+    assert!(!read_result.is_error());
 
     let edit_result = registry
         .execute_tool(
@@ -379,7 +379,7 @@ async fn builtin_write_after_edit_still_rejects_external_changes() {
             &CancellationToken::new(),
         )
         .await;
-    assert!(!edit_result.is_error);
+    assert!(!edit_result.is_error());
     fs::write(root.join("notes.txt"), "external\n").expect("modify fixture outside tool");
 
     let write_result = registry
@@ -396,7 +396,7 @@ async fn builtin_write_after_edit_still_rejects_external_changes() {
         )
         .await;
 
-    assert!(write_result.is_error);
+    assert!(write_result.is_error());
     assert!(write_result.content.contains("modified since read"));
     assert_eq!(
         fs::read_to_string(root.join("notes.txt")).expect("read stale fixture"),
@@ -511,13 +511,12 @@ async fn builtin_write_permission_preview_and_result_details_are_bounded() {
         )
         .await;
     assert!(
-        !result.is_error,
+        !result.is_error(),
         "approved large write should succeed: {result:?}"
     );
 
     let details = result
-        .details
-        .as_ref()
+        .details()
         .and_then(serde_json::Value::as_object)
         .expect("write result should include bounded details");
     assert_eq!(
@@ -561,13 +560,12 @@ async fn builtin_write_create_result_details_are_bounded() {
         )
         .await;
     assert!(
-        !result.is_error,
+        !result.is_error(),
         "large file creation should succeed: {result:?}"
     );
 
     let details = result
-        .details
-        .as_ref()
+        .details()
         .and_then(serde_json::Value::as_object)
         .expect("write result should include bounded details");
     assert_eq!(
@@ -599,7 +597,7 @@ async fn builtin_edit_preserves_utf8_bom_and_crlf_line_endings() {
             &CancellationToken::new(),
         )
         .await;
-    assert!(!read_result.is_error);
+    assert!(!read_result.is_error());
 
     let result = registry
         .execute_tool(
@@ -617,7 +615,7 @@ async fn builtin_edit_preserves_utf8_bom_and_crlf_line_endings() {
         )
         .await;
 
-    assert!(!result.is_error, "edit should succeed: {result:?}");
+    assert!(!result.is_error(), "edit should succeed: {result:?}");
     assert_eq!(
         fs::read_to_string(root.join("notes.txt")).expect("read fixture"),
         "\u{feff}alpha\r\ngamma\r\n"

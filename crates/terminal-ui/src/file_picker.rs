@@ -1,10 +1,14 @@
 use std::path::PathBuf;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::KeyEvent;
 use ratatui::text::{Line, Span};
 
 use super::{
     Model,
+    composer_inline_picker::{
+        ComposerInlinePickerKey, ComposerInlinePickerState, classify_composer_inline_picker_key,
+        move_composer_inline_picker_selection, reconcile_composer_inline_picker_state,
+    },
     display_width::display_width,
     file_search::{FileSearchMatch, common_path_completion_prefix},
     image_attachment::{is_supported_image_path, load_image_attachment},
@@ -23,13 +27,7 @@ pub(super) const FILE_PICKER_POPUP_MIN_HEIGHT: u16 = 3;
 pub(super) const FILE_PICKER_POPUP_MAX_HEIGHT: u16 = 21;
 
 /// `FilePickerState` 保存 `@` 文件选择器的当前查询、结果和导航位置。
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(crate) struct FilePickerState {
-    pub(crate) query: String,
-    pub(crate) items: Vec<FileSearchMatch>,
-    pub(crate) selected: usize,
-    pub(crate) scroll: usize,
-}
+pub(crate) type FilePickerState = ComposerInlinePickerState<FileSearchMatch>;
 
 impl Model {
     pub(crate) fn file_picker_active(&self) -> bool {
@@ -57,32 +55,13 @@ impl Model {
         let items = self.file_search_cache.search(&root, &query);
         let visible_rows = self.file_picker_list_visible_rows();
         let previous = self.file_picker.as_ref();
-        let query_changed = previous.is_none_or(|state| state.query != query);
-        let mut selected = if query_changed {
-            0
-        } else {
-            previous.map(|state| state.selected).unwrap_or(0)
-        };
-        let mut scroll = if query_changed {
-            0
-        } else {
-            previous.map(|state| state.scroll).unwrap_or(0)
-        };
-
-        if items.is_empty() {
-            selected = 0;
-            scroll = 0;
-        } else {
-            selected = selected.min(items.len() - 1);
-            scroll = clamp_picker_scroll(scroll, selected, items.len(), visible_rows);
-        }
-
-        self.file_picker = Some(FilePickerState {
+        self.file_picker = Some(reconcile_composer_inline_picker_state(
             query,
             items,
-            selected,
-            scroll,
-        });
+            previous,
+            visible_rows,
+            0,
+        ));
     }
 
     pub(crate) fn handle_file_picker_key(&mut self, key: KeyEvent) -> OverlayInputResult {
@@ -90,33 +69,25 @@ impl Model {
             return OverlayInputResult::Ignored;
         }
 
-        match key.code {
-            KeyCode::Up if key.modifiers.is_empty() => {
+        match classify_composer_inline_picker_key(key) {
+            Some(ComposerInlinePickerKey::MovePrevious) => {
                 self.move_file_picker_selection(-1);
                 OverlayInputResult::Handled
             }
-            KeyCode::Down if key.modifiers.is_empty() => {
+            Some(ComposerInlinePickerKey::MoveNext) => {
                 self.move_file_picker_selection(1);
                 OverlayInputResult::Handled
             }
-            KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
-                self.move_file_picker_selection(-1);
-                OverlayInputResult::Handled
-            }
-            KeyCode::Char('n') if key.modifiers == KeyModifiers::CONTROL => {
-                self.move_file_picker_selection(1);
-                OverlayInputResult::Handled
-            }
-            KeyCode::Esc if key.modifiers.is_empty() => {
+            Some(ComposerInlinePickerKey::Dismiss) => {
                 self.dismiss_current_file_picker_token();
                 self.close_file_picker();
                 OverlayInputResult::Handled
             }
-            KeyCode::Tab if key.modifiers.is_empty() => {
+            Some(ComposerInlinePickerKey::Complete) => {
                 self.complete_file_picker_common_prefix();
                 OverlayInputResult::Handled
             }
-            KeyCode::Enter if key.modifiers.is_empty() => {
+            Some(ComposerInlinePickerKey::Accept) => {
                 if self.current_file_picker_query_resolves_to_file() {
                     if self.insert_exact_file_picker_image_attachment() {
                         return OverlayInputResult::Handled;
@@ -130,7 +101,7 @@ impl Model {
                 }
                 OverlayInputResult::Handled
             }
-            _ => OverlayInputResult::Ignored,
+            None => OverlayInputResult::Ignored,
         }
     }
 
@@ -240,22 +211,7 @@ impl Model {
         let Some(state) = self.file_picker.as_mut() else {
             return;
         };
-        if state.items.is_empty() {
-            return;
-        }
-
-        let last = state.items.len() - 1;
-        if delta.is_negative() {
-            state.selected = state.selected.saturating_sub(delta.unsigned_abs());
-        } else {
-            state.selected = state.selected.saturating_add(delta as usize).min(last);
-        }
-        state.scroll = clamp_picker_scroll(
-            state.scroll,
-            state.selected,
-            state.items.len(),
-            visible_rows,
-        );
+        move_composer_inline_picker_selection(state, delta, visible_rows);
     }
 
     fn complete_file_picker_common_prefix(&mut self) {
@@ -393,27 +349,6 @@ impl Model {
         let root = resolve_configured_current_dir(&self.current_dir);
         resolve_path_token(&root, &state.query).is_file()
     }
-}
-
-fn clamp_picker_scroll(
-    scroll: usize,
-    selected: usize,
-    item_count: usize,
-    visible_rows: usize,
-) -> usize {
-    if item_count == 0 {
-        return 0;
-    }
-    let visible_rows = visible_rows.max(1);
-    let max_scroll = item_count.saturating_sub(visible_rows);
-    let mut scroll = scroll.min(max_scroll);
-    if selected < scroll {
-        scroll = selected;
-    }
-    if selected >= scroll + visible_rows {
-        scroll = selected + 1 - visible_rows;
-    }
-    scroll.min(max_scroll)
 }
 
 fn file_picker_selectable_range(plain_line: &str, width: usize) -> SelectableLineRange {

@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::dynamic_environment::DynamicEnvironmentSourceSelection;
 
-use super::{PromptSourceKind, derive_extra_prompt_title, natural_sort_text_cmp};
+use crate::text::natural_sort_text_cmp;
+
+use super::{PromptSourceKind, derive_extra_prompt_title};
 
 pub const PROJECT_PROMPT_ASSEMBLY_FILE_NAME: &str = "prompt-assembly.toml";
 pub const PROJECT_PROMPTS_DIR_NAME: &str = "prompts";

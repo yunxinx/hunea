@@ -13,6 +13,7 @@ use crate::{
 };
 
 use super::{
+    error::WorkspaceFileError,
     file_state::{
         TextFingerprint, TextFingerprintBuilder, WorkspaceFileSnapshot, WorkspaceReadState,
     },
@@ -25,7 +26,6 @@ const READ_DEFAULT_LINE_COUNT: usize = 2_000;
 const READ_MAX_LINE_COUNT: usize = 5_000;
 const READ_MAX_LINE_CHARS: usize = 2_000;
 const READ_MAX_OUTPUT_BYTES: usize = 64 * 1024;
-const TOOL_CALL_INTERRUPTED: &str = "Tool call interrupted";
 
 /// `read_tool` 创建只读 workspace 内容读取工具。
 pub fn read_tool(root: impl AsRef<Path>) -> impl Tool + 'static {
@@ -154,45 +154,68 @@ fn execute_read(
 ) -> ToolResult {
     let arguments = match serde_json::from_value::<ReadArguments>(call.arguments) {
         Ok(arguments) => arguments,
-        Err(error) => {
-            return ToolResult::error(call.call_id, format!("read arguments are invalid: {error}"));
+        Err(source) => {
+            return ToolResult::error(
+                call.call_id,
+                WorkspaceFileError::InvalidArguments {
+                    tool: "read",
+                    source,
+                }
+                .to_string(),
+            );
         }
     };
 
     let path = match resolve_workspace_path(access.as_ref(), &root, &arguments.path) {
         Ok(path) => path,
-        Err(message) => return ToolResult::error(call.call_id, message),
+        Err(message) => {
+            return ToolResult::error(
+                call.call_id,
+                WorkspaceFileError::InvalidPath { message }.to_string(),
+            );
+        }
     };
 
     let metadata = match access.metadata(&path) {
         Ok(metadata) => metadata,
-        Err(error) => {
+        Err(source) => {
             return ToolResult::error(
                 call.call_id,
-                format!("stat failed for '{}': {error}", arguments.path),
+                WorkspaceFileError::Metadata {
+                    path: arguments.path,
+                    source,
+                }
+                .to_string(),
             );
         }
     };
     if metadata.is_dir {
         return ToolResult::error(
             call.call_id,
-            format!("'{}' is a directory, use list_dir instead", arguments.path),
+            WorkspaceFileError::Directory {
+                path: arguments.path,
+                replacement: "list_dir",
+            }
+            .to_string(),
         );
     }
     if !metadata.is_file {
         return ToolResult::error(
             call.call_id,
-            format!("'{}' is not a regular file", arguments.path),
+            WorkspaceFileError::NotRegularFile {
+                path: arguments.path,
+            }
+            .to_string(),
         );
     }
     if let Some(content_type) = structured_content_type_for_path(&path) {
         return ToolResult::error(
             call.call_id,
-            format!(
-                "read failed for '{}': {}",
-                path.display(),
-                content_type.read_error()
-            ),
+            WorkspaceFileError::ReadRejected {
+                path: path.clone(),
+                detail: content_type.read_error(),
+            }
+            .to_string(),
         );
     }
 
@@ -212,18 +235,16 @@ fn execute_read(
                     is_complete: outcome.is_complete,
                 },
             );
-            let mut result = ToolResult::success(call.call_id, outcome.output);
-            result.details = Some(json!({
+            ToolResult::success(call.call_id, outcome.output).with_details(json!({
                 "path": arguments.path,
                 "kind": "text",
                 "start_line": outcome.start_line,
                 "end_line": outcome.end_line,
                 "total_lines": outcome.total_lines,
                 "next_offset": outcome.next_offset,
-            }));
-            result
+            }))
         }
-        Err(message) => ToolResult::error(call.call_id, message),
+        Err(error) => ToolResult::error(call.call_id, error.to_string()),
     }
 }
 
@@ -233,7 +254,7 @@ fn read_text_file_lines(
     offset: Option<usize>,
     limit: Option<usize>,
     cancellation: &CancellationToken,
-) -> Result<ReadTextOutcome, String> {
+) -> Result<ReadTextOutcome, WorkspaceFileError> {
     let start_line = offset.unwrap_or(1).max(1);
     let line_limit = limit
         .unwrap_or(READ_DEFAULT_LINE_COUNT)
@@ -242,7 +263,10 @@ fn read_text_file_lines(
 
     let reader = access
         .open_reader(path)
-        .map_err(|error| format!("read failed for '{}': {error}", path.display()))?;
+        .map_err(|source| WorkspaceFileError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
     let mut reader = BufReader::new(reader);
     let mut raw_line = Vec::new();
     let mut selected = Vec::new();
@@ -254,12 +278,16 @@ fn read_text_file_lines(
 
     loop {
         if cancellation.is_cancelled() {
-            return Err(TOOL_CALL_INTERRUPTED.to_string());
+            return Err(WorkspaceFileError::Interrupted);
         }
         raw_line.clear();
-        let bytes_read = reader
-            .read_until(b'\n', &mut raw_line)
-            .map_err(|error| format!("read failed for '{}': {error}", path.display()))?;
+        let bytes_read =
+            reader
+                .read_until(b'\n', &mut raw_line)
+                .map_err(|source| WorkspaceFileError::Read {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
         if bytes_read == 0 {
             break;
         }
@@ -273,17 +301,16 @@ fn read_text_file_lines(
         {
             raw_line.pop();
         }
-        let line = std::str::from_utf8(&raw_line).map_err(|_| {
-            format!(
-                "read failed for '{}': file is not valid UTF-8 text",
-                path.display()
-            )
-        })?;
+        let line =
+            std::str::from_utf8(&raw_line).map_err(|_| WorkspaceFileError::ReadRejected {
+                path: path.to_path_buf(),
+                detail: "file is not valid UTF-8 text".to_string(),
+            })?;
         if contains_disallowed_text_control_chars(line) {
-            return Err(format!(
-                "read failed for '{}': file is not valid UTF-8 text",
-                path.display()
-            ));
+            return Err(WorkspaceFileError::ReadRejected {
+                path: path.to_path_buf(),
+                detail: "file is not valid UTF-8 text".to_string(),
+            });
         }
         if total_lines < start_line || total_lines > end_line || truncated_by_bytes {
             continue;
@@ -314,10 +341,11 @@ fn read_text_file_lines(
     }
 
     if start_line > total_lines {
-        return Err(format!(
-            "read failed for '{}': offset {start_line} is beyond end of file ({total_lines} lines total)",
-            path.display()
-        ));
+        return Err(WorkspaceFileError::OffsetBeyondEnd {
+            path: path.to_path_buf(),
+            start_line,
+            total_lines,
+        });
     }
 
     let rendered_start = start_line;

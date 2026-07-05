@@ -90,7 +90,7 @@ pub(super) async fn execute_tool_call(
         }
     };
 
-    let processed_error = (raw_result.is_error
+    let processed_error = (raw_result.is_error()
         && !is_command_execution_error(
             &raw_result,
             context.tool_definitions.definition(&call.name),
@@ -104,19 +104,19 @@ pub(super) async fn execute_tool_call(
         .as_ref()
         .map(|processed| vec![ContentBlock::Text(processed.assistant_message.clone())])
         .unwrap_or_else(|| provider_content_from_tool_result(&raw_result));
-    let provider_result = if raw_result.is_error {
+    let provider_result = if raw_result.is_error() {
         AiToolResult::error(
             call.call_id.clone(),
             call.name.clone(),
             provider_content,
-            raw_result.details.clone(),
+            raw_result.details().cloned(),
         )
     } else {
         AiToolResult::success(
             call.call_id.clone(),
             call.name.clone(),
             provider_content,
-            raw_result.details.clone(),
+            raw_result.details().cloned(),
         )
     };
 
@@ -165,7 +165,7 @@ fn is_command_execution_error(
         return false;
     }
 
-    let Some(details) = result.details.as_ref() else {
+    let Some(details) = result.details() else {
         return false;
     };
     details
@@ -393,7 +393,7 @@ mod tests {
 
         let execution = invalid_arguments_tool_execution(&call, error);
 
-        assert!(execution.raw_result.is_error);
+        assert!(execution.raw_result.is_error());
         assert!(execution.processed_error.is_none());
         assert!(
             execution

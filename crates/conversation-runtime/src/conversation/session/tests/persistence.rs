@@ -179,7 +179,7 @@ fn flush_session_persistence_preserves_store_error_source() {
         .build()
         .expect("test runtime should build")
         .block_on(async {
-            let (command_sender, command_receiver) = tokio_mpsc::unbounded_channel();
+            let (command_sender, command_receiver) = tokio_mpsc::channel(16);
             let (event_sender, _event_receiver) = mpsc::channel();
             let actor = tokio::spawn(run_session_persistence_actor(
                 request.persistence_cloned(),
@@ -201,6 +201,32 @@ fn flush_session_persistence_preserves_store_error_source() {
             source: SessionStoreError::SessionNotFound { session_id }
         } if session_id == &missing_session_id
     ));
+}
+
+#[test]
+fn session_persistence_actor_exits_when_cancelled_with_sender_alive() {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime should build")
+        .block_on(async {
+            let (_command_sender, command_receiver) = tokio_mpsc::channel(16);
+            let (event_sender, _event_receiver) = mpsc::channel();
+            let cancellation = CancellationToken::new();
+            let actor = tokio::spawn(run_session_persistence_actor(
+                None,
+                command_receiver,
+                event_sender,
+                cancellation.clone(),
+            ));
+
+            cancellation.cancel();
+
+            tokio::time::timeout(std::time::Duration::from_millis(100), actor)
+                .await
+                .expect("persistence actor should observe cancellation")
+                .expect("persistence actor should stop cleanly");
+        });
 }
 
 #[test]

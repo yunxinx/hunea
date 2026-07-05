@@ -48,7 +48,7 @@ pub fn runtime_tool_activity_update_from_result(
     let definition = tool_definitions.definition(&call.name);
     let parsed = ParsedArguments::from_call(call);
     let arguments = parsed.value();
-    let status = Some(if processed_error.is_some() || result.is_error {
+    let status = Some(if processed_error.is_some() || result.is_error() {
         RuntimeToolActivityStatus::Failed
     } else {
         RuntimeToolActivityStatus::Completed
@@ -66,8 +66,8 @@ pub fn runtime_tool_activity_update_from_result(
     let raw_output = processed_error.is_none().then(|| {
         RuntimeToolActivityRawValue::tool_result_with_display_content(
             result.text_content(),
-            result.display_content.clone(),
-            result.details.clone(),
+            result.display_content().map(str::to_string),
+            result.details().cloned(),
         )
     });
 
@@ -96,8 +96,10 @@ fn runtime_tool_activity_content_for_result(
         return vec![content];
     }
 
-    if let Some(display_content) = result.display_content.as_ref() {
-        return vec![RuntimeToolActivityContent::Text(display_content.clone())];
+    if let Some(display_content) = result.display_content() {
+        return vec![RuntimeToolActivityContent::Text(
+            display_content.to_string(),
+        )];
     }
 
     let content = result
@@ -126,7 +128,7 @@ fn diff_content_from_tool_result(
     arguments: &Value,
     result: &ToolResult,
 ) -> Option<RuntimeToolActivityContent> {
-    let details = result.details.as_ref()?;
+    let details = result.details()?;
     let path = details
         .get("path")
         .and_then(Value::as_str)
@@ -330,8 +332,9 @@ mod tests {
         let mut registry = ToolRegistry::new();
         registry.insert(ToolDefinition::new("read").with_label("Read"));
         let call = ToolCall::new("call-1", "read", r#"{"path":"Cargo.toml"}"#);
-        let mut result = ToolResult::success("call-1", "content");
-        result.details = Some(serde_json::json!({ "kind": "text" }));
+        let result = ToolResult::success("call-1", "content").with_details(serde_json::json!({
+            "kind": "text"
+        }));
 
         let update = runtime_tool_activity_update_from_result(&call, &result, None, &registry);
 

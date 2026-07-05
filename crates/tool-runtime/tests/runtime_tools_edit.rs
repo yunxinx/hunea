@@ -48,7 +48,7 @@ async fn builtin_edit_rejects_single_edit_arguments() {
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(result.content.contains("arguments do not match schema"));
     assert!(result.content.contains("$.edits"));
     assert!(result.content.contains("is required"));
@@ -77,7 +77,7 @@ async fn builtin_edit_existing_file_requires_complete_prior_read() {
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(result.content.contains("has not been read"));
     cleanup(&root);
 }
@@ -107,7 +107,7 @@ async fn builtin_edit_rejects_file_changed_after_read() {
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(result.content.contains("modified since read"));
     assert_eq!(
         fs::read_to_string(root.join("notes.txt")).expect("read stale fixture"),
@@ -138,7 +138,7 @@ async fn builtin_edit_requires_unique_match_for_single_edits_array_item() {
             &CancellationToken::new(),
         )
         .await;
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(
         result.content.contains("Found 2 matches"),
         "unexpected duplicate-match error: {}",
@@ -175,36 +175,32 @@ async fn builtin_edit_accepts_multiple_disjoint_edits_in_one_call() {
         )
         .await;
 
-    assert!(!result.is_error, "multi edit should succeed: {result:?}");
+    assert!(!result.is_error(), "multi edit should succeed: {result:?}");
     assert!(result.content.contains("Successfully replaced 2 block(s)"));
     assert_eq!(
         result
-            .details
-            .as_ref()
+            .details()
             .and_then(|details| details.get("path"))
             .and_then(serde_json::Value::as_str),
         Some("notes.txt")
     );
     assert_eq!(
         result
-            .details
-            .as_ref()
+            .details()
             .and_then(|details| details.get("old_text"))
             .and_then(serde_json::Value::as_str),
         Some("alpha\nbeta\ngamma\ndelta\n")
     );
     assert_eq!(
         result
-            .details
-            .as_ref()
+            .details()
             .and_then(|details| details.get("new_text"))
             .and_then(serde_json::Value::as_str),
         Some("ALPHA\nbeta\nGAMMA\ndelta\n")
     );
     assert_eq!(
         result
-            .details
-            .as_ref()
+            .details()
             .and_then(|details| details.get("replacements"))
             .and_then(serde_json::Value::as_u64),
         Some(2)
@@ -241,7 +237,7 @@ async fn builtin_edit_matches_multiple_edits_against_original_file() {
         .await;
 
     assert!(
-        !result.is_error,
+        !result.is_error(),
         "multi edit should match original file: {result:?}"
     );
     assert_eq!(
@@ -276,7 +272,7 @@ async fn builtin_edit_rejects_overlapping_edits_without_modifying_file() {
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(result.content.contains("overlap"));
     assert_eq!(
         fs::read_to_string(root.join("notes.txt")).expect("read fixture"),
@@ -310,7 +306,7 @@ async fn builtin_edit_does_not_partially_write_when_one_multi_edit_fails() {
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(result.content.contains("not found"));
     assert_eq!(
         fs::read_to_string(root.join("notes.txt")).expect("read fixture"),
@@ -359,7 +355,7 @@ async fn builtin_edit_fuzzy_matches_common_model_text_differences() {
         .await;
 
     assert!(
-        !result.is_error,
+        !result.is_error(),
         "fuzzy multi edit should succeed: {result:?}"
     );
     assert_eq!(
@@ -403,7 +399,7 @@ async fn builtin_edit_detects_duplicates_after_fuzzy_normalization() {
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(
         result.content.contains("Found 2 matches"),
         "unexpected duplicate error: {}",
@@ -434,7 +430,7 @@ async fn builtin_edit_rejects_replace_all_argument() {
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(result.content.contains("arguments do not match schema"));
     assert!(result.content.contains("replace_all"));
     cleanup(&root);
@@ -459,7 +455,7 @@ async fn builtin_edit_rejects_empty_edits_array() {
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(
         result
             .content
@@ -489,7 +485,7 @@ async fn builtin_edit_rejects_empty_old_string_inside_edits() {
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(
         result
             .content
@@ -519,7 +515,7 @@ async fn builtin_edit_rejects_missing_field_inside_edits_items() {
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(result.content.contains("arguments do not match schema"));
     assert!(result.content.contains("$.edits[0].new_string"));
     assert!(result.content.contains("is required"));
@@ -551,7 +547,7 @@ async fn builtin_edit_rejects_extra_fields_inside_edits_items() {
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(result.content.contains("arguments do not match schema"));
     assert!(result.content.contains("$.edits[0].replace_all"));
     assert!(result.content.contains("replace_all"));
@@ -566,7 +562,7 @@ async fn read_complete_file(registry: &ToolExecutorRegistry, path: &str) {
         )
         .await;
     assert!(
-        !result.is_error,
+        !result.is_error(),
         "fixture file should be readable before mutation: {result:?}"
     );
 }

@@ -1,5 +1,6 @@
 mod edit;
 mod edit_apply;
+mod error;
 mod file_state;
 mod list_dir;
 mod mutation;

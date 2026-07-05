@@ -489,15 +489,6 @@ pub(super) fn prompt_overlay_inactive_visible_rows(height: u16) -> usize {
     usize::from(body_height.saturating_sub(1)).max(1)
 }
 
-pub(super) fn vertical_rule_lines(
-    height: usize,
-    palette: crate::theme::TerminalPalette,
-) -> Vec<Line<'static>> {
-    (0..height)
-        .map(|_| Line::styled("│", tertiary_text_style(palette)))
-        .collect()
-}
-
 pub(super) fn prompt_scope_from_origin(origin: PromptSourceOrigin) -> Option<PromptAssemblyScope> {
     match origin {
         PromptSourceOrigin::Builtin => None,

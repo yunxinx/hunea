@@ -3,6 +3,7 @@ use std::fmt;
 
 /// `ToolCall` 描述模型发起的一次工具调用。
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
 pub struct ToolCall {
     pub call_id: String,
     pub name: String,
@@ -22,13 +23,21 @@ impl ToolCall {
 
 /// `ToolResult` 描述工具执行后回传给 runtime 的结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
 pub struct ToolResult {
     pub call_id: String,
     pub content: ToolResultContentBlocks,
-    pub display_content: Option<String>,
-    pub is_error: bool,
-    pub details: Option<Value>,
-    pub terminate: bool,
+    display_content: Option<String>,
+    outcome: ToolResultOutcome,
+    details: Option<Value>,
+}
+
+/// `ToolResultOutcome` 表达工具结果对 runtime 的控制含义。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolResultOutcome {
+    Success,
+    Error,
+    Terminate,
 }
 
 /// `ToolResultContentBlocks` 保存工具结果的结构化内容，并提供文本摘要接口。
@@ -123,9 +132,8 @@ impl ToolResult {
             call_id: call_id.into(),
             content: content.into(),
             display_content: None,
-            is_error: false,
+            outcome: ToolResultOutcome::Success,
             details: None,
-            terminate: false,
         }
     }
 
@@ -135,9 +143,8 @@ impl ToolResult {
             call_id: call_id.into(),
             content: vec![ToolResultContent::Text(content.into())].into(),
             display_content: None,
-            is_error: true,
+            outcome: ToolResultOutcome::Error,
             details: None,
-            terminate: false,
         }
     }
 
@@ -151,6 +158,37 @@ impl ToolResult {
     pub fn with_details(mut self, details: Value) -> Self {
         self.details = Some(details);
         self
+    }
+
+    /// `with_terminate` 标记工具结果为终止当前工具循环。
+    pub fn with_terminate(mut self) -> Self {
+        self.outcome = ToolResultOutcome::Terminate;
+        self
+    }
+
+    /// `outcome` 返回工具结果对 runtime 的控制含义。
+    pub fn outcome(&self) -> ToolResultOutcome {
+        self.outcome
+    }
+
+    /// `is_error` 返回工具是否失败。
+    pub fn is_error(&self) -> bool {
+        self.outcome == ToolResultOutcome::Error
+    }
+
+    /// `terminates` 返回工具结果是否终止当前工具循环。
+    pub fn terminates(&self) -> bool {
+        self.outcome == ToolResultOutcome::Terminate
+    }
+
+    /// `details` 返回结构化执行细节。
+    pub fn details(&self) -> Option<&Value> {
+        self.details.as_ref()
+    }
+
+    /// `display_content` 返回仅供 runtime/TUI 展示的内容。
+    pub fn display_content(&self) -> Option<&str> {
+        self.display_content.as_deref()
     }
 
     /// `text_content` 返回工具结果中的文本内容。

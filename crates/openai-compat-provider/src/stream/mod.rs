@@ -2,7 +2,10 @@ mod chat;
 mod responses;
 mod sse;
 
+use std::collections::{BTreeMap, HashSet};
+
 use provider_protocol::{FinishReason, ProviderError, ToolCall};
+use provider_protocol::{StreamEvent, StreamEventSink};
 use serde::Deserialize;
 
 pub(crate) use chat::OpenAiStreamState;
@@ -33,6 +36,133 @@ impl PartialToolCall {
     }
 }
 
+#[derive(Debug, Default)]
+struct ToolCallAccumulator {
+    partials: BTreeMap<usize, PartialToolCall>,
+    started: HashSet<usize>,
+}
+
+impl ToolCallAccumulator {
+    fn is_empty(&self) -> bool {
+        self.partials.is_empty()
+    }
+
+    fn apply_chat_delta(
+        &mut self,
+        delta: OpenAiToolCallDelta,
+        sink: &mut (dyn StreamEventSink + Send),
+    ) {
+        let index = delta.index;
+        let partial = self.partials.entry(index).or_default();
+        if let Some(id) = delta.id.filter(|id| !id.is_empty()) {
+            partial.call_id = Some(id);
+        }
+        if let Some(function) = delta.function {
+            if let Some(name) = function.name.filter(|name| !name.is_empty()) {
+                partial.name = Some(name);
+            }
+            if let Some(arguments) = function.arguments.filter(|arguments| !arguments.is_empty()) {
+                partial.arguments.push_str(&arguments);
+                sink.emit(StreamEvent::ToolCallArgumentsDelta {
+                    index,
+                    delta: arguments,
+                });
+            }
+        }
+        self.emit_started_if_ready(index, sink);
+    }
+
+    fn apply_responses_item(
+        &mut self,
+        index: usize,
+        item: ResponsesOutputItem,
+        arguments_mode: ResponsesToolArgumentsMode,
+        sink: &mut (dyn StreamEventSink + Send),
+    ) {
+        let partial = self.partials.entry(index).or_default();
+        if let Some(call_id) = item.call_id.filter(|value| !value.is_empty()) {
+            partial.call_id = Some(call_id);
+        }
+        if let Some(name) = item.name.filter(|value| !value.is_empty()) {
+            partial.name = Some(name);
+        }
+        if let Some(arguments) = item.arguments.filter(|value| !value.is_empty()) {
+            match arguments_mode {
+                ResponsesToolArgumentsMode::Append => partial.arguments.push_str(&arguments),
+                ResponsesToolArgumentsMode::Replace => partial.arguments = arguments,
+            }
+        }
+        self.emit_started_if_ready(index, sink);
+    }
+
+    fn append_arguments_delta(
+        &mut self,
+        index: usize,
+        delta: String,
+        sink: &mut (dyn StreamEventSink + Send),
+    ) {
+        self.partials
+            .entry(index)
+            .or_default()
+            .arguments
+            .push_str(&delta);
+        sink.emit(StreamEvent::ToolCallArgumentsDelta { index, delta });
+    }
+
+    fn replace_arguments_emitting_missing_delta(
+        &mut self,
+        index: usize,
+        arguments: String,
+        sink: &mut (dyn StreamEventSink + Send),
+    ) {
+        let partial = self.partials.entry(index).or_default();
+        if arguments.starts_with(&partial.arguments) {
+            let delta = arguments[partial.arguments.len()..].to_string();
+            if !delta.is_empty() {
+                sink.emit(StreamEvent::ToolCallArgumentsDelta { index, delta });
+            }
+        }
+        partial.arguments = arguments;
+    }
+
+    fn finalized_calls(&self) -> Result<Vec<(usize, ToolCall)>, ProviderError> {
+        self.partials
+            .iter()
+            .map(|(index, call)| Ok((*index, call.to_tool_call(*index)?)))
+            .collect()
+    }
+
+    fn emit_completed(&self, calls: &[(usize, ToolCall)], sink: &mut (dyn StreamEventSink + Send)) {
+        for (index, call) in calls {
+            sink.emit(StreamEvent::ToolCallCompleted {
+                index: *index,
+                call: call.clone(),
+            });
+        }
+    }
+
+    fn emit_started_if_ready(&mut self, index: usize, sink: &mut (dyn StreamEventSink + Send)) {
+        let Some(partial) = self.partials.get(&index) else {
+            return;
+        };
+        if let (Some(call_id), Some(name)) = (partial.call_id.as_ref(), partial.name.as_ref())
+            && self.started.insert(index)
+        {
+            sink.emit(StreamEvent::ToolCallStarted {
+                index,
+                call_id: call_id.clone(),
+                name: name.clone(),
+            });
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResponsesToolArgumentsMode {
+    Append,
+    Replace,
+}
+
 fn finish_reason_from_openai(value: &str) -> FinishReason {
     match value {
         "stop" => FinishReason::Stop,
@@ -47,7 +177,6 @@ fn finish_reason_from_responses_status(status: Option<&str>) -> FinishReason {
     match status {
         Some("completed") => FinishReason::Stop,
         Some("incomplete") => FinishReason::Length,
-        Some(other @ ("failed" | "cancelled")) => FinishReason::Other(other.to_string()),
         Some(other) => FinishReason::Other(other.to_string()),
         None => FinishReason::Stop,
     }

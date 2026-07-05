@@ -63,7 +63,7 @@ fn sse_decoder_ignores_keepalive_events() {
 
 #[test]
 fn stream_state_aggregates_tool_call_arguments() {
-    let mut state = OpenAiStreamState::new("qwen3".to_string());
+    let mut state = OpenAiStreamState::new();
     let mut events = Events::default();
     state
             .apply_data_frame(
@@ -89,7 +89,7 @@ fn stream_state_aggregates_tool_call_arguments() {
 
 #[test]
 fn stream_state_omits_incomplete_tool_call_when_finish_reason_is_length() {
-    let mut state = OpenAiStreamState::new("qwen3".to_string());
+    let mut state = OpenAiStreamState::new();
     let mut events = Events::default();
     state
             .apply_data_frame(
@@ -114,7 +114,7 @@ fn stream_state_omits_incomplete_tool_call_when_finish_reason_is_length() {
 
 #[test]
 fn stream_state_waits_for_tool_call_id_before_started_event() {
-    let mut state = OpenAiStreamState::new("gpt-5-mini".to_string());
+    let mut state = OpenAiStreamState::new();
     let mut events = Events::default();
     state
         .apply_data_frame(
@@ -144,7 +144,7 @@ fn stream_state_waits_for_tool_call_id_before_started_event() {
 
 #[test]
 fn stream_state_errors_when_tool_call_finishes_without_id() {
-    let mut state = OpenAiStreamState::new("gpt-5-mini".to_string());
+    let mut state = OpenAiStreamState::new();
     let mut events = Events::default();
     state
             .apply_data_frame(
@@ -166,7 +166,7 @@ fn stream_state_errors_when_tool_call_finishes_without_id() {
 
 #[test]
 fn stream_state_preserves_usage_finish_reason_and_hidden_reasoning() {
-    let mut state = OpenAiStreamState::new("qwen3".to_string());
+    let mut state = OpenAiStreamState::new();
     let mut events = Events::default();
     state
             .apply_data_frame(
@@ -381,7 +381,7 @@ fn responses_stream_state_requires_terminal_event() {
 
 #[test]
 fn stream_state_does_not_emit_empty_assistant_item_for_reasoning_only() {
-    let mut state = OpenAiStreamState::new("qwen3".to_string());
+    let mut state = OpenAiStreamState::new();
     let mut events = Events::default();
     state
         .apply_data_frame(

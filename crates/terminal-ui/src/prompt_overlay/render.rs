@@ -31,10 +31,9 @@ impl Model {
 
         if gutter.width > 0 {
             frame.render_widget(
-                Paragraph::new(vertical_rule_lines(
-                    usize::from(gutter.height),
-                    self.palette,
-                )),
+                PromptOverlayVerticalRule {
+                    palette: self.palette,
+                },
                 gutter,
             );
         }

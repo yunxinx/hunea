@@ -10,5 +10,6 @@ pub mod prompt_assembly;
 pub mod provider;
 pub mod request_policy;
 pub mod session;
+pub mod text;
 pub mod time;
 pub mod token_count;

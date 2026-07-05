@@ -259,14 +259,14 @@ async fn execute_bash(
         }
     };
 
-    let mut result = if is_error {
+    let result = if is_error {
         ToolResult::error(call.call_id, output_text)
     } else {
         ToolResult::success(call.call_id, output_text)
     };
-    result.display_content = Some(display_output_text);
-    result.details = Some(details);
     result
+        .with_display_content(display_output_text)
+        .with_details(details)
 }
 
 async fn resolve_workdir(root: &Path, requested: Option<&str>) -> Result<PathBuf, String> {

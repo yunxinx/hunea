@@ -10,6 +10,7 @@ pub mod benchmark;
 mod attached_prompt_picker_row;
 mod command_panel;
 mod composer;
+mod composer_inline_picker;
 mod context_budget;
 mod copy_picker;
 mod custom_prompt_picker;

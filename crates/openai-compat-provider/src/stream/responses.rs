@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 
 use provider_protocol::{
     ContentBlock, ConversationItem, FinishReason, PromptCompletion, ProviderError, StreamEvent,
@@ -6,7 +6,8 @@ use provider_protocol::{
 };
 
 use super::{
-    PartialToolCall, ResponsesOutputItem, ResponsesStreamEvent, finish_reason_from_responses_status,
+    ResponsesOutputItem, ResponsesStreamEvent, ResponsesToolArgumentsMode, ToolCallAccumulator,
+    finish_reason_from_responses_status,
 };
 
 /// `OpenAiResponsesStreamState` 将 Responses API events 聚合为 core stream events 与最终响应。
@@ -14,8 +15,7 @@ use super::{
 pub(crate) struct OpenAiResponsesStreamState {
     text_outputs: BTreeMap<usize, String>,
     reasoning_outputs: BTreeMap<usize, String>,
-    tool_calls: BTreeMap<usize, PartialToolCall>,
-    started_tool_calls: HashSet<usize>,
+    tool_calls: ToolCallAccumulator,
     finish_reason: Option<FinishReason>,
     usage: Option<TokenUsage>,
     has_started: bool,
@@ -84,28 +84,18 @@ impl OpenAiResponsesStreamState {
                 output_index,
                 delta,
             } => {
-                let partial = self.tool_calls.entry(output_index).or_default();
-                partial.arguments.push_str(&delta);
-                sink.emit(StreamEvent::ToolCallArgumentsDelta {
-                    index: output_index,
-                    delta,
-                });
+                self.tool_calls
+                    .append_arguments_delta(output_index, delta, sink);
             }
             ResponsesStreamEvent::FunctionCallArgumentsDone {
                 output_index,
                 arguments,
             } => {
-                let partial = self.tool_calls.entry(output_index).or_default();
-                if arguments.starts_with(&partial.arguments) {
-                    let delta = arguments[partial.arguments.len()..].to_string();
-                    if !delta.is_empty() {
-                        sink.emit(StreamEvent::ToolCallArgumentsDelta {
-                            index: output_index,
-                            delta,
-                        });
-                    }
-                }
-                partial.arguments = arguments;
+                self.tool_calls.replace_arguments_emitting_missing_delta(
+                    output_index,
+                    arguments,
+                    sink,
+                );
             }
             ResponsesStreamEvent::OutputItemDone { output_index, item } => {
                 self.apply_output_item_done(output_index, item, sink);
@@ -166,20 +156,16 @@ impl OpenAiResponsesStreamState {
         }
 
         let terminal_finish_reason = self.finish_reason.take().unwrap_or(FinishReason::Stop);
-        let tool_calls = if terminal_finish_reason == FinishReason::Stop {
-            self.tool_calls
-                .iter()
-                .map(|(index, call)| call.to_tool_call(*index))
-                .collect::<Result<Vec<_>, _>>()?
+        let indexed_tool_calls = if terminal_finish_reason == FinishReason::Stop {
+            self.tool_calls.finalized_calls()?
         } else {
             Vec::new()
         };
-        for ((index, _), call) in self.tool_calls.iter().zip(tool_calls.iter()) {
-            sink.emit(StreamEvent::ToolCallCompleted {
-                index: *index,
-                call: call.clone(),
-            });
-        }
+        self.tool_calls.emit_completed(&indexed_tool_calls, sink);
+        let tool_calls = indexed_tool_calls
+            .into_iter()
+            .map(|(_, call)| call)
+            .collect::<Vec<_>>();
 
         let mut items = Vec::new();
         let reasoning_content = self
@@ -230,17 +216,12 @@ impl OpenAiResponsesStreamState {
         if item.kind.as_deref() != Some("function_call") {
             return;
         }
-        let partial = self.tool_calls.entry(output_index).or_default();
-        if let Some(call_id) = item.call_id.filter(|value| !value.is_empty()) {
-            partial.call_id = Some(call_id);
-        }
-        if let Some(name) = item.name.filter(|value| !value.is_empty()) {
-            partial.name = Some(name);
-        }
-        if let Some(arguments) = item.arguments.filter(|value| !value.is_empty()) {
-            partial.arguments.push_str(&arguments);
-        }
-        self.emit_responses_tool_call_started(output_index, sink);
+        self.tool_calls.apply_responses_item(
+            output_index,
+            item,
+            ResponsesToolArgumentsMode::Append,
+            sink,
+        );
     }
 
     fn apply_output_item_done(
@@ -251,17 +232,12 @@ impl OpenAiResponsesStreamState {
     ) {
         match item.kind.as_deref() {
             Some("function_call") => {
-                let partial = self.tool_calls.entry(output_index).or_default();
-                if let Some(call_id) = item.call_id.filter(|value| !value.is_empty()) {
-                    partial.call_id = Some(call_id);
-                }
-                if let Some(name) = item.name.filter(|value| !value.is_empty()) {
-                    partial.name = Some(name);
-                }
-                if let Some(arguments) = item.arguments {
-                    partial.arguments = arguments;
-                }
-                self.emit_responses_tool_call_started(output_index, sink);
+                self.tool_calls.apply_responses_item(
+                    output_index,
+                    item,
+                    ResponsesToolArgumentsMode::Replace,
+                    sink,
+                );
             }
             Some("message") => {
                 if let Some(text) = item.visible_output_text().filter(|value| !value.is_empty()) {
@@ -308,24 +284,5 @@ impl OpenAiResponsesStreamState {
             sink.emit(StreamEvent::ReasoningDelta(delta.to_string()));
         }
         *current = final_text;
-    }
-
-    fn emit_responses_tool_call_started(
-        &mut self,
-        output_index: usize,
-        sink: &mut (dyn StreamEventSink + Send),
-    ) {
-        let Some(partial) = self.tool_calls.get(&output_index) else {
-            return;
-        };
-        if let (Some(call_id), Some(name)) = (partial.call_id.as_ref(), partial.name.as_ref())
-            && self.started_tool_calls.insert(output_index)
-        {
-            sink.emit(StreamEvent::ToolCallStarted {
-                index: output_index,
-                call_id: call_id.clone(),
-                name: name.clone(),
-            });
-        }
     }
 }

@@ -499,11 +499,11 @@ mod tests {
         let second_result = second.join().expect("edit thread should finish");
 
         assert!(
-            !first_result.is_error,
+            !first_result.is_error(),
             "write should succeed: {first_result:?}"
         );
         assert!(
-            !second_result.is_error,
+            !second_result.is_error(),
             "edit should succeed: {second_result:?}"
         );
         assert_eq!(

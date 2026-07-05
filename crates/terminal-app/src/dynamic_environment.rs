@@ -1,6 +1,9 @@
 use std::{
     path::Path,
     process::{Command, Stdio},
+    sync::mpsc,
+    thread,
+    time::Duration,
 };
 
 use runtime_domain::dynamic_environment::{
@@ -8,16 +11,60 @@ use runtime_domain::dynamic_environment::{
     stable_sha256,
 };
 
+const DYNAMIC_ENVIRONMENT_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum DynamicEnvironmentObservationError {
+    #[error("dynamic environment observation timed out after {timeout:?}")]
+    TimedOut { timeout: Duration },
+    #[error("dynamic environment observation worker stopped")]
+    WorkerStopped,
+    #[error("start dynamic environment observation worker: {detail}")]
+    WorkerStart { detail: String },
+}
+
 /// `observe_dynamic_environment_sources` 读取当前工作目录下已启用的动态环境来源。
 pub(crate) fn observe_dynamic_environment_sources(
     work_dir: &Path,
     sources: &[DynamicEnvironmentSourceKind],
-) -> Vec<DynamicEnvironmentObservation> {
-    sources
-        .iter()
-        .copied()
-        .map(|source| observe_dynamic_environment_source(work_dir, source))
-        .collect()
+) -> Result<Vec<DynamicEnvironmentObservation>, DynamicEnvironmentObservationError> {
+    let work_dir = work_dir.to_path_buf();
+    let sources = sources.to_vec();
+    observe_with_timeout(DYNAMIC_ENVIRONMENT_OBSERVATION_TIMEOUT, move || {
+        sources
+            .into_iter()
+            .map(|source| observe_dynamic_environment_source(work_dir.as_path(), source))
+            .collect()
+    })
+}
+
+fn observe_with_timeout<T>(
+    timeout: Duration,
+    observe: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, DynamicEnvironmentObservationError>
+where
+    T: Send + 'static,
+{
+    let (sender, receiver) = mpsc::sync_channel(1);
+    thread::Builder::new()
+        .name("dynamic-environment-observer".to_string())
+        .spawn(move || {
+            let result = observe();
+            let _ = sender.send(result);
+        })
+        .map_err(|error| DynamicEnvironmentObservationError::WorkerStart {
+            detail: error.to_string(),
+        })?;
+
+    match receiver.recv_timeout(timeout) {
+        Ok(result) => Ok(result),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            Err(DynamicEnvironmentObservationError::TimedOut { timeout })
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err(DynamicEnvironmentObservationError::WorkerStopped)
+        }
+    }
 }
 
 fn observe_dynamic_environment_source(
@@ -112,4 +159,26 @@ fn command_output(command: &mut Command) -> Option<String> {
     }
     let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
     Some(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn observe_with_timeout_returns_before_blocking_observer_finishes() {
+        let started = Instant::now();
+
+        let error = super::observe_with_timeout(Duration::from_millis(10), || {
+            std::thread::sleep(Duration::from_secs(1));
+            Vec::<()>::new()
+        })
+        .expect_err("blocking observer should time out");
+
+        assert!(matches!(
+            error,
+            super::DynamicEnvironmentObservationError::TimedOut { .. }
+        ));
+        assert!(started.elapsed() < Duration::from_millis(500));
+    }
 }

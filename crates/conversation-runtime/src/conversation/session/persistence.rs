@@ -90,12 +90,21 @@ pub(super) enum SessionPersistenceError {
 
 pub(super) async fn run_session_persistence_actor(
     persistence: Option<PreparedConversationPersistence>,
-    mut receiver: tokio_mpsc::UnboundedReceiver<SessionPersistenceCommand>,
+    mut receiver: tokio_mpsc::Receiver<SessionPersistenceCommand>,
     sender: mpsc::Sender<ConversationWorkerEvent>,
     cancellation: CancellationToken,
 ) {
     let mut state = SessionPersistenceState::default();
-    while let Some(command) = receiver.recv().await {
+    loop {
+        let command = tokio::select! {
+            _ = cancellation.cancelled() => break,
+            command = receiver.recv() => {
+                let Some(command) = command else {
+                    break;
+                };
+                command
+            }
+        };
         let result = match command {
             SessionPersistenceCommand::ProviderTurnStarted => {
                 persist_turn_start(persistence.as_ref(), &sender, &cancellation, &mut state)
@@ -510,11 +519,12 @@ async fn flush_persistence(
 }
 
 pub(super) async fn flush_session_persistence(
-    sender: &tokio_mpsc::UnboundedSender<SessionPersistenceCommand>,
+    sender: &tokio_mpsc::Sender<SessionPersistenceCommand>,
 ) -> Result<(), Arc<SessionPersistenceError>> {
     let (ack_tx, ack_rx) = oneshot::channel();
     sender
         .send(SessionPersistenceCommand::Flush { ack: ack_tx })
+        .await
         .map_err(|_| Arc::new(SessionPersistenceError::WorkerStopped))?;
     ack_rx
         .await

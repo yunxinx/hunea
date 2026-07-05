@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::KeyEvent;
 use ratatui::text::Line;
 use runtime_domain::prompt_assembly::{PromptAssemblyExtraPromptCandidate, PromptSourceOrigin};
 
@@ -9,6 +9,10 @@ use super::{
         attached_prompt_picker_name_column_width, attached_prompt_picker_selectable_range,
         render_attached_prompt_picker_row,
     },
+    composer_inline_picker::{
+        ComposerInlinePickerKey, ComposerInlinePickerState, classify_composer_inline_picker_key,
+        move_composer_inline_picker_selection, reconcile_composer_inline_picker_state,
+    },
     display_width::display_width,
     inline_panel::InlinePanelRenderResult,
     overlay_input_result::OverlayInputResult,
@@ -17,13 +21,8 @@ use super::{
 };
 
 /// `CustomPromptPickerState` 保存 `#prompt` 选择器的当前查询、结果和导航位置。
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(crate) struct CustomPromptPickerState {
-    pub(crate) query: String,
-    pub(crate) items: Vec<PromptAssemblyExtraPromptCandidate>,
-    pub(crate) selected: usize,
-    pub(crate) scroll: usize,
-}
+pub(crate) type CustomPromptPickerState =
+    ComposerInlinePickerState<PromptAssemblyExtraPromptCandidate>;
 
 impl Model {
     pub(crate) fn custom_prompt_picker_active(&self) -> bool {
@@ -51,40 +50,23 @@ impl Model {
             filter_custom_prompt_items(&self.prompt_assembly.extra_prompt_candidates, &query);
         let visible_rows = self.file_picker_list_visible_rows();
         let previous = self.custom_prompt_picker.as_ref();
-        let query_changed = previous.is_none_or(|state| state.query != query);
         let bound_prompt = self.composer.current_custom_prompt_binding();
-        let mut selected = if query_changed {
-            bound_prompt
-                .as_ref()
-                .and_then(|binding| {
-                    items.iter().position(|item| {
-                        item.reference_id == binding.reference_id && item.origin == binding.origin
-                    })
+        let initial_selected = bound_prompt
+            .as_ref()
+            .and_then(|binding| {
+                items.iter().position(|item| {
+                    item.reference_id == binding.reference_id && item.origin == binding.origin
                 })
-                .unwrap_or(0)
-        } else {
-            previous.map(|state| state.selected).unwrap_or(0)
-        };
-        let mut scroll = if query_changed {
-            0
-        } else {
-            previous.map(|state| state.scroll).unwrap_or(0)
-        };
+            })
+            .unwrap_or(0);
 
-        if items.is_empty() {
-            selected = 0;
-            scroll = 0;
-        } else {
-            selected = selected.min(items.len() - 1);
-            scroll = clamp_custom_prompt_picker_scroll(scroll, selected, items.len(), visible_rows);
-        }
-
-        self.custom_prompt_picker = Some(CustomPromptPickerState {
+        self.custom_prompt_picker = Some(reconcile_composer_inline_picker_state(
             query,
             items,
-            selected,
-            scroll,
-        });
+            previous,
+            visible_rows,
+            initial_selected,
+        ));
     }
 
     pub(crate) fn handle_custom_prompt_picker_key(&mut self, key: KeyEvent) -> OverlayInputResult {
@@ -92,37 +74,29 @@ impl Model {
             return OverlayInputResult::Ignored;
         }
 
-        match key.code {
-            KeyCode::Up if key.modifiers.is_empty() => {
+        match classify_composer_inline_picker_key(key) {
+            Some(ComposerInlinePickerKey::MovePrevious) => {
                 self.move_custom_prompt_picker_selection(-1);
                 OverlayInputResult::Handled
             }
-            KeyCode::Down if key.modifiers.is_empty() => {
+            Some(ComposerInlinePickerKey::MoveNext) => {
                 self.move_custom_prompt_picker_selection(1);
                 OverlayInputResult::Handled
             }
-            KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
-                self.move_custom_prompt_picker_selection(-1);
-                OverlayInputResult::Handled
-            }
-            KeyCode::Char('n') if key.modifiers == KeyModifiers::CONTROL => {
-                self.move_custom_prompt_picker_selection(1);
-                OverlayInputResult::Handled
-            }
-            KeyCode::Esc if key.modifiers.is_empty() => {
+            Some(ComposerInlinePickerKey::Dismiss) => {
                 self.dismiss_current_custom_prompt_picker_token();
                 self.close_custom_prompt_picker();
                 OverlayInputResult::Handled
             }
-            KeyCode::Tab if key.modifiers.is_empty() => {
+            Some(ComposerInlinePickerKey::Complete) => {
                 self.complete_custom_prompt_picker_common_prefix();
                 OverlayInputResult::Handled
             }
-            KeyCode::Enter if key.modifiers.is_empty() => {
+            Some(ComposerInlinePickerKey::Accept) => {
                 let _ = self.insert_selected_custom_prompt_picker_item();
                 OverlayInputResult::Handled
             }
-            _ => OverlayInputResult::Ignored,
+            None => OverlayInputResult::Ignored,
         }
     }
 
@@ -227,22 +201,7 @@ impl Model {
         let Some(state) = self.custom_prompt_picker.as_mut() else {
             return;
         };
-        if state.items.is_empty() {
-            return;
-        }
-
-        let last = state.items.len() - 1;
-        if delta.is_negative() {
-            state.selected = state.selected.saturating_sub(delta.unsigned_abs());
-        } else {
-            state.selected = state.selected.saturating_add(delta as usize).min(last);
-        }
-        state.scroll = clamp_custom_prompt_picker_scroll(
-            state.scroll,
-            state.selected,
-            state.items.len(),
-            visible_rows,
-        );
+        move_composer_inline_picker_selection(state, delta, visible_rows);
     }
 
     fn complete_custom_prompt_picker_common_prefix(&mut self) {
@@ -311,27 +270,6 @@ impl Model {
     fn dismiss_current_custom_prompt_picker_token(&mut self) {
         self.dismissed_custom_prompt_picker_token = self.composer.current_custom_prompt_token();
     }
-}
-
-fn clamp_custom_prompt_picker_scroll(
-    scroll: usize,
-    selected: usize,
-    item_count: usize,
-    visible_rows: usize,
-) -> usize {
-    if item_count == 0 {
-        return 0;
-    }
-    let visible_rows = visible_rows.max(1);
-    let max_scroll = item_count.saturating_sub(visible_rows);
-    let mut scroll = scroll.min(max_scroll);
-    if selected < scroll {
-        scroll = selected;
-    }
-    if selected >= scroll + visible_rows {
-        scroll = selected + 1 - visible_rows;
-    }
-    scroll.min(max_scroll)
 }
 
 fn filter_custom_prompt_items(

@@ -174,7 +174,8 @@ impl AppRuntimeCoordinator {
             let observations = crate::dynamic_environment::observe_dynamic_environment_sources(
                 work_dir.as_path(),
                 &sources,
-            );
+            )
+            .map_err(|error| error.to_string())?;
             if let Some(snapshot) = build_dynamic_environment_snapshot(
                 DynamicEnvironmentSnapshotKind::Baseline,
                 observations.clone(),
@@ -193,7 +194,8 @@ impl AppRuntimeCoordinator {
             let observations = crate::dynamic_environment::observe_dynamic_environment_sources(
                 work_dir.as_path(),
                 &sources,
-            );
+            )
+            .map_err(|error| error.to_string())?;
             let changed = dynamic_environment_changes(
                 self.provider_conversation
                     .dynamic_environment_observations(),

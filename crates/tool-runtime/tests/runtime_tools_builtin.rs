@@ -212,7 +212,7 @@ async fn builtin_bash_rejects_legacy_reason_argument() {
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(result.content.contains("arguments do not match schema"));
     assert!(result.content.contains("reason"));
     cleanup(&root);
@@ -237,7 +237,10 @@ async fn builtin_bash_returns_merged_stdout_and_stderr() {
         )
         .await;
 
-    assert!(!result.is_error, "bash command should succeed: {result:?}");
+    assert!(
+        !result.is_error(),
+        "bash command should succeed: {result:?}"
+    );
     assert!(result.content.contains("stdout"));
     assert!(result.content.contains("stderr"));
     cleanup(&root);
@@ -262,16 +265,18 @@ async fn builtin_bash_records_duration_metadata() {
         )
         .await;
 
-    assert!(!result.is_error, "bash command should succeed: {result:?}");
+    assert!(
+        !result.is_error(),
+        "bash command should succeed: {result:?}"
+    );
     assert!(
         result
-            .details
-            .as_ref()
+            .details()
             .and_then(|details| details.get("duration_ms"))
             .and_then(serde_json::Value::as_u64)
             .is_some(),
         "bash result details should include duration_ms: {:?}",
-        result.details
+        result.details()
     );
     cleanup(&root);
 }
@@ -295,13 +300,12 @@ async fn builtin_bash_non_zero_exit_returns_error_with_output() {
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(result.content.contains("before failure"));
     assert!(result.content.contains("Command exited with code 7"));
     assert_eq!(
         result
-            .details
-            .as_ref()
+            .details()
             .and_then(|details| details.get("exit_code"))
             .and_then(serde_json::Value::as_i64),
         Some(7)
@@ -329,7 +333,7 @@ async fn builtin_bash_timeout_kills_command_and_keeps_output() {
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(result.content.contains("started"));
     assert!(!result.content.contains("after sleep"));
     assert!(
@@ -339,8 +343,7 @@ async fn builtin_bash_timeout_kills_command_and_keeps_output() {
     );
     assert_eq!(
         result
-            .details
-            .as_ref()
+            .details()
             .and_then(|details| details.get("timed_out"))
             .and_then(serde_json::Value::as_bool),
         Some(true)
@@ -373,7 +376,7 @@ async fn builtin_bash_cancellation_kills_command_and_keeps_output() {
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(result.content.contains("started"));
     assert!(!result.content.contains("after sleep"));
     assert!(result.content.contains("Command aborted"));
@@ -402,7 +405,10 @@ async fn builtin_bash_runs_inside_workspace_workdir() {
         )
         .await;
 
-    assert!(!result.is_error, "bash workdir should succeed: {result:?}");
+    assert!(
+        !result.is_error(),
+        "bash workdir should succeed: {result:?}"
+    );
     assert!(result.content.contains("nested"));
     assert!(result.content.contains("marker.txt"));
     cleanup(&root);
@@ -429,7 +435,7 @@ async fn builtin_bash_rejects_workdir_outside_workspace() {
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(result.content.contains("outside workspace"));
     cleanup(&outside);
     cleanup(&root);
@@ -454,19 +460,22 @@ async fn builtin_bash_truncates_large_output_and_persists_full_output_path() {
         )
         .await;
 
-    assert!(!result.is_error, "large output should succeed: {result:?}");
+    assert!(
+        !result.is_error(),
+        "large output should succeed: {result:?}"
+    );
     assert!(result.content.contains("2105"));
     let expected_display_content = (106..=2105)
         .map(|line| line.to_string())
         .collect::<Vec<_>>()
         .join("\n");
     assert_eq!(
-        result.display_content.as_deref(),
+        result.display_content(),
         Some(expected_display_content.as_str()),
         "TUI display output should not include the model-visible full-output footer"
     );
     assert!(!result.content.contains("\n1\n"));
-    let details = result.details.as_ref().expect("details should exist");
+    let details = result.details().expect("details should exist");
     assert_eq!(
         details
             .get("truncated")
@@ -514,7 +523,7 @@ async fn builtin_bash_byte_truncation_uses_accurate_model_footer() {
         .await;
 
     assert!(
-        !result.is_error,
+        !result.is_error(),
         "large one-line output should succeed: {result:?}"
     );
     assert!(
@@ -529,16 +538,14 @@ async fn builtin_bash_byte_truncation_uses_accurate_model_footer() {
     );
     assert!(
         result
-            .display_content
-            .as_deref()
+            .display_content()
             .is_some_and(|content| !content.contains("[Showing last ")),
         "display content should stay free of model metadata: {:?}",
-        result.display_content
+        result.display_content()
     );
 
     if let Some(full_output_path) = result
-        .details
-        .as_ref()
+        .details()
         .and_then(|details| details.get("full_output_path"))
         .and_then(serde_json::Value::as_str)
     {
@@ -569,7 +576,7 @@ async fn builtin_bash_emits_terminal_progress_snapshots() {
         )
         .await;
 
-    assert!(!result.is_error);
+    assert!(!result.is_error());
     let mut snapshots = Vec::new();
     while let Ok(progress) = progress_receiver.try_recv() {
         match progress {
@@ -623,7 +630,7 @@ async fn builtin_read_tool_can_be_registered_independently() {
         )
         .await;
 
-    assert!(!result.is_error);
+    assert!(!result.is_error());
     assert_eq!(result.text_content(), "2\ttwo\n3\tthree");
     cleanup(&root);
 }
@@ -650,7 +657,7 @@ async fn builtin_view_image_tool_can_be_registered_independently() {
         )
         .await;
 
-    assert!(!result.is_error);
+    assert!(!result.is_error());
     assert!(matches!(
         result.content.as_slice(),
         [ToolResultContent::Image { data_base64, mime_type, uri, detail }]
@@ -691,7 +698,7 @@ async fn builtin_list_dir_tool_can_be_registered_independently() {
         )
         .await;
 
-    assert!(!result.is_error);
+    assert!(!result.is_error());
     assert!(result.content.contains("Cargo.toml"));
     assert!(result.content.contains("src/"));
     assert!(result.content.contains(".hidden"));
@@ -733,7 +740,7 @@ async fn builtin_grep_tool_can_be_registered_independently() {
         )
         .await;
 
-    assert!(!result.is_error, "grep should succeed: {result:?}");
+    assert!(!result.is_error(), "grep should succeed: {result:?}");
     assert!(result.content.contains("src/lib.rs:2:"));
     assert!(result.content.contains("needle();"));
     cleanup(&root);
@@ -761,7 +768,7 @@ async fn builtin_grep_searches_hidden_files_and_truncates_long_lines_by_default(
         )
         .await;
 
-    assert!(!result.is_error, "grep should succeed: {result:?}");
+    assert!(!result.is_error(), "grep should succeed: {result:?}");
     assert!(result.content.contains(".hidden.rs:1:"));
     assert!(result.content.contains("needle "));
     assert!(
@@ -771,16 +778,14 @@ async fn builtin_grep_searches_hidden_files_and_truncates_long_lines_by_default(
     );
     assert_eq!(
         result
-            .details
-            .as_ref()
+            .details()
             .and_then(|details| details.get("truncated"))
             .and_then(serde_json::Value::as_bool),
         Some(true)
     );
     assert_eq!(
         result
-            .details
-            .as_ref()
+            .details()
             .and_then(|details| details.get("lines_truncated"))
             .and_then(serde_json::Value::as_bool),
         Some(true)
@@ -814,20 +819,18 @@ async fn builtin_grep_applies_byte_truncation_after_match_limit() {
         )
         .await;
 
-    assert!(!result.is_error, "grep should succeed: {result:?}");
+    assert!(!result.is_error(), "grep should succeed: {result:?}");
     assert!(result.content.contains("50.0KB limit reached"));
     assert_eq!(
         result
-            .details
-            .as_ref()
+            .details()
             .and_then(|details| details.get("truncated"))
             .and_then(serde_json::Value::as_bool),
         Some(true)
     );
     assert_eq!(
         result
-            .details
-            .as_ref()
+            .details()
             .and_then(|details| details.get("byte_truncated"))
             .and_then(serde_json::Value::as_bool),
         Some(true)
@@ -873,7 +876,7 @@ async fn builtin_find_tool_can_be_registered_independently() {
         )
         .await;
 
-    assert!(!result.is_error, "find should succeed: {result:?}");
+    assert!(!result.is_error(), "find should succeed: {result:?}");
     assert_eq!(result.text_content(), "src/bin/main.rs\nsrc/lib.rs");
     cleanup(&root);
 }
@@ -923,7 +926,7 @@ async fn builtin_find_uses_required_glob_pattern_and_searches_hidden_paths_by_de
         )
         .await;
 
-    assert!(!result.is_error, "find should succeed: {result:?}");
+    assert!(!result.is_error(), "find should succeed: {result:?}");
     assert!(result.content.contains(".hidden.rs"));
     assert!(result.content.contains("src/lib.rs"));
     cleanup(&root);
@@ -956,7 +959,7 @@ async fn builtin_find_treats_path_containing_pattern_as_full_path_glob() {
         )
         .await;
 
-    assert!(!result.is_error, "find should succeed: {result:?}");
+    assert!(!result.is_error(), "find should succeed: {result:?}");
     assert!(result.content.contains("src/bin/main.rs"));
     assert!(result.content.contains("src/lib.rs"));
     assert!(!result.content.contains("\nmain.rs"));
@@ -986,7 +989,7 @@ async fn builtin_search_tools_exclude_vcs_directories_but_keep_hidden_files() {
         )
         .await;
     assert!(
-        !grep_result.is_error,
+        !grep_result.is_error(),
         "grep should succeed: {grep_result:?}"
     );
     assert!(grep_result.content.contains(".hidden.rs"));
@@ -1006,7 +1009,7 @@ async fn builtin_search_tools_exclude_vcs_directories_but_keep_hidden_files() {
         )
         .await;
     assert!(
-        !find_result.is_error,
+        !find_result.is_error(),
         "find should succeed: {find_result:?}"
     );
     assert!(find_result.content.contains(".hidden.rs"));
@@ -1033,7 +1036,7 @@ async fn builtin_grep_and_find_reject_arguments_outside_schema_before_execution(
             &CancellationToken::new(),
         )
         .await;
-    assert!(grep_result.is_error);
+    assert!(grep_result.is_error());
     assert!(
         grep_result
             .content
@@ -1054,7 +1057,7 @@ async fn builtin_grep_and_find_reject_arguments_outside_schema_before_execution(
             &CancellationToken::new(),
         )
         .await;
-    assert!(find_result.is_error);
+    assert!(find_result.is_error());
     assert!(
         find_result
             .content
@@ -1084,7 +1087,7 @@ async fn builtin_write_creates_missing_file_without_prior_read() {
         .await;
 
     assert!(
-        !result.is_error,
+        !result.is_error(),
         "write should create missing files: {result:?}"
     );
     assert_eq!(
@@ -1093,23 +1096,18 @@ async fn builtin_write_creates_missing_file_without_prior_read() {
     );
     assert_eq!(
         result
-            .details
-            .as_ref()
+            .details()
             .and_then(|details| details.get("path"))
             .and_then(serde_json::Value::as_str),
         Some("nested/notes.txt")
     );
     assert_eq!(
-        result
-            .details
-            .as_ref()
-            .and_then(|details| details.get("old_text")),
+        result.details().and_then(|details| details.get("old_text")),
         None
     );
     assert_eq!(
         result
-            .details
-            .as_ref()
+            .details()
             .and_then(|details| details.get("new_text"))
             .and_then(serde_json::Value::as_str),
         Some("one\ntwo\n")
@@ -1137,7 +1135,7 @@ async fn builtin_write_rejects_missing_paths_outside_workspace() {
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(result.content.contains("outside workspace"));
     assert!(!outside.join("created.txt").exists());
     cleanup(&outside);
@@ -1164,7 +1162,7 @@ async fn builtin_write_existing_file_requires_complete_prior_read() {
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(result.content.contains("has not been read"));
     assert_eq!(
         fs::read_to_string(root.join("notes.txt")).expect("read fixture"),
@@ -1193,7 +1191,7 @@ async fn builtin_write_rejects_partial_read_snapshot() {
             &CancellationToken::new(),
         )
         .await;
-    assert!(!read_result.is_error);
+    assert!(!read_result.is_error());
 
     let result = registry
         .execute_tool(
@@ -1209,7 +1207,7 @@ async fn builtin_write_rejects_partial_read_snapshot() {
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(result.content.contains("has not been read"));
     cleanup(&root);
 }
@@ -1227,7 +1225,7 @@ async fn builtin_write_rejects_read_snapshot_with_truncated_line() {
             &CancellationToken::new(),
         )
         .await;
-    assert!(!read_result.is_error);
+    assert!(!read_result.is_error());
     assert!(
         read_result.content.ends_with("..."),
         "long line should be visibly truncated: {}",
@@ -1248,7 +1246,7 @@ async fn builtin_write_rejects_read_snapshot_with_truncated_line() {
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(result.content.contains("has not been read"));
     assert_eq!(
         fs::read_to_string(root.join("notes.txt")).expect("read fixture"),
@@ -1269,7 +1267,7 @@ async fn builtin_write_existing_file_succeeds_after_complete_read() {
             &CancellationToken::new(),
         )
         .await;
-    assert!(!read_result.is_error);
+    assert!(!read_result.is_error());
 
     let result = registry
         .execute_tool(
@@ -1286,7 +1284,7 @@ async fn builtin_write_existing_file_succeeds_after_complete_read() {
         .await;
 
     assert!(
-        !result.is_error,
+        !result.is_error(),
         "write after read should succeed: {result:?}"
     );
     assert_eq!(
@@ -1295,16 +1293,14 @@ async fn builtin_write_existing_file_succeeds_after_complete_read() {
     );
     assert_eq!(
         result
-            .details
-            .as_ref()
+            .details()
             .and_then(|details| details.get("old_text"))
             .and_then(serde_json::Value::as_str),
         Some("old\n")
     );
     assert_eq!(
         result
-            .details
-            .as_ref()
+            .details()
             .and_then(|details| details.get("new_text"))
             .and_then(serde_json::Value::as_str),
         Some("new\n")
@@ -1324,7 +1320,7 @@ async fn builtin_write_rejects_file_changed_after_read() {
             &CancellationToken::new(),
         )
         .await;
-    assert!(!read_result.is_error);
+    assert!(!read_result.is_error());
     fs::write(root.join("notes.txt"), "external\n").expect("modify fixture outside tool");
 
     let result = registry
@@ -1341,7 +1337,7 @@ async fn builtin_write_rejects_file_changed_after_read() {
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(result.content.contains("modified since read"));
     assert_eq!(
         fs::read_to_string(root.join("notes.txt")).expect("read stale fixture"),
@@ -1367,7 +1363,7 @@ async fn builtin_list_dir_omits_gitignored_entries_by_default() {
         )
         .await;
 
-    assert!(!result.is_error);
+    assert!(!result.is_error());
     assert!(result.content.contains(".hidden"));
     assert!(result.content.contains("src/"));
     assert!(!result.content.contains("target/"));
@@ -1395,7 +1391,7 @@ async fn builtin_list_dir_rejects_arguments_outside_schema_before_execution() {
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(result.content.contains("arguments do not match schema"));
     assert!(result.content.contains("recursive"));
     cleanup(&root);
@@ -1421,7 +1417,7 @@ async fn builtin_read_rejects_offset_below_schema_minimum() {
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(result.content.contains("arguments do not match schema"));
     assert!(result.content.contains("offset"));
     assert!(result.content.contains("minimum"));
@@ -1450,7 +1446,7 @@ async fn builtin_list_dir_limits_output_entries() {
         )
         .await;
 
-    assert!(!result.is_error);
+    assert!(!result.is_error());
     assert!(result.content.contains("a.txt"));
     assert!(result.content.contains("b.txt"));
     assert!(!result.content.contains("c.txt"));
@@ -1476,7 +1472,7 @@ async fn builtin_read_rejects_paths_outside_workspace_root() {
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(result.content.contains("outside workspace"));
     cleanup(&outside);
     cleanup(&root);
@@ -1502,7 +1498,7 @@ async fn builtin_read_directs_image_files_to_view_image() {
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(
         result
             .text_content()
@@ -1533,7 +1529,7 @@ async fn builtin_view_image_rejects_directory_paths() {
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(result.text_content().contains("is not a file"));
     cleanup(&root);
 }
@@ -1556,7 +1552,7 @@ async fn builtin_view_image_rejects_paths_outside_workspace_root() {
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(result.text_content().contains("outside workspace"));
     cleanup(&outside);
     cleanup(&root);
@@ -1579,9 +1575,13 @@ async fn builtin_view_image_rejects_unsupported_detail_values() {
         )
         .await;
 
-    assert!(result.is_error);
-    assert!(result.text_content().contains("high"));
-    assert!(result.text_content().contains("original"));
+    assert!(result.is_error());
+    assert!(
+        result
+            .text_content()
+            .contains("view_image arguments are invalid")
+    );
+    assert!(result.text_content().contains("unknown variant `low`"));
     cleanup(&root);
 }
 
@@ -1602,7 +1602,7 @@ async fn builtin_view_image_preserves_original_detail_hint() {
         )
         .await;
 
-    assert!(!result.is_error);
+    assert!(!result.is_error());
     assert!(matches!(
         result.content.as_slice(),
         [ToolResultContent::Image { detail, .. }]
@@ -1628,7 +1628,7 @@ async fn builtin_view_image_rejects_unsupported_extensions() {
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(result.text_content().contains("unsupported image type"));
     cleanup(&root);
 }
@@ -1657,7 +1657,7 @@ async fn builtin_view_image_rejects_oversized_images_before_encoding() {
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(result.text_content().contains("too large for view_image"));
     cleanup(&root);
 }
@@ -1679,7 +1679,7 @@ async fn builtin_view_image_rejects_invalid_image_signatures() {
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(
         result
             .text_content()
@@ -1705,7 +1705,7 @@ async fn builtin_read_rejects_binary_text_fallback() {
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(result.content.contains("not valid UTF-8 text"));
     cleanup(&root);
 }
@@ -1727,7 +1727,7 @@ async fn builtin_read_rejects_control_character_binary_payload() {
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(result.content.contains("not valid UTF-8 text"));
     cleanup(&root);
 }
@@ -1747,7 +1747,7 @@ async fn builtin_read_returns_interrupted_when_cancellation_is_pre_triggered() {
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert_eq!(result.text_content(), "Tool call interrupted");
     cleanup(&root);
 }
@@ -1767,7 +1767,7 @@ async fn builtin_list_dir_returns_interrupted_when_cancellation_is_pre_triggered
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert_eq!(result.text_content(), "Tool call interrupted");
     cleanup(&root);
 }

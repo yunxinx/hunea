@@ -131,7 +131,7 @@ where
                 execution.provider_result.content.clone(),
                 execution.provider_result.is_error,
             );
-            tool_result_batch.push((tool_result_item, execution.raw_result.terminate));
+            tool_result_batch.push((tool_result_item, execution.raw_result.terminates()));
         }
 
         let should_terminate_after_batch = tool_result_batch

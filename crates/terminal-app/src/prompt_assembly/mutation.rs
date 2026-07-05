@@ -715,7 +715,7 @@ pub(super) fn ensure_prompt_source_entry_materialized(
             ensure_default_dynamic_environment_sources(global_state, project_state);
         }
         PromptSourceKind::InstructionsFile => {
-            let discovered_instruction_files = discover_instruction_files(work_dir, None);
+            let (discovered_instruction_files, _) = discover_instruction_files(work_dir, None);
             ensure_discovered_instruction_entries(
                 global_state,
                 project_state,
@@ -737,7 +737,7 @@ pub(super) fn ensure_active_prompt_source_ordering_materialized(
     ensure_default_skill_discovery_source(global_state, project_state);
     ensure_default_tool_guidelines_source(global_state, project_state);
     ensure_default_dynamic_environment_sources(global_state, project_state);
-    let discovered_instruction_files = discover_instruction_files(work_dir, None);
+    let (discovered_instruction_files, _) = discover_instruction_files(work_dir, None);
     ensure_discovered_instruction_entries(
         global_state,
         project_state,

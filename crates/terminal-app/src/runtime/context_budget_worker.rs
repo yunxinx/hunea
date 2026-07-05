@@ -182,11 +182,9 @@ impl ContextBudgetWorker {
             let _ = worker_tx.send(WorkerControl::Shutdown);
         }
 
-        if let Some(worker_thread) = self.worker_thread.take() {
-            worker_thread
-                .join()
-                .map_err(|_| "context budget worker thread panicked during shutdown".to_string())?;
-        }
+        // `/context` cancellation is cooperative. Dropping the handle lets shutdown return even
+        // when a stale projection is still between cancellation checkpoints.
+        let _ = self.worker_thread.take();
 
         self.drain_result_channel();
         Ok(())

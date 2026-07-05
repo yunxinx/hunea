@@ -2,6 +2,7 @@ use runtime_domain::dynamic_environment::DynamicEnvironmentSnapshotKind;
 use runtime_domain::prompt_assembly::persistence::PromptAssemblyScope;
 use runtime_domain::prompt_assembly::{PromptAssemblyEditorTarget, PromptSourceKind};
 
+use super::dialog::PromptOverlayDialog;
 use super::preview;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,18 +17,6 @@ pub(crate) enum PromptOverlayInactiveTab {
     ExtraPrompts,
     Tools,
     Dynamic,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum PromptOverlayDialog {
-    CreateExtraPromptScope {
-        selected_scope: PromptAssemblyScope,
-    },
-    ConfirmDeleteExtraPrompt {
-        scope: PromptAssemblyScope,
-        reference_id: String,
-        title: String,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

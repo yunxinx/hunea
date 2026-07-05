@@ -1,3 +1,5 @@
+mod dialog;
+mod editor;
 mod input;
 mod preview;
 mod render;
@@ -18,12 +20,11 @@ use runtime_domain::dynamic_environment::DynamicEnvironmentSnapshotKind;
 use runtime_domain::prompt_assembly::persistence::PromptAssemblyScope;
 use runtime_domain::prompt_assembly::{
     PromptAssemblyDiscoveredSkill, PromptAssemblyDynamicEnvironmentCandidate,
-    PromptAssemblyEditorTarget, PromptAssemblyExtraPromptCandidate, PromptAssemblyManagedSource,
-    PromptAssemblyManagerSource, PromptAssemblyMoveDirection, PromptAssemblyMutation,
-    PromptAssemblyToolCandidate, PromptSourceKind, PromptSourceOrigin, PromptSourceStatus,
-    ResolvedPromptSource, SKILL_DISCOVERY_GENERATED_END, SKILL_DISCOVERY_GENERATED_START,
-    TOOL_GUIDELINES_GENERATED_END, TOOL_GUIDELINES_GENERATED_START, default_extra_prompt_body,
-    next_default_extra_prompt_title,
+    PromptAssemblyExtraPromptCandidate, PromptAssemblyManagedSource, PromptAssemblyManagerSource,
+    PromptAssemblyMoveDirection, PromptAssemblyMutation, PromptAssemblyToolCandidate,
+    PromptSourceKind, PromptSourceOrigin, PromptSourceStatus, ResolvedPromptSource,
+    SKILL_DISCOVERY_GENERATED_END, SKILL_DISCOVERY_GENERATED_START, TOOL_GUIDELINES_GENERATED_END,
+    TOOL_GUIDELINES_GENERATED_START, default_extra_prompt_body, next_default_extra_prompt_title,
 };
 use runtime_domain::text::natural_sort_text_cmp;
 
@@ -44,13 +45,14 @@ use crate::{
         tertiary_text_style,
     },
 };
+use dialog::PromptOverlayDialog;
 use render_cells::*;
 use render_rows::*;
 use render_support::*;
-use state::{PromptOverlayDialog, PromptOverlayExpandedRow};
-pub(crate) use state::{
-    PromptOverlayFocus, PromptOverlayInactiveTab, PromptOverlayPendingEditor, PromptOverlayState,
-};
+use state::PromptOverlayExpandedRow;
+#[cfg(test)]
+pub(crate) use state::PromptOverlayPendingEditor;
+pub(crate) use state::{PromptOverlayFocus, PromptOverlayInactiveTab, PromptOverlayState};
 
 #[cfg(test)]
 mod tests;
@@ -169,54 +171,6 @@ impl Model {
         self.present_pending_prompt_assembly_notice_if_ready();
     }
 
-    pub(crate) fn apply_prompt_overlay_external_editor_finished(
-        &mut self,
-        draft_path: &std::path::Path,
-        failed: bool,
-    ) -> Option<Option<AppEffect>> {
-        let pending_editor = self
-            .prompt_overlay
-            .as_ref()
-            .and_then(|state| state.pending_editor.as_ref())
-            .cloned()?;
-        let state = self.prompt_overlay.as_mut()?;
-        state.pending_editor = None;
-
-        if failed {
-            if pending_editor.cleanup_path_after_finish {
-                let _ = std::fs::remove_file(draft_path);
-            }
-            self.show_toast(crate::toast::ToastSeverity::Error, "External editor failed");
-            return Some(None);
-        }
-        let content = match std::fs::read_to_string(draft_path) {
-            Ok(content) => content,
-            Err(_) => {
-                if pending_editor.cleanup_path_after_finish {
-                    let _ = std::fs::remove_file(draft_path);
-                }
-                self.show_toast(
-                    crate::toast::ToastSeverity::Error,
-                    "Failed to read external editor draft",
-                );
-                return Some(None);
-            }
-        };
-        if pending_editor.cleanup_path_after_finish {
-            let _ = std::fs::remove_file(draft_path);
-        }
-        let normalized_content = normalize_prompt_overlay_external_editor_draft(&content);
-        if normalized_content == pending_editor.original_draft {
-            return Some(None);
-        }
-        Some(Some(AppEffect::MutatePromptAssembly {
-            mutation: PromptAssemblyMutation::SaveEditorTarget {
-                target: pending_editor.target,
-                content: normalized_content,
-            },
-        }))
-    }
-
     fn open_selected_prompt_overlay_preview(&mut self) {
         let Some(selection) = self.selected_prompt_overlay_selection() else {
             return;
@@ -295,75 +249,6 @@ impl Model {
         self.open_prompt_overlay_plain_text_preview(title, &content, None);
     }
 
-    fn prompt_overlay_dialog_active(&self) -> bool {
-        self.prompt_overlay
-            .as_ref()
-            .and_then(|state| state.dialog.as_ref())
-            .is_some()
-    }
-
-    fn handle_prompt_overlay_dialog_key(&mut self, key: KeyEvent) -> OverlayInputResult {
-        match key.code {
-            KeyCode::Esc if key.modifiers.is_empty() => {
-                if let Some(state) = self.prompt_overlay.as_mut() {
-                    state.dialog = None;
-                }
-                OverlayInputResult::Handled
-            }
-            KeyCode::Left | KeyCode::Char('h') | KeyCode::Up | KeyCode::Char('k')
-                if key.modifiers.is_empty() =>
-            {
-                self.toggle_prompt_overlay_dialog_scope();
-                OverlayInputResult::Handled
-            }
-            KeyCode::Right | KeyCode::Char('l') | KeyCode::Down | KeyCode::Char('j')
-                if key.modifiers.is_empty() =>
-            {
-                self.toggle_prompt_overlay_dialog_scope();
-                OverlayInputResult::Handled
-            }
-            KeyCode::Enter if key.modifiers.is_empty() => {
-                OverlayInputResult::from_effect(self.confirm_prompt_overlay_dialog())
-            }
-            _ => OverlayInputResult::Handled,
-        }
-    }
-
-    fn toggle_prompt_overlay_dialog_scope(&mut self) {
-        let Some(state) = self.prompt_overlay.as_mut() else {
-            return;
-        };
-        let Some(PromptOverlayDialog::CreateExtraPromptScope { selected_scope }) =
-            state.dialog.as_mut()
-        else {
-            return;
-        };
-        *selected_scope = match selected_scope {
-            PromptAssemblyScope::Global => PromptAssemblyScope::Project,
-            PromptAssemblyScope::Project => PromptAssemblyScope::Global,
-        };
-    }
-
-    fn confirm_prompt_overlay_dialog(&mut self) -> Option<AppEffect> {
-        let dialog = self
-            .prompt_overlay
-            .as_ref()
-            .and_then(|state| state.dialog.clone())?;
-        if let Some(state) = self.prompt_overlay.as_mut() {
-            state.dialog = None;
-        }
-        match dialog {
-            PromptOverlayDialog::CreateExtraPromptScope { selected_scope } => {
-                self.create_extra_prompt_from_overlay(selected_scope)
-            }
-            PromptOverlayDialog::ConfirmDeleteExtraPrompt {
-                scope,
-                reference_id,
-                ..
-            } => Some(self.delete_extra_prompt_effect(scope, reference_id)),
-        }
-    }
-
     fn toggle_prompt_overlay_expanded_row(&mut self) {
         let Some(focus) = self.prompt_overlay.as_ref().map(|state| state.focus) else {
             return;
@@ -431,130 +316,6 @@ impl Model {
         };
         state.expanded_row = next_expanded_row;
         self.sync_prompt_overlay_state();
-    }
-
-    fn open_create_extra_prompt_scope_picker(&mut self) {
-        let Some(state) = self.prompt_overlay.as_mut() else {
-            return;
-        };
-        if state.focus != PromptOverlayFocus::Inactive
-            || state.inactive_tab != PromptOverlayInactiveTab::ExtraPrompts
-        {
-            return;
-        }
-        state.dialog = Some(PromptOverlayDialog::CreateExtraPromptScope {
-            selected_scope: PromptAssemblyScope::Project,
-        });
-    }
-
-    pub(crate) fn open_prompt_overlay_editor_for_selection(&mut self) -> Option<AppEffect> {
-        let scope = self
-            .prompt_overlay
-            .as_ref()
-            .map(|state| state.draft_scope)
-            .unwrap_or(PromptAssemblyScope::Project);
-        let (target, initial_content) = match self.selected_prompt_overlay_selection()? {
-            PromptOverlaySelection::ManagedSource(source) => {
-                let selected = ResolvedPromptSource {
-                    reference_id: source.reference_id.clone(),
-                    kind: source.kind,
-                    title: source.title.clone(),
-                    origin: source.origin,
-                    status: PromptSourceStatus::Active {
-                        order: source.order,
-                    },
-                };
-                let manager_source = self.manager_source_for_resolved_source(&selected)?;
-                match selected.kind {
-                    PromptSourceKind::CoreSystemPrompt => (
-                        PromptAssemblyEditorTarget::CoreSystemOverride { scope },
-                        self.core_system_editor_body_for_scope(scope),
-                    ),
-                    PromptSourceKind::InstructionsFile => {
-                        let backing_file_path = manager_source.backing_file_path?;
-                        let initial_content = manager_source.body.unwrap_or_default();
-                        let launch = self.prepare_external_editor_launch_for_path(
-                            backing_file_path.clone(),
-                            &initial_content,
-                        )?;
-                        if let Some(state) = self.prompt_overlay.as_mut() {
-                            state.pending_editor = Some(PromptOverlayPendingEditor {
-                                target: PromptAssemblyEditorTarget::InstructionsFile {
-                                    path: backing_file_path,
-                                },
-                                original_draft: initial_content,
-                                cleanup_path_after_finish: false,
-                            });
-                        }
-                        return Some(AppEffect::LaunchExternalEditor(launch));
-                    }
-                    PromptSourceKind::SkillDiscovery => (
-                        PromptAssemblyEditorTarget::SkillDiscovery {
-                            scope: source.scope?,
-                        },
-                        self.skill_discovery_editor_body_for_scope(source.scope?),
-                    ),
-                    PromptSourceKind::ToolGuidelines => (
-                        PromptAssemblyEditorTarget::ToolGuidelines {
-                            scope: source.scope?,
-                        },
-                        self.tool_guidelines_editor_body(),
-                    ),
-                    PromptSourceKind::ExtraPrompt => {
-                        let origin = selected.origin?;
-                        (
-                            PromptAssemblyEditorTarget::ExtraPrompt {
-                                scope: prompt_scope_from_origin(origin)?,
-                                reference_id: selected.reference_id.clone(),
-                            },
-                            manager_source.body.unwrap_or_default(),
-                        )
-                    }
-                    PromptSourceKind::LongLivedSkill
-                    | PromptSourceKind::DynamicEnvironmentBaseline
-                    | PromptSourceKind::DynamicEnvironmentChanges => return None,
-                }
-            }
-            PromptOverlaySelection::ExtraPromptCandidate(candidate) => (
-                PromptAssemblyEditorTarget::ExtraPrompt {
-                    scope: prompt_scope_from_origin(candidate.origin)?,
-                    reference_id: candidate.reference_id.clone(),
-                },
-                candidate.body,
-            ),
-            PromptOverlaySelection::ResolvedSource(selected) => {
-                let manager_source = self.manager_source_for_resolved_source(&selected)?;
-                match selected.kind {
-                    PromptSourceKind::ExtraPrompt => (
-                        PromptAssemblyEditorTarget::ExtraPrompt {
-                            scope: prompt_scope_from_origin(selected.origin?)?,
-                            reference_id: selected.reference_id.clone(),
-                        },
-                        manager_source.body.unwrap_or_default(),
-                    ),
-                    PromptSourceKind::CoreSystemPrompt
-                    | PromptSourceKind::InstructionsFile
-                    | PromptSourceKind::SkillDiscovery
-                    | PromptSourceKind::LongLivedSkill
-                    | PromptSourceKind::ToolGuidelines
-                    | PromptSourceKind::DynamicEnvironmentBaseline
-                    | PromptSourceKind::DynamicEnvironmentChanges => return None,
-                }
-            }
-            PromptOverlaySelection::DiscoveredSkill(_) => return None,
-            PromptOverlaySelection::ToolCandidate(_) => return None,
-            PromptOverlaySelection::DynamicEnvironmentCandidate(_) => return None,
-        };
-
-        let launch = self.prepare_external_editor_launch_for_content(&initial_content)?;
-        if let Some(state) = self.prompt_overlay.as_mut() {
-            state.pending_editor = Some(PromptOverlayPendingEditor {
-                target,
-                original_draft: initial_content,
-                cleanup_path_after_finish: true,
-            });
-        }
-        Some(AppEffect::LaunchExternalEditor(launch))
     }
 
     fn remove_selected_prompt_source(&mut self) -> Option<AppEffect> {

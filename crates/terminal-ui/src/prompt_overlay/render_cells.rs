@@ -489,7 +489,3 @@ pub(super) fn prompt_scope_from_origin(origin: PromptSourceOrigin) -> Option<Pro
 pub(super) fn allows_shift_only_modifier(modifiers: KeyModifiers) -> bool {
     modifiers.is_empty() || modifiers == KeyModifiers::SHIFT
 }
-
-pub(super) fn normalize_prompt_overlay_external_editor_draft(content: &str) -> String {
-    content.replace("\r\n", "\n").replace('\r', "\n")
-}

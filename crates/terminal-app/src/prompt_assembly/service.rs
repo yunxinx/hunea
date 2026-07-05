@@ -2,8 +2,7 @@ use std::{path::Path, sync::Arc};
 
 use color_eyre::eyre::Result;
 use runtime_domain::{
-    prompt_assembly::{PromptAssemblyManagerSnapshot, PromptAssemblyMutation},
-    session::TranscriptUserMessage,
+    prompt_assembly::PromptAssemblyManagerSnapshot, session::TranscriptUserMessage,
 };
 use session_store::SessionStore;
 use tool_runtime::ToolDefinition;
@@ -33,26 +32,12 @@ impl<'a> PromptAssemblyWorkspace<'a> {
         load_prompt_assembly_manager_snapshot(store, self.work_dir, self.tool_definitions)
     }
 
-    /// `apply_mutation` 应用 prompt assembly mutation 并返回最新管理快照。
-    pub(crate) fn apply_mutation(
-        &self,
-        store: Arc<dyn SessionStore>,
-        mutation: PromptAssemblyMutation,
-    ) -> Result<PromptAssemblyManagerSnapshot> {
-        super::apply_prompt_assembly_mutation(store, self.work_dir, mutation, self.tool_definitions)
-    }
-
     /// `assemble_attached_prompt_message` 解析当前用户消息中的 `$skill` / `#prompt` 绑定。
     pub(crate) fn assemble_attached_prompt_message(
         &self,
-        store: Option<Arc<dyn SessionStore>>,
+        manager: Option<&PromptAssemblyManagerSnapshot>,
         user_message: &TranscriptUserMessage,
     ) -> Result<AttachedPromptMessageAssembly> {
-        super::assemble_attached_prompt_message(
-            store,
-            self.work_dir,
-            user_message,
-            self.tool_definitions,
-        )
+        super::assemble_attached_prompt_message(manager, self.work_dir, user_message)
     }
 }

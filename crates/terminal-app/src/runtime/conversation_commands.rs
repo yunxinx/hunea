@@ -15,7 +15,6 @@ use runtime_domain::{
 use super::{AppRuntimeCoordinator, ensure_conversation_target};
 use crate::prompt_assembly::{
     AttachedPromptMessageAssembly, ManualSkillPromptUse, PromptAssemblyWorkspace,
-    dynamic_environment_session_config_from_manager,
 };
 
 impl AppRuntimeCoordinator {
@@ -217,7 +216,7 @@ impl AppRuntimeCoordinator {
 
     fn resolve_dynamic_environment_session_config(
         &mut self,
-        work_dir: &std::path::Path,
+        _work_dir: &std::path::Path,
     ) -> Result<DynamicEnvironmentSessionConfig, String> {
         if let Some(config) = self
             .provider_conversation
@@ -227,14 +226,11 @@ impl AppRuntimeCoordinator {
             return Ok(config);
         }
 
-        let Some(store) = self.options.session_store.clone() else {
-            return Ok(DynamicEnvironmentSessionConfig::default());
-        };
-        let manager =
-            PromptAssemblyWorkspace::new(work_dir, self.prompt_assembly_tool_definitions())
-                .load_manager(store)
-                .map_err(|error| error.to_string())?;
-        let config = dynamic_environment_session_config_from_manager(&manager);
+        let config = self
+            .options
+            .initial_dynamic_environment_session_config
+            .clone()
+            .unwrap_or_default();
         self.provider_conversation
             .set_dynamic_environment_session_config(Some(config.clone()));
         Ok(config)
@@ -272,7 +268,7 @@ impl AppRuntimeCoordinator {
         }
     }
 
-    fn attached_prompt_message_assembly(
+    pub(super) fn attached_prompt_message_assembly(
         &self,
         user_message: &TranscriptUserMessage,
     ) -> Result<AttachedPromptMessageAssembly, String> {
@@ -289,7 +285,10 @@ impl AppRuntimeCoordinator {
             });
         };
         PromptAssemblyWorkspace::new(work_dir, self.prompt_assembly_tool_definitions())
-            .assemble_attached_prompt_message(self.options.session_store.clone(), user_message)
+            .assemble_attached_prompt_message(
+                self.options.prompt_assembly_manager.as_ref(),
+                user_message,
+            )
             .map_err(|error| error.to_string())
     }
 

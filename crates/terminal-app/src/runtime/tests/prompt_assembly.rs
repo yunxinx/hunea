@@ -179,6 +179,66 @@ fn reload_prompt_assembly_reports_structured_load_failure_event() {
 }
 
 #[test]
+fn reload_prompt_assembly_dispatches_without_waiting_for_store_or_project_io() {
+    let root = temp_test_dir("reload-prompt-assembly-async");
+    let work_dir = root.join("repo");
+    fs::create_dir_all(&work_dir).expect("work dir should exist");
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let store: Arc<dyn SessionStore> =
+        Arc::new(DelayedListSessionStore::new_with_prompt_assembly_delay(
+            Arc::new(InMemorySessionStore::new()),
+            started_tx,
+            release_rx,
+        ));
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        session_store: Some(store),
+        session_header_template: Some(SessionHeader {
+            session_id: SessionId::new(),
+            work_dir: work_dir.clone(),
+            session_name: None,
+            initial_model: "qwen3".to_string(),
+            git_head: None,
+            cli_version: None,
+        }),
+        ..AppRuntimeOptions::default()
+    });
+    let release_thread = thread::spawn(move || {
+        started_rx
+            .recv()
+            .expect("worker should start prompt assembly load");
+        thread::sleep(Duration::from_millis(200));
+        release_tx
+            .send(())
+            .expect("delayed prompt assembly load should still be waiting");
+    });
+
+    let started = std::time::Instant::now();
+    let receipt = coordinator
+        .handle_runtime_command(RuntimeCommand::ReloadPromptAssembly)
+        .expect("reload prompt assembly command should dispatch");
+
+    assert_eq!(receipt, RuntimeCommandReceipt::Accepted);
+    assert!(
+        started.elapsed() < Duration::from_millis(100),
+        "reload command should not wait for prompt assembly I/O"
+    );
+
+    let _ = wait_for_runtime_event(
+        &mut coordinator,
+        |event| match event {
+            RuntimeEvent::PromptAssemblyUpdated { manager, .. } => Some(manager),
+            _ => None,
+        },
+        "prompt assembly snapshot loaded by worker",
+    );
+    release_thread
+        .join()
+        .expect("release thread should finish cleanly");
+    cleanup(&root);
+}
+
+#[test]
 fn mutate_prompt_assembly_reports_structured_apply_failure_event() {
     let root = temp_test_dir("mutate-prompt-assembly-save-failure");
     let work_dir = root.join("repo");
@@ -223,6 +283,77 @@ fn mutate_prompt_assembly_reports_structured_apply_failure_event() {
         message.contains("injected prompt assembly save failure"),
         "failure message should retain store context: {message}"
     );
+    cleanup(&root);
+}
+
+#[test]
+fn mutate_prompt_assembly_dispatches_without_waiting_for_store_or_project_io() {
+    let root = temp_test_dir("mutate-prompt-assembly-async");
+    let work_dir = root.join("repo");
+    fs::create_dir_all(&work_dir).expect("work dir should exist");
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let store: Arc<dyn SessionStore> =
+        Arc::new(DelayedListSessionStore::new_with_prompt_assembly_delay(
+            Arc::new(InMemorySessionStore::new()),
+            started_tx,
+            release_rx,
+        ));
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        session_store: Some(store),
+        session_header_template: Some(SessionHeader {
+            session_id: SessionId::new(),
+            work_dir: work_dir.clone(),
+            session_name: None,
+            initial_model: "qwen3".to_string(),
+            git_head: None,
+            cli_version: None,
+        }),
+        ..AppRuntimeOptions::default()
+    });
+    let release_thread = thread::spawn(move || {
+        started_rx
+            .recv()
+            .expect("worker should start prompt assembly mutation");
+        thread::sleep(Duration::from_millis(200));
+        release_tx
+            .send(())
+            .expect("delayed prompt assembly mutation should still be waiting");
+    });
+
+    let started = std::time::Instant::now();
+    let receipt = coordinator
+        .handle_runtime_command(RuntimeCommand::MutatePromptAssembly {
+            mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation::CreateExtraPrompt {
+                scope: PromptAssemblyScope::Global,
+                content: "# Async prompt\nDo not block the UI.\n".to_string(),
+            },
+        })
+        .expect("prompt assembly mutation command should dispatch");
+
+    assert_eq!(receipt, RuntimeCommandReceipt::Accepted);
+    assert!(
+        started.elapsed() < Duration::from_millis(100),
+        "mutation command should not wait for prompt assembly I/O"
+    );
+
+    let manager = wait_for_runtime_event(
+        &mut coordinator,
+        |event| match event {
+            RuntimeEvent::PromptAssemblyUpdated { manager, .. } => Some(manager),
+            _ => None,
+        },
+        "prompt assembly mutation loaded by worker",
+    );
+    assert!(
+        manager
+            .extra_prompt_candidates
+            .iter()
+            .any(|prompt| prompt.title == "Async prompt")
+    );
+    release_thread
+        .join()
+        .expect("release thread should finish cleanly");
     cleanup(&root);
 }
 

@@ -16,7 +16,7 @@ use conversation_runtime::{
 use runtime_domain::{
     dynamic_environment::DynamicEnvironmentSessionConfig,
     model_catalog::{ModelProviderRefreshEvent, ModelSelection, ProviderSyncRequest},
-    prompt_assembly::PromptPreludeSnapshot,
+    prompt_assembly::{PromptAssemblyManagerSnapshot, PromptPreludeSnapshot},
     request_policy::RuntimeRequestPolicy,
     session::{
         ConversationEvent, RuntimeCommand, RuntimeCommandReceipt, RuntimeEvent, RuntimeTarget,
@@ -67,6 +67,7 @@ pub(crate) struct AppRuntimeOptions {
     pub(crate) managed_search_authorization_config_path: Option<PathBuf>,
     pub(crate) session_store: Option<Arc<dyn SessionStore>>,
     pub(crate) session_header_template: Option<SessionHeader>,
+    pub(crate) prompt_assembly_manager: Option<PromptAssemblyManagerSnapshot>,
     pub(crate) initial_prompt_prelude: Option<PromptPreludeSnapshot>,
     pub(crate) initial_dynamic_environment_session_config: Option<DynamicEnvironmentSessionConfig>,
 }
@@ -467,6 +468,12 @@ impl AppRuntimeCoordinator {
                         target: None,
                         message,
                     });
+                }
+                SessionStoreWorkerEvent::PromptAssemblyLoaded { manager } => {
+                    events.push(self.prompt_assembly_reloaded_event(manager));
+                }
+                SessionStoreWorkerEvent::PromptAssemblyMutated { manager } => {
+                    events.push(self.prompt_assembly_mutated_event(manager));
                 }
             }
         }

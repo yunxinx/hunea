@@ -351,3 +351,114 @@ fn manual_skill_mentions_emit_synthetic_skill_usage_events_before_worker_failure
     );
     cleanup(&root);
 }
+
+#[test]
+fn custom_prompt_attachment_uses_cached_prompt_assembly_without_waiting_for_store_io() {
+    let root = temp_test_dir("custom-prompt-attachment-cached");
+    let work_dir = root.join("repo");
+    fs::create_dir_all(&work_dir).expect("work dir should exist");
+    runtime_domain::prompt_assembly::persistence::save_project_prompt_assembly_state(
+        &work_dir,
+        &runtime_domain::prompt_assembly::persistence::PromptAssemblyScopeState {
+            scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
+            core_system_override: None,
+            entries: vec![
+                runtime_domain::prompt_assembly::persistence::PersistedPromptAssemblyEntry {
+                    reference_id: "review-rules".to_string(),
+                    kind: runtime_domain::prompt_assembly::PromptSourceKind::ExtraPrompt,
+                    title: "Review Rules".to_string(),
+                    enabled: false,
+                    requested_order: None,
+                },
+            ],
+            skill_discovery_override: None,
+            skill_discovery_skills: Vec::new(),
+            extra_prompts: vec![
+                runtime_domain::prompt_assembly::persistence::StoredPromptBody {
+                    reference_id: "review-rules".to_string(),
+                    title: "Review Rules".to_string(),
+                    body: "# Review Rules\nCheck regressions before approving.".to_string(),
+                },
+            ],
+            tool_guidelines_override: None,
+            tool_selections: Vec::new(),
+            dynamic_environment_sources: Vec::new(),
+        },
+    )
+    .expect("project prompt assembly should save");
+
+    let base_store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+    let store_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime should build");
+    store_runtime
+        .block_on(base_store.save_global_prompt_assembly_state(
+            &runtime_domain::prompt_assembly::persistence::PromptAssemblyScopeState::empty(
+                runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Global,
+            ),
+        ))
+        .expect("global prompt state should save");
+    let cached_manager = crate::prompt_assembly::PromptAssemblyWorkspace::new(&work_dir, &[])
+        .load_manager(Arc::clone(&base_store))
+        .expect("cached prompt assembly manager should load");
+
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let delayed_store: Arc<dyn SessionStore> =
+        Arc::new(DelayedListSessionStore::new_with_prompt_assembly_delay(
+            Arc::new(InMemorySessionStore::new()),
+            started_tx,
+            release_rx,
+        ));
+    let release_thread = thread::spawn(move || {
+        if started_rx.recv_timeout(Duration::from_millis(250)).is_ok() {
+            thread::sleep(Duration::from_millis(200));
+            release_tx
+                .send(())
+                .expect("delayed prompt assembly load should still be waiting");
+        }
+    });
+    let coordinator = runtime_coordinator(AppRuntimeOptions {
+        session_store: Some(delayed_store),
+        session_header_template: Some(SessionHeader {
+            session_id: SessionId::new(),
+            work_dir: work_dir.clone(),
+            session_name: None,
+            initial_model: "gpt-4o-mini".to_string(),
+            git_head: None,
+            cli_version: None,
+        }),
+        prompt_assembly_manager: Some(cached_manager),
+        ..AppRuntimeOptions::default()
+    });
+    let user_message = runtime_domain::session::TranscriptUserMessage {
+        content: "Before\n#review-rules\nAfter".to_string(),
+        attachments: Vec::new(),
+        skill_bindings: Vec::new(),
+        custom_prompt_bindings: vec![runtime_domain::session::TranscriptCustomPromptBinding {
+            reference_id: "review-rules".to_string(),
+            origin: runtime_domain::prompt_assembly::PromptSourceOrigin::Project,
+            start_char: 7,
+            end_char: 20,
+        }],
+    };
+
+    let started = std::time::Instant::now();
+    let assembled = coordinator
+        .attached_prompt_message_assembly(&user_message)
+        .expect("custom prompt attachment should assemble from cached manager");
+
+    assert!(
+        started.elapsed() < Duration::from_millis(100),
+        "custom prompt assembly should not wait for prompt assembly I/O"
+    );
+    assert_eq!(
+        assembled.provider_visible_user_text,
+        "Before\n\n# Review Rules\nCheck regressions before approving.\n\nAfter"
+    );
+    release_thread
+        .join()
+        .expect("release thread should finish cleanly");
+    cleanup(&root);
+}

@@ -1886,7 +1886,6 @@ fn assemble_attached_prompt_message_expands_unique_skill_mentions_in_first_use_o
             ],
             custom_prompt_bindings: Vec::new(),
         },
-        &[],
     )
     .expect("skill-only attachment assembly should succeed");
 
@@ -1942,7 +1941,6 @@ fn assemble_attached_prompt_message_ignores_plain_text_tokens_without_bindings()
             skill_bindings: Vec::new(),
             custom_prompt_bindings: Vec::new(),
         },
-        &[],
     )
     .expect("plain text without bindings should assemble");
 
@@ -1995,8 +1993,12 @@ fn assemble_attached_prompt_message_includes_custom_prompt_bodies_in_first_use_o
         )
         .expect("global prompt state should save");
 
+    let manager = PromptAssemblyWorkspace::new(&work_dir, &[])
+        .load_manager(store)
+        .expect("prompt assembly manager should load");
+
     let assembled = assemble_attached_prompt_message(
-        Some(store),
+        Some(&manager),
         &work_dir,
         &TranscriptUserMessage {
             content: "Before\n#review-rules\nAfter".to_string(),
@@ -2009,7 +2011,6 @@ fn assemble_attached_prompt_message_includes_custom_prompt_bodies_in_first_use_o
                 end_char: 20,
             }],
         },
-        &[],
     )
     .expect("custom prompt attachment assembly should succeed");
 

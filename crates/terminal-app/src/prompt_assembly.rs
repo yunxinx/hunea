@@ -238,6 +238,26 @@ fn load_prompt_assembly_manager_snapshot(
     ))
 }
 
+pub(crate) async fn load_prompt_assembly_manager_snapshot_for_worker(
+    store: Arc<dyn SessionStore>,
+    work_dir: &Path,
+    tool_definitions: &[ToolDefinition],
+) -> Result<PromptAssemblyManagerSnapshot> {
+    let global_state = store
+        .load_global_prompt_assembly_state()
+        .await
+        .wrap_err("load global prompt assembly state")?;
+    let project_state = load_project_prompt_assembly_state(work_dir)
+        .wrap_err("load project prompt assembly state")?;
+    Ok(resolve_prompt_assembly_manager_snapshot(
+        work_dir,
+        &global_state,
+        &project_state,
+        tool_definitions,
+    ))
+}
+
+#[cfg(test)]
 fn apply_prompt_assembly_mutation(
     store: Arc<dyn SessionStore>,
     work_dir: &Path,
@@ -278,6 +298,42 @@ fn apply_prompt_assembly_mutation(
     ))
 }
 
+pub(crate) async fn apply_prompt_assembly_mutation_for_worker(
+    store: Arc<dyn SessionStore>,
+    work_dir: &Path,
+    mutation: PromptAssemblyMutation,
+    tool_definitions: &[ToolDefinition],
+) -> Result<PromptAssemblyManagerSnapshot> {
+    let mut global_state = store
+        .load_global_prompt_assembly_state()
+        .await
+        .wrap_err("load global prompt assembly state")?;
+    let mut project_state = load_project_prompt_assembly_state(work_dir)
+        .wrap_err("load project prompt assembly state")?;
+
+    apply_mutation_to_scope_states(
+        work_dir,
+        &mut global_state,
+        &mut project_state,
+        mutation,
+        tool_definitions,
+    )?;
+
+    store
+        .save_global_prompt_assembly_state(&global_state)
+        .await
+        .wrap_err("save global prompt assembly state")?;
+    save_project_prompt_assembly_state(work_dir, &project_state)
+        .wrap_err("save project prompt assembly state")?;
+
+    Ok(resolve_prompt_assembly_manager_snapshot(
+        work_dir,
+        &global_state,
+        &project_state,
+        tool_definitions,
+    ))
+}
+
 pub(crate) fn check_prompt_assembly_missing_sources_from_states(
     work_dir: &Path,
     global_state: &PromptAssemblyScopeState,
@@ -295,10 +351,9 @@ pub(crate) fn check_prompt_assembly_missing_sources_from_states(
 
 /// `assemble_attached_prompt_message` 解析当前用户消息里的 `$skill` / `#prompt` 提及并拼装 provider-visible 文本。
 fn assemble_attached_prompt_message(
-    store: Option<Arc<dyn SessionStore>>,
+    manager: Option<&PromptAssemblyManagerSnapshot>,
     work_dir: &Path,
     user_message: &TranscriptUserMessage,
-    tool_definitions: &[ToolDefinition],
 ) -> Result<AttachedPromptMessageAssembly> {
     let discovered_skills = discover_skills(work_dir, None);
     let skills_by_locator = discovered_skills
@@ -314,22 +369,16 @@ fn assemble_attached_prompt_message(
             )
         })
         .collect::<HashMap<_, _>>();
-    let extra_prompts_by_locator = if user_message.custom_prompt_bindings.is_empty() {
-        HashMap::new()
-    } else {
-        match store {
-            Some(store) => {
-                let manager =
-                    load_prompt_assembly_manager_snapshot(store, work_dir, tool_definitions)?;
-                manager
-                    .extra_prompt_candidates
-                    .into_iter()
-                    .map(|prompt| ((prompt.reference_id.clone(), prompt.origin), prompt))
-                    .collect::<HashMap<_, _>>()
-            }
-            None => HashMap::new(),
-        }
-    };
+    let extra_prompts_by_locator = manager
+        .filter(|_| !user_message.custom_prompt_bindings.is_empty())
+        .map(|manager| {
+            manager
+                .extra_prompt_candidates
+                .iter()
+                .map(|prompt| ((prompt.reference_id.clone(), prompt.origin), prompt.clone()))
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
 
     let mut attachments = Vec::new();
     for binding in &user_message.skill_bindings {

@@ -28,6 +28,8 @@ pub(super) struct DelayedListSessionStore {
     inner: Arc<InMemorySessionStore>,
     list_started: Mutex<Option<mpsc::Sender<()>>>,
     list_release: Mutex<Option<mpsc::Receiver<()>>>,
+    prompt_assembly_started: Mutex<Option<mpsc::Sender<()>>>,
+    prompt_assembly_release: Mutex<Option<mpsc::Receiver<()>>>,
 }
 
 pub(super) struct FailingSessionStore {
@@ -63,6 +65,22 @@ impl DelayedListSessionStore {
             inner,
             list_started: Mutex::new(Some(list_started)),
             list_release: Mutex::new(Some(list_release)),
+            prompt_assembly_started: Mutex::new(None),
+            prompt_assembly_release: Mutex::new(None),
+        }
+    }
+
+    pub(super) fn new_with_prompt_assembly_delay(
+        inner: Arc<InMemorySessionStore>,
+        prompt_assembly_started: mpsc::Sender<()>,
+        prompt_assembly_release: mpsc::Receiver<()>,
+    ) -> Self {
+        Self {
+            inner,
+            list_started: Mutex::new(None),
+            list_release: Mutex::new(None),
+            prompt_assembly_started: Mutex::new(Some(prompt_assembly_started)),
+            prompt_assembly_release: Mutex::new(Some(prompt_assembly_release)),
         }
     }
 }
@@ -465,7 +483,26 @@ impl SessionStore for DelayedListSessionStore {
     ) -> Pin<
         Box<dyn Future<Output = Result<PromptAssemblyScopeState, SessionStoreError>> + Send + 'a>,
     > {
-        self.inner.load_global_prompt_assembly_state()
+        Box::pin(async move {
+            let started = self
+                .prompt_assembly_started
+                .lock()
+                .expect("prompt_assembly_started mutex should not be poisoned")
+                .take();
+            if let Some(started) = started {
+                let _ = started.send(());
+                let release = self
+                    .prompt_assembly_release
+                    .lock()
+                    .expect("prompt_assembly_release mutex should not be poisoned")
+                    .take()
+                    .expect("test should provide a prompt assembly release signal");
+                release
+                    .recv()
+                    .expect("test should release delayed prompt assembly load");
+            }
+            self.inner.load_global_prompt_assembly_state().await
+        })
     }
 }
 

@@ -8,11 +8,15 @@ use std::{
 };
 
 use conversation_runtime::ProviderConversation;
-use runtime_domain::session::{
-    MessageHistoryEntryId, RuntimeEvent, SessionLoadRequestId, SessionPickerRow,
-    SessionResumePayload, SessionTreePayload,
+use runtime_domain::{
+    prompt_assembly::{PromptAssemblyManagerSnapshot, PromptAssemblyMutation},
+    session::{
+        MessageHistoryEntryId, PromptAssemblyCommandFailureKind, RuntimeEvent,
+        SessionLoadRequestId, SessionPickerRow, SessionResumePayload, SessionTreePayload,
+    },
 };
 use session_store::{ProjectDir, SessionHeader, SessionId, SessionListOptions, SessionStore};
+use tool_runtime::ToolDefinition;
 
 use super::{
     session_branch_tree_payload, session_picker_row_from_meta, session_preview_payload,
@@ -49,6 +53,12 @@ pub(super) enum SessionStoreWorkerEvent {
     Failed {
         message: String,
         is_mutation: bool,
+    },
+    PromptAssemblyLoaded {
+        manager: PromptAssemblyManagerSnapshot,
+    },
+    PromptAssemblyMutated {
+        manager: PromptAssemblyManagerSnapshot,
     },
 }
 
@@ -112,6 +122,17 @@ enum SessionStoreCommand {
     CheckPromptAssemblyMissingSources {
         store: Arc<dyn SessionStore>,
         work_dir: std::path::PathBuf,
+    },
+    LoadPromptAssembly {
+        store: Arc<dyn SessionStore>,
+        work_dir: std::path::PathBuf,
+        tool_definitions: Vec<ToolDefinition>,
+    },
+    ApplyPromptAssemblyMutation {
+        store: Arc<dyn SessionStore>,
+        work_dir: std::path::PathBuf,
+        mutation: PromptAssemblyMutation,
+        tool_definitions: Vec<ToolDefinition>,
     },
     LoadMessageHistoryPickerRows {
         store: Arc<dyn SessionStore>,
@@ -356,6 +377,40 @@ impl SessionStoreWorker {
         )
     }
 
+    pub(super) fn load_prompt_assembly(
+        &mut self,
+        store: Arc<dyn SessionStore>,
+        work_dir: std::path::PathBuf,
+        tool_definitions: Vec<ToolDefinition>,
+    ) -> Result<(), String> {
+        self.send_command(
+            SessionStoreCommand::LoadPromptAssembly {
+                store,
+                work_dir,
+                tool_definitions,
+            },
+            false,
+        )
+    }
+
+    pub(super) fn apply_prompt_assembly_mutation(
+        &mut self,
+        store: Arc<dyn SessionStore>,
+        work_dir: std::path::PathBuf,
+        mutation: PromptAssemblyMutation,
+        tool_definitions: Vec<ToolDefinition>,
+    ) -> Result<(), String> {
+        self.send_command(
+            SessionStoreCommand::ApplyPromptAssemblyMutation {
+                store,
+                work_dir,
+                mutation,
+                tool_definitions,
+            },
+            true,
+        )
+    }
+
     pub(super) fn load_message_history_picker_rows(
         &mut self,
         store: Arc<dyn SessionStore>,
@@ -443,7 +498,9 @@ impl SessionStoreWorkerEvent {
             Self::Restored { .. }
             | Self::RestoredWithTree { .. }
             | Self::Noop
-            | Self::Failed { .. } => true,
+            | Self::Failed { .. }
+            | Self::PromptAssemblyLoaded { .. }
+            | Self::PromptAssemblyMutated { .. } => true,
         }
     }
 
@@ -457,6 +514,7 @@ impl SessionStoreWorkerEvent {
             } | Self::Restored { .. }
                 | Self::RestoredWithTree { .. }
                 | Self::Noop
+                | Self::PromptAssemblyMutated { .. }
                 | Self::Failed {
                     is_mutation: true,
                     ..
@@ -730,6 +788,46 @@ async fn handle_session_command(command: SessionStoreCommand) -> SessionStoreWor
                 missing_count: check.missing_count,
             })
         }
+        SessionStoreCommand::LoadPromptAssembly {
+            store,
+            work_dir,
+            tool_definitions,
+        } => match crate::prompt_assembly::load_prompt_assembly_manager_snapshot_for_worker(
+            store,
+            &work_dir,
+            &tool_definitions,
+        )
+        .await
+        {
+            Ok(manager) => SessionStoreWorkerEvent::PromptAssemblyLoaded { manager },
+            Err(report) => {
+                SessionStoreWorkerEvent::runtime(RuntimeEvent::PromptAssemblyUpdateFailed {
+                    kind: PromptAssemblyCommandFailureKind::LoadManager,
+                    message: prompt_assembly_report_message(report),
+                })
+            }
+        },
+        SessionStoreCommand::ApplyPromptAssemblyMutation {
+            store,
+            work_dir,
+            mutation,
+            tool_definitions,
+        } => match crate::prompt_assembly::apply_prompt_assembly_mutation_for_worker(
+            store,
+            &work_dir,
+            mutation,
+            &tool_definitions,
+        )
+        .await
+        {
+            Ok(manager) => SessionStoreWorkerEvent::PromptAssemblyMutated { manager },
+            Err(report) => SessionStoreWorkerEvent::runtime_mutation(
+                RuntimeEvent::PromptAssemblyUpdateFailed {
+                    kind: PromptAssemblyCommandFailureKind::ApplyMutation,
+                    message: prompt_assembly_report_message(report),
+                },
+            ),
+        },
         SessionStoreCommand::LoadMessageHistoryPickerRows { store, request_id } => {
             match store.load_message_history_all().await {
                 Ok(rows) => {
@@ -868,4 +966,16 @@ fn failed(message: String, is_mutation: bool) -> SessionStoreWorkerEvent {
         message,
         is_mutation,
     }
+}
+
+fn prompt_assembly_report_message(report: color_eyre::Report) -> String {
+    let mut message = report.to_string();
+    for source in report.chain().skip(1) {
+        let source_message = source.to_string();
+        if !source_message.is_empty() && !message.contains(&source_message) {
+            message.push_str(": ");
+            message.push_str(&source_message);
+        }
+    }
+    message
 }

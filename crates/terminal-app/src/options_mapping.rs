@@ -88,6 +88,8 @@ pub(crate) fn runtime_options_from_app_config_and_models(
         prompt_assembly_manager: None,
         initial_prompt_prelude: None,
         initial_dynamic_environment_session_config: None,
+        dynamic_environment_observer:
+            crate::dynamic_environment::default_dynamic_environment_observer(),
     }
 }
 

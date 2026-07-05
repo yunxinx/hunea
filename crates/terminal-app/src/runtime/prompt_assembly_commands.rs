@@ -33,6 +33,7 @@ enum PromptSessionConfigRefreshTarget {
 impl AppRuntimeCoordinator {
     fn prompt_session_config_refresh_target(&self) -> PromptSessionConfigRefreshTarget {
         if !self.conversation_worker.is_running()
+            && self.pending_conversation_turn.is_none()
             && self.provider_conversation.is_history_empty()
             && self.provider_conversation.session_id().is_none()
         {

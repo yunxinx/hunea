@@ -1,8 +1,6 @@
 use runtime_domain::{
     dynamic_environment::{
-        DynamicEnvironmentObservation, DynamicEnvironmentSessionConfig,
-        DynamicEnvironmentSnapshotKind, build_dynamic_environment_snapshot,
-        dynamic_environment_changes, enabled_dynamic_environment_sources_for_session_config,
+        DynamicEnvironmentSessionConfig, enabled_dynamic_environment_sources_for_session_config,
     },
     prompt_assembly::PromptSourceOrigin,
     session::{
@@ -12,7 +10,16 @@ use runtime_domain::{
     },
 };
 
-use super::{AppRuntimeCoordinator, ensure_conversation_target};
+#[cfg(test)]
+use super::dynamic_environment_worker::build_dynamic_environment_injection;
+use super::{
+    AppRuntimeCoordinator, PendingConversationTurn,
+    dynamic_environment_worker::{
+        DynamicEnvironmentInjection, DynamicEnvironmentRequest,
+        dynamic_environment_snapshot_for_turn,
+    },
+    ensure_conversation_target,
+};
 use crate::prompt_assembly::{
     AttachedPromptMessageAssembly, ManualSkillPromptUse, PromptAssemblyWorkspace,
 };
@@ -83,6 +90,9 @@ impl AppRuntimeCoordinator {
         if self.conversation_worker.is_running() {
             return Err("Conversation request is already running".to_string());
         }
+        if self.pending_conversation_turn.is_some() {
+            return Err("Conversation request is already preparing".to_string());
+        }
 
         let transcript_user_message =
             request
@@ -115,16 +125,64 @@ impl AppRuntimeCoordinator {
         };
         let manual_skill_activities =
             self.manual_skill_activities(&attached_prompt_assembly.manual_skill_uses);
-        let dynamic_environment =
-            self.dynamic_environment_prefix_items()
-                .unwrap_or_else(|message| {
-                    self.pending_runtime_events.push(RuntimeEvent::Failed {
-                        target: Some(target.clone()),
-                        message,
-                    });
-                    DynamicEnvironmentTurnInjection::default()
-                });
         let activity_label = request.model_id().to_string();
+        let pending_turn = PendingConversationTurn {
+            target: target.clone(),
+            activity_label,
+            provider_request,
+            transcript_user_message,
+            manual_skill_activities,
+        };
+        if let Some(dynamic_environment_request) = self.dynamic_environment_request()? {
+            self.dynamic_environment_worker
+                .load(dynamic_environment_request)?;
+            self.pending_conversation_turn = Some(pending_turn);
+            return Ok(RuntimeCommandReceipt::Accepted);
+        }
+
+        self.start_pending_conversation_turn(pending_turn, DynamicEnvironmentInjection::default())
+    }
+
+    pub(super) fn drain_dynamic_environment_events_into(&mut self, events: &mut Vec<RuntimeEvent>) {
+        let Some(result) = self.dynamic_environment_worker.try_recv_injection() else {
+            return;
+        };
+        let Some(pending_turn) = self.pending_conversation_turn.take() else {
+            return;
+        };
+        let target = pending_turn.target.clone();
+        let dynamic_environment = match result {
+            Ok(dynamic_environment) => dynamic_environment,
+            Err(message) => {
+                events.push(RuntimeEvent::Failed {
+                    target: Some(target.clone()),
+                    message,
+                });
+                DynamicEnvironmentInjection::default()
+            }
+        };
+        if let Err(message) =
+            self.start_pending_conversation_turn(pending_turn, dynamic_environment)
+        {
+            events.push(RuntimeEvent::Failed {
+                target: Some(target),
+                message,
+            });
+        }
+    }
+
+    fn start_pending_conversation_turn(
+        &mut self,
+        pending_turn: PendingConversationTurn,
+        dynamic_environment: DynamicEnvironmentInjection,
+    ) -> Result<RuntimeCommandReceipt, String> {
+        let PendingConversationTurn {
+            target,
+            activity_label,
+            provider_request,
+            transcript_user_message,
+            manual_skill_activities,
+        } = pending_turn;
         let prepared_request = self
             .provider_conversation
             .prepare_turn_with_transcript_prefix_texts_and_dynamic_environment(
@@ -145,73 +203,66 @@ impl AppRuntimeCoordinator {
         Ok(RuntimeCommandReceipt::ConversationStarted { activity_label })
     }
 
-    pub(super) fn dynamic_environment_prefix_items(
-        &mut self,
-    ) -> Result<DynamicEnvironmentTurnInjection, String> {
+    fn dynamic_environment_request(&mut self) -> Result<Option<DynamicEnvironmentRequest>, String> {
         let Some(work_dir) = self
             .options
             .session_header_template
             .as_ref()
             .map(|header| header.work_dir.clone())
         else {
-            return Ok(DynamicEnvironmentTurnInjection::default());
+            return Ok(None);
+        };
+        let session_config = self.resolve_dynamic_environment_session_config(work_dir.as_path())?;
+        let is_first_turn = self.provider_conversation.is_history_empty();
+        let Some(snapshot_kind) =
+            dynamic_environment_snapshot_for_turn(&session_config, is_first_turn)
+        else {
+            return Ok(None);
+        };
+        let sources =
+            enabled_dynamic_environment_sources_for_session_config(&session_config, snapshot_kind);
+        if sources.is_empty() {
+            return Ok(None);
+        }
+
+        Ok(Some(DynamicEnvironmentRequest {
+            work_dir,
+            session_config,
+            is_first_turn,
+            previous_observations: self
+                .provider_conversation
+                .dynamic_environment_observations()
+                .to_vec(),
+        }))
+    }
+
+    #[cfg(test)]
+    pub(super) fn dynamic_environment_prefix_items(
+        &mut self,
+    ) -> Result<DynamicEnvironmentInjection, String> {
+        let Some(work_dir) = self
+            .options
+            .session_header_template
+            .as_ref()
+            .map(|header| header.work_dir.clone())
+        else {
+            return Ok(DynamicEnvironmentInjection::default());
         };
         let dynamic_environment_session_config =
             self.resolve_dynamic_environment_session_config(work_dir.as_path())?;
         let is_first_turn = self.provider_conversation.is_history_empty();
-
-        let mut prefix_texts = Vec::new();
-        let mut next_observations = None;
-        if is_first_turn
-            && dynamic_environment_session_config
-                .snapshot_enabled(DynamicEnvironmentSnapshotKind::Baseline)
-        {
-            let sources = enabled_dynamic_environment_sources_for_session_config(
-                &dynamic_environment_session_config,
-                DynamicEnvironmentSnapshotKind::Baseline,
-            );
-            let observations = crate::dynamic_environment::observe_dynamic_environment_sources(
-                work_dir.as_path(),
-                &sources,
-            )
-            .map_err(|error| error.to_string())?;
-            if let Some(snapshot) = build_dynamic_environment_snapshot(
-                DynamicEnvironmentSnapshotKind::Baseline,
-                observations.clone(),
-            ) {
-                prefix_texts.push(snapshot.body);
-                next_observations = Some(observations);
-            }
-        } else if !is_first_turn
-            && dynamic_environment_session_config
-                .snapshot_enabled(DynamicEnvironmentSnapshotKind::Changes)
-        {
-            let sources = enabled_dynamic_environment_sources_for_session_config(
-                &dynamic_environment_session_config,
-                DynamicEnvironmentSnapshotKind::Changes,
-            );
-            let observations = crate::dynamic_environment::observe_dynamic_environment_sources(
-                work_dir.as_path(),
-                &sources,
-            )
-            .map_err(|error| error.to_string())?;
-            let changed = dynamic_environment_changes(
-                self.provider_conversation
-                    .dynamic_environment_observations(),
-                &observations,
-            );
-            if let Some(snapshot) =
-                build_dynamic_environment_snapshot(DynamicEnvironmentSnapshotKind::Changes, changed)
-            {
-                prefix_texts.push(snapshot.body);
-                next_observations = Some(observations);
-            }
-        }
-
-        Ok(DynamicEnvironmentTurnInjection {
-            prefix_texts,
-            next_observations,
-        })
+        build_dynamic_environment_injection(
+            self.options.dynamic_environment_observer.clone(),
+            DynamicEnvironmentRequest {
+                work_dir,
+                session_config: dynamic_environment_session_config,
+                is_first_turn,
+                previous_observations: self
+                    .provider_conversation
+                    .dynamic_environment_observations()
+                    .to_vec(),
+            },
+        )
     }
 
     fn resolve_dynamic_environment_session_config(
@@ -245,6 +296,9 @@ impl AppRuntimeCoordinator {
                 self.interrupt_conversation_worker(Some(&target))
             }
             None => {
+                if let Some(receipt) = self.interrupt_pending_conversation_turn(None)? {
+                    return Ok(receipt);
+                }
                 if self.conversation_worker.is_running() {
                     return self.interrupt_conversation_worker(None);
                 }
@@ -257,6 +311,9 @@ impl AppRuntimeCoordinator {
         &mut self,
         command_target: Option<&RuntimeTarget>,
     ) -> Result<RuntimeCommandReceipt, String> {
+        if let Some(receipt) = self.interrupt_pending_conversation_turn(command_target)? {
+            return Ok(receipt);
+        }
         let active_target = self.conversation_worker.current_target().cloned();
         ensure_conversation_target(active_target.as_ref(), command_target)?;
         if self.conversation_worker.interrupt() {
@@ -266,6 +323,25 @@ impl AppRuntimeCoordinator {
         } else {
             Ok(RuntimeCommandReceipt::Accepted)
         }
+    }
+
+    fn interrupt_pending_conversation_turn(
+        &mut self,
+        command_target: Option<&RuntimeTarget>,
+    ) -> Result<Option<RuntimeCommandReceipt>, String> {
+        let Some(active_target) = self
+            .pending_conversation_turn
+            .as_ref()
+            .map(|pending_turn| pending_turn.target.clone())
+        else {
+            return Ok(None);
+        };
+        ensure_conversation_target(Some(&active_target), command_target)?;
+        self.dynamic_environment_worker.cancel_pending();
+        self.pending_conversation_turn = None;
+        Ok(Some(RuntimeCommandReceipt::Interrupted {
+            target: Some(active_target),
+        }))
     }
 
     pub(super) fn attached_prompt_message_assembly(
@@ -351,12 +427,6 @@ impl AppRuntimeCoordinator {
             raw_output: None,
         }
     }
-}
-
-#[derive(Default)]
-pub(super) struct DynamicEnvironmentTurnInjection {
-    pub(super) prefix_texts: Vec<String>,
-    pub(super) next_observations: Option<Vec<DynamicEnvironmentObservation>>,
 }
 
 fn manual_skill_origin_label(origin: PromptSourceOrigin) -> &'static str {

@@ -1,6 +1,7 @@
 mod context_budget_command;
 mod context_budget_worker;
 mod conversation_commands;
+mod dynamic_environment_worker;
 mod event_mapping;
 mod managed_search_authorization;
 mod prompt_assembly_commands;
@@ -19,9 +20,10 @@ use runtime_domain::{
     prompt_assembly::{PromptAssemblyManagerSnapshot, PromptPreludeSnapshot},
     request_policy::RuntimeRequestPolicy,
     session::{
-        ConversationEvent, RuntimeCommand, RuntimeCommandReceipt, RuntimeEvent, RuntimeTarget,
-        SessionBranchTreePayload, SessionPickerRow, SessionPreviewPayload, SessionResumePayload,
-        SessionTreePayload, SessionTreeRow,
+        ConversationEvent, ConversationTurnRequest, RuntimeCommand, RuntimeCommandReceipt,
+        RuntimeEvent, RuntimeTarget, RuntimeToolActivity, SessionBranchTreePayload,
+        SessionPickerRow, SessionPreviewPayload, SessionResumePayload, SessionTreePayload,
+        SessionTreeRow, TranscriptUserMessage,
     },
 };
 use session_store::{
@@ -33,6 +35,7 @@ use tool_runtime::{ToolDefinition, ToolExecutorRegistry, builtin::ManagedSearchT
 
 use self::{
     context_budget_worker::ContextBudgetWorker,
+    dynamic_environment_worker::DynamicEnvironmentWorker,
     event_mapping::{
         runtime_event_from_conversation_event, should_defer_runtime_event_for_render_barrier,
     },
@@ -59,7 +62,7 @@ fn tool_definitions_from_registry(workspace_tools: &ToolExecutorRegistry) -> Vec
 }
 
 /// `AppRuntimeOptions` 保存 app 层对话运行时所需的配置。
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct AppRuntimeOptions {
     pub(crate) loaded_models: provider_models::LoadedModelCatalog,
     pub(crate) runtime_request_policy: RuntimeRequestPolicy,
@@ -70,6 +73,8 @@ pub(crate) struct AppRuntimeOptions {
     pub(crate) prompt_assembly_manager: Option<PromptAssemblyManagerSnapshot>,
     pub(crate) initial_prompt_prelude: Option<PromptPreludeSnapshot>,
     pub(crate) initial_dynamic_environment_session_config: Option<DynamicEnvironmentSessionConfig>,
+    pub(crate) dynamic_environment_observer:
+        Arc<dyn crate::dynamic_environment::DynamicEnvironmentObserver>,
 }
 
 /// `AppRuntimeCoordinator` 负责把 TUI runtime command 连接到对话运行时。
@@ -82,8 +87,36 @@ pub(crate) struct AppRuntimeCoordinator {
     prompt_assembly_tool_definitions: Vec<ToolDefinition>,
     session_store_worker: SessionStoreWorker,
     context_budget_worker: ContextBudgetWorker,
+    dynamic_environment_worker: DynamicEnvironmentWorker,
+    pending_conversation_turn: Option<PendingConversationTurn>,
     pending_runtime_events: Vec<RuntimeEvent>,
     manual_skill_activity_sequence: usize,
+}
+
+struct PendingConversationTurn {
+    target: RuntimeTarget,
+    activity_label: String,
+    provider_request: ConversationTurnRequest,
+    transcript_user_message: TranscriptUserMessage,
+    manual_skill_activities: Vec<RuntimeToolActivity>,
+}
+
+impl Default for AppRuntimeOptions {
+    fn default() -> Self {
+        Self {
+            loaded_models: provider_models::LoadedModelCatalog::default(),
+            runtime_request_policy: RuntimeRequestPolicy::default(),
+            managed_search_tools: ManagedSearchToolConfig::default(),
+            managed_search_authorization_config_path: None,
+            session_store: None,
+            session_header_template: None,
+            prompt_assembly_manager: None,
+            initial_prompt_prelude: None,
+            initial_dynamic_environment_session_config: None,
+            dynamic_environment_observer:
+                crate::dynamic_environment::default_dynamic_environment_observer(),
+        }
+    }
 }
 
 impl AppRuntimeCoordinator {
@@ -91,6 +124,7 @@ impl AppRuntimeCoordinator {
         let workspace_tools = conversation_workspace_tools(&options.managed_search_tools);
         let prompt_assembly_tool_definitions = tool_definitions_from_registry(&workspace_tools);
         let provider_conversation = fresh_provider_conversation(&options)?;
+        let dynamic_environment_observer = Arc::clone(&options.dynamic_environment_observer);
         Ok(Self {
             options,
             conversation_worker: ConversationWorker::default(),
@@ -100,6 +134,8 @@ impl AppRuntimeCoordinator {
             prompt_assembly_tool_definitions,
             session_store_worker: SessionStoreWorker::new(),
             context_budget_worker: ContextBudgetWorker::new().map_err(|error| error.to_string())?,
+            dynamic_environment_worker: DynamicEnvironmentWorker::new(dynamic_environment_observer),
+            pending_conversation_turn: None,
             pending_runtime_events: Vec::new(),
             manual_skill_activity_sequence: 0,
         })
@@ -350,6 +386,7 @@ impl RuntimeCoordinator for AppRuntimeCoordinator {
         let mut events = Vec::new();
         self.drain_context_budget_events_into(&mut events);
         self.drain_session_store_events_into(&mut events);
+        self.drain_dynamic_environment_events_into(&mut events);
         loop {
             let target = self.conversation_worker.current_target().cloned();
             let Some(event) = self.conversation_worker.try_recv_event() else {
@@ -405,6 +442,8 @@ impl RuntimeCoordinator for AppRuntimeCoordinator {
             || self.model_refresh.is_running()
             || self.session_store_worker.has_pending_work()
             || self.context_budget_worker.has_pending_work()
+            || self.dynamic_environment_worker.has_pending_work()
+            || self.pending_conversation_turn.is_some()
     }
 
     fn dispatch_runtime_command(

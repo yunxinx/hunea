@@ -1,7 +1,7 @@
 use std::{
     path::Path,
     process::{Command, Stdio},
-    sync::mpsc,
+    sync::{Arc, mpsc},
     thread,
     time::Duration,
 };
@@ -21,6 +21,33 @@ pub(crate) enum DynamicEnvironmentObservationError {
     WorkerStopped,
     #[error("start dynamic environment observation worker: {detail}")]
     WorkerStart { detail: String },
+}
+
+/// `DynamicEnvironmentObserver` 抽象动态环境来源的阻塞观察实现。
+pub(crate) trait DynamicEnvironmentObserver: Send + Sync {
+    fn observe(
+        &self,
+        work_dir: &Path,
+        sources: &[DynamicEnvironmentSourceKind],
+    ) -> Result<Vec<DynamicEnvironmentObservation>, DynamicEnvironmentObservationError>;
+}
+
+/// `CommandDynamicEnvironmentObserver` 通过系统命令读取 git/date 等动态环境来源。
+#[derive(Debug, Default)]
+pub(crate) struct CommandDynamicEnvironmentObserver;
+
+impl DynamicEnvironmentObserver for CommandDynamicEnvironmentObserver {
+    fn observe(
+        &self,
+        work_dir: &Path,
+        sources: &[DynamicEnvironmentSourceKind],
+    ) -> Result<Vec<DynamicEnvironmentObservation>, DynamicEnvironmentObservationError> {
+        observe_dynamic_environment_sources(work_dir, sources)
+    }
+}
+
+pub(crate) fn default_dynamic_environment_observer() -> Arc<dyn DynamicEnvironmentObserver> {
+    Arc::new(CommandDynamicEnvironmentObserver)
 }
 
 /// `observe_dynamic_environment_sources` 读取当前工作目录下已启用的动态环境来源。

@@ -270,6 +270,95 @@ fn dynamic_environment_does_not_advance_observations_without_injected_snapshot()
 }
 
 #[test]
+fn conversation_submit_dispatches_without_waiting_for_dynamic_environment_observation() {
+    let root = temp_test_dir("dynamic-environment-async-submit");
+    let work_dir = root.join("repo");
+    fs::create_dir_all(&work_dir).expect("work dir should exist");
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let observer = Arc::new(BlockingDynamicEnvironmentObserver {
+        started: std::sync::Mutex::new(Some(started_tx)),
+        release: std::sync::Mutex::new(Some(release_rx)),
+    });
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        runtime_request_policy: runtime_domain::request_policy::RuntimeRequestPolicy::new(
+            0,
+            Vec::new(),
+            1,
+        ),
+        dynamic_environment_observer: observer,
+        session_header_template: Some(SessionHeader {
+            session_id: SessionId::new(),
+            work_dir: work_dir.clone(),
+            session_name: None,
+            initial_model: "gpt-4o-mini".to_string(),
+            git_head: None,
+            cli_version: None,
+        }),
+        initial_dynamic_environment_session_config: Some(
+            runtime_domain::dynamic_environment::DynamicEnvironmentSessionConfig {
+                baseline_enabled: true,
+                changes_enabled: false,
+                source_selections: vec![
+                    runtime_domain::dynamic_environment::DynamicEnvironmentSourceSelection {
+                        snapshot_kind:
+                            runtime_domain::dynamic_environment::DynamicEnvironmentSnapshotKind::Baseline,
+                        source_kind:
+                            runtime_domain::dynamic_environment::DynamicEnvironmentSourceKind::Date,
+                        enabled: true,
+                    },
+                ],
+            },
+        ),
+        ..AppRuntimeOptions::default()
+    });
+    let request = ConversationTurnRequest::new(
+        "openai",
+        ProviderKind::OpenAi,
+        "gpt-4o-mini",
+        None,
+        None,
+        None,
+        ConversationItem::text(Role::User, "hello"),
+    );
+    let target = request.target();
+
+    let started = std::time::Instant::now();
+    let receipt = coordinator
+        .handle_runtime_command(RuntimeCommand::SubmitConversationTurn {
+            target,
+            request: Box::new(request),
+        })
+        .expect("conversation request should dispatch");
+
+    assert_eq!(receipt, RuntimeCommandReceipt::Accepted);
+    assert!(
+        started.elapsed() < Duration::from_millis(100),
+        "submit should not wait for dynamic environment observation"
+    );
+    started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("dynamic environment observation should run in background");
+
+    release_tx
+        .send(())
+        .expect("test should release dynamic environment observation");
+    let failure = wait_for_runtime_event(
+        &mut coordinator,
+        |event| match event {
+            RuntimeEvent::Failed { message, .. } => Some(message),
+            _ => None,
+        },
+        "provider failure after dynamic environment observation",
+    );
+    assert!(
+        failure.contains("requires API key"),
+        "conversation should continue through the normal provider path: {failure}"
+    );
+    cleanup(&root);
+}
+
+#[test]
 fn manual_skill_mentions_emit_synthetic_skill_usage_events_before_worker_failure() {
     let root = temp_test_dir("manual-skill-events");
     let work_dir = root.join("repo");
@@ -461,4 +550,41 @@ fn custom_prompt_attachment_uses_cached_prompt_assembly_without_waiting_for_stor
         .join()
         .expect("release thread should finish cleanly");
     cleanup(&root);
+}
+
+struct BlockingDynamicEnvironmentObserver {
+    started: std::sync::Mutex<Option<mpsc::Sender<()>>>,
+    release: std::sync::Mutex<Option<mpsc::Receiver<()>>>,
+}
+
+impl crate::dynamic_environment::DynamicEnvironmentObserver for BlockingDynamicEnvironmentObserver {
+    fn observe(
+        &self,
+        _work_dir: &Path,
+        sources: &[runtime_domain::dynamic_environment::DynamicEnvironmentSourceKind],
+    ) -> Result<
+        Vec<runtime_domain::dynamic_environment::DynamicEnvironmentObservation>,
+        crate::dynamic_environment::DynamicEnvironmentObservationError,
+    > {
+        if let Some(started) = self.started.lock().expect("started lock").take() {
+            let _ = started.send(());
+        }
+        if let Some(release) = self.release.lock().expect("release lock").take() {
+            release
+                .recv()
+                .expect("test should release dynamic environment observer");
+        }
+        Ok(sources
+            .iter()
+            .copied()
+            .map(
+                |source_kind| runtime_domain::dynamic_environment::DynamicEnvironmentObservation {
+                    source_kind,
+                    fingerprint: "observed".to_string(),
+                    summary: "observed".to_string(),
+                    details: None,
+                },
+            )
+            .collect())
+    }
 }

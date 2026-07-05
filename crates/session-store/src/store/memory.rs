@@ -56,7 +56,7 @@ impl InMemorySessionStore {
         Self {
             sessions: RwLock::new(HashMap::new()),
             message_history: RwLock::new(InMemoryMessageHistoryState::default()),
-            global_prompt_assembly: RwLock::new(PromptAssemblyScopeState::empty(
+            global_prompt_assembly: RwLock::new(PromptAssemblyScopeState::new(
                 PromptAssemblyScope::Global,
             )),
         }
@@ -476,11 +476,11 @@ impl SessionStore for InMemorySessionStore {
         state: &'a PromptAssemblyScopeState,
     ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
         Box::pin(async move {
-            if state.scope != PromptAssemblyScope::Global {
+            if state.scope() != PromptAssemblyScope::Global {
                 return Err(SessionStoreError::ConfigurationError {
                     message: format!(
                         "global prompt assembly persistence only accepts global scope, got {}",
-                        state.scope.as_stored_value()
+                        state.scope().as_stored_value()
                     ),
                 });
             }

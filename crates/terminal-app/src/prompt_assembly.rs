@@ -657,8 +657,8 @@ fn resolve_prompt_assembly_manager_snapshot_with_overrides(
 
     let snapshot = resolve_prompt_assembly(&PromptAssemblyInput {
         core_system: CoreSystemPromptInput {
-            global_override_present: global_state.core_system_override.is_some(),
-            project_override_present: project_state.core_system_override.is_some(),
+            global_override_present: global_state.core_system_override().is_some(),
+            project_override_present: project_state.core_system_override().is_some(),
         },
         candidates,
     });
@@ -750,8 +750,8 @@ fn resolve_prompt_assembly_manager_snapshot_with_overrides(
         ),
         diagnostics,
         builtin_core_system_body: BUILTIN_CORE_SYSTEM_PROMPT.to_string(),
-        global_core_system_override: global_state.core_system_override.clone(),
-        project_core_system_override: project_state.core_system_override.clone(),
+        global_core_system_override: global_state.core_system_override().map(str::to_string),
+        project_core_system_override: project_state.core_system_override().map(str::to_string),
     }
 }
 
@@ -773,12 +773,12 @@ fn managed_sources(
     }];
 
     let mut entries = global_state
-        .entries
+        .entries()
         .iter()
         .map(|entry| (PromptAssemblyScope::Global, entry))
         .chain(
             project_state
-                .entries
+                .entries()
                 .iter()
                 .map(|entry| (PromptAssemblyScope::Project, entry)),
         )
@@ -841,20 +841,20 @@ fn push_extra_prompt_candidates(
     extra_prompt_bodies: &HashMap<String, String>,
 ) {
     let selected_ids = state
-        .entries
+        .entries()
         .iter()
         .filter(|entry| entry.kind == PromptSourceKind::ExtraPrompt)
         .map(|entry| entry.reference_id.as_str())
         .collect::<std::collections::HashSet<_>>();
-    for prompt in &state.extra_prompts {
+    for prompt in state.extra_prompts() {
         let body = extra_prompt_bodies
-            .get(&scope_reference_key(state.scope, &prompt.reference_id))
+            .get(&scope_reference_key(state.scope(), &prompt.reference_id))
             .cloned()
             .unwrap_or_else(|| prompt.body.trim().to_string());
         candidates.push(PromptAssemblyExtraPromptCandidate {
             reference_id: prompt.reference_id.clone(),
             title: prompt.title.clone(),
-            origin: scope_origin(state.scope),
+            origin: scope_origin(state.scope()),
             body,
             selected: selected_ids.contains(prompt.reference_id.as_str()),
         });
@@ -867,10 +867,10 @@ fn merged_skill_discovery_skill_state(
     discovered_skills: &[DiscoveredSkill],
 ) -> Vec<PersistedSkillDiscoverySkillEntry> {
     let mut state_by_name = HashMap::<String, PersistedSkillDiscoverySkillEntry>::new();
-    for entry in &global_state.skill_discovery_skills {
+    for entry in global_state.skill_discovery_skills() {
         state_by_name.insert(entry.skill_name.clone(), entry.clone());
     }
-    for entry in &project_state.skill_discovery_skills {
+    for entry in project_state.skill_discovery_skills() {
         state_by_name.insert(entry.skill_name.clone(), entry.clone());
     }
 
@@ -907,11 +907,10 @@ fn resolve_skill_discovery_body(
 ) -> String {
     let generated_body = render_skill_discovery_generated_body(skill_state, skills_by_name);
     let override_body = match scope {
-        PromptAssemblyScope::Global => global_state.skill_discovery_override.as_deref(),
+        PromptAssemblyScope::Global => global_state.skill_discovery_override(),
         PromptAssemblyScope::Project => project_state
-            .skill_discovery_override
-            .as_deref()
-            .or(global_state.skill_discovery_override.as_deref()),
+            .skill_discovery_override()
+            .or(global_state.skill_discovery_override()),
     };
     match override_body {
         Some(override_body) => rebuild_skill_discovery_override(override_body, &generated_body),

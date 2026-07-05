@@ -85,21 +85,21 @@ pub struct StoredPromptBody {
 /// `PromptAssemblyScopeState` 表示单个 scope 下完整的 prompt assembly 持久化状态。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptAssemblyScopeState {
-    pub scope: PromptAssemblyScope,
-    pub core_system_override: Option<String>,
-    pub skill_discovery_override: Option<String>,
-    pub tool_guidelines_override: Option<String>,
-    pub entries: Vec<PersistedPromptAssemblyEntry>,
-    pub skill_discovery_skills: Vec<PersistedSkillDiscoverySkillEntry>,
-    pub tool_selections: Vec<PersistedToolSelectionEntry>,
-    pub dynamic_environment_sources: Vec<DynamicEnvironmentSourceSelection>,
-    pub extra_prompts: Vec<StoredPromptBody>,
+    scope: PromptAssemblyScope,
+    core_system_override: Option<String>,
+    skill_discovery_override: Option<String>,
+    tool_guidelines_override: Option<String>,
+    entries: Vec<PersistedPromptAssemblyEntry>,
+    skill_discovery_skills: Vec<PersistedSkillDiscoverySkillEntry>,
+    tool_selections: Vec<PersistedToolSelectionEntry>,
+    dynamic_environment_sources: Vec<DynamicEnvironmentSourceSelection>,
+    extra_prompts: Vec<StoredPromptBody>,
 }
 
 impl PromptAssemblyScopeState {
-    /// `empty` 构造一个空 scope 状态。
+    /// `new` 构造一个空 scope 状态。
     #[must_use]
-    pub fn empty(scope: PromptAssemblyScope) -> Self {
+    pub fn new(scope: PromptAssemblyScope) -> Self {
         Self {
             scope,
             core_system_override: None,
@@ -111,6 +111,130 @@ impl PromptAssemblyScopeState {
             dynamic_environment_sources: Vec::new(),
             extra_prompts: Vec::new(),
         }
+    }
+
+    /// `scope` 返回该状态所属的 prompt assembly scope。
+    #[must_use]
+    pub const fn scope(&self) -> PromptAssemblyScope {
+        self.scope
+    }
+
+    /// `core_system_override` 返回 core system override 文本。
+    #[must_use]
+    pub fn core_system_override(&self) -> Option<&str> {
+        self.core_system_override.as_deref()
+    }
+
+    /// `set_core_system_override` 设置 core system override 文本。
+    pub fn set_core_system_override(&mut self, body: Option<String>) {
+        self.core_system_override = body;
+    }
+
+    /// `skill_discovery_override` 返回 skill discovery override 文本。
+    #[must_use]
+    pub fn skill_discovery_override(&self) -> Option<&str> {
+        self.skill_discovery_override.as_deref()
+    }
+
+    /// `set_skill_discovery_override` 设置 skill discovery override 文本。
+    pub fn set_skill_discovery_override(&mut self, body: Option<String>) {
+        self.skill_discovery_override = body;
+    }
+
+    /// `tool_guidelines_override` 返回 tool guidelines override 文本。
+    #[must_use]
+    pub fn tool_guidelines_override(&self) -> Option<&str> {
+        self.tool_guidelines_override.as_deref()
+    }
+
+    /// `set_tool_guidelines_override` 设置 tool guidelines override 文本。
+    pub fn set_tool_guidelines_override(&mut self, body: Option<String>) {
+        self.tool_guidelines_override = body;
+    }
+
+    /// `entries` 返回该 scope 下持久化的 source entries。
+    #[must_use]
+    pub fn entries(&self) -> &[PersistedPromptAssemblyEntry] {
+        &self.entries
+    }
+
+    /// `entries_mut` 返回该 scope 下持久化 source entries 的可变集合。
+    pub fn entries_mut(&mut self) -> &mut Vec<PersistedPromptAssemblyEntry> {
+        &mut self.entries
+    }
+
+    /// `set_entries` 替换该 scope 下持久化的 source entries。
+    pub fn set_entries(&mut self, entries: Vec<PersistedPromptAssemblyEntry>) {
+        self.entries = entries;
+    }
+
+    /// `skill_discovery_skills` 返回 skill discovery 中单个 skill 的持久化选择。
+    #[must_use]
+    pub fn skill_discovery_skills(&self) -> &[PersistedSkillDiscoverySkillEntry] {
+        &self.skill_discovery_skills
+    }
+
+    /// `skill_discovery_skills_mut` 返回 skill discovery skill 选择的可变集合。
+    pub fn skill_discovery_skills_mut(&mut self) -> &mut Vec<PersistedSkillDiscoverySkillEntry> {
+        &mut self.skill_discovery_skills
+    }
+
+    /// `set_skill_discovery_skills` 替换 skill discovery skill 选择。
+    pub fn set_skill_discovery_skills(&mut self, skills: Vec<PersistedSkillDiscoverySkillEntry>) {
+        self.skill_discovery_skills = skills;
+    }
+
+    /// `tool_selections` 返回 tool guideline 中单个 tool 的持久化选择。
+    #[must_use]
+    pub fn tool_selections(&self) -> &[PersistedToolSelectionEntry] {
+        &self.tool_selections
+    }
+
+    /// `tool_selections_mut` 返回 tool guideline tool 选择的可变集合。
+    pub fn tool_selections_mut(&mut self) -> &mut Vec<PersistedToolSelectionEntry> {
+        &mut self.tool_selections
+    }
+
+    /// `set_tool_selections` 替换 tool guideline tool 选择。
+    pub fn set_tool_selections(&mut self, tool_selections: Vec<PersistedToolSelectionEntry>) {
+        self.tool_selections = tool_selections;
+    }
+
+    /// `dynamic_environment_sources` 返回 dynamic environment source 选择。
+    #[must_use]
+    pub fn dynamic_environment_sources(&self) -> &[DynamicEnvironmentSourceSelection] {
+        &self.dynamic_environment_sources
+    }
+
+    /// `dynamic_environment_sources_mut` 返回 dynamic environment source 选择的可变集合。
+    pub fn dynamic_environment_sources_mut(
+        &mut self,
+    ) -> &mut Vec<DynamicEnvironmentSourceSelection> {
+        &mut self.dynamic_environment_sources
+    }
+
+    /// `set_dynamic_environment_sources` 替换 dynamic environment source 选择。
+    pub fn set_dynamic_environment_sources(
+        &mut self,
+        sources: Vec<DynamicEnvironmentSourceSelection>,
+    ) {
+        self.dynamic_environment_sources = sources;
+    }
+
+    /// `extra_prompts` 返回该 scope 下持久化的 custom prompt bodies。
+    #[must_use]
+    pub fn extra_prompts(&self) -> &[StoredPromptBody] {
+        &self.extra_prompts
+    }
+
+    /// `extra_prompts_mut` 返回该 scope 下 custom prompt bodies 的可变集合。
+    pub fn extra_prompts_mut(&mut self) -> &mut Vec<StoredPromptBody> {
+        &mut self.extra_prompts
+    }
+
+    /// `set_extra_prompts` 替换该 scope 下持久化的 custom prompt bodies。
+    pub fn set_extra_prompts(&mut self, prompts: Vec<StoredPromptBody>) {
+        self.extra_prompts = prompts;
     }
 }
 
@@ -192,25 +316,33 @@ pub fn load_project_prompt_assembly_state(
     let prompts_dir = project_prompts_dir(work_dir);
     let custom_prompts_dir = project_custom_prompts_dir(work_dir);
 
-    let mut state = PromptAssemblyScopeState::empty(PromptAssemblyScope::Project);
-    state.entries = sort_entries(config.entries);
-    state.skill_discovery_skills = sort_skill_discovery_skills(config.skill_discovery_skills);
-    state.core_system_override =
+    let entries = sort_entries(config.entries);
+    let skill_discovery_skills = sort_skill_discovery_skills(config.skill_discovery_skills);
+    let core_system_override =
         read_optional_text_file(&prompts_dir.join(PROJECT_CORE_SYSTEM_OVERRIDE_FILE_NAME))?;
-    state.skill_discovery_override =
+    let skill_discovery_override =
         read_optional_text_file(&prompts_dir.join(PROJECT_SKILL_DISCOVERY_OVERRIDE_FILE_NAME))?;
-    state.tool_guidelines_override =
+    let tool_guidelines_override =
         read_optional_text_file(&prompts_dir.join(PROJECT_TOOL_GUIDELINES_OVERRIDE_FILE_NAME))?;
-    state.tool_selections = sort_tool_selections(config.tool_selections);
-    let entry_titles = state
-        .entries
+    let tool_selections = sort_tool_selections(config.tool_selections);
+    let entry_titles = entries
         .iter()
         .filter(|entry| entry.kind == PromptSourceKind::ExtraPrompt)
         .map(|entry| (entry.reference_id.as_str(), entry.title.as_str()))
         .collect::<BTreeMap<_, _>>();
-    state.extra_prompts = load_project_extra_prompt_bodies(&custom_prompts_dir, &entry_titles)?;
+    let extra_prompts = load_project_extra_prompt_bodies(&custom_prompts_dir, &entry_titles)?;
 
-    Ok(state)
+    Ok(PromptAssemblyScopeState {
+        scope: PromptAssemblyScope::Project,
+        core_system_override,
+        skill_discovery_override,
+        tool_guidelines_override,
+        entries,
+        skill_discovery_skills,
+        tool_selections,
+        dynamic_environment_sources: Vec::new(),
+        extra_prompts,
+    })
 }
 
 /// `save_project_prompt_assembly_state` 把项目级 prompt assembly 状态写入 `.hunea/`。
@@ -625,6 +757,23 @@ mod tests {
             tool_selections: Vec::new(),
             dynamic_environment_sources: Vec::new(),
         }
+    }
+
+    #[test]
+    fn scope_state_new_builds_state_through_domain_api() {
+        let mut state = PromptAssemblyScopeState::new(PromptAssemblyScope::Global);
+        state.set_core_system_override(Some("core".to_string()));
+        state.entries_mut().push(PersistedPromptAssemblyEntry {
+            reference_id: "skill-discovery".to_string(),
+            kind: PromptSourceKind::SkillDiscovery,
+            title: "Skill discovery".to_string(),
+            enabled: true,
+            requested_order: Some(1),
+        });
+
+        assert_eq!(state.scope(), PromptAssemblyScope::Global);
+        assert_eq!(state.core_system_override(), Some("core"));
+        assert_eq!(state.entries()[0].reference_id, "skill-discovery");
     }
 
     #[test]

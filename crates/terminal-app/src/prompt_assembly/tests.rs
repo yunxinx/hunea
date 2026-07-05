@@ -6,6 +6,41 @@ use runtime_domain::prompt_assembly::persistence::{
 };
 use session_store::InMemorySessionStore;
 
+macro_rules! scope_state {
+    (scope: $scope:expr, $($field:ident $(: $value:expr)?),* $(,)?) => {{
+        let mut state = PromptAssemblyScopeState::new($scope);
+        $(scope_state!(@assign state, $field $(: $value)?);)*
+        state
+    }};
+    (@assign $state:ident, core_system_override : $value:expr) => {
+        $state.set_core_system_override($value);
+    };
+    (@assign $state:ident, skill_discovery_override : $value:expr) => {
+        $state.set_skill_discovery_override($value);
+    };
+    (@assign $state:ident, tool_guidelines_override : $value:expr) => {
+        $state.set_tool_guidelines_override($value);
+    };
+    (@assign $state:ident, entries : $value:expr) => {
+        $state.set_entries($value);
+    };
+    (@assign $state:ident, skill_discovery_skills : $value:expr) => {
+        $state.set_skill_discovery_skills($value);
+    };
+    (@assign $state:ident, tool_selections : $value:expr) => {
+        $state.set_tool_selections($value);
+    };
+    (@assign $state:ident, dynamic_environment_sources : $value:expr) => {
+        $state.set_dynamic_environment_sources($value);
+    };
+    (@assign $state:ident, extra_prompts : $value:expr) => {
+        $state.set_extra_prompts($value);
+    };
+    (@assign $state:ident, $field:ident) => {
+        scope_state!(@assign $state, $field : $field);
+    };
+}
+
 fn temp_dir(label: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "hunea-terminal-app-prompt-assembly-{label}-{}-{}",
@@ -100,8 +135,8 @@ fn manager_snapshot_reports_invalid_skill_files_as_diagnostics() {
 
     let snapshot = resolve_prompt_assembly_manager_snapshot(
         &work_dir,
-        &PromptAssemblyScopeState::empty(PromptAssemblyScope::Global),
-        &PromptAssemblyScopeState::empty(PromptAssemblyScope::Project),
+        &PromptAssemblyScopeState::new(PromptAssemblyScope::Global),
+        &PromptAssemblyScopeState::new(PromptAssemblyScope::Project),
         &[],
     );
 
@@ -120,8 +155,8 @@ fn manager_snapshot_includes_default_dynamic_environment_sources() {
     let work_dir = temp_dir("dynamic-defaults");
     let snapshot = resolve_prompt_assembly_manager_snapshot(
         &work_dir,
-        &PromptAssemblyScopeState::empty(PromptAssemblyScope::Global),
-        &PromptAssemblyScopeState::empty(PromptAssemblyScope::Project),
+        &PromptAssemblyScopeState::new(PromptAssemblyScope::Global),
+        &PromptAssemblyScopeState::new(PromptAssemblyScope::Project),
         &[],
     );
 
@@ -193,9 +228,10 @@ fn resolve_initial_prompt_prelude_orders_core_extra_discovery_and_long_lived_ski
         )
         .expect("skill file should exist");
 
-    let global_state = PromptAssemblyScopeState {
+    let global_state = scope_state! {
         scope: PromptAssemblyScope::Global,
         core_system_override: Some("global core".to_string()),
+        skill_discovery_override: None,
         entries: vec![
             PersistedPromptAssemblyEntry {
                 reference_id: "skill-discovery".to_string(),
@@ -212,16 +248,16 @@ fn resolve_initial_prompt_prelude_orders_core_extra_discovery_and_long_lived_ski
                 requested_order: Some(30),
             },
         ],
-        skill_discovery_override: None,
         skill_discovery_skills: Vec::new(),
         extra_prompts: Vec::new(),
         tool_guidelines_override: None,
         tool_selections: Vec::new(),
         dynamic_environment_sources: Vec::new(),
     };
-    let project_state = PromptAssemblyScopeState {
+    let project_state = scope_state! {
         scope: PromptAssemblyScope::Project,
         core_system_override: None,
+        skill_discovery_override: None,
         entries: vec![PersistedPromptAssemblyEntry {
             reference_id: "repo-rules".to_string(),
             kind: PromptSourceKind::ExtraPrompt,
@@ -229,7 +265,6 @@ fn resolve_initial_prompt_prelude_orders_core_extra_discovery_and_long_lived_ski
             enabled: true,
             requested_order: Some(10),
         }],
-        skill_discovery_override: None,
         skill_discovery_skills: Vec::new(),
         extra_prompts: vec![StoredPromptBody {
             reference_id: "repo-rules".to_string(),
@@ -291,7 +326,7 @@ fn resolve_initial_prompt_prelude_places_instruction_files_between_core_and_extr
 
     let prelude = resolve_initial_prompt_prelude_with_overrides(
         &nested_dir,
-        &PromptAssemblyScopeState {
+        &scope_state! {
             scope: PromptAssemblyScope::Global,
             core_system_override: Some("global core".to_string()),
             entries: vec![PersistedPromptAssemblyEntry {
@@ -308,7 +343,7 @@ fn resolve_initial_prompt_prelude_places_instruction_files_between_core_and_extr
             tool_selections: Vec::new(),
             dynamic_environment_sources: Vec::new(),
         },
-        &PromptAssemblyScopeState {
+        &scope_state! {
             scope: PromptAssemblyScope::Project,
             core_system_override: None,
             entries: vec![PersistedPromptAssemblyEntry {
@@ -371,7 +406,7 @@ fn resolve_initial_prompt_assembly_keeps_inactive_sources_for_manager_view() {
     let work_dir = temp_dir("snapshot");
     let resolved = resolve_prompt_assembly_manager_snapshot(
         &work_dir,
-        &PromptAssemblyScopeState {
+        &scope_state! {
             scope: PromptAssemblyScope::Global,
             core_system_override: None,
             entries: vec![
@@ -397,7 +432,7 @@ fn resolve_initial_prompt_assembly_keeps_inactive_sources_for_manager_view() {
             tool_selections: Vec::new(),
             dynamic_environment_sources: Vec::new(),
         },
-        &PromptAssemblyScopeState::empty(PromptAssemblyScope::Project),
+        &PromptAssemblyScopeState::new(PromptAssemblyScope::Project),
         &[],
     );
 
@@ -441,8 +476,8 @@ fn resolve_manager_snapshot_injects_default_skill_discovery_source_with_generate
 
     let resolved = resolve_prompt_assembly_manager_snapshot(
         &work_dir,
-        &PromptAssemblyScopeState::empty(PromptAssemblyScope::Global),
-        &PromptAssemblyScopeState::empty(PromptAssemblyScope::Project),
+        &PromptAssemblyScopeState::new(PromptAssemblyScope::Global),
+        &PromptAssemblyScopeState::new(PromptAssemblyScope::Project),
         &[],
     );
 
@@ -483,8 +518,8 @@ fn resolve_manager_snapshot_places_tool_guidelines_after_core_and_marks_it_built
 
     let resolved = resolve_prompt_assembly_manager_snapshot(
         &work_dir,
-        &PromptAssemblyScopeState::empty(PromptAssemblyScope::Global),
-        &PromptAssemblyScopeState::empty(PromptAssemblyScope::Project),
+        &PromptAssemblyScopeState::new(PromptAssemblyScope::Global),
+        &PromptAssemblyScopeState::new(PromptAssemblyScope::Project),
         &builtin_tool_definitions(),
     );
 
@@ -544,7 +579,7 @@ fn disabling_default_tool_guidelines_materializes_builtin_entry_in_global_state(
         .block_on(store.load_global_prompt_assembly_state())
         .expect("global prompt assembly state should load");
     assert!(
-        global_state.entries.iter().any(|entry| {
+        global_state.entries().iter().any(|entry| {
             entry.kind == PromptSourceKind::ToolGuidelines
                 && entry.reference_id == "tool-guidelines"
                 && !entry.enabled
@@ -722,7 +757,7 @@ fn moving_default_instruction_file_materializes_and_reorders_project_entry() {
     let project_state = load_project_prompt_assembly_state(&work_dir)
         .expect("project prompt assembly state should load");
     assert!(
-        project_state.entries.iter().any(|entry| {
+        project_state.entries().iter().any(|entry| {
             entry.kind == PromptSourceKind::InstructionsFile
                 && entry.reference_id == "instructions:project:."
         }),
@@ -774,8 +809,8 @@ fn manager_snapshot_keeps_project_and_global_skill_duplicates_for_overlay() {
 
     let snapshot = resolve_prompt_assembly_manager_snapshot_with_global_skill_root(
         &work_dir,
-        &PromptAssemblyScopeState::empty(PromptAssemblyScope::Global),
-        &PromptAssemblyScopeState::empty(PromptAssemblyScope::Project),
+        &PromptAssemblyScopeState::new(PromptAssemblyScope::Global),
+        &PromptAssemblyScopeState::new(PromptAssemblyScope::Project),
         Some(global_skill_root.as_path()),
         &[],
     );
@@ -820,8 +855,8 @@ fn discovered_skill_inventory_keeps_manual_only_skills_visible() {
 
     let snapshot = resolve_prompt_assembly_manager_snapshot(
         &work_dir,
-        &PromptAssemblyScopeState::empty(PromptAssemblyScope::Global),
-        &PromptAssemblyScopeState::empty(PromptAssemblyScope::Project),
+        &PromptAssemblyScopeState::new(PromptAssemblyScope::Global),
+        &PromptAssemblyScopeState::new(PromptAssemblyScope::Project),
         &[],
     );
 
@@ -914,7 +949,7 @@ fn save_skill_discovery_override_follows_effective_scope() {
 
     save_project_prompt_assembly_state(
         &work_dir,
-        &PromptAssemblyScopeState {
+        &scope_state! {
             scope: PromptAssemblyScope::Project,
             core_system_override: None,
             entries: vec![PersistedPromptAssemblyEntry {
@@ -950,7 +985,7 @@ fn save_skill_discovery_override_follows_effective_scope() {
     let project_state = load_project_prompt_assembly_state(&work_dir)
         .expect("project prompt assembly state should load");
     assert_eq!(
-        project_state.skill_discovery_override.as_deref(),
+        project_state.skill_discovery_override(),
         Some("project discovery override")
     );
 }
@@ -976,7 +1011,7 @@ fn manager_snapshot_skill_inventory_uses_dense_selected_order() {
 
     let snapshot = resolve_prompt_assembly_manager_snapshot_with_global_skill_root(
         &work_dir,
-        &PromptAssemblyScopeState {
+        &scope_state! {
             scope: PromptAssemblyScope::Global,
             core_system_override: None,
             entries: Vec::new(),
@@ -998,7 +1033,7 @@ fn manager_snapshot_skill_inventory_uses_dense_selected_order() {
             tool_selections: Vec::new(),
             dynamic_environment_sources: Vec::new(),
         },
-        &PromptAssemblyScopeState::empty(PromptAssemblyScope::Project),
+        &PromptAssemblyScopeState::new(PromptAssemblyScope::Project),
         Some(global_skill_root.as_path()),
         &[],
     );
@@ -1025,7 +1060,7 @@ fn manager_snapshot_tool_inventory_filters_unguided_tools_and_uses_dense_selecte
 
     let snapshot = resolve_prompt_assembly_manager_snapshot(
         &work_dir,
-        &PromptAssemblyScopeState {
+        &scope_state! {
             scope: PromptAssemblyScope::Global,
             core_system_override: None,
             entries: Vec::new(),
@@ -1052,7 +1087,7 @@ fn manager_snapshot_tool_inventory_filters_unguided_tools_and_uses_dense_selecte
             ],
             dynamic_environment_sources: Vec::new(),
         },
-        &PromptAssemblyScopeState::empty(PromptAssemblyScope::Project),
+        &PromptAssemblyScopeState::new(PromptAssemblyScope::Project),
         &tool_definitions_with_unguided_tool(),
     );
 
@@ -1086,8 +1121,8 @@ fn manager_snapshot_discovered_skills_carry_effective_selection_scope() {
 
     let snapshot = resolve_prompt_assembly_manager_snapshot_with_global_skill_root(
         &work_dir,
-        &PromptAssemblyScopeState::empty(PromptAssemblyScope::Global),
-        &PromptAssemblyScopeState::empty(PromptAssemblyScope::Project),
+        &PromptAssemblyScopeState::new(PromptAssemblyScope::Global),
+        &PromptAssemblyScopeState::new(PromptAssemblyScope::Project),
         Some(global_skill_root.as_path()),
         &[],
     );
@@ -1103,7 +1138,7 @@ fn manager_snapshot_discovered_skills_carry_effective_selection_scope() {
 
 #[test]
 fn moving_discovered_skill_normalizes_requested_order_to_dense_sequence() {
-    let mut state = PromptAssemblyScopeState {
+    let mut state = scope_state! {
         scope: PromptAssemblyScope::Project,
         core_system_override: None,
         entries: Vec::new(),
@@ -1131,7 +1166,7 @@ fn moving_discovered_skill_normalizes_requested_order_to_dense_sequence() {
 
     assert_eq!(
         state
-            .skill_discovery_skills
+            .skill_discovery_skills()
             .iter()
             .map(|entry| (entry.skill_name.as_str(), entry.requested_order))
             .collect::<Vec<_>>(),
@@ -1166,7 +1201,7 @@ fn selecting_discovered_skill_persists_requested_order_from_one() {
     let project_state = load_project_prompt_assembly_state(&work_dir)
         .expect("project prompt assembly state should load");
     assert_eq!(
-        project_state.skill_discovery_skills.first(),
+        project_state.skill_discovery_skills().first(),
         Some(&PersistedSkillDiscoverySkillEntry {
             skill_name: "repo-bootstrap".to_string(),
             enabled: true,
@@ -1210,7 +1245,7 @@ fn moving_default_discovered_skill_materializes_dense_project_order() {
         .expect("project prompt assembly state should load");
     assert_eq!(
         project_state
-            .skill_discovery_skills
+            .skill_discovery_skills()
             .iter()
             .take(2)
             .cloned()
@@ -1250,8 +1285,8 @@ fn resetting_discovered_skill_order_restores_default_discovery_order() {
 
     let default_snapshot = resolve_prompt_assembly_manager_snapshot(
         &work_dir,
-        &PromptAssemblyScopeState::empty(PromptAssemblyScope::Global),
-        &PromptAssemblyScopeState::empty(PromptAssemblyScope::Project),
+        &PromptAssemblyScopeState::new(PromptAssemblyScope::Global),
+        &PromptAssemblyScopeState::new(PromptAssemblyScope::Project),
         &[],
     );
     let default_order = default_snapshot
@@ -1266,7 +1301,7 @@ fn resetting_discovered_skill_order_restores_default_discovery_order() {
 
     save_project_prompt_assembly_state(
         &work_dir,
-        &PromptAssemblyScopeState {
+        &scope_state! {
             scope: PromptAssemblyScope::Project,
             core_system_override: None,
             entries: Vec::new(),
@@ -1304,7 +1339,7 @@ fn resetting_discovered_skill_order_restores_default_discovery_order() {
         .expect("project prompt assembly state should load");
     assert_eq!(
         project_state
-            .skill_discovery_skills
+            .skill_discovery_skills()
             .iter()
             .map(|entry| entry.skill_name.as_str())
             .collect::<Vec<_>>(),
@@ -1312,7 +1347,7 @@ fn resetting_discovered_skill_order_restores_default_discovery_order() {
     );
     assert_eq!(
         project_state
-            .skill_discovery_skills
+            .skill_discovery_skills()
             .iter()
             .map(|entry| entry.requested_order)
             .collect::<Vec<_>>(),
@@ -1322,7 +1357,7 @@ fn resetting_discovered_skill_order_restores_default_discovery_order() {
     );
     assert_eq!(
         project_state
-            .skill_discovery_skills
+            .skill_discovery_skills()
             .iter()
             .map(|entry| entry.enabled)
             .collect::<Vec<_>>(),
@@ -1364,7 +1399,7 @@ fn moving_default_tool_materializes_dense_global_order() {
         .block_on(store.load_global_prompt_assembly_state())
         .expect("global prompt assembly state should load");
     assert_eq!(
-        global_state.tool_selections,
+        global_state.tool_selections(),
         vec![
             PersistedToolSelectionEntry {
                 tool_name: "read_file".to_string(),
@@ -1404,7 +1439,7 @@ fn moving_tool_ignores_unguided_registry_entries_when_materializing_order() {
         .block_on(store.load_global_prompt_assembly_state())
         .expect("global prompt assembly state should load");
     assert_eq!(
-        global_state.tool_selections,
+        global_state.tool_selections(),
         vec![
             PersistedToolSelectionEntry {
                 tool_name: "read_file".to_string(),
@@ -1441,7 +1476,7 @@ fn disabling_skill_discovery_materializes_disabled_entry_in_selected_scope() {
     let project_state = load_project_prompt_assembly_state(&work_dir)
         .expect("project prompt assembly state should load");
     assert!(
-        project_state.entries.iter().any(|entry| {
+        project_state.entries().iter().any(|entry| {
             entry.kind == PromptSourceKind::SkillDiscovery
                 && entry.reference_id == "skill-discovery"
                 && !entry.enabled
@@ -1454,7 +1489,7 @@ fn disabling_skill_discovery_materializes_disabled_entry_in_selected_scope() {
 fn load_initial_prompt_prelude_reads_global_and_project_state() {
     let work_dir = temp_dir("load");
     let global_store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
-    let project_state = PromptAssemblyScopeState {
+    let project_state = scope_state! {
         scope: PromptAssemblyScope::Project,
         core_system_override: Some("project core".to_string()),
         entries: vec![PersistedPromptAssemblyEntry {
@@ -1483,7 +1518,7 @@ fn load_initial_prompt_prelude_reads_global_and_project_state() {
         .expect("runtime should build");
     runtime
         .block_on(
-            global_store.save_global_prompt_assembly_state(&PromptAssemblyScopeState {
+            global_store.save_global_prompt_assembly_state(&scope_state! {
                 scope: PromptAssemblyScope::Global,
                 core_system_override: Some("global core".to_string()),
                 entries: Vec::new(),
@@ -1518,7 +1553,7 @@ fn prompt_assembly_workspace_reads_snapshot_and_prelude() {
         .expect("runtime should build");
     runtime
         .block_on(
-            global_store.save_global_prompt_assembly_state(&PromptAssemblyScopeState {
+            global_store.save_global_prompt_assembly_state(&scope_state! {
                 scope: PromptAssemblyScope::Global,
                 core_system_override: Some("global core".to_string()),
                 entries: vec![PersistedPromptAssemblyEntry {
@@ -1615,7 +1650,7 @@ fn activate_long_lived_skill_persists_reference_and_expands_in_prelude() {
     let project_state = load_project_prompt_assembly_state(&work_dir)
         .expect("project prompt assembly state should load");
     assert_eq!(
-        project_state.entries,
+        project_state.entries(),
         vec![PersistedPromptAssemblyEntry {
             reference_id: "repo-bootstrap".to_string(),
             kind: PromptSourceKind::LongLivedSkill,
@@ -1647,7 +1682,7 @@ fn active_long_lived_skill_prefers_project_skill_when_names_collide() {
         .expect("global skill file should exist");
     let snapshot = resolve_prompt_assembly_manager_snapshot_with_global_skill_root(
         &work_dir,
-        &PromptAssemblyScopeState {
+        &scope_state! {
             scope: PromptAssemblyScope::Global,
             core_system_override: None,
             entries: vec![PersistedPromptAssemblyEntry {
@@ -1664,7 +1699,7 @@ fn active_long_lived_skill_prefers_project_skill_when_names_collide() {
             tool_selections: Vec::new(),
             dynamic_environment_sources: Vec::new(),
         },
-        &PromptAssemblyScopeState::empty(PromptAssemblyScope::Project),
+        &PromptAssemblyScopeState::new(PromptAssemblyScope::Project),
         Some(&home_dir.join(".agents").join("skills")),
         &[],
     );
@@ -1700,33 +1735,31 @@ fn move_active_source_reorders_non_core_entries() {
         .build()
         .expect("runtime should build");
     runtime
-        .block_on(
-            store.save_global_prompt_assembly_state(&PromptAssemblyScopeState {
-                scope: PromptAssemblyScope::Global,
-                core_system_override: None,
-                entries: vec![PersistedPromptAssemblyEntry {
-                    reference_id: "shared-rules".to_string(),
-                    kind: PromptSourceKind::ExtraPrompt,
-                    title: "shared-rules".to_string(),
-                    enabled: true,
-                    requested_order: Some(10),
-                }],
-                skill_discovery_override: None,
-                skill_discovery_skills: Vec::new(),
-                extra_prompts: vec![StoredPromptBody {
-                    reference_id: "shared-rules".to_string(),
-                    title: "shared-rules".to_string(),
-                    body: "global rules".to_string(),
-                }],
-                tool_guidelines_override: None,
-                tool_selections: Vec::new(),
-                dynamic_environment_sources: Vec::new(),
-            }),
-        )
+        .block_on(store.save_global_prompt_assembly_state(&scope_state! {
+            scope: PromptAssemblyScope::Global,
+            core_system_override: None,
+            entries: vec![PersistedPromptAssemblyEntry {
+                reference_id: "shared-rules".to_string(),
+                kind: PromptSourceKind::ExtraPrompt,
+                title: "shared-rules".to_string(),
+                enabled: true,
+                requested_order: Some(10),
+            }],
+            skill_discovery_override: None,
+            skill_discovery_skills: Vec::new(),
+            extra_prompts: vec![StoredPromptBody {
+                reference_id: "shared-rules".to_string(),
+                title: "shared-rules".to_string(),
+                body: "global rules".to_string(),
+            }],
+            tool_guidelines_override: None,
+            tool_selections: Vec::new(),
+            dynamic_environment_sources: Vec::new(),
+        }))
         .expect("global state should save");
     save_project_prompt_assembly_state(
         &work_dir,
-        &PromptAssemblyScopeState {
+        &scope_state! {
             scope: PromptAssemblyScope::Project,
             core_system_override: None,
             entries: vec![PersistedPromptAssemblyEntry {
@@ -1786,7 +1819,7 @@ fn move_active_source_reorders_non_core_entries() {
 fn missing_source_check_counts_missing_entries_without_blocking_snapshot_resolution() {
     let manager = resolve_prompt_assembly_manager_snapshot(
         &temp_dir("missing-check"),
-        &PromptAssemblyScopeState {
+        &scope_state! {
             scope: PromptAssemblyScope::Global,
             core_system_override: None,
             entries: vec![
@@ -1812,7 +1845,7 @@ fn missing_source_check_counts_missing_entries_without_blocking_snapshot_resolut
             tool_selections: Vec::new(),
             dynamic_environment_sources: Vec::new(),
         },
-        &PromptAssemblyScopeState::empty(PromptAssemblyScope::Project),
+        &PromptAssemblyScopeState::new(PromptAssemblyScope::Project),
         &[],
     );
 
@@ -1958,7 +1991,7 @@ fn assemble_attached_prompt_message_includes_custom_prompt_bodies_in_first_use_o
     let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
     save_project_prompt_assembly_state(
         &work_dir,
-        &PromptAssemblyScopeState {
+        &scope_state! {
             scope: PromptAssemblyScope::Project,
             core_system_override: None,
             entries: vec![PersistedPromptAssemblyEntry {
@@ -1987,7 +2020,7 @@ fn assemble_attached_prompt_message_includes_custom_prompt_bodies_in_first_use_o
         .expect("runtime should build");
     runtime
         .block_on(
-            store.save_global_prompt_assembly_state(&PromptAssemblyScopeState::empty(
+            store.save_global_prompt_assembly_state(&PromptAssemblyScopeState::new(
                 PromptAssemblyScope::Global,
             )),
         )
@@ -2035,7 +2068,7 @@ fn removing_project_active_extra_prompt_preserves_it_as_inactive_candidate() {
     let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
     save_project_prompt_assembly_state(
         &work_dir,
-        &PromptAssemblyScopeState {
+        &scope_state! {
             scope: PromptAssemblyScope::Project,
             core_system_override: None,
             skill_discovery_override: None,

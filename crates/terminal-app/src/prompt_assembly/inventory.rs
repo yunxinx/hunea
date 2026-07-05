@@ -9,12 +9,12 @@ pub(super) fn discovered_skill_inventory(
     let selection_scope =
         skill_discovery_scope(global_state, project_state, PromptAssemblyScope::Project);
     let global_state_by_name = global_state
-        .skill_discovery_skills
+        .skill_discovery_skills()
         .iter()
         .map(|entry| (entry.skill_name.as_str(), entry))
         .collect::<HashMap<_, _>>();
     let project_state_by_name = project_state
-        .skill_discovery_skills
+        .skill_discovery_skills()
         .iter()
         .map(|entry| (entry.skill_name.as_str(), entry))
         .collect::<HashMap<_, _>>();
@@ -301,7 +301,7 @@ pub(super) fn ensure_scope_instruction_entries(
     starting_order: u16,
 ) {
     let mut next_instruction_order = state
-        .entries
+        .entries()
         .iter()
         .filter(|entry| entry.kind == PromptSourceKind::InstructionsFile)
         .filter_map(|entry| entry.requested_order)
@@ -310,7 +310,7 @@ pub(super) fn ensure_scope_instruction_entries(
         .unwrap_or(starting_order);
 
     for file in discovered_instruction_files {
-        if let Some(entry) = state.entries.iter_mut().find(|entry| {
+        if let Some(entry) = state.entries_mut().iter_mut().find(|entry| {
             entry.kind == PromptSourceKind::InstructionsFile
                 && entry.reference_id == file.reference_id
         }) {
@@ -318,7 +318,7 @@ pub(super) fn ensure_scope_instruction_entries(
             continue;
         }
 
-        state.entries.push(PersistedPromptAssemblyEntry {
+        state.entries_mut().push(PersistedPromptAssemblyEntry {
             reference_id: file.reference_id.clone(),
             kind: PromptSourceKind::InstructionsFile,
             title: file.title.clone(),
@@ -620,11 +620,10 @@ pub(super) fn resolve_tool_guidelines_body(
 ) -> String {
     let generated_body = render_tool_guidelines_generated_body(tool_state, tool_defs);
     let override_body = match scope {
-        PromptAssemblyScope::Global => global_state.tool_guidelines_override.as_deref(),
+        PromptAssemblyScope::Global => global_state.tool_guidelines_override(),
         PromptAssemblyScope::Project => project_state
-            .tool_guidelines_override
-            .as_deref()
-            .or(global_state.tool_guidelines_override.as_deref()),
+            .tool_guidelines_override()
+            .or(global_state.tool_guidelines_override()),
     };
     match override_body {
         Some(override_body) => rebuild_tool_guidelines_override(override_body, &generated_body),
@@ -655,18 +654,19 @@ pub(super) fn parse_tool_guidelines_override(content: &str) -> Option<(&str, &st
 
 pub(super) fn ensure_tool_guidelines_entry_exists(state: &mut PromptAssemblyScopeState) {
     if state
-        .entries
+        .entries()
         .iter()
         .any(|entry| entry.kind == PromptSourceKind::ToolGuidelines)
     {
         return;
     }
-    state.entries.push(PersistedPromptAssemblyEntry {
+    let requested_order = default_tool_guidelines_requested_order(state.entries());
+    state.entries_mut().push(PersistedPromptAssemblyEntry {
         reference_id: "tool-guidelines".to_string(),
         kind: PromptSourceKind::ToolGuidelines,
         title: "Tool guidelines".to_string(),
         enabled: true,
-        requested_order: Some(default_tool_guidelines_requested_order(&state.entries)),
+        requested_order: Some(requested_order),
     });
 }
 
@@ -675,9 +675,9 @@ pub(super) fn ensure_default_tool_guidelines_source(
     project_state: &mut PromptAssemblyScopeState,
 ) {
     if global_state
-        .entries
+        .entries()
         .iter()
-        .chain(project_state.entries.iter())
+        .chain(project_state.entries().iter())
         .any(|entry| entry.kind == PromptSourceKind::ToolGuidelines)
     {
         return;
@@ -711,13 +711,13 @@ pub(super) fn ensure_dynamic_environment_entry_exists(
         _ => return,
     };
     if state
-        .entries
+        .entries()
         .iter()
         .any(|entry| entry.kind == kind && entry.reference_id == reference_id)
     {
         return;
     }
-    state.entries.push(PersistedPromptAssemblyEntry {
+    state.entries_mut().push(PersistedPromptAssemblyEntry {
         reference_id: reference_id.to_string(),
         kind,
         title: title.to_string(),
@@ -768,10 +768,10 @@ pub(super) fn merged_tool_selection_state(
     tool_defs: &[ToolDefinition],
 ) -> Vec<PersistedToolSelectionEntry> {
     let mut state_by_name = HashMap::<String, PersistedToolSelectionEntry>::new();
-    for entry in &global_state.tool_selections {
+    for entry in global_state.tool_selections() {
         state_by_name.insert(entry.tool_name.clone(), entry.clone());
     }
-    for entry in &project_state.tool_selections {
+    for entry in project_state.tool_selections() {
         state_by_name.insert(entry.tool_name.clone(), entry.clone());
     }
 
@@ -848,7 +848,7 @@ pub(super) fn merged_dynamic_environment_selection_state(
     let mut selections = default_dynamic_environment_selections();
     apply_dynamic_environment_selection_overrides(
         &mut selections,
-        &global_state.dynamic_environment_sources,
+        global_state.dynamic_environment_sources(),
     );
     selections.sort_by_key(|selection| (selection.snapshot_kind, selection.source_kind));
     selections
@@ -933,7 +933,7 @@ pub(super) fn set_dynamic_environment_source_selected(
     selected: bool,
 ) {
     if let Some(selection) = state
-        .dynamic_environment_sources
+        .dynamic_environment_sources_mut()
         .iter_mut()
         .find(|selection| {
             selection.snapshot_kind == snapshot_kind && selection.source_kind == source_kind
@@ -944,7 +944,7 @@ pub(super) fn set_dynamic_environment_source_selected(
     }
 
     state
-        .dynamic_environment_sources
+        .dynamic_environment_sources_mut()
         .push(DynamicEnvironmentSourceSelection {
             snapshot_kind,
             source_kind,
@@ -1017,9 +1017,9 @@ pub(super) fn set_tool_selected(
     tool_name: &str,
     selected: bool,
 ) {
-    let next_order = next_tool_requested_order(&state.tool_selections);
+    let next_order = next_tool_requested_order(state.tool_selections());
     if let Some(entry) = state
-        .tool_selections
+        .tool_selections_mut()
         .iter_mut()
         .find(|entry| entry.tool_name == tool_name)
     {
@@ -1030,11 +1030,13 @@ pub(super) fn set_tool_selected(
         return;
     }
 
-    state.tool_selections.push(PersistedToolSelectionEntry {
-        tool_name: tool_name.to_string(),
-        enabled: selected,
-        requested_order: Some(next_order),
-    });
+    state
+        .tool_selections_mut()
+        .push(PersistedToolSelectionEntry {
+            tool_name: tool_name.to_string(),
+            enabled: selected,
+            requested_order: Some(next_order),
+        });
 }
 
 pub(super) fn move_tool(
@@ -1043,7 +1045,7 @@ pub(super) fn move_tool(
     direction: PromptAssemblyMoveDirection,
 ) -> Result<()> {
     let Some(position) = state
-        .tool_selections
+        .tool_selections()
         .iter()
         .position(|entry| entry.tool_name == tool_name)
     else {
@@ -1052,12 +1054,12 @@ pub(super) fn move_tool(
     let Some(neighbor) = (match direction {
         PromptAssemblyMoveDirection::Up => position.checked_sub(1),
         PromptAssemblyMoveDirection::Down => {
-            (position + 1 < state.tool_selections.len()).then_some(position + 1)
+            (position + 1 < state.tool_selections().len()).then_some(position + 1)
         }
     }) else {
         return Ok(());
     };
-    state.tool_selections.swap(position, neighbor);
+    state.tool_selections_mut().swap(position, neighbor);
     normalize_tool_requested_orders(state);
     Ok(())
 }
@@ -1072,7 +1074,7 @@ pub(super) fn next_tool_requested_order(entries: &[PersistedToolSelectionEntry])
 }
 
 pub(super) fn normalize_tool_requested_orders(state: &mut PromptAssemblyScopeState) {
-    for (index, entry) in state.tool_selections.iter_mut().enumerate() {
+    for (index, entry) in state.tool_selections_mut().iter_mut().enumerate() {
         entry.requested_order = Some(u16::try_from(index + 1).unwrap_or(u16::MAX));
     }
 }

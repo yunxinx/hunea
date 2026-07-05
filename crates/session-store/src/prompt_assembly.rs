@@ -21,11 +21,11 @@ pub(crate) fn save_global_prompt_assembly_state(
     index_path: &Path,
     state: &PromptAssemblyScopeState,
 ) -> Result<(), SessionStoreError> {
-    if state.scope != PromptAssemblyScope::Global {
+    if state.scope() != PromptAssemblyScope::Global {
         return Err(SessionStoreError::ConfigurationError {
             message: format!(
                 "global prompt assembly persistence only accepts global scope, got {}",
-                state.scope.as_stored_value()
+                state.scope().as_stored_value()
             ),
         });
     }
@@ -85,7 +85,7 @@ pub(crate) fn save_global_prompt_assembly_state(
             )
             .map_err(sqlite_err)?;
 
-        for entry in sort_entries(state.entries.clone()) {
+        for entry in sort_entries(state.entries().to_vec()) {
             transaction
                 .execute(
                     "INSERT INTO prompt_assembly_entries (
@@ -108,7 +108,7 @@ pub(crate) fn save_global_prompt_assembly_state(
                 .map_err(sqlite_err)?;
         }
 
-        for prompt in &state.extra_prompts {
+        for prompt in state.extra_prompts() {
             transaction
                 .execute(
                     "INSERT INTO prompt_assembly_extra_prompts (
@@ -122,7 +122,7 @@ pub(crate) fn save_global_prompt_assembly_state(
                 .map_err(sqlite_err)?;
         }
 
-        if let Some(body) = state.core_system_override.as_deref() {
+        if let Some(body) = state.core_system_override() {
             transaction
                 .execute(
                     "INSERT INTO prompt_assembly_core_overrides (scope, body) VALUES (?1, ?2)",
@@ -131,7 +131,7 @@ pub(crate) fn save_global_prompt_assembly_state(
                 .map_err(sqlite_err)?;
         }
 
-        if let Some(body) = state.skill_discovery_override.as_deref() {
+        if let Some(body) = state.skill_discovery_override() {
             transaction
                 .execute(
                     "INSERT INTO prompt_assembly_skill_discovery_overrides (scope, body) VALUES (?1, ?2)",
@@ -140,7 +140,7 @@ pub(crate) fn save_global_prompt_assembly_state(
                 .map_err(sqlite_err)?;
         }
 
-        for skill in sort_skill_discovery_skills(state.skill_discovery_skills.clone()) {
+        for skill in sort_skill_discovery_skills(state.skill_discovery_skills().to_vec()) {
             transaction
                 .execute(
                     "INSERT INTO prompt_assembly_skill_discovery_skills (
@@ -159,7 +159,7 @@ pub(crate) fn save_global_prompt_assembly_state(
                 .map_err(sqlite_err)?;
         }
 
-        if let Some(body) = state.tool_guidelines_override.as_deref() {
+        if let Some(body) = state.tool_guidelines_override() {
             transaction
                 .execute(
                     "INSERT INTO prompt_assembly_tool_guideline_overrides (scope, body) VALUES (?1, ?2)",
@@ -168,7 +168,7 @@ pub(crate) fn save_global_prompt_assembly_state(
                 .map_err(sqlite_err)?;
         }
 
-        for tool in sort_tool_selections(state.tool_selections.clone()) {
+        for tool in sort_tool_selections(state.tool_selections().to_vec()) {
             transaction
                 .execute(
                     "INSERT INTO prompt_assembly_tool_selections (
@@ -187,7 +187,7 @@ pub(crate) fn save_global_prompt_assembly_state(
                 .map_err(sqlite_err)?;
         }
 
-        for source in &state.dynamic_environment_sources {
+        for source in state.dynamic_environment_sources() {
             transaction
                 .execute(
                     "INSERT INTO prompt_assembly_dynamic_environment_sources (
@@ -382,17 +382,16 @@ pub(crate) fn load_global_prompt_assembly_state(
             .collect::<Result<Vec<_>, _>>()
             .map_err(sqlite_err)?;
 
-        Ok(PromptAssemblyScopeState {
-            scope: PromptAssemblyScope::Global,
-            core_system_override,
-            skill_discovery_override,
-            tool_guidelines_override,
-            entries,
-            skill_discovery_skills,
-            tool_selections,
-            dynamic_environment_sources,
-            extra_prompts,
-        })
+        let mut state = PromptAssemblyScopeState::new(PromptAssemblyScope::Global);
+        state.set_core_system_override(core_system_override);
+        state.set_skill_discovery_override(skill_discovery_override);
+        state.set_tool_guidelines_override(tool_guidelines_override);
+        state.set_entries(entries);
+        state.set_skill_discovery_skills(skill_discovery_skills);
+        state.set_tool_selections(tool_selections);
+        state.set_dynamic_environment_sources(dynamic_environment_sources);
+        state.set_extra_prompts(extra_prompts);
+        Ok(state)
     })
 }
 
@@ -548,36 +547,30 @@ mod tests {
     use super::*;
 
     fn sample_global_state() -> PromptAssemblyScopeState {
-        PromptAssemblyScopeState {
-            scope: PromptAssemblyScope::Global,
-            core_system_override: Some("global core override".to_string()),
-            skill_discovery_override: None,
-            entries: vec![
-                PersistedPromptAssemblyEntry {
-                    reference_id: "skill-discovery".to_string(),
-                    kind: PromptSourceKind::SkillDiscovery,
-                    title: "Skill discovery source".to_string(),
-                    enabled: true,
-                    requested_order: Some(5),
-                },
-                PersistedPromptAssemblyEntry {
-                    reference_id: "shared-rules".to_string(),
-                    kind: PromptSourceKind::ExtraPrompt,
-                    title: "shared-rules".to_string(),
-                    enabled: true,
-                    requested_order: Some(10),
-                },
-            ],
-            skill_discovery_skills: Vec::new(),
-            extra_prompts: vec![StoredPromptBody {
+        let mut state = PromptAssemblyScopeState::new(PromptAssemblyScope::Global);
+        state.set_core_system_override(Some("global core override".to_string()));
+        state.set_entries(vec![
+            PersistedPromptAssemblyEntry {
+                reference_id: "skill-discovery".to_string(),
+                kind: PromptSourceKind::SkillDiscovery,
+                title: "Skill discovery source".to_string(),
+                enabled: true,
+                requested_order: Some(5),
+            },
+            PersistedPromptAssemblyEntry {
                 reference_id: "shared-rules".to_string(),
+                kind: PromptSourceKind::ExtraPrompt,
                 title: "shared-rules".to_string(),
-                body: "global rules".to_string(),
-            }],
-            tool_guidelines_override: None,
-            tool_selections: Vec::new(),
-            dynamic_environment_sources: Vec::new(),
-        }
+                enabled: true,
+                requested_order: Some(10),
+            },
+        ]);
+        state.set_extra_prompts(vec![StoredPromptBody {
+            reference_id: "shared-rules".to_string(),
+            title: "shared-rules".to_string(),
+            body: "global rules".to_string(),
+        }]);
+        state
     }
 
     #[tokio::test]
@@ -630,28 +623,23 @@ mod tests {
             .await
             .expect("global prompt assembly should load");
 
-        let project_state =
-            runtime_domain::prompt_assembly::persistence::PromptAssemblyScopeState {
-                scope: PromptAssemblyScope::Project,
-                core_system_override: Some("project core override".to_string()),
-                skill_discovery_override: None,
-                entries: vec![PersistedPromptAssemblyEntry {
-                    reference_id: "shared-rules".to_string(),
-                    kind: PromptSourceKind::ExtraPrompt,
-                    title: "shared-rules".to_string(),
-                    enabled: true,
-                    requested_order: Some(10),
-                }],
-                skill_discovery_skills: Vec::new(),
-                extra_prompts: vec![StoredPromptBody {
-                    reference_id: "shared-rules".to_string(),
-                    title: "shared-rules".to_string(),
-                    body: "project rules".to_string(),
-                }],
-                tool_guidelines_override: None,
-                tool_selections: Vec::new(),
-                dynamic_environment_sources: Vec::new(),
-            };
+        let mut project_state =
+            runtime_domain::prompt_assembly::persistence::PromptAssemblyScopeState::new(
+                PromptAssemblyScope::Project,
+            );
+        project_state.set_core_system_override(Some("project core override".to_string()));
+        project_state.set_entries(vec![PersistedPromptAssemblyEntry {
+            reference_id: "shared-rules".to_string(),
+            kind: PromptSourceKind::ExtraPrompt,
+            title: "shared-rules".to_string(),
+            enabled: true,
+            requested_order: Some(10),
+        }]);
+        project_state.set_extra_prompts(vec![StoredPromptBody {
+            reference_id: "shared-rules".to_string(),
+            title: "shared-rules".to_string(),
+            body: "project rules".to_string(),
+        }]);
         runtime_domain::prompt_assembly::persistence::save_project_prompt_assembly_state(
             &work_dir,
             &project_state,
@@ -665,8 +653,8 @@ mod tests {
 
         let input = PromptAssemblyInput {
             core_system: runtime_domain::prompt_assembly::CoreSystemPromptInput {
-                global_override_present: loaded_global.core_system_override.is_some(),
-                project_override_present: loaded_project.core_system_override.is_some(),
+                global_override_present: loaded_global.core_system_override().is_some(),
+                project_override_present: loaded_project.core_system_override().is_some(),
             },
             candidates: vec![
                 runtime_domain::prompt_assembly::PromptSourceCandidate {

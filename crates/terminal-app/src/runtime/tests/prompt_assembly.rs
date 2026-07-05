@@ -1,13 +1,49 @@
 use runtime_domain::prompt_assembly::{
     PromptPreludeSection, PromptPreludeSnapshot, PromptSourceKind, PromptSourceOrigin,
     persistence::{
-        PersistedPromptAssemblyEntry, PromptAssemblyScope, PromptAssemblyScopeState,
-        StoredPromptBody, project_custom_prompts_dir, save_project_prompt_assembly_state,
+        PersistedPromptAssemblyEntry, PromptAssemblyScope, StoredPromptBody,
+        project_custom_prompts_dir, save_project_prompt_assembly_state,
     },
 };
 use runtime_domain::session::{PromptAssemblyCommandFailureKind, PromptAssemblyUpdateNotice};
 
 use super::support::*;
+
+macro_rules! scope_state {
+    (scope: $scope:expr, $($field:ident $(: $value:expr)?),* $(,)?) => {{
+        let mut state =
+            runtime_domain::prompt_assembly::persistence::PromptAssemblyScopeState::new($scope);
+        $(scope_state!(@assign state, $field $(: $value)?);)*
+        state
+    }};
+    (@assign $state:ident, core_system_override : $value:expr) => {
+        $state.set_core_system_override($value);
+    };
+    (@assign $state:ident, skill_discovery_override : $value:expr) => {
+        $state.set_skill_discovery_override($value);
+    };
+    (@assign $state:ident, tool_guidelines_override : $value:expr) => {
+        $state.set_tool_guidelines_override($value);
+    };
+    (@assign $state:ident, entries : $value:expr) => {
+        $state.set_entries($value);
+    };
+    (@assign $state:ident, skill_discovery_skills : $value:expr) => {
+        $state.set_skill_discovery_skills($value);
+    };
+    (@assign $state:ident, tool_selections : $value:expr) => {
+        $state.set_tool_selections($value);
+    };
+    (@assign $state:ident, dynamic_environment_sources : $value:expr) => {
+        $state.set_dynamic_environment_sources($value);
+    };
+    (@assign $state:ident, extra_prompts : $value:expr) => {
+        $state.set_extra_prompts($value);
+    };
+    (@assign $state:ident, $field:ident) => {
+        scope_state!(@assign $state, $field : $field);
+    };
+}
 
 #[test]
 fn reload_prompt_assembly_reads_latest_filesystem_state() {
@@ -23,7 +59,7 @@ fn reload_prompt_assembly_reads_latest_filesystem_state() {
 
     save_project_prompt_assembly_state(
         &work_dir,
-        &PromptAssemblyScopeState {
+        &scope_state! {
             scope: PromptAssemblyScope::Project,
             core_system_override: None,
             skill_discovery_override: None,
@@ -364,7 +400,7 @@ fn prompt_assembly_changes_sync_current_empty_session_prelude_immediately() {
     fs::create_dir_all(&work_dir).expect("work dir should exist");
     save_project_prompt_assembly_state(
         &work_dir,
-        &PromptAssemblyScopeState {
+        &scope_state! {
             scope: PromptAssemblyScope::Project,
             core_system_override: None,
             skill_discovery_override: None,
@@ -460,7 +496,7 @@ fn prompt_assembly_changes_on_started_session_apply_only_after_next_new_session_
     fs::create_dir_all(&work_dir).expect("work dir should exist");
     save_project_prompt_assembly_state(
         &work_dir,
-        &PromptAssemblyScopeState {
+        &scope_state! {
             scope: PromptAssemblyScope::Project,
             core_system_override: None,
             skill_discovery_override: None,
@@ -567,20 +603,18 @@ fn dynamic_environment_selection_change_on_empty_session_emits_current_session_n
         .build()
         .expect("runtime should build");
     store_runtime
-        .block_on(
-            store.save_global_prompt_assembly_state(&PromptAssemblyScopeState {
-                scope: PromptAssemblyScope::Global,
-                core_system_override: None,
-                skill_discovery_override: None,
-                entries: Vec::new(),
-                skill_discovery_skills: Vec::new(),
-                extra_prompts: Vec::new(),
-                tool_guidelines_override: None,
-                tool_selections: Vec::new(),
-                dynamic_environment_sources:
-                    runtime_domain::dynamic_environment::default_dynamic_environment_selections(),
-            }),
-        )
+        .block_on(store.save_global_prompt_assembly_state(&scope_state! {
+            scope: PromptAssemblyScope::Global,
+            core_system_override: None,
+            skill_discovery_override: None,
+            entries: Vec::new(),
+            skill_discovery_skills: Vec::new(),
+            extra_prompts: Vec::new(),
+            tool_guidelines_override: None,
+            tool_selections: Vec::new(),
+            dynamic_environment_sources:
+                runtime_domain::dynamic_environment::default_dynamic_environment_selections(),
+        }))
         .expect("global prompt state should save");
     let mut coordinator = runtime_coordinator(AppRuntimeOptions {
         session_store: Some(store),
@@ -653,19 +687,17 @@ fn disabling_dynamic_environment_changes_waits_for_next_new_session() {
                 == runtime_domain::dynamic_environment::DynamicEnvironmentSourceKind::Date;
     }
     store_runtime
-        .block_on(
-            store.save_global_prompt_assembly_state(&PromptAssemblyScopeState {
-                scope: PromptAssemblyScope::Global,
-                core_system_override: None,
-                skill_discovery_override: None,
-                entries: Vec::new(),
-                skill_discovery_skills: Vec::new(),
-                extra_prompts: Vec::new(),
-                tool_guidelines_override: None,
-                tool_selections: Vec::new(),
-                dynamic_environment_sources,
-            }),
-        )
+        .block_on(store.save_global_prompt_assembly_state(&scope_state! {
+            scope: PromptAssemblyScope::Global,
+            core_system_override: None,
+            skill_discovery_override: None,
+            entries: Vec::new(),
+            skill_discovery_skills: Vec::new(),
+            extra_prompts: Vec::new(),
+            tool_guidelines_override: None,
+            tool_selections: Vec::new(),
+            dynamic_environment_sources,
+        }))
         .expect("global prompt state should save");
     let mut coordinator = runtime_coordinator(AppRuntimeOptions {
         session_store: Some(store),

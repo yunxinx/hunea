@@ -1,5 +1,41 @@
 use super::support::*;
 
+macro_rules! scope_state {
+    (scope: $scope:expr, $($field:ident $(: $value:expr)?),* $(,)?) => {{
+        let mut state =
+            runtime_domain::prompt_assembly::persistence::PromptAssemblyScopeState::new($scope);
+        $(scope_state!(@assign state, $field $(: $value)?);)*
+        state
+    }};
+    (@assign $state:ident, core_system_override : $value:expr) => {
+        $state.set_core_system_override($value);
+    };
+    (@assign $state:ident, skill_discovery_override : $value:expr) => {
+        $state.set_skill_discovery_override($value);
+    };
+    (@assign $state:ident, tool_guidelines_override : $value:expr) => {
+        $state.set_tool_guidelines_override($value);
+    };
+    (@assign $state:ident, entries : $value:expr) => {
+        $state.set_entries($value);
+    };
+    (@assign $state:ident, skill_discovery_skills : $value:expr) => {
+        $state.set_skill_discovery_skills($value);
+    };
+    (@assign $state:ident, tool_selections : $value:expr) => {
+        $state.set_tool_selections($value);
+    };
+    (@assign $state:ident, dynamic_environment_sources : $value:expr) => {
+        $state.set_dynamic_environment_sources($value);
+    };
+    (@assign $state:ident, extra_prompts : $value:expr) => {
+        $state.set_extra_prompts($value);
+    };
+    (@assign $state:ident, $field:ident) => {
+        scope_state!(@assign $state, $field : $field);
+    };
+}
+
 #[test]
 fn conversation_target_must_match_running_worker() {
     let active_target = RuntimeTarget::provider("openai", "gpt-4o-mini");
@@ -155,27 +191,25 @@ fn startup_prompt_missing_source_check_emits_aggregated_runtime_event() {
         .build()
         .expect("runtime should build");
     runtime
-        .block_on(store.save_global_prompt_assembly_state(
-            &runtime_domain::prompt_assembly::persistence::PromptAssemblyScopeState {
-                scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Global,
-                core_system_override: None,
-                entries: vec![
-                    runtime_domain::prompt_assembly::persistence::PersistedPromptAssemblyEntry {
-                        reference_id: "missing-skill".to_string(),
-                        kind: runtime_domain::prompt_assembly::PromptSourceKind::LongLivedSkill,
-                        title: "missing-skill".to_string(),
-                        enabled: true,
-                        requested_order: Some(10),
-                    },
-                ],
-                skill_discovery_override: None,
-                skill_discovery_skills: Vec::new(),
-                extra_prompts: Vec::new(),
-                tool_guidelines_override: None,
-                tool_selections: Vec::new(),
-                dynamic_environment_sources: Vec::new(),
-            },
-        ))
+        .block_on(store.save_global_prompt_assembly_state(&scope_state! {
+            scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Global,
+            core_system_override: None,
+            entries: vec![
+                runtime_domain::prompt_assembly::persistence::PersistedPromptAssemblyEntry {
+                    reference_id: "missing-skill".to_string(),
+                    kind: runtime_domain::prompt_assembly::PromptSourceKind::LongLivedSkill,
+                    title: "missing-skill".to_string(),
+                    enabled: true,
+                    requested_order: Some(10),
+                },
+            ],
+            skill_discovery_override: None,
+            skill_discovery_skills: Vec::new(),
+            extra_prompts: Vec::new(),
+            tool_guidelines_override: None,
+            tool_selections: Vec::new(),
+            dynamic_environment_sources: Vec::new(),
+        }))
         .expect("global prompt state should save");
 
     let mut coordinator = runtime_coordinator(AppRuntimeOptions {
@@ -226,19 +260,17 @@ fn dynamic_environment_does_not_advance_observations_without_injected_snapshot()
         source.enabled = false;
     }
     store_runtime
-        .block_on(store.save_global_prompt_assembly_state(
-            &runtime_domain::prompt_assembly::persistence::PromptAssemblyScopeState {
-                scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Global,
-                core_system_override: None,
-                entries: Vec::new(),
-                skill_discovery_override: None,
-                skill_discovery_skills: Vec::new(),
-                extra_prompts: Vec::new(),
-                tool_guidelines_override: None,
-                tool_selections: Vec::new(),
-                dynamic_environment_sources,
-            },
-        ))
+        .block_on(store.save_global_prompt_assembly_state(&scope_state! {
+            scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Global,
+            core_system_override: None,
+            entries: Vec::new(),
+            skill_discovery_override: None,
+            skill_discovery_skills: Vec::new(),
+            extra_prompts: Vec::new(),
+            tool_guidelines_override: None,
+            tool_selections: Vec::new(),
+            dynamic_environment_sources,
+        }))
         .expect("global prompt state should save");
 
     let mut coordinator = runtime_coordinator(AppRuntimeOptions {
@@ -448,7 +480,7 @@ fn custom_prompt_attachment_uses_cached_prompt_assembly_without_waiting_for_stor
     fs::create_dir_all(&work_dir).expect("work dir should exist");
     runtime_domain::prompt_assembly::persistence::save_project_prompt_assembly_state(
         &work_dir,
-        &runtime_domain::prompt_assembly::persistence::PromptAssemblyScopeState {
+        &scope_state! {
             scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
             core_system_override: None,
             entries: vec![
@@ -483,7 +515,7 @@ fn custom_prompt_attachment_uses_cached_prompt_assembly_without_waiting_for_stor
         .expect("runtime should build");
     store_runtime
         .block_on(base_store.save_global_prompt_assembly_state(
-            &runtime_domain::prompt_assembly::persistence::PromptAssemblyScopeState::empty(
+            &runtime_domain::prompt_assembly::persistence::PromptAssemblyScopeState::new(
                 runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Global,
             ),
         ))

@@ -151,6 +151,58 @@ impl PreparedConversationRequest {
     }
 }
 
+/// `PreparedTurnOptions` 收敛一次 turn 准备过程中可选的 provider/transcript 输入。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PreparedTurnOptions {
+    provider_prefix_items: Vec<ConversationItem>,
+    transcript_user_message: Option<TranscriptUserMessage>,
+    transcript_replay_after_user: Vec<TranscriptReplayItem>,
+    dynamic_environment_observations: Option<Vec<DynamicEnvironmentObservation>>,
+}
+
+impl PreparedTurnOptions {
+    /// `with_provider_prefix_items` 在真实用户消息前追加 provider-visible meta items。
+    #[must_use]
+    pub fn with_provider_prefix_items(mut self, items: Vec<ConversationItem>) -> Self {
+        self.provider_prefix_items = items;
+        self
+    }
+
+    /// `with_provider_prefix_texts` 以 user text item 形式追加 provider-visible meta texts。
+    #[must_use]
+    pub fn with_provider_prefix_texts(mut self, texts: Vec<String>) -> Self {
+        self.provider_prefix_items = texts
+            .into_iter()
+            .map(|text| ConversationItem::text(Role::User, text))
+            .collect();
+        self
+    }
+
+    /// `with_transcript_user_message` 绑定本轮 transcript-visible 用户消息。
+    #[must_use]
+    pub fn with_transcript_user_message(mut self, message: TranscriptUserMessage) -> Self {
+        self.transcript_user_message = Some(message);
+        self
+    }
+
+    /// `with_transcript_replay_after_user` 绑定用户消息后追加的 transcript replay items。
+    #[must_use]
+    pub fn with_transcript_replay_after_user(mut self, items: Vec<TranscriptReplayItem>) -> Self {
+        self.transcript_replay_after_user = items;
+        self
+    }
+
+    /// `with_dynamic_environment_observations` 绑定本轮 dynamic environment 观测结果。
+    #[must_use]
+    pub fn with_dynamic_environment_observations(
+        mut self,
+        observations: Vec<DynamicEnvironmentObservation>,
+    ) -> Self {
+        self.dynamic_environment_observations = Some(observations);
+        self
+    }
+}
+
 /// `ProviderConversation` 持有 provider-visible 内存对话。
 #[derive(Default)]
 pub struct ProviderConversation {
@@ -376,75 +428,15 @@ impl ProviderConversation {
         &mut self,
         turn: &ConversationTurnRequest,
     ) -> Result<PreparedConversationRequest, ProviderConversationError> {
-        self.prepare_turn_with_transcript(turn, turn.transcript_user_message().cloned(), Vec::new())
+        self.prepare_turn_with_options(turn, PreparedTurnOptions::default())
     }
 
-    /// `prepare_turn_with_transcript` 允许调用方为当前 turn 指定单独的 transcript 展示消息。
+    /// `prepare_turn_with_options` 接受一个用户 turn 和本轮可选上下文，并构造完整执行请求。
     #[must_use = "prepared turn requests must be submitted or explicitly discarded"]
-    pub fn prepare_turn_with_transcript(
+    pub fn prepare_turn_with_options(
         &mut self,
         turn: &ConversationTurnRequest,
-        transcript_user_message: Option<TranscriptUserMessage>,
-        transcript_replay_after_user: Vec<TranscriptReplayItem>,
-    ) -> Result<PreparedConversationRequest, ProviderConversationError> {
-        self.prepare_turn_with_transcript_and_prefix_items(
-            turn,
-            Vec::new(),
-            transcript_user_message,
-            transcript_replay_after_user,
-        )
-    }
-
-    /// `prepare_turn_with_transcript_and_prefix_items` 允许当前 turn 在真实用户消息前追加 provider-visible meta items。
-    #[must_use = "prepared turn requests must be submitted or explicitly discarded"]
-    pub fn prepare_turn_with_transcript_and_prefix_items(
-        &mut self,
-        turn: &ConversationTurnRequest,
-        provider_prefix_items: Vec<ConversationItem>,
-        transcript_user_message: Option<TranscriptUserMessage>,
-        transcript_replay_after_user: Vec<TranscriptReplayItem>,
-    ) -> Result<PreparedConversationRequest, ProviderConversationError> {
-        self.prepare_turn_with_transcript_prefix_items_and_dynamic_environment(
-            turn,
-            provider_prefix_items,
-            transcript_user_message,
-            transcript_replay_after_user,
-            None,
-        )
-    }
-
-    /// `prepare_turn_with_transcript_prefix_texts_and_dynamic_environment` 允许上层用文本形式传入 provider-visible meta user items。
-    #[must_use = "prepared turn requests must be submitted or explicitly discarded"]
-    pub fn prepare_turn_with_transcript_prefix_texts_and_dynamic_environment(
-        &mut self,
-        turn: &ConversationTurnRequest,
-        provider_prefix_texts: Vec<String>,
-        transcript_user_message: Option<TranscriptUserMessage>,
-        transcript_replay_after_user: Vec<TranscriptReplayItem>,
-        dynamic_environment_observations: Option<Vec<DynamicEnvironmentObservation>>,
-    ) -> Result<PreparedConversationRequest, ProviderConversationError> {
-        let provider_prefix_items = provider_prefix_texts
-            .into_iter()
-            .map(|text| ConversationItem::text(Role::User, text))
-            .collect();
-        self.prepare_turn_with_transcript_prefix_items_and_dynamic_environment(
-            turn,
-            provider_prefix_items,
-            transcript_user_message,
-            transcript_replay_after_user,
-            dynamic_environment_observations,
-        )
-    }
-
-    /// `prepare_turn_with_transcript_prefix_items_and_dynamic_environment` 同时绑定本轮动态环境快照。
-    #[must_use = "prepared turn requests must be submitted or explicitly discarded"]
-    pub fn prepare_turn_with_transcript_prefix_items_and_dynamic_environment(
-        &mut self,
-        turn: &ConversationTurnRequest,
-        provider_prefix_items: Vec<ConversationItem>,
-        transcript_user_message: Option<TranscriptUserMessage>,
-        transcript_replay_after_user: Vec<TranscriptReplayItem>,
-        dynamic_environment_observations: Option<Vec<DynamicEnvironmentObservation>>,
+        options: PreparedTurnOptions,
     ) -> Result<PreparedConversationRequest, ProviderConversationError> {
         if turn.message().role() != Some(Role::User) {
             return Err(ProviderConversationError::NonUserTurnMessage);
@@ -454,16 +446,19 @@ impl ProviderConversation {
         }
 
         let user_message = turn.message().clone();
-        let mut current_user_items = provider_prefix_items;
+        let mut current_user_items = options.provider_prefix_items;
         current_user_items.push(user_message.clone());
-        self.pending_user_items = current_user_items.clone();
-        let next_dynamic_environment_observations = dynamic_environment_observations
+        self.pending_user_items = current_user_items;
+        let next_dynamic_environment_observations = options
+            .dynamic_environment_observations
             .unwrap_or_else(|| self.dynamic_environment_observations.clone());
         self.pending_dynamic_environment_observations =
             Some(next_dynamic_environment_observations.clone());
         self.upstream_context_tokens = None;
-        let transcript_user_message =
-            transcript_user_message.unwrap_or_else(|| TranscriptUserMessage {
+        let transcript_user_message = options
+            .transcript_user_message
+            .or_else(|| turn.transcript_user_message().cloned())
+            .unwrap_or_else(|| TranscriptUserMessage {
                 content: user_message.text_content(),
                 attachments: Vec::new(),
                 skill_bindings: Vec::new(),
@@ -488,14 +483,15 @@ impl ProviderConversation {
                             .clone(),
                         dynamic_environment_observations: next_dynamic_environment_observations,
                     },
-                    current_user_items: current_user_items.clone(),
+                    current_user_items: self.pending_user_items.clone(),
                     transcript_user_message,
-                    transcript_replay_after_user,
+                    transcript_replay_after_user: options.transcript_replay_after_user,
                 });
 
+        let items = self.provider_items_with_pending_user_items(&self.pending_user_items);
         Ok(PreparedConversationRequest::from_turn(
             turn,
-            self.provider_items_with_pending_user_items(&current_user_items),
+            items,
             self.session_prompt_cache_key.clone(),
             self.prompt_prelude.clone(),
             persistence,

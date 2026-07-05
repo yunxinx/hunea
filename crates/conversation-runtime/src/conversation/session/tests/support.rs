@@ -36,8 +36,8 @@ pub(super) use super::super::{
     run_conversation_worker, run_session_persistence_actor, run_with_soft_timeout,
 };
 pub(super) use crate::{
-    ConversationResponse, PreparedConversationRequest, ProviderConversation, ProviderKind,
-    conversation::PersistedConversationItem,
+    ConversationResponse, PreparedConversationRequest, PreparedTurnOptions, ProviderConversation,
+    ProviderKind, conversation::PersistedConversationItem,
 };
 
 pub(super) fn run_store<T>(

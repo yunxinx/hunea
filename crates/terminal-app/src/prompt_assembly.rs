@@ -30,7 +30,8 @@ use runtime_domain::prompt_assembly::{
     PromptSourceCandidate, PromptSourceCandidateState, PromptSourceInactiveReason,
     PromptSourceKind, PromptSourceOrigin, PromptSourceStatus, SKILL_DISCOVERY_GENERATED_END,
     SKILL_DISCOVERY_GENERATED_START, TOOL_GUIDELINES_GENERATED_END,
-    TOOL_GUIDELINES_GENERATED_START, derive_extra_prompt_title, resolve_prompt_assembly,
+    TOOL_GUIDELINES_GENERATED_START, derive_extra_prompt_title, requested_order_sort_key,
+    resolve_prompt_assembly,
 };
 use runtime_domain::session::{TranscriptCustomPromptBinding, TranscriptUserMessage};
 use runtime_domain::text::natural_sort_text_cmp;
@@ -140,11 +141,6 @@ pub(crate) struct AttachedPromptMessageAssembly {
     pub(crate) provider_visible_user_text: String,
     pub(crate) manual_skill_uses: Vec<ManualSkillPromptUse>,
     pub(crate) custom_prompt_uses: Vec<CustomPromptUse>,
-}
-
-#[derive(Debug, Clone)]
-struct PromptCandidateBody {
-    body: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

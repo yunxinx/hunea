@@ -12,7 +12,7 @@ fn ready_model() -> Model {
     Model::new_with_options(StartupBannerOptions::default(), ModelOptions::default())
 }
 
-fn limit(value: u32) -> ContextTokenLimit {
+fn limit(value: usize) -> ContextTokenLimit {
     ContextTokenLimit::try_from(value).expect("fixture limit should be valid")
 }
 

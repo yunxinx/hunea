@@ -147,10 +147,57 @@ enum ResponsesStreamEvent {
     Other,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ResponsesOutputItemKind {
+    FunctionCall,
+    Message,
+    Reasoning,
+    Other(String),
+}
+
+impl Default for ResponsesOutputItemKind {
+    fn default() -> Self {
+        Self::Other(String::new())
+    }
+}
+
+impl ResponsesOutputItemKind {
+    fn from_raw(value: String) -> Self {
+        match value.as_str() {
+            "function_call" => Self::FunctionCall,
+            "message" => Self::Message,
+            "reasoning" => Self::Reasoning,
+            _ => Self::Other(value),
+        }
+    }
+
+    fn is_function_call(&self) -> bool {
+        matches!(self, Self::FunctionCall)
+    }
+
+    fn is_message(&self) -> bool {
+        matches!(self, Self::Message)
+    }
+
+    fn is_reasoning(&self) -> bool {
+        matches!(self, Self::Reasoning)
+    }
+}
+
+impl<'de> Deserialize<'de> for ResponsesOutputItemKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        String::deserialize(deserializer).map(Self::from_raw)
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct ResponsesOutputItem {
     #[serde(rename = "type")]
-    kind: Option<String>,
+    #[serde(default)]
+    kind: ResponsesOutputItemKind,
     call_id: Option<String>,
     name: Option<String>,
     arguments: Option<String>,

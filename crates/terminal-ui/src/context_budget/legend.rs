@@ -164,7 +164,7 @@ mod tests {
         ContextBudgetSnapshot, ContextSegment, ContextTokenLimit, ContextWindowUsage, SegmentKind,
     };
 
-    fn limit(value: u32) -> ContextTokenLimit {
+    fn limit(value: usize) -> ContextTokenLimit {
         ContextTokenLimit::try_from(value).expect("fixture limit should be valid")
     }
 

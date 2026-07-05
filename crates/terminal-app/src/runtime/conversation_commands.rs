@@ -1,3 +1,4 @@
+use conversation_runtime::PreparedTurnOptions;
 use runtime_domain::{
     dynamic_environment::{
         DynamicEnvironmentSessionConfig, enabled_dynamic_environment_sources_for_session_config,
@@ -182,15 +183,18 @@ impl AppRuntimeCoordinator {
             transcript_user_message,
             manual_skill_activities,
         } = pending_turn;
+        let mut turn_options = PreparedTurnOptions::default()
+            .with_provider_prefix_texts(dynamic_environment.prefix_texts)
+            .with_transcript_user_message(transcript_user_message)
+            .with_transcript_replay_after_user(
+                self.manual_skill_replay_items(&manual_skill_activities),
+            );
+        if let Some(observations) = dynamic_environment.next_observations {
+            turn_options = turn_options.with_dynamic_environment_observations(observations);
+        }
         let prepared_request = self
             .provider_conversation
-            .prepare_turn_with_transcript_prefix_texts_and_dynamic_environment(
-                &provider_request,
-                dynamic_environment.prefix_texts,
-                Some(transcript_user_message),
-                self.manual_skill_replay_items(&manual_skill_activities),
-                dynamic_environment.next_observations,
-            )
+            .prepare_turn_with_options(&provider_request, turn_options)
             .map_err(|error| error.to_string())?;
         self.pending_runtime_events
             .extend(self.manual_skill_runtime_events(target.clone(), &manual_skill_activities));

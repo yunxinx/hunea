@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::{cmp::Ordering, path::PathBuf};
 
 use crate::text::natural_sort_text_cmp;
@@ -457,6 +457,15 @@ pub fn next_default_extra_prompt_title<'a>(titles: impl IntoIterator<Item = &'a 
     format!("{DEFAULT_EXTRA_PROMPT_TITLE_PREFIX} {next_index}")
 }
 
+/// `requested_order_sort_key` 把可选用户顺序转成排序键；未设置的条目稳定排在所有显式顺序之后。
+#[must_use]
+pub const fn requested_order_sort_key(requested_order: Option<u16>) -> (bool, u16) {
+    match requested_order {
+        Some(order) => (false, order),
+        None => (true, 0),
+    }
+}
+
 /// `default_extra_prompt_body` 返回新建 extra prompt 的默认正文模板。
 #[must_use]
 pub fn default_extra_prompt_body(title: &str) -> String {
@@ -490,7 +499,7 @@ pub fn resolve_prompt_assembly(input: &PromptAssemblyInput) -> PromptAssemblySna
         status: PromptSourceStatus::Active { order: 0 },
     }];
     let mut inactive_sources = Vec::new();
-    let mut grouped_candidates: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    let mut grouped_candidates: HashMap<&str, Vec<usize>> = HashMap::new();
     let mut passthrough_candidates = Vec::new();
 
     for (candidate_index, candidate) in input.candidates.iter().enumerate() {
@@ -509,7 +518,10 @@ pub fn resolve_prompt_assembly(input: &PromptAssemblyInput) -> PromptAssemblySna
         let winner_index = collision_winner_index(&input.candidates, &candidate_indices);
         for candidate_index in candidate_indices {
             let candidate = &input.candidates[candidate_index];
-            match inactive_reason_for_candidate(candidate, winner_index == Some(candidate_index)) {
+            match inactive_reason_for_grouped_candidate(
+                candidate,
+                winner_index == Some(candidate_index),
+            ) {
                 Some(reason) => inactive_sources.push(resolved_inactive(candidate, reason)),
                 None => active_candidates.push(candidate_index),
             }
@@ -518,7 +530,7 @@ pub fn resolve_prompt_assembly(input: &PromptAssemblyInput) -> PromptAssemblySna
 
     for candidate_index in passthrough_candidates {
         let candidate = &input.candidates[candidate_index];
-        match inactive_reason_for_candidate(candidate, true) {
+        match inactive_reason_for_passthrough_candidate(candidate) {
             Some(reason) => inactive_sources.push(resolved_inactive(candidate, reason)),
             None => active_candidates.push(candidate_index),
         }
@@ -579,7 +591,7 @@ fn collision_priority(candidate: &PromptSourceCandidate) -> (u8, &str) {
     (scope_rank, candidate.reference_id.as_str())
 }
 
-fn inactive_reason_for_candidate(
+fn inactive_reason_for_grouped_candidate(
     candidate: &PromptSourceCandidate,
     is_collision_winner: bool,
 ) -> Option<PromptSourceInactiveReason> {
@@ -588,6 +600,18 @@ fn inactive_reason_for_candidate(
     }
     if !is_collision_winner {
         return Some(PromptSourceInactiveReason::Shadowed);
+    }
+    if candidate.state == PromptSourceCandidateState::Missing {
+        return Some(PromptSourceInactiveReason::Missing);
+    }
+    None
+}
+
+fn inactive_reason_for_passthrough_candidate(
+    candidate: &PromptSourceCandidate,
+) -> Option<PromptSourceInactiveReason> {
+    if candidate.state == PromptSourceCandidateState::Disabled {
+        return Some(PromptSourceInactiveReason::Disabled);
     }
     if candidate.state == PromptSourceCandidateState::Missing {
         return Some(PromptSourceInactiveReason::Missing);
@@ -609,10 +633,8 @@ fn resolved_inactive(
 }
 
 fn active_candidate_order(left: &PromptSourceCandidate, right: &PromptSourceCandidate) -> Ordering {
-    let left_order = left.requested_order.unwrap_or(u16::MAX);
-    let right_order = right.requested_order.unwrap_or(u16::MAX);
-    left_order
-        .cmp(&right_order)
+    requested_order_sort_key(left.requested_order)
+        .cmp(&requested_order_sort_key(right.requested_order))
         .then_with(|| natural_sort_text_cmp(&left.title, &right.title))
         .then_with(|| left.reference_id.cmp(&right.reference_id))
 }

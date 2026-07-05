@@ -4,6 +4,7 @@ use crate::{message::ConversationItem, tool::ToolDefinition};
 
 /// OpenAI-compatible provider 支持的 prompt cache 保留时长。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PromptCacheRetention {
     /// 请求 provider 将 prompt cache 保留 24 小时。
     Long24h,

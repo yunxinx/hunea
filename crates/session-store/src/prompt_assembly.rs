@@ -9,7 +9,8 @@ use runtime_domain::{
         persistence::{
             PersistedPromptAssemblyEntry, PersistedSkillDiscoverySkillEntry,
             PersistedToolSelectionEntry, PromptAssemblyScope, PromptAssemblyScopeState,
-            StoredPromptBody,
+            StoredPromptBody, sort_prompt_assembly_entries, sort_skill_discovery_skill_entries,
+            sort_tool_selection_entries,
         },
     },
 };
@@ -85,7 +86,9 @@ pub(crate) fn save_global_prompt_assembly_state(
             )
             .map_err(sqlite_err)?;
 
-        for entry in sort_entries(state.entries().to_vec()) {
+        let mut entries = state.entries().to_vec();
+        sort_prompt_assembly_entries(&mut entries);
+        for entry in entries {
             transaction
                 .execute(
                     "INSERT INTO prompt_assembly_entries (
@@ -140,7 +143,9 @@ pub(crate) fn save_global_prompt_assembly_state(
                 .map_err(sqlite_err)?;
         }
 
-        for skill in sort_skill_discovery_skills(state.skill_discovery_skills().to_vec()) {
+        let mut skill_discovery_skills = state.skill_discovery_skills().to_vec();
+        sort_skill_discovery_skill_entries(&mut skill_discovery_skills);
+        for skill in skill_discovery_skills {
             transaction
                 .execute(
                     "INSERT INTO prompt_assembly_skill_discovery_skills (
@@ -168,7 +173,9 @@ pub(crate) fn save_global_prompt_assembly_state(
                 .map_err(sqlite_err)?;
         }
 
-        for tool in sort_tool_selections(state.tool_selections().to_vec()) {
+        let mut tool_selections = state.tool_selections().to_vec();
+        sort_tool_selection_entries(&mut tool_selections);
+        for tool in tool_selections {
             transaction
                 .execute(
                     "INSERT INTO prompt_assembly_tool_selections (
@@ -227,7 +234,7 @@ pub(crate) fn load_global_prompt_assembly_state(
                     reference_id ASC",
             )
             .map_err(sqlite_err)?;
-        let entries = entries_statement
+        let mut entries = entries_statement
             .query_map(params![scope], |row| {
                 let kind = parse_prompt_source_kind(&row.get::<_, String>(1)?)?;
                 let requested_order = row
@@ -248,6 +255,7 @@ pub(crate) fn load_global_prompt_assembly_state(
             .map_err(sqlite_err)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(sqlite_err)?;
+        sort_prompt_assembly_entries(&mut entries);
 
         let mut prompts_statement = conn
             .prepare(
@@ -298,7 +306,7 @@ pub(crate) fn load_global_prompt_assembly_state(
                     skill_name ASC",
             )
             .map_err(sqlite_err)?;
-        let skill_discovery_skills = discovery_skills_statement
+        let mut skill_discovery_skills = discovery_skills_statement
             .query_map(params![scope], |row| {
                 let requested_order = row
                     .get::<_, Option<i64>>(2)?
@@ -316,6 +324,7 @@ pub(crate) fn load_global_prompt_assembly_state(
             .map_err(sqlite_err)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(sqlite_err)?;
+        sort_skill_discovery_skill_entries(&mut skill_discovery_skills);
 
         let tool_guidelines_override = conn
             .query_row(
@@ -337,7 +346,7 @@ pub(crate) fn load_global_prompt_assembly_state(
                     tool_name ASC",
             )
             .map_err(sqlite_err)?;
-        let tool_selections = tool_selections_statement
+        let mut tool_selections = tool_selections_statement
             .query_map(params![scope], |row| {
                 let requested_order = row
                     .get::<_, Option<i64>>(2)?
@@ -355,6 +364,7 @@ pub(crate) fn load_global_prompt_assembly_state(
             .map_err(sqlite_err)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(sqlite_err)?;
+        sort_tool_selection_entries(&mut tool_selections);
 
         let mut dynamic_environment_statement = conn
             .prepare(
@@ -500,42 +510,6 @@ fn sqlite_err(source: rusqlite::Error) -> SessionStoreError {
     SessionStoreError::SqliteError { source }
 }
 
-fn sort_entries(
-    mut entries: Vec<PersistedPromptAssemblyEntry>,
-) -> Vec<PersistedPromptAssemblyEntry> {
-    entries.sort_by(|left, right| {
-        left.requested_order
-            .unwrap_or(u16::MAX)
-            .cmp(&right.requested_order.unwrap_or(u16::MAX))
-            .then_with(|| left.reference_id.cmp(&right.reference_id))
-    });
-    entries
-}
-
-fn sort_skill_discovery_skills(
-    mut entries: Vec<PersistedSkillDiscoverySkillEntry>,
-) -> Vec<PersistedSkillDiscoverySkillEntry> {
-    entries.sort_by(|left, right| {
-        left.requested_order
-            .unwrap_or(u16::MAX)
-            .cmp(&right.requested_order.unwrap_or(u16::MAX))
-            .then_with(|| left.skill_name.cmp(&right.skill_name))
-    });
-    entries
-}
-
-fn sort_tool_selections(
-    mut entries: Vec<PersistedToolSelectionEntry>,
-) -> Vec<PersistedToolSelectionEntry> {
-    entries.sort_by(|left, right| {
-        left.requested_order
-            .unwrap_or(u16::MAX)
-            .cmp(&right.requested_order.unwrap_or(u16::MAX))
-            .then_with(|| left.tool_name.cmp(&right.tool_name))
-    });
-    entries
-}
-
 #[cfg(test)]
 mod tests {
     use runtime_domain::prompt_assembly::{
@@ -589,6 +563,87 @@ mod tests {
             .expect("global prompt assembly should load");
 
         assert_eq!(loaded, state);
+    }
+
+    #[tokio::test]
+    async fn global_prompt_assembly_roundtrip_uses_domain_natural_sorting() {
+        let root = tempdir().expect("tempdir should exist");
+        let store = crate::LocalSessionStore::open_in(root.path().to_path_buf())
+            .await
+            .expect("local session store should open");
+        let mut state = PromptAssemblyScopeState::new(PromptAssemblyScope::Global);
+        state.set_entries(vec![
+            PersistedPromptAssemblyEntry {
+                reference_id: "prompt-10".to_string(),
+                kind: PromptSourceKind::ExtraPrompt,
+                title: "Prompt 10".to_string(),
+                enabled: true,
+                requested_order: None,
+            },
+            PersistedPromptAssemblyEntry {
+                reference_id: "prompt-2".to_string(),
+                kind: PromptSourceKind::ExtraPrompt,
+                title: "Prompt 2".to_string(),
+                enabled: true,
+                requested_order: None,
+            },
+        ]);
+        state.set_skill_discovery_skills(vec![
+            PersistedSkillDiscoverySkillEntry {
+                skill_name: "skill-10".to_string(),
+                enabled: true,
+                requested_order: None,
+            },
+            PersistedSkillDiscoverySkillEntry {
+                skill_name: "skill-2".to_string(),
+                enabled: true,
+                requested_order: None,
+            },
+        ]);
+        state.set_tool_selections(vec![
+            PersistedToolSelectionEntry {
+                tool_name: "tool-10".to_string(),
+                enabled: true,
+                requested_order: None,
+            },
+            PersistedToolSelectionEntry {
+                tool_name: "tool-2".to_string(),
+                enabled: true,
+                requested_order: None,
+            },
+        ]);
+
+        crate::store::PromptAssemblyStore::save_global_prompt_assembly_state(&store, &state)
+            .await
+            .expect("global prompt assembly should save");
+        let loaded = crate::store::PromptAssemblyStore::load_global_prompt_assembly_state(&store)
+            .await
+            .expect("global prompt assembly should load");
+
+        assert_eq!(
+            loaded
+                .entries()
+                .iter()
+                .map(|entry| entry.reference_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["prompt-2", "prompt-10"]
+        );
+        assert_eq!(
+            loaded
+                .skill_discovery_skills()
+                .iter()
+                .map(|entry| entry.skill_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["skill-2", "skill-10"]
+        );
+        assert_eq!(
+            loaded
+                .tool_selections()
+                .iter()
+                .map(|entry| entry.tool_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["tool-2", "tool-10"]
+        );
     }
 
     #[test]

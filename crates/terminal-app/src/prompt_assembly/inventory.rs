@@ -789,9 +789,8 @@ pub(super) fn merged_tool_selection_state(
         })
         .collect::<Vec<_>>();
     state.sort_by(|left, right| {
-        left.requested_order
-            .unwrap_or(u16::MAX)
-            .cmp(&right.requested_order.unwrap_or(u16::MAX))
+        requested_order_sort_key(left.requested_order)
+            .cmp(&requested_order_sort_key(right.requested_order))
             .then_with(|| natural_sort_text_cmp(&left.tool_name, &right.tool_name))
     });
     state

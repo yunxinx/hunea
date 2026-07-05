@@ -10,7 +10,7 @@ use crate::dynamic_environment::DynamicEnvironmentSourceSelection;
 
 use crate::text::natural_sort_text_cmp;
 
-use super::{PromptSourceKind, derive_extra_prompt_title};
+use super::{PromptSourceKind, derive_extra_prompt_title, requested_order_sort_key};
 
 pub const PROJECT_PROMPT_ASSEMBLY_FILE_NAME: &str = "prompt-assembly.toml";
 pub const PROJECT_PROMPTS_DIR_NAME: &str = "prompts";
@@ -324,15 +324,16 @@ pub fn load_project_prompt_assembly_state(
     let prompts_dir = project_prompts_dir(work_dir);
     let custom_prompts_dir = project_custom_prompts_dir(work_dir);
 
-    let entries = sort_entries(config.entries);
-    let skill_discovery_skills = sort_skill_discovery_skills(config.skill_discovery_skills);
+    let entries = sorted_prompt_assembly_entries(config.entries);
+    let skill_discovery_skills =
+        sorted_skill_discovery_skill_entries(config.skill_discovery_skills);
     let core_system_override =
         read_optional_text_file(&prompts_dir.join(PROJECT_CORE_SYSTEM_OVERRIDE_FILE_NAME))?;
     let skill_discovery_override =
         read_optional_text_file(&prompts_dir.join(PROJECT_SKILL_DISCOVERY_OVERRIDE_FILE_NAME))?;
     let tool_guidelines_override =
         read_optional_text_file(&prompts_dir.join(PROJECT_TOOL_GUIDELINES_OVERRIDE_FILE_NAME))?;
-    let tool_selections = sort_tool_selections(config.tool_selections);
+    let tool_selections = sorted_tool_selection_entries(config.tool_selections);
     let entry_titles = entries
         .iter()
         .filter(|entry| entry.kind == PromptSourceKind::ExtraPrompt)
@@ -414,9 +415,11 @@ pub fn save_project_prompt_assembly_state(
 
     let config = ProjectPromptAssemblyFile {
         version: PROJECT_PROMPT_ASSEMBLY_VERSION,
-        entries: sort_entries(state.entries.clone()),
-        skill_discovery_skills: sort_skill_discovery_skills(state.skill_discovery_skills.clone()),
-        tool_selections: sort_tool_selections(state.tool_selections.clone()),
+        entries: sorted_prompt_assembly_entries(state.entries.clone()),
+        skill_discovery_skills: sorted_skill_discovery_skill_entries(
+            state.skill_discovery_skills.clone(),
+        ),
+        tool_selections: sorted_tool_selection_entries(state.tool_selections.clone()),
     };
     let encoded =
         toml::to_string_pretty(&config).map_err(|source| ProjectPromptAssemblyError::Encode {
@@ -657,40 +660,52 @@ fn validate_project_reference_id(reference_id: &str) -> Result<(), ProjectPrompt
     Ok(())
 }
 
-fn sort_entries(
-    mut entries: Vec<PersistedPromptAssemblyEntry>,
-) -> Vec<PersistedPromptAssemblyEntry> {
+/// `sort_prompt_assembly_entries` 按领域展示顺序就地排序 persisted source entries。
+pub fn sort_prompt_assembly_entries(entries: &mut [PersistedPromptAssemblyEntry]) {
     entries.sort_by(|left, right| {
-        left.requested_order
-            .unwrap_or(u16::MAX)
-            .cmp(&right.requested_order.unwrap_or(u16::MAX))
+        requested_order_sort_key(left.requested_order)
+            .cmp(&requested_order_sort_key(right.requested_order))
             .then_with(|| natural_sort_text_cmp(&left.title, &right.title))
             .then_with(|| left.reference_id.cmp(&right.reference_id))
     });
+}
+
+fn sorted_prompt_assembly_entries(
+    mut entries: Vec<PersistedPromptAssemblyEntry>,
+) -> Vec<PersistedPromptAssemblyEntry> {
+    sort_prompt_assembly_entries(&mut entries);
     entries
 }
 
-fn sort_skill_discovery_skills(
-    mut entries: Vec<PersistedSkillDiscoverySkillEntry>,
-) -> Vec<PersistedSkillDiscoverySkillEntry> {
+/// `sort_skill_discovery_skill_entries` 按领域展示顺序就地排序 skill discovery entries。
+pub fn sort_skill_discovery_skill_entries(entries: &mut [PersistedSkillDiscoverySkillEntry]) {
     entries.sort_by(|left, right| {
-        left.requested_order
-            .unwrap_or(u16::MAX)
-            .cmp(&right.requested_order.unwrap_or(u16::MAX))
+        requested_order_sort_key(left.requested_order)
+            .cmp(&requested_order_sort_key(right.requested_order))
             .then_with(|| natural_sort_text_cmp(&left.skill_name, &right.skill_name))
     });
+}
+
+fn sorted_skill_discovery_skill_entries(
+    mut entries: Vec<PersistedSkillDiscoverySkillEntry>,
+) -> Vec<PersistedSkillDiscoverySkillEntry> {
+    sort_skill_discovery_skill_entries(&mut entries);
     entries
 }
 
-fn sort_tool_selections(
-    mut entries: Vec<PersistedToolSelectionEntry>,
-) -> Vec<PersistedToolSelectionEntry> {
+/// `sort_tool_selection_entries` 按领域展示顺序就地排序 tool selection entries。
+pub fn sort_tool_selection_entries(entries: &mut [PersistedToolSelectionEntry]) {
     entries.sort_by(|left, right| {
-        left.requested_order
-            .unwrap_or(u16::MAX)
-            .cmp(&right.requested_order.unwrap_or(u16::MAX))
+        requested_order_sort_key(left.requested_order)
+            .cmp(&requested_order_sort_key(right.requested_order))
             .then_with(|| natural_sort_text_cmp(&left.tool_name, &right.tool_name))
     });
+}
+
+fn sorted_tool_selection_entries(
+    mut entries: Vec<PersistedToolSelectionEntry>,
+) -> Vec<PersistedToolSelectionEntry> {
+    sort_tool_selection_entries(&mut entries);
     entries
 }
 

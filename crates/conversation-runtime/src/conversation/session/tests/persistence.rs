@@ -403,7 +403,7 @@ fn persist_turn_start_keeps_provider_message_in_items_and_transcript_projection_
         custom_prompt_bindings: Vec::new(),
     };
     let request = conversation
-        .prepare_turn_with_transcript(
+        .prepare_turn_with_options(
             &runtime_domain::session::ConversationTurnRequest::new(
                 "local",
                 ProviderKind::OpenAiCompatible,
@@ -413,22 +413,23 @@ fn persist_turn_start_keeps_provider_message_in_items_and_transcript_projection_
                 None,
                 provider_user.clone(),
             ),
-            Some(transcript_user),
-            vec![TranscriptReplayItem::ToolActivity {
-                activity: RuntimeToolActivity {
-                    activity_id: "manual-skill-1-code-review".to_string(),
-                    title: "Read /tmp/code-review/SKILL.md".to_string(),
-                    kind: RuntimeToolKind::Read,
-                    status: RuntimeToolActivityStatus::Completed,
-                    content: Vec::new(),
-                    locations: Vec::new(),
-                    raw_input: Some(RuntimeToolActivityRawValue::from(serde_json::json!({
-                        "path": "/tmp/code-review/SKILL.md",
-                        "hunea_skill_name": "code-review",
-                    }))),
-                    raw_output: None,
-                },
-            }],
+            PreparedTurnOptions::default()
+                .with_transcript_user_message(transcript_user)
+                .with_transcript_replay_after_user(vec![TranscriptReplayItem::ToolActivity {
+                    activity: RuntimeToolActivity {
+                        activity_id: "manual-skill-1-code-review".to_string(),
+                        title: "Read /tmp/code-review/SKILL.md".to_string(),
+                        kind: RuntimeToolKind::Read,
+                        status: RuntimeToolActivityStatus::Completed,
+                        content: Vec::new(),
+                        locations: Vec::new(),
+                        raw_input: Some(RuntimeToolActivityRawValue::from(serde_json::json!({
+                            "path": "/tmp/code-review/SKILL.md",
+                            "hunea_skill_name": "code-review",
+                        }))),
+                        raw_output: None,
+                    },
+                }]),
         )
         .expect("turn should prepare");
     let (sender, _receiver) = mpsc::channel();

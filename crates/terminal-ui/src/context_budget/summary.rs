@@ -50,7 +50,7 @@ pub(crate) fn context_usage_summary(model_id: &str, usage: ContextWindowUsage) -
     format!(
         "{model_id} · ~{}/{} tokens ({})",
         used,
-        format_compact_tokens(usage.limit.get() as usize),
+        format_compact_tokens(usage.limit.get()),
         percent,
     )
 }
@@ -90,12 +90,15 @@ pub(crate) fn context_budget_category_from_segment_kind(
 }
 
 pub(crate) fn free_space_tokens(snapshot: &ContextBudgetSnapshot) -> usize {
-    let limit = snapshot.usage.limit.get() as usize;
-    limit.saturating_sub(snapshot.usage.used)
+    snapshot
+        .usage
+        .limit
+        .get()
+        .saturating_sub(snapshot.usage.used)
 }
 
 pub(crate) fn legend_share_total(snapshot: &ContextBudgetSnapshot) -> usize {
-    usize::try_from(snapshot.usage.limit.get()).unwrap_or(usize::MAX)
+    snapshot.usage.limit.get()
 }
 
 pub(crate) fn aggregated_category_totals(
@@ -153,7 +156,7 @@ mod tests {
         share_of_total_percent,
     };
 
-    fn limit(value: u32) -> ContextTokenLimit {
+    fn limit(value: usize) -> ContextTokenLimit {
         ContextTokenLimit::try_from(value).expect("fixture limit should be valid")
     }
 

@@ -6,24 +6,6 @@ use runtime_domain::session::{
 use super::AppRuntimeCoordinator;
 use crate::prompt_assembly::dynamic_environment_session_config_from_manager;
 
-#[derive(Debug, thiserror::Error)]
-enum PromptAssemblyCommandError {
-    #[error("{0}")]
-    RuntimeState(String),
-}
-
-impl PromptAssemblyCommandError {
-    fn failure_kind(&self) -> PromptAssemblyCommandFailureKind {
-        match self {
-            Self::RuntimeState(_) => PromptAssemblyCommandFailureKind::RuntimeState,
-        }
-    }
-
-    fn display_message(&self) -> String {
-        self.to_string()
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PromptSessionConfigRefreshTarget {
     CurrentEmptySession,
@@ -71,33 +53,25 @@ impl AppRuntimeCoordinator {
     pub(super) fn reload_prompt_assembly(&mut self) -> RuntimeCommandReceipt {
         match self.reload_prompt_assembly_result() {
             Ok(receipt) => receipt,
-            Err(error) => {
+            Err(message) => {
                 self.pending_runtime_events
                     .push(RuntimeEvent::PromptAssemblyUpdateFailed {
-                        kind: error.failure_kind(),
-                        message: error.display_message(),
+                        kind: PromptAssemblyCommandFailureKind::RuntimeState,
+                        message,
                     });
                 RuntimeCommandReceipt::Accepted
             }
         }
     }
 
-    fn reload_prompt_assembly_result(
-        &mut self,
-    ) -> Result<RuntimeCommandReceipt, PromptAssemblyCommandError> {
-        let store = self
-            .session_store()
-            .map_err(PromptAssemblyCommandError::RuntimeState)?;
-        let header = self
-            .session_header()
-            .map_err(PromptAssemblyCommandError::RuntimeState)?;
-        self.session_store_worker
-            .load_prompt_assembly(
-                store,
-                header.work_dir,
-                self.prompt_assembly_tool_definitions().to_vec(),
-            )
-            .map_err(PromptAssemblyCommandError::RuntimeState)?;
+    fn reload_prompt_assembly_result(&mut self) -> Result<RuntimeCommandReceipt, String> {
+        let store = self.session_store()?;
+        let header = self.session_header()?;
+        self.session_store_worker.load_prompt_assembly(
+            store,
+            header.work_dir,
+            self.prompt_assembly_tool_definitions().to_vec(),
+        )?;
         Ok(RuntimeCommandReceipt::Accepted)
     }
 
@@ -131,11 +105,11 @@ impl AppRuntimeCoordinator {
     ) -> RuntimeCommandReceipt {
         match self.mutate_prompt_assembly_result(mutation) {
             Ok(receipt) => receipt,
-            Err(error) => {
+            Err(message) => {
                 self.pending_runtime_events
                     .push(RuntimeEvent::PromptAssemblyUpdateFailed {
-                        kind: error.failure_kind(),
-                        message: error.display_message(),
+                        kind: PromptAssemblyCommandFailureKind::RuntimeState,
+                        message,
                     });
                 RuntimeCommandReceipt::Accepted
             }
@@ -145,23 +119,16 @@ impl AppRuntimeCoordinator {
     fn mutate_prompt_assembly_result(
         &mut self,
         mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation,
-    ) -> Result<RuntimeCommandReceipt, PromptAssemblyCommandError> {
-        let store = self
-            .session_store()
-            .map_err(PromptAssemblyCommandError::RuntimeState)?;
-        let header = self
-            .session_header()
-            .map_err(PromptAssemblyCommandError::RuntimeState)?;
-        self.ensure_session_mutation_available("mutate prompt assembly")
-            .map_err(PromptAssemblyCommandError::RuntimeState)?;
-        self.session_store_worker
-            .apply_prompt_assembly_mutation(
-                store,
-                header.work_dir,
-                mutation,
-                self.prompt_assembly_tool_definitions().to_vec(),
-            )
-            .map_err(PromptAssemblyCommandError::RuntimeState)?;
+    ) -> Result<RuntimeCommandReceipt, String> {
+        let store = self.session_store()?;
+        let header = self.session_header()?;
+        self.ensure_session_mutation_available("mutate prompt assembly")?;
+        self.session_store_worker.apply_prompt_assembly_mutation(
+            store,
+            header.work_dir,
+            mutation,
+            self.prompt_assembly_tool_definitions().to_vec(),
+        )?;
         Ok(RuntimeCommandReceipt::Accepted)
     }
 

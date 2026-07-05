@@ -376,7 +376,7 @@ fn split_prompt_prelude_system_segment(
         return None;
     };
     let prompt_prelude = prompt_prelude?;
-    let buckets = prompt_prelude_buckets(prompt_prelude);
+    let buckets = prompt_prelude_buckets(prompt_prelude, token_encoding);
     if buckets.is_empty() {
         return None;
     }
@@ -387,7 +387,7 @@ fn split_prompt_prelude_system_segment(
     let total_tokens = token_encoding.estimate_text(projection_text);
     let weights = buckets
         .iter()
-        .map(|bucket| token_encoding.estimate_text(&serialized_system_message(&bucket.body)))
+        .map(|bucket| bucket.token_weight)
         .collect::<Vec<_>>();
     let distributed = distribute_tokens_by_weight(total_tokens, &weights);
 
@@ -408,10 +408,13 @@ fn split_prompt_prelude_system_segment(
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PromptPreludeBucket {
     kind: SegmentKind,
-    body: String,
+    token_weight: usize,
 }
 
-fn prompt_prelude_buckets(prompt_prelude: &PromptPreludeSnapshot) -> Vec<PromptPreludeBucket> {
+fn prompt_prelude_buckets(
+    prompt_prelude: &PromptPreludeSnapshot,
+    token_encoding: TokenEncoding,
+) -> Vec<PromptPreludeBucket> {
     let mut system_sections = Vec::new();
     let mut skill_sections = Vec::new();
 
@@ -429,15 +432,17 @@ fn prompt_prelude_buckets(prompt_prelude: &PromptPreludeSnapshot) -> Vec<PromptP
 
     let mut buckets = Vec::with_capacity(2);
     if !system_sections.is_empty() {
+        let body = system_sections.join("\n\n");
         buckets.push(PromptPreludeBucket {
             kind: SegmentKind::System,
-            body: system_sections.join("\n\n"),
+            token_weight: token_encoding.estimate_text(&serialized_system_message(&body)),
         });
     }
     if !skill_sections.is_empty() {
+        let body = skill_sections.join("\n\n");
         buckets.push(PromptPreludeBucket {
             kind: SegmentKind::SkillDiscovery,
-            body: skill_sections.join("\n\n"),
+            token_weight: token_encoding.estimate_text(&serialized_system_message(&body)),
         });
     }
     buckets

@@ -13,7 +13,8 @@ pub use conversation::{
     run_conversation_turn_with_cancellation,
 };
 pub use conversation::{
-    PreparedConversationRequest, ProviderConversation, ProviderConversationError,
+    PreparedConversationRequest, PreparedTurnOptions, ProviderConversation,
+    ProviderConversationError,
 };
 pub use llm::ProviderRequestError;
 pub use llm::ProviderRequestMetrics;

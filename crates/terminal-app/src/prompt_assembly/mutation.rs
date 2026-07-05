@@ -385,7 +385,7 @@ pub(super) fn materialized_sources_for_state(
 
 pub(super) fn extend_candidates(
     candidates: &mut Vec<PromptSourceCandidate>,
-    candidate_bodies: &mut HashMap<String, PromptCandidateBody>,
+    candidate_bodies: &mut HashMap<String, String>,
     state: &PromptAssemblyScopeState,
     context: &PromptAssemblyResolutionContext<'_>,
 ) {
@@ -409,10 +409,7 @@ pub(super) fn extend_candidates(
             requested_order: entry.requested_order,
         };
         if let Some(body) = body_for_entry(entry, state.scope(), context) {
-            candidate_bodies.insert(
-                candidate_body_key(origin, entry.kind, &reference_id),
-                PromptCandidateBody { body },
-            );
+            candidate_bodies.insert(candidate_body_key(origin, entry.kind, &reference_id), body);
         }
         candidates.push(candidate);
     }
@@ -560,12 +557,7 @@ pub(super) fn candidate_body_key(
 ) -> String {
     format!(
         "{}::{:?}::{reference_id}",
-        match origin {
-            Some(PromptSourceOrigin::Builtin) => "builtin",
-            Some(PromptSourceOrigin::Global) => "global",
-            Some(PromptSourceOrigin::Project) => "project",
-            None => "none",
-        },
+        origin.map_or("none", PromptSourceOrigin::as_str),
         kind
     )
 }
@@ -1177,10 +1169,8 @@ pub(super) fn ordered_non_core_entry_addresses(
     addresses.sort_by(|left, right| {
         let left_entry = entry_ref(global_state, project_state, *left);
         let right_entry = entry_ref(global_state, project_state, *right);
-        left_entry
-            .requested_order
-            .unwrap_or(u16::MAX)
-            .cmp(&right_entry.requested_order.unwrap_or(u16::MAX))
+        requested_order_sort_key(left_entry.requested_order)
+            .cmp(&requested_order_sort_key(right_entry.requested_order))
             .then_with(|| natural_sort_text_cmp(&left_entry.title, &right_entry.title))
             .then_with(|| left_entry.reference_id.cmp(&right_entry.reference_id))
             .then_with(|| {

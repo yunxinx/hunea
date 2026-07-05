@@ -215,7 +215,7 @@ mod tests {
     use crate::context_budget::summary::context_usage_summary;
     use runtime_domain::context_budget::{ContextTokenLimit, ContextWindowUsage};
 
-    fn limit(value: u32) -> ContextTokenLimit {
+    fn limit(value: usize) -> ContextTokenLimit {
         ContextTokenLimit::try_from(value).expect("fixture limit should be valid")
     }
 

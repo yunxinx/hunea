@@ -342,15 +342,14 @@ fn validate_positive_context_window(
     field: &str,
     path: &Path,
 ) -> Result<ContextTokenLimit, ModelsConfigError> {
-    if value > u32::MAX as u64 {
-        return Err(ModelsConfigError::InvalidContextWindow {
+    let value_usize =
+        usize::try_from(value).map_err(|_| ModelsConfigError::InvalidContextWindow {
             path: path.to_path_buf(),
             field: field.to_string(),
             value,
-        });
-    }
+        })?;
 
-    ContextTokenLimit::try_from(value as u32).map_err(|_| ModelsConfigError::InvalidContextWindow {
+    ContextTokenLimit::try_from(value_usize).map_err(|_| ModelsConfigError::InvalidContextWindow {
         path: path.to_path_buf(),
         field: field.to_string(),
         value,

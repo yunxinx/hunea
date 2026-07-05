@@ -212,7 +212,7 @@ impl OpenAiResponsesStreamState {
         item: ResponsesOutputItem,
         sink: &mut (dyn StreamEventSink + Send),
     ) {
-        if item.kind.as_deref() != Some("function_call") {
+        if !item.kind.is_function_call() {
             return;
         }
         self.tool_calls.apply_responses_item(
@@ -229,29 +229,23 @@ impl OpenAiResponsesStreamState {
         item: ResponsesOutputItem,
         sink: &mut (dyn StreamEventSink + Send),
     ) {
-        match item.kind.as_deref() {
-            Some("function_call") => {
-                self.tool_calls.apply_responses_item(
-                    output_index,
-                    item,
-                    ResponsesToolArgumentsMode::Replace,
-                    sink,
-                );
+        if item.kind.is_function_call() {
+            self.tool_calls.apply_responses_item(
+                output_index,
+                item,
+                ResponsesToolArgumentsMode::Replace,
+                sink,
+            );
+        } else if item.kind.is_message() {
+            if let Some(text) = item.visible_output_text().filter(|value| !value.is_empty()) {
+                self.apply_final_text_output(output_index, text, sink);
             }
-            Some("message") => {
-                if let Some(text) = item.visible_output_text().filter(|value| !value.is_empty()) {
-                    self.apply_final_text_output(output_index, text, sink);
-                }
-            }
-            Some("reasoning") => {
-                if let Some(text) = item
-                    .visible_reasoning_text()
-                    .filter(|value| !value.is_empty())
-                {
-                    self.apply_final_reasoning_output(output_index, text, sink);
-                }
-            }
-            _ => {}
+        } else if item.kind.is_reasoning()
+            && let Some(text) = item
+                .visible_reasoning_text()
+                .filter(|value| !value.is_empty())
+        {
+            self.apply_final_reasoning_output(output_index, text, sink);
         }
     }
 

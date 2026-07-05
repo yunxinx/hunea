@@ -236,7 +236,7 @@ pub(super) fn resolve_prompt_assembly_manager_snapshot_with_overrides(
                     source.kind,
                     &source.reference_id,
                 ))
-                .map(|candidate| candidate.body.clone())
+                .cloned()
                 .unwrap_or_default(),
         };
         if body.trim().is_empty() {
@@ -322,9 +322,8 @@ fn managed_sources(
         )
         .collect::<Vec<_>>();
     entries.sort_by(|(left_scope, left), (right_scope, right)| {
-        left.requested_order
-            .unwrap_or(u16::MAX)
-            .cmp(&right.requested_order.unwrap_or(u16::MAX))
+        requested_order_sort_key(left.requested_order)
+            .cmp(&requested_order_sort_key(right.requested_order))
             .then_with(|| natural_sort_text_cmp(&left.title, &right.title))
             .then_with(|| left.reference_id.cmp(&right.reference_id))
             .then_with(|| {
@@ -430,9 +429,8 @@ pub(super) fn merged_skill_discovery_skill_state(
         })
         .collect::<Vec<_>>();
     state.sort_by(|left, right| {
-        left.requested_order
-            .unwrap_or(u16::MAX)
-            .cmp(&right.requested_order.unwrap_or(u16::MAX))
+        requested_order_sort_key(left.requested_order)
+            .cmp(&requested_order_sort_key(right.requested_order))
             .then_with(|| natural_sort_text_cmp(&left.skill_name, &right.skill_name))
     });
     state

@@ -1,6 +1,9 @@
 use provider_protocol::{ConversationItem, FinishReason, StreamEvent, StreamEventSink};
 
-use super::{OpenAiResponsesStreamState, OpenAiSseDecoder, OpenAiStreamState};
+use super::{
+    OpenAiResponsesStreamState, OpenAiSseDecoder, OpenAiStreamState, ResponsesOutputItem,
+    ResponsesOutputItemKind,
+};
 
 #[derive(Default)]
 struct Events(Vec<StreamEvent>);
@@ -58,6 +61,22 @@ fn sse_decoder_ignores_keepalive_events() {
             .push(b"event: keepalive\ndata: ignored\n\ndata: {\"ok\":true}\n\n")
             .unwrap(),
         vec!["{\"ok\":true}"]
+    );
+}
+
+#[test]
+fn responses_output_item_kind_preserves_known_and_unknown_values() {
+    let function_call = serde_json::from_str::<ResponsesOutputItem>(
+        r#"{"type":"function_call","call_id":"call_1","name":"read"}"#,
+    )
+    .expect("function_call output item should deserialize");
+    assert_eq!(function_call.kind, ResponsesOutputItemKind::FunctionCall);
+
+    let unknown = serde_json::from_str::<ResponsesOutputItem>(r#"{"type":"web_search_call"}"#)
+        .expect("unknown output item should deserialize");
+    assert_eq!(
+        unknown.kind,
+        ResponsesOutputItemKind::Other("web_search_call".to_string())
     );
 }
 

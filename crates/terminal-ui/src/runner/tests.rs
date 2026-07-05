@@ -66,7 +66,7 @@ fn ready_model() -> Model {
     model
 }
 
-fn context_limit(value: u32) -> ContextTokenLimit {
+fn context_limit(value: usize) -> ContextTokenLimit {
     ContextTokenLimit::try_from(value).expect("fixture limit should be valid")
 }
 

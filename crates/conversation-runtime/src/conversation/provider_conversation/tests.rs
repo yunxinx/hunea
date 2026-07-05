@@ -5,8 +5,8 @@ use std::{
 
 use provider_protocol::{ContentBlock, ConversationItem, Role, ToolCall};
 use runtime_domain::dynamic_environment::{
-    DynamicEnvironmentSessionConfig, DynamicEnvironmentSnapshotKind, DynamicEnvironmentSourceKind,
-    DynamicEnvironmentSourceSelection,
+    DynamicEnvironmentObservation, DynamicEnvironmentSessionConfig, DynamicEnvironmentSnapshotKind,
+    DynamicEnvironmentSourceKind, DynamicEnvironmentSourceSelection,
 };
 use runtime_domain::prompt_assembly::{
     PromptPreludeSection, PromptPreludeSnapshot, PromptSourceKind, PromptSourceOrigin,
@@ -16,7 +16,9 @@ use session_store::{
     SessionStoreError,
 };
 
-use super::{PersistedConversationItem, ProviderConversation, ProviderConversationError};
+use super::{
+    PersistedConversationItem, PreparedTurnOptions, ProviderConversation, ProviderConversationError,
+};
 use crate::ProviderKind;
 use runtime_domain::session::{
     ConversationTurnRequest, TranscriptReplayItem, TranscriptReplayRole, TranscriptUserMessage,
@@ -315,10 +317,11 @@ fn prepare_turn_with_transcript_keeps_provider_and_transcript_user_messages_sepa
     }];
 
     let request = conversation
-        .prepare_turn_with_transcript(
+        .prepare_turn_with_options(
             &turn,
-            Some(transcript_user_message.clone()),
-            transcript_replay_after_user.clone(),
+            PreparedTurnOptions::default()
+                .with_transcript_user_message(transcript_user_message.clone())
+                .with_transcript_replay_after_user(transcript_replay_after_user.clone()),
         )
         .expect("turn should prepare");
     let persistence = request
@@ -373,16 +376,16 @@ fn prepare_turn_with_transcript_can_prepend_provider_visible_meta_items() {
     );
 
     let request = conversation
-        .prepare_turn_with_transcript_and_prefix_items(
+        .prepare_turn_with_options(
             &turn,
-            vec![meta_item.clone()],
-            Some(TranscriptUserMessage {
-                content: "actual user message".to_string(),
-                attachments: Vec::new(),
-                skill_bindings: Vec::new(),
-                custom_prompt_bindings: Vec::new(),
-            }),
-            Vec::new(),
+            PreparedTurnOptions::default()
+                .with_provider_prefix_items(vec![meta_item.clone()])
+                .with_transcript_user_message(TranscriptUserMessage {
+                    content: "actual user message".to_string(),
+                    attachments: Vec::new(),
+                    skill_bindings: Vec::new(),
+                    custom_prompt_bindings: Vec::new(),
+                }),
         )
         .expect("turn should prepare");
     let persistence = request
@@ -410,6 +413,72 @@ fn prepare_turn_with_transcript_can_prepend_provider_visible_meta_items() {
             "<system-reminder>\nEnvironment baseline\n</system-reminder>",
             "actual user message"
         ]
+    );
+}
+
+#[test]
+fn prepare_turn_options_bind_transcript_prefix_and_dynamic_environment() {
+    let work_dir = PathBuf::from("/tmp/hunea-provider-conversation-options");
+    let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+    let mut conversation =
+        ProviderConversation::with_session_store(store, sample_header(&work_dir, "qwen3"))
+            .expect("persisted conversation should initialize");
+    let turn = ConversationTurnRequest::new(
+        "local",
+        ProviderKind::OpenAiCompatible,
+        "qwen3",
+        Some("http://127.0.0.1:1234/v1".to_string()),
+        None,
+        None,
+        ConversationItem::text(Role::User, "actual user message"),
+    );
+    let transcript_user_message = TranscriptUserMessage {
+        content: "actual user message".to_string(),
+        attachments: Vec::new(),
+        skill_bindings: Vec::new(),
+        custom_prompt_bindings: Vec::new(),
+    };
+    let transcript_replay_after_user = vec![TranscriptReplayItem::Message {
+        role: TranscriptReplayRole::Assistant,
+        content: "manual replay".to_string(),
+    }];
+    let observations = vec![DynamicEnvironmentObservation {
+        source_kind: DynamicEnvironmentSourceKind::Workdir,
+        fingerprint: "workspace".to_string(),
+        summary: "Workdir: /tmp/repo".to_string(),
+        details: None,
+    }];
+
+    let request = conversation
+        .prepare_turn_with_options(
+            &turn,
+            PreparedTurnOptions::default()
+                .with_provider_prefix_texts(vec!["<env>Workdir: /tmp/repo</env>".to_string()])
+                .with_transcript_user_message(transcript_user_message.clone())
+                .with_transcript_replay_after_user(transcript_replay_after_user.clone())
+                .with_dynamic_environment_observations(observations.clone()),
+        )
+        .expect("turn should prepare");
+    let persistence = request
+        .persistence_cloned()
+        .expect("persistence should be attached");
+
+    assert_eq!(
+        request
+            .items()
+            .iter()
+            .map(ConversationItem::text_content)
+            .collect::<Vec<_>>(),
+        vec!["<env>Workdir: /tmp/repo</env>", "actual user message"]
+    );
+    assert_eq!(persistence.transcript_user_message, transcript_user_message);
+    assert_eq!(
+        persistence.transcript_replay_after_user,
+        transcript_replay_after_user
+    );
+    assert_eq!(
+        persistence.config_snapshot.dynamic_environment_observations,
+        observations
     );
 }
 

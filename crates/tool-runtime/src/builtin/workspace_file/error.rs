@@ -7,8 +7,15 @@ pub(crate) enum WorkspaceFileError {
         tool: &'static str,
         source: serde_json::Error,
     },
-    #[error("{message}")]
-    InvalidPath { message: String },
+    #[error("'path' is required")]
+    MissingPath,
+    #[error("path not found: {requested}: {source}")]
+    PathNotFound {
+        requested: String,
+        source: io::Error,
+    },
+    #[error("path is outside workspace: {requested}")]
+    PathOutsideWorkspace { requested: String },
     #[error("stat failed for '{path}': {source}")]
     Metadata { path: String, source: io::Error },
     #[error("'{path}' is a directory, use {replacement} instead")]

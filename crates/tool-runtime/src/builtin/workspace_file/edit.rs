@@ -254,7 +254,7 @@ fn execute_edit(
 
     let path = match resolve_workspace_write_path(access.as_ref(), &root, &requested_path) {
         Ok(path) => path,
-        Err(message) => return ToolResult::error(call.call_id, message),
+        Err(error) => return ToolResult::error(call.call_id, error.to_string()),
     };
 
     match edit_text_file(EditTextFileOptions {

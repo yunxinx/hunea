@@ -157,12 +157,7 @@ fn execute_view_image(
 
     let path = match resolve_workspace_path(access.as_ref(), &root, &arguments.path) {
         Ok(path) => path,
-        Err(message) => {
-            return ToolResult::error(
-                call.call_id,
-                WorkspaceFileError::InvalidPath { message }.to_string(),
-            );
-        }
+        Err(error) => return ToolResult::error(call.call_id, error.to_string()),
     };
     let metadata = match access.metadata(&path) {
         Ok(metadata) => metadata,

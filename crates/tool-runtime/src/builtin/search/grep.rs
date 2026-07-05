@@ -203,7 +203,7 @@ async fn execute_grep(
     let search_path =
         match resolve_workspace_path(access.as_ref(), &root, &arguments.requested_path) {
             Ok(path) => path,
-            Err(message) => return ToolResult::error(call.call_id, message),
+            Err(error) => return ToolResult::error(call.call_id, error.to_string()),
         };
 
     if let Some(command) =

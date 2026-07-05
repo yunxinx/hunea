@@ -199,7 +199,7 @@ fn execute_write(
 
     let path = match resolve_workspace_write_path(access.as_ref(), &root, &arguments.path) {
         Ok(path) => path,
-        Err(message) => return ToolResult::error(call.call_id, message),
+        Err(error) => return ToolResult::error(call.call_id, error.to_string()),
     };
 
     match write_text_file(WriteTextFileOptions {

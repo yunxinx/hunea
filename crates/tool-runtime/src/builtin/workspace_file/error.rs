@@ -18,12 +18,31 @@ pub(crate) enum WorkspaceFileError {
     },
     #[error("'{path}' is not a regular file")]
     NotRegularFile { path: String },
+    #[error("'{path}' is not a directory, use {replacement} instead")]
+    NotDirectory {
+        path: String,
+        replacement: &'static str,
+    },
     #[error("image path '{path}' is not a file")]
     ImageNotFile { path: String },
     #[error("read failed for '{path}': {detail}")]
     ReadRejected { path: PathBuf, detail: String },
     #[error("read failed for '{path}': {source}")]
     Read { path: PathBuf, source: io::Error },
+    #[error("read directory failed for '{path}': {source}")]
+    ReadDirectory { path: PathBuf, source: io::Error },
+    #[error("workspace root '{path}' is unavailable: {source}")]
+    WorkspaceRoot { path: PathBuf, source: io::Error },
+    #[error("invalid .gitignore '{path}': {source}")]
+    Gitignore {
+        path: PathBuf,
+        source: ignore::Error,
+    },
+    #[error("invalid gitignore matcher for '{root}': {source}")]
+    GitignoreMatcher {
+        root: PathBuf,
+        source: ignore::Error,
+    },
     #[error(
         "read failed for '{path}': offset {start_line} is beyond end of file ({total_lines} lines total)"
     )]

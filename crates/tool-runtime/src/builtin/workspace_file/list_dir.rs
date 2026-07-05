@@ -17,6 +17,7 @@ use crate::{
 };
 
 use super::{
+    error::WorkspaceFileError,
     workspace::resolve_workspace_path,
     workspace_access::{SharedWorkspaceAccess, local_workspace_access},
 };
@@ -24,7 +25,6 @@ use super::{
 const LIST_DIR_TOOL_NAME: &str = "list_dir";
 const LIST_DIR_DEFAULT_ENTRY_LIMIT: usize = 500;
 const LIST_DIR_MAX_ENTRY_LIMIT: usize = 2_000;
-const TOOL_CALL_INTERRUPTED: &str = "Tool call interrupted";
 
 /// `list_dir_tool` 创建只读 workspace 目录列举工具。
 pub fn list_dir_tool(root: impl AsRef<Path>) -> impl Tool + 'static {
@@ -124,7 +124,11 @@ fn execute_list_dir(
         Err(error) => {
             return ToolResult::error(
                 call.call_id,
-                format!("list_dir arguments are invalid: {error}"),
+                WorkspaceFileError::InvalidArguments {
+                    tool: "list_dir",
+                    source: error,
+                }
+                .to_string(),
             );
         }
     };
@@ -132,7 +136,12 @@ fn execute_list_dir(
 
     let path = match resolve_workspace_path(access.as_ref(), &root, requested_path) {
         Ok(path) => path,
-        Err(message) => return ToolResult::error(call.call_id, message),
+        Err(message) => {
+            return ToolResult::error(
+                call.call_id,
+                WorkspaceFileError::InvalidPath { message }.to_string(),
+            );
+        }
     };
 
     let metadata = match access.metadata(&path) {
@@ -140,14 +149,22 @@ fn execute_list_dir(
         Err(error) => {
             return ToolResult::error(
                 call.call_id,
-                format!("stat failed for '{requested_path}': {error}"),
+                WorkspaceFileError::Metadata {
+                    path: requested_path.to_string(),
+                    source: error,
+                }
+                .to_string(),
             );
         }
     };
     if !metadata.is_dir {
         return ToolResult::error(
             call.call_id,
-            format!("'{requested_path}' is a file, use read instead"),
+            WorkspaceFileError::NotDirectory {
+                path: requested_path.to_string(),
+                replacement: "read",
+            }
+            .to_string(),
         );
     }
 
@@ -157,7 +174,7 @@ fn execute_list_dir(
         .clamp(1, LIST_DIR_MAX_ENTRY_LIMIT);
     match list_directory_entries(&root, access.as_ref(), &path, limit, &cancellation) {
         Ok(content) => ToolResult::success(call.call_id, content),
-        Err(message) => ToolResult::error(call.call_id, message),
+        Err(error) => ToolResult::error(call.call_id, error.to_string()),
     }
 }
 
@@ -167,17 +184,23 @@ fn list_directory_entries(
     path: &Path,
     limit: usize,
     cancellation: &CancellationToken,
-) -> Result<String, String> {
+) -> Result<String, WorkspaceFileError> {
     if cancellation.is_cancelled() {
-        return Err(TOOL_CALL_INTERRUPTED.to_string());
+        return Err(WorkspaceFileError::Interrupted);
     }
     let root = access
         .canonicalize(root)
-        .map_err(|error| format!("workspace root is unavailable: {error}"))?;
+        .map_err(|source| WorkspaceFileError::WorkspaceRoot {
+            path: root.to_path_buf(),
+            source,
+        })?;
     let gitignore = gitignore_matcher(access, &root, path, cancellation)?;
     let mut entries = access
         .read_dir(path)
-        .map_err(|error| format!("read directory failed for '{}': {error}", path.display()))?
+        .map_err(|source| WorkspaceFileError::ReadDirectory {
+            path: path.to_path_buf(),
+            source,
+        })?
         .into_iter()
         .filter_map(|entry| {
             if is_gitignored(&gitignore, &entry.path, entry.is_dir) {
@@ -224,11 +247,11 @@ fn gitignore_matcher(
     root: &Path,
     path: &Path,
     cancellation: &CancellationToken,
-) -> Result<Gitignore, String> {
+) -> Result<Gitignore, WorkspaceFileError> {
     let mut builder = GitignoreBuilder::new(root);
     for directory in gitignore_directories(root, path) {
         if cancellation.is_cancelled() {
-            return Err(TOOL_CALL_INTERRUPTED.to_string());
+            return Err(WorkspaceFileError::Interrupted);
         }
         let gitignore = directory.join(".gitignore");
         let Some(content) = read_optional_text_file(access, &gitignore, cancellation)? else {
@@ -236,7 +259,7 @@ fn gitignore_matcher(
         };
         for (index, line) in content.lines().enumerate() {
             if cancellation.is_cancelled() {
-                return Err(TOOL_CALL_INTERRUPTED.to_string());
+                return Err(WorkspaceFileError::Interrupted);
             }
             let line = if index == 0 {
                 line.trim_start_matches('\u{feff}')
@@ -245,32 +268,36 @@ fn gitignore_matcher(
             };
             builder
                 .add_line(Some(gitignore.clone()), line)
-                .map_err(|error| {
-                    format!("invalid .gitignore '{}': {error}", gitignore.display())
+                .map_err(|source| WorkspaceFileError::Gitignore {
+                    path: gitignore.clone(),
+                    source,
                 })?;
         }
     }
-    builder.build().map_err(|error| {
-        format!(
-            "invalid gitignore matcher for '{}': {error}",
-            root.display()
-        )
-    })
+    builder
+        .build()
+        .map_err(|source| WorkspaceFileError::GitignoreMatcher {
+            root: root.to_path_buf(),
+            source,
+        })
 }
 
 fn read_optional_text_file(
     access: &dyn super::workspace_access::WorkspaceAccess,
     path: &Path,
     cancellation: &CancellationToken,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, WorkspaceFileError> {
     if cancellation.is_cancelled() {
-        return Err(TOOL_CALL_INTERRUPTED.to_string());
+        return Err(WorkspaceFileError::Interrupted);
     }
     let metadata = match access.metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
-            return Err(format!("stat failed for '{}': {error}", path.display()));
+            return Err(WorkspaceFileError::Metadata {
+                path: path.display().to_string(),
+                source: error,
+            });
         }
     };
     if !metadata.is_file {
@@ -279,14 +306,20 @@ fn read_optional_text_file(
 
     let mut reader = access
         .open_reader(path)
-        .map_err(|error| format!("read failed for '{}': {error}", path.display()))?;
+        .map_err(|source| WorkspaceFileError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
     if cancellation.is_cancelled() {
-        return Err(TOOL_CALL_INTERRUPTED.to_string());
+        return Err(WorkspaceFileError::Interrupted);
     }
     let mut content = String::new();
     reader
         .read_to_string(&mut content)
-        .map_err(|error| format!("read failed for '{}': {error}", path.display()))?;
+        .map_err(|source| WorkspaceFileError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
     Ok(Some(content))
 }
 
@@ -322,7 +355,7 @@ mod tests {
     use super::super::workspace_access::{
         WorkspaceAccess, WorkspaceDirectoryEntry, WorkspaceMetadata,
     };
-    use super::list_directory_entries;
+    use super::{super::error::WorkspaceFileError, list_directory_entries};
     use tokio_util::sync::CancellationToken;
 
     struct FakeWorkspaceAccess {
@@ -451,8 +484,10 @@ mod tests {
         )
         .expect_err("invalid .gitignore should surface as an error");
 
-        assert!(error.contains("invalid .gitignore"));
-        assert!(error.contains("/srv/workspace/src/.gitignore"));
+        let WorkspaceFileError::Gitignore { path, source: _ } = error else {
+            panic!("invalid .gitignore should retain its typed error source");
+        };
+        assert_eq!(path, PathBuf::from("/srv/workspace/src/.gitignore"));
     }
 
     #[test]

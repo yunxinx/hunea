@@ -188,7 +188,7 @@ fn shadowed_detail_row_delete_targets_shadowed_source() {
 
     assert_eq!(
         model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('d'))),
-        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+        super::OverlayInputResult::Effect(AppEffect::ApplyPromptAssemblyEditMutation {
             mutation: PromptAssemblyMutation::scoped(
                 PromptAssemblyScope::Global,
                 PromptAssemblyScopedMutationKind::RemovePromptSource {
@@ -1339,7 +1339,7 @@ fn tools_tab_shows_ord_column_and_supports_reorder() {
             KeyCode::Char('J'),
             crossterm::event::KeyModifiers::SHIFT,
         )),
-        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+        super::OverlayInputResult::Effect(AppEffect::ApplyPromptAssemblyEditMutation {
             mutation: PromptAssemblyMutation::scoped(
                 PromptAssemblyScope::Global,
                 PromptAssemblyScopedMutationKind::MoveTool {
@@ -1396,7 +1396,7 @@ fn dynamic_tab_groups_baseline_and_changes_columns_for_builtin_sources() {
 
     assert_eq!(
         model.handle_prompt_overlay_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
-        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+        super::OverlayInputResult::Effect(AppEffect::ApplyPromptAssemblyEditMutation {
             mutation: PromptAssemblyMutation::SetDynamicEnvironmentSourceSelected {
                 snapshot_kind: DynamicEnvironmentSnapshotKind::Baseline,
                 source_kind: DynamicEnvironmentSourceKind::GitReference,
@@ -1408,7 +1408,7 @@ fn dynamic_tab_groups_baseline_and_changes_columns_for_builtin_sources() {
     let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Right));
     assert_eq!(
         model.handle_prompt_overlay_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
-        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+        super::OverlayInputResult::Effect(AppEffect::ApplyPromptAssemblyEditMutation {
             mutation: PromptAssemblyMutation::SetDynamicEnvironmentSourceSelected {
                 snapshot_kind: DynamicEnvironmentSnapshotKind::Changes,
                 source_kind: DynamicEnvironmentSourceKind::GitReference,
@@ -1460,7 +1460,7 @@ fn mouse_click_on_dynamic_checkbox_selects_snapshot_column_for_x_toggle() {
 
     assert_eq!(
         model.handle_prompt_overlay_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
-        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+        super::OverlayInputResult::Effect(AppEffect::ApplyPromptAssemblyEditMutation {
             mutation: PromptAssemblyMutation::SetDynamicEnvironmentSourceSelected {
                 snapshot_kind: DynamicEnvironmentSnapshotKind::Changes,
                 source_kind: DynamicEnvironmentSourceKind::GitReference,
@@ -1494,7 +1494,7 @@ fn r_still_restores_core_system_override_on_left_selection() {
             KeyCode::Char('r'),
             crossterm::event::KeyModifiers::NONE,
         )),
-        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+        super::OverlayInputResult::Effect(AppEffect::ApplyPromptAssemblyEditMutation {
             mutation: PromptAssemblyMutation::scoped(
                 PromptAssemblyScope::Project,
                 PromptAssemblyScopedMutationKind::RestoreCoreSystemOverride,

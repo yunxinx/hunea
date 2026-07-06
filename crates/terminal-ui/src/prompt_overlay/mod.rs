@@ -250,8 +250,28 @@ impl Model {
     }
 
     pub(crate) fn close_prompt_overlay(&mut self) {
+        if self.prompt_overlay.is_none() {
+            return;
+        }
         self.prompt_overlay = None;
+        self.pending_prompt_assembly_commit = true;
         self.sync_composer_height();
         self.present_pending_prompt_assembly_notice_if_ready();
+    }
+
+    /// `dismiss_prompt_overlay` 关闭 overlay 但不触发 commit，也不展示 pending notice。
+    ///
+    /// 用于 `BeginPromptAssemblyEdit` 失败等场景：从未成功进入 edit session，
+    /// 不应触发后续 commit 请求，避免 commit 生命周期与真实编辑态错位。
+    pub(crate) fn dismiss_prompt_overlay(&mut self) {
+        if self.prompt_overlay.is_none() {
+            return;
+        }
+        self.prompt_overlay = None;
+        self.sync_composer_height();
+    }
+
+    pub(crate) fn take_prompt_assembly_commit_request(&mut self) -> bool {
+        std::mem::take(&mut self.pending_prompt_assembly_commit)
     }
 }

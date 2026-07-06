@@ -84,6 +84,7 @@ pub struct Model {
     pub(super) entry_tree: Option<crate::entry_tree::EntryTreeState>,
     pub(super) context_budget: Option<ContextBudgetState>,
     pub(super) pending_context_budget_cancellation: bool,
+    pub(super) pending_prompt_assembly_commit: bool,
     pub(super) copy_picker: Option<CopyPickerState>,
     pub(super) message_history_picker:
         Option<crate::message_history_picker::MessageHistoryPickerState>,
@@ -238,6 +239,7 @@ impl Model {
             entry_tree: None,
             context_budget: None,
             pending_context_budget_cancellation: false,
+            pending_prompt_assembly_commit: false,
             copy_picker: None,
             message_history_picker: None,
             prompt_assembly,

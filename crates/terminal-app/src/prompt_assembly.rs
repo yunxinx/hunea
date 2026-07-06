@@ -16,7 +16,7 @@ use runtime_domain::paths::hunea_config_dir;
 use runtime_domain::prompt_assembly::persistence::{
     PersistedPromptAssemblyEntry, PersistedSkillDiscoverySkillEntry, PersistedToolSelectionEntry,
     PromptAssemblyScope, PromptAssemblyScopeState, StoredPromptBody,
-    load_project_prompt_assembly_state, save_project_prompt_assembly_state,
+    load_project_prompt_assembly_state,
 };
 use runtime_domain::prompt_assembly::{
     CoreSystemPromptInput, PromptAssemblyCandidateInventorySnapshot,
@@ -86,6 +86,8 @@ const DEFAULT_SKILL_DISCOVERY_REQUESTED_ORDER: u16 = 30;
 
 mod attached_prompt;
 use attached_prompt::*;
+mod edit_session;
+pub(crate) use edit_session::PromptAssemblyEditSession;
 mod service;
 pub(crate) use service::PromptAssemblyWorkspace;
 
@@ -177,16 +179,6 @@ pub(crate) struct PromptAssemblyMissingSourcesCheck {
     pub(crate) missing_count: usize,
 }
 
-struct AppliedPromptAssemblyMutation {
-    global_state: PromptAssemblyScopeState,
-    project_state: PromptAssemblyScopeState,
-    original_global_state: PromptAssemblyScopeState,
-    original_project_state: PromptAssemblyScopeState,
-    global_changed: bool,
-    project_changed: bool,
-    manager: PromptAssemblyManagerSnapshot,
-}
-
 impl PromptAssemblyMissingSourcesCheck {
     fn from_manager(manager: &PromptAssemblyManagerSnapshot) -> Self {
         Self {
@@ -228,70 +220,6 @@ fn load_prompt_assembly_manager_snapshot(
     ))
 }
 
-pub(crate) async fn load_prompt_assembly_manager_snapshot_for_worker(
-    store: Arc<dyn SessionStore>,
-    work_dir: &Path,
-    tool_definitions: &[ToolDefinition],
-) -> Result<PromptAssemblyManagerSnapshot> {
-    let global_state = store
-        .load_global_prompt_assembly_state()
-        .await
-        .wrap_err("load global prompt assembly state")?;
-    let work_dir = work_dir.to_path_buf();
-    let tool_definitions = tool_definitions.to_vec();
-    tokio::task::spawn_blocking(move || {
-        let project_state = load_project_prompt_assembly_state(&work_dir)
-            .wrap_err("load project prompt assembly state")?;
-        Ok(resolve_prompt_assembly_manager_snapshot(
-            &work_dir,
-            &global_state,
-            &project_state,
-            &tool_definitions,
-        ))
-    })
-    .await
-    .wrap_err("load prompt assembly worker task panicked")?
-}
-
-fn prepare_prompt_assembly_mutation(
-    work_dir: &Path,
-    mut global_state: PromptAssemblyScopeState,
-    mutation: PromptAssemblyMutation,
-    tool_definitions: &[ToolDefinition],
-) -> Result<AppliedPromptAssemblyMutation> {
-    let original_global_state = global_state.clone();
-    let mut project_state = load_project_prompt_assembly_state(work_dir)
-        .wrap_err("load project prompt assembly state")?;
-    let original_project_state = project_state.clone();
-
-    apply_mutation_to_scope_states(
-        work_dir,
-        &mut global_state,
-        &mut project_state,
-        mutation,
-        tool_definitions,
-    )?;
-
-    let global_changed = global_state != original_global_state;
-    let project_changed = project_state != original_project_state;
-    let manager = resolve_prompt_assembly_manager_snapshot(
-        work_dir,
-        &global_state,
-        &project_state,
-        tool_definitions,
-    );
-
-    Ok(AppliedPromptAssemblyMutation {
-        global_state,
-        project_state,
-        original_global_state,
-        original_project_state,
-        global_changed,
-        project_changed,
-        manager,
-    })
-}
-
 #[cfg(test)]
 fn apply_prompt_assembly_mutation(
     store: Arc<dyn SessionStore>,
@@ -299,144 +227,14 @@ fn apply_prompt_assembly_mutation(
     mutation: PromptAssemblyMutation,
     tool_definitions: &[ToolDefinition],
 ) -> Result<PromptAssemblyManagerSnapshot> {
-    let load_store = Arc::clone(&store);
-    let global_state = run_session_store_future(
-        move || async move { load_store.load_global_prompt_assembly_state().await },
-        "start prompt assembly runtime",
-    )?
-    .wrap_err("load global prompt assembly state")?;
-    let applied =
-        prepare_prompt_assembly_mutation(work_dir, global_state, mutation, tool_definitions)?;
-    persist_applied_prompt_assembly_mutation(store, work_dir, applied)
-}
-
-#[cfg(test)]
-fn persist_applied_prompt_assembly_mutation(
-    store: Arc<dyn SessionStore>,
-    work_dir: &Path,
-    applied: AppliedPromptAssemblyMutation,
-) -> Result<PromptAssemblyManagerSnapshot> {
-    let AppliedPromptAssemblyMutation {
-        global_state,
-        project_state,
-        original_global_state,
-        original_project_state,
-        global_changed,
-        project_changed,
-        manager,
-    } = applied;
-
-    if global_changed {
-        let save_store = Arc::clone(&store);
-        let save_state = global_state.clone();
-        run_session_store_future(
-            move || async move {
-                save_store
-                    .save_global_prompt_assembly_state(&save_state)
-                    .await
-            },
-            "start prompt assembly runtime",
-        )?
-        .wrap_err("save global prompt assembly state")?;
-    }
-
-    if project_changed
-        && let Err(error) = save_project_prompt_assembly_state(work_dir, &project_state)
-    {
-        if global_changed {
-            let rollback_state = original_global_state.clone();
-            let _ = run_session_store_future(
-                move || async move {
-                    store
-                        .save_global_prompt_assembly_state(&rollback_state)
-                        .await
-                },
-                "start prompt assembly runtime",
-            );
-        }
-        let _ = save_project_prompt_assembly_state(work_dir, &original_project_state);
-        return Err(error).wrap_err("save project prompt assembly state");
-    }
-
-    Ok(manager)
-}
-
-pub(crate) async fn apply_prompt_assembly_mutation_for_worker(
-    store: Arc<dyn SessionStore>,
-    work_dir: &Path,
-    mutation: PromptAssemblyMutation,
-    tool_definitions: &[ToolDefinition],
-) -> Result<PromptAssemblyManagerSnapshot> {
-    let global_state = store
-        .load_global_prompt_assembly_state()
-        .await
-        .wrap_err("load global prompt assembly state")?;
-    let work_dir = work_dir.to_path_buf();
-    let tool_definitions = tool_definitions.to_vec();
-    let prepare_work_dir = work_dir.clone();
-    let prepare_tool_definitions = tool_definitions.clone();
-    let applied = tokio::task::spawn_blocking(move || {
-        prepare_prompt_assembly_mutation(
-            &prepare_work_dir,
-            global_state,
-            mutation,
-            &prepare_tool_definitions,
-        )
-    })
-    .await
-    .wrap_err("apply prompt assembly worker task panicked")??;
-    persist_applied_prompt_assembly_mutation_for_worker(store, work_dir, applied).await
-}
-
-async fn persist_applied_prompt_assembly_mutation_for_worker(
-    store: Arc<dyn SessionStore>,
-    work_dir: PathBuf,
-    applied: AppliedPromptAssemblyMutation,
-) -> Result<PromptAssemblyManagerSnapshot> {
-    let AppliedPromptAssemblyMutation {
-        global_state,
-        project_state,
-        original_global_state,
-        original_project_state,
-        global_changed,
-        project_changed,
-        manager,
-    } = applied;
-
-    if global_changed {
-        store
-            .save_global_prompt_assembly_state(&global_state)
-            .await
-            .wrap_err("save global prompt assembly state")?;
-    }
-
-    if project_changed {
-        let save_work_dir = work_dir.clone();
-        let save_project_state = project_state.clone();
-        let save_result = tokio::task::spawn_blocking(move || {
-            save_project_prompt_assembly_state(&save_work_dir, &save_project_state)
-                .wrap_err("save project prompt assembly state")
-        })
-        .await
-        .wrap_err("save project prompt assembly worker task panicked")?;
-
-        if let Err(error) = save_result {
-            if global_changed {
-                let _ = store
-                    .save_global_prompt_assembly_state(&original_global_state)
-                    .await;
-            }
-            let rollback_work_dir = work_dir;
-            let rollback_project_state = original_project_state;
-            let _ = tokio::task::spawn_blocking(move || {
-                save_project_prompt_assembly_state(&rollback_work_dir, &rollback_project_state)
-            })
-            .await;
-            return Err(error);
-        }
-    }
-
-    Ok(manager)
+    let mut session = PromptAssemblyEditSession::load(
+        Arc::clone(&store),
+        work_dir.to_path_buf(),
+        tool_definitions.to_vec(),
+    )?;
+    let snapshot = session.apply_mutation(mutation)?;
+    let outcome = session.commit(store)?;
+    Ok(outcome.map(|outcome| outcome.manager).unwrap_or(snapshot))
 }
 
 pub(crate) fn check_prompt_assembly_missing_sources_from_states(

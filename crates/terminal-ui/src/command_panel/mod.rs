@@ -426,7 +426,7 @@ impl Model {
                 self.sync_composer_attached_picker_state();
                 self.sync_composer_height();
                 self.open_prompt_overlay();
-                Some(AppEffect::ReloadPromptAssembly)
+                Some(AppEffect::BeginPromptAssemblyEdit)
             }
             CommandPanelAction::OpenMessageHistory => {
                 self.composer_mut().clear();

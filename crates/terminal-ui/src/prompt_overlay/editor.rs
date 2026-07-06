@@ -42,7 +42,7 @@ impl Model {
             return Some(None);
         }
 
-        Some(Some(AppEffect::MutatePromptAssembly {
+        Some(Some(AppEffect::ApplyPromptAssemblyEditMutation {
             mutation: PromptAssemblyMutation::SaveEditorTarget {
                 target: pending_editor.target,
                 content: normalized_content,

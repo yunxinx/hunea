@@ -64,7 +64,7 @@ fn changed_prompt_overlay_external_editor_exit_returns_save_mutation() {
 
     assert_eq!(
         effect,
-        Some(AppEffect::MutatePromptAssembly {
+        Some(AppEffect::ApplyPromptAssemblyEditMutation {
             mutation: PromptAssemblyMutation::SaveEditorTarget {
                 target: runtime_domain::prompt_assembly::PromptAssemblyEditorTarget::ExtraPrompt {
                     scope:

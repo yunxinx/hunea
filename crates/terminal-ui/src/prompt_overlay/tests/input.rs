@@ -14,14 +14,14 @@ fn command_panel_lists_prompt_command() {
 }
 
 #[test]
-fn prompt_command_opens_overlay_and_requests_reload() {
+fn prompt_command_opens_overlay_and_begins_edit() {
     let mut model = ready_model();
     model.composer_mut().set_text_for_test("/prompt");
     model.sync_command_panel_navigation();
 
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
 
-    assert_eq!(effect, Some(AppEffect::ReloadPromptAssembly));
+    assert_eq!(effect, Some(AppEffect::BeginPromptAssemblyEdit));
     assert_eq!(model.top_modal_layer(), Some(ModalLayer::PromptOverlay));
     assert!(model.blocks_composer_input());
     assert_eq!(model.composer_text(), "");
@@ -90,7 +90,7 @@ fn scope_picker_confirms_selected_scope_for_custom_creation() {
 
     assert_eq!(
         model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Enter)),
-        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+        super::OverlayInputResult::Effect(AppEffect::ApplyPromptAssemblyEditMutation {
             mutation: PromptAssemblyMutation::scoped(
                 PromptAssemblyScope::Global,
                 PromptAssemblyScopedMutationKind::CreateExtraPrompt {
@@ -291,5 +291,33 @@ fn prompt_overlay_close_shows_toast_for_next_new_session_notice() {
             .transcript_plain_items()
             .iter()
             .any(|item| item.contains("Prompt updated for current empty session."))
+    );
+}
+
+#[test]
+fn close_prompt_overlay_schedules_commit_request() {
+    let mut model = ready_model();
+    model.open_prompt_overlay();
+
+    model.close_prompt_overlay();
+
+    assert!(!model.prompt_overlay_active());
+    assert!(
+        model.take_prompt_assembly_commit_request(),
+        "Esc 关闭 overlay 应触发后续 commit 请求，把 working copy 落盘"
+    );
+}
+
+#[test]
+fn dismiss_prompt_overlay_does_not_schedule_commit_request() {
+    let mut model = ready_model();
+    model.open_prompt_overlay();
+
+    model.dismiss_prompt_overlay();
+
+    assert!(!model.prompt_overlay_active());
+    assert!(
+        !model.take_prompt_assembly_commit_request(),
+        "begin 失败等场景从未成功进入 edit session，不应触发 commit 请求"
     );
 }

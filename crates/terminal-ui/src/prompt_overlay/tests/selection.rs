@@ -173,7 +173,7 @@ fn create_extra_prompt_uses_next_numbered_default_title() {
     );
     assert_eq!(
         model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Enter)),
-        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+        super::OverlayInputResult::Effect(AppEffect::ApplyPromptAssemblyEditMutation {
             mutation: PromptAssemblyMutation::scoped(
                 PromptAssemblyScope::Project,
                 PromptAssemblyScopedMutationKind::CreateExtraPrompt {
@@ -408,7 +408,7 @@ fn deleting_modified_extra_prompt_confirms_on_enter() {
 
     assert_eq!(
         model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Enter)),
-        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+        super::OverlayInputResult::Effect(AppEffect::ApplyPromptAssemblyEditMutation {
             mutation: PromptAssemblyMutation::scoped(
                 PromptAssemblyScope::Global,
                 PromptAssemblyScopedMutationKind::DeleteExtraPrompt {
@@ -481,7 +481,7 @@ fn removing_active_disabled_extra_prompt_emits_generic_remove_mutation() {
 
     assert_eq!(
         model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('d'))),
-        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+        super::OverlayInputResult::Effect(AppEffect::ApplyPromptAssemblyEditMutation {
             mutation: PromptAssemblyMutation::scoped(
                 PromptAssemblyScope::Global,
                 PromptAssemblyScopedMutationKind::RemovePromptSource {
@@ -502,7 +502,7 @@ fn moving_active_source_emits_reorder_mutation() {
 
     assert_eq!(
         model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('J'))),
-        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+        super::OverlayInputResult::Effect(AppEffect::ApplyPromptAssemblyEditMutation {
             mutation: PromptAssemblyMutation::scoped(
                 PromptAssemblyScope::Project,
                 PromptAssemblyScopedMutationKind::MoveActiveSource {
@@ -527,7 +527,7 @@ fn shifted_j_and_k_reorder_active_source() {
             KeyCode::Char('K'),
             crossterm::event::KeyModifiers::SHIFT,
         )),
-        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+        super::OverlayInputResult::Effect(AppEffect::ApplyPromptAssemblyEditMutation {
             mutation: PromptAssemblyMutation::scoped(
                 PromptAssemblyScope::Project,
                 PromptAssemblyScopedMutationKind::MoveActiveSource {
@@ -544,7 +544,7 @@ fn shifted_j_and_k_reorder_active_source() {
             KeyCode::Char('J'),
             crossterm::event::KeyModifiers::SHIFT,
         )),
-        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+        super::OverlayInputResult::Effect(AppEffect::ApplyPromptAssemblyEditMutation {
             mutation: PromptAssemblyMutation::scoped(
                 PromptAssemblyScope::Project,
                 PromptAssemblyScopedMutationKind::MoveActiveSource {
@@ -578,7 +578,7 @@ fn moving_tool_guidelines_emits_reorder_mutation_with_managed_scope() {
             KeyCode::Char('J'),
             crossterm::event::KeyModifiers::SHIFT,
         )),
-        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+        super::OverlayInputResult::Effect(AppEffect::ApplyPromptAssemblyEditMutation {
             mutation: PromptAssemblyMutation::scoped(
                 PromptAssemblyScope::Global,
                 PromptAssemblyScopedMutationKind::MoveActiveSource {
@@ -609,7 +609,7 @@ fn toggling_tool_guidelines_emits_scope_aware_disable_mutation() {
 
     assert_eq!(
         model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('x'))),
-        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+        super::OverlayInputResult::Effect(AppEffect::ApplyPromptAssemblyEditMutation {
             mutation: PromptAssemblyMutation::scoped(
                 PromptAssemblyScope::Global,
                 PromptAssemblyScopedMutationKind::SetPromptSourceEnabled {
@@ -644,7 +644,7 @@ fn x_on_active_non_core_source_emits_disable_mutation() {
 
     assert_eq!(
         model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('x'))),
-        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+        super::OverlayInputResult::Effect(AppEffect::ApplyPromptAssemblyEditMutation {
             mutation: PromptAssemblyMutation::scoped(
                 PromptAssemblyScope::Project,
                 PromptAssemblyScopedMutationKind::SetPromptSourceEnabled {
@@ -665,7 +665,7 @@ fn x_on_active_skill_discovery_emits_disable_mutation() {
 
     assert_eq!(
         model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('x'))),
-        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+        super::OverlayInputResult::Effect(AppEffect::ApplyPromptAssemblyEditMutation {
             mutation: PromptAssemblyMutation::scoped(
                 PromptAssemblyScope::Project,
                 PromptAssemblyScopedMutationKind::SetPromptSourceEnabled {
@@ -702,7 +702,7 @@ fn x_on_active_dynamic_environment_baseline_emits_disable_mutation() {
 
     assert_eq!(
         model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('x'))),
-        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+        super::OverlayInputResult::Effect(AppEffect::ApplyPromptAssemblyEditMutation {
             mutation: PromptAssemblyMutation::scoped(
                 PromptAssemblyScope::Global,
                 PromptAssemblyScopedMutationKind::SetPromptSourceEnabled {
@@ -731,7 +731,7 @@ fn moving_dynamic_environment_baseline_emits_reorder_mutation() {
             KeyCode::Char('J'),
             crossterm::event::KeyModifiers::SHIFT,
         )),
-        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+        super::OverlayInputResult::Effect(AppEffect::ApplyPromptAssemblyEditMutation {
             mutation: PromptAssemblyMutation::scoped(
                 PromptAssemblyScope::Global,
                 PromptAssemblyScopedMutationKind::MoveActiveSource {
@@ -752,7 +752,7 @@ fn x_on_discovered_skill_emits_selection_toggle_mutation() {
 
     assert_eq!(
         model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('x'))),
-        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+        super::OverlayInputResult::Effect(AppEffect::ApplyPromptAssemblyEditMutation {
             mutation: PromptAssemblyMutation::scoped(
                 PromptAssemblyScope::Project,
                 PromptAssemblyScopedMutationKind::SetDiscoveredSkillSelected {
@@ -826,7 +826,7 @@ fn shifted_j_and_k_reorder_discovered_skill() {
             KeyCode::Char('K'),
             crossterm::event::KeyModifiers::SHIFT,
         )),
-        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+        super::OverlayInputResult::Effect(AppEffect::ApplyPromptAssemblyEditMutation {
             mutation: PromptAssemblyMutation::scoped(
                 PromptAssemblyScope::Project,
                 PromptAssemblyScopedMutationKind::MoveDiscoveredSkill {
@@ -842,7 +842,7 @@ fn shifted_j_and_k_reorder_discovered_skill() {
             KeyCode::Char('J'),
             crossterm::event::KeyModifiers::SHIFT,
         )),
-        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+        super::OverlayInputResult::Effect(AppEffect::ApplyPromptAssemblyEditMutation {
             mutation: PromptAssemblyMutation::scoped(
                 PromptAssemblyScope::Project,
                 PromptAssemblyScopedMutationKind::MoveDiscoveredSkill {
@@ -865,7 +865,7 @@ fn r_resets_discovered_skill_order() {
             KeyCode::Char('r'),
             crossterm::event::KeyModifiers::NONE,
         )),
-        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+        super::OverlayInputResult::Effect(AppEffect::ApplyPromptAssemblyEditMutation {
             mutation: PromptAssemblyMutation::scoped(
                 PromptAssemblyScope::Project,
                 PromptAssemblyScopedMutationKind::ResetDiscoveredSkillOrder,
@@ -895,7 +895,7 @@ fn global_discovered_skill_reorder_uses_selection_scope_not_item_origin() {
             KeyCode::Char('J'),
             crossterm::event::KeyModifiers::SHIFT,
         )),
-        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+        super::OverlayInputResult::Effect(AppEffect::ApplyPromptAssemblyEditMutation {
             mutation: PromptAssemblyMutation::scoped(
                 PromptAssemblyScope::Project,
                 PromptAssemblyScopedMutationKind::MoveDiscoveredSkill {
@@ -928,7 +928,7 @@ fn global_discovered_skill_reset_uses_selection_scope_not_item_origin() {
             KeyCode::Char('r'),
             crossterm::event::KeyModifiers::NONE,
         )),
-        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+        super::OverlayInputResult::Effect(AppEffect::ApplyPromptAssemblyEditMutation {
             mutation: PromptAssemblyMutation::scoped(
                 PromptAssemblyScope::Project,
                 PromptAssemblyScopedMutationKind::ResetDiscoveredSkillOrder,

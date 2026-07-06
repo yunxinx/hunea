@@ -92,7 +92,6 @@ impl RuntimeCoordinator for TestRuntimeCoordinator {
                 RuntimeCommand::RecordMessageHistory { .. }
                     | RuntimeCommand::LoadMessageHistoryStartupCache
                     | RuntimeCommand::CheckPromptAssemblyMissingSources
-                    | RuntimeCommand::ReloadPromptAssembly
             ) {
                 self.next_runtime_error = Some(message);
             } else {
@@ -150,9 +149,7 @@ impl RuntimeCoordinator for TestRuntimeCoordinator {
             | RuntimeCommand::LoadMessageHistoryStartupCache
             | RuntimeCommand::CheckPromptAssemblyMissingSources
             | RuntimeCommand::LoadMessageHistoryPickerRows { .. }
-            | RuntimeCommand::RecordMessageHistory { .. }
-            | RuntimeCommand::ReloadPromptAssembly
-            | RuntimeCommand::MutatePromptAssembly { .. } => Ok(RuntimeCommandReceipt::Accepted),
+            | RuntimeCommand::RecordMessageHistory { .. } => Ok(RuntimeCommandReceipt::Accepted),
             RuntimeCommand::LoadContextBudgetSnapshot { request_id, .. } => {
                 self.runtime_events
                     .push(RuntimeEvent::ContextBudgetSnapshotLoaded {

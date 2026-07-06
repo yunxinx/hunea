@@ -8,7 +8,7 @@ impl Model {
         if let Some(PromptOverlaySelection::DiscoveredSkill(skill)) =
             self.selected_prompt_overlay_selection()
         {
-            return Some(AppEffect::MutatePromptAssembly {
+            return Some(AppEffect::ApplyPromptAssemblyEditMutation {
                 mutation: PromptAssemblyMutation::scoped(
                     skill.selection_scope,
                     PromptAssemblyScopedMutationKind::MoveDiscoveredSkill {
@@ -21,7 +21,7 @@ impl Model {
         if let Some(PromptOverlaySelection::ToolCandidate(tool)) =
             self.selected_prompt_overlay_selection()
         {
-            return Some(AppEffect::MutatePromptAssembly {
+            return Some(AppEffect::ApplyPromptAssemblyEditMutation {
                 mutation: PromptAssemblyMutation::scoped(
                     tool.selection_scope,
                     PromptAssemblyScopedMutationKind::MoveTool {
@@ -35,7 +35,7 @@ impl Model {
         if selected.kind == PromptSourceKind::CoreSystemPrompt {
             return None;
         }
-        Some(AppEffect::MutatePromptAssembly {
+        Some(AppEffect::ApplyPromptAssemblyEditMutation {
             mutation: PromptAssemblyMutation::scoped(
                 selected.scope?,
                 PromptAssemblyScopedMutationKind::MoveActiveSource {
@@ -54,7 +54,7 @@ impl Model {
             if selected.kind == PromptSourceKind::CoreSystemPrompt {
                 return None;
             }
-            return Some(AppEffect::MutatePromptAssembly {
+            return Some(AppEffect::ApplyPromptAssemblyEditMutation {
                 mutation: PromptAssemblyMutation::scoped(
                     selected.scope?,
                     PromptAssemblyScopedMutationKind::SetPromptSourceEnabled {
@@ -72,7 +72,7 @@ impl Model {
                 if selected.kind == PromptSourceKind::CoreSystemPrompt {
                     return None;
                 }
-                Some(AppEffect::MutatePromptAssembly {
+                Some(AppEffect::ApplyPromptAssemblyEditMutation {
                     mutation: PromptAssemblyMutation::scoped(
                         prompt_scope_from_origin(selected.origin?)?,
                         PromptAssemblyScopedMutationKind::SetPromptSourceEnabled {
@@ -84,7 +84,7 @@ impl Model {
                 })
             }
             PromptOverlaySelection::ExtraPromptCandidate(candidate) => {
-                Some(AppEffect::MutatePromptAssembly {
+                Some(AppEffect::ApplyPromptAssemblyEditMutation {
                     mutation: PromptAssemblyMutation::scoped(
                         prompt_scope_from_origin(candidate.origin)?,
                         PromptAssemblyScopedMutationKind::SetExtraPromptSelected {
@@ -98,7 +98,7 @@ impl Model {
                 if !skill.selection.can_select() {
                     return None;
                 }
-                Some(AppEffect::MutatePromptAssembly {
+                Some(AppEffect::ApplyPromptAssemblyEditMutation {
                     mutation: PromptAssemblyMutation::scoped(
                         skill.selection_scope,
                         PromptAssemblyScopedMutationKind::SetDiscoveredSkillSelected {
@@ -112,7 +112,7 @@ impl Model {
                 if !tool.selection.can_select() {
                     return None;
                 }
-                Some(AppEffect::MutatePromptAssembly {
+                Some(AppEffect::ApplyPromptAssemblyEditMutation {
                     mutation: PromptAssemblyMutation::scoped(
                         tool.selection_scope,
                         PromptAssemblyScopedMutationKind::SetToolSelected {
@@ -124,7 +124,7 @@ impl Model {
             }
             PromptOverlaySelection::DynamicEnvironmentCandidate(source) => {
                 let snapshot_kind = self.prompt_overlay_dynamic_selected_snapshot_kind();
-                Some(AppEffect::MutatePromptAssembly {
+                Some(AppEffect::ApplyPromptAssemblyEditMutation {
                     mutation: PromptAssemblyMutation::SetDynamicEnvironmentSourceSelected {
                         snapshot_kind,
                         source_kind: source.source_kind,
@@ -146,7 +146,7 @@ impl Model {
             return None;
         }
         let content = self.default_extra_prompt_body_for_scope(scope);
-        Some(AppEffect::MutatePromptAssembly {
+        Some(AppEffect::ApplyPromptAssemblyEditMutation {
             mutation: PromptAssemblyMutation::scoped(
                 scope,
                 PromptAssemblyScopedMutationKind::CreateExtraPrompt { content },
@@ -207,7 +207,7 @@ impl Model {
         scope: PromptAssemblyScope,
         reference_id: String,
     ) -> AppEffect {
-        AppEffect::MutatePromptAssembly {
+        AppEffect::ApplyPromptAssemblyEditMutation {
             mutation: PromptAssemblyMutation::scoped(
                 scope,
                 PromptAssemblyScopedMutationKind::DeleteExtraPrompt { reference_id },

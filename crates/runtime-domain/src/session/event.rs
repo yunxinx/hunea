@@ -18,9 +18,6 @@ pub enum PromptAssemblyUpdateNotice {
 /// `PromptAssemblyCommandFailureKind` 表示 `/prompt` 命令失败的机器可识别阶段。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptAssemblyCommandFailureKind {
-    RuntimeState,
-    LoadManager,
-    ApplyMutation,
     CheckMissingSources,
 }
 

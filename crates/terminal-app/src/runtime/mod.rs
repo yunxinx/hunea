@@ -44,6 +44,7 @@ use self::{
     },
     session_worker::{SessionStoreWorker, SessionStoreWorkerEvent},
 };
+use crate::prompt_assembly::PromptAssemblyEditSession;
 
 /// `tool_definitions_for_managed_search` 在 coordinator 创建前收集内置工具定义，
 /// 供初始 prompt assembly 加载使用。
@@ -91,6 +92,7 @@ pub(crate) struct AppRuntimeCoordinator {
     pending_conversation_turn: Option<PendingConversationTurn>,
     pending_runtime_events: Vec<RuntimeEvent>,
     manual_skill_activity_sequence: usize,
+    prompt_assembly_edit_session: Option<PromptAssemblyEditSession>,
 }
 
 struct PendingConversationTurn {
@@ -138,6 +140,7 @@ impl AppRuntimeCoordinator {
             pending_conversation_turn: None,
             pending_runtime_events: Vec::new(),
             manual_skill_activity_sequence: 0,
+            prompt_assembly_edit_session: None,
         })
     }
 
@@ -197,15 +200,11 @@ impl AppRuntimeCoordinator {
             RuntimeCommand::LoadMessageHistoryPickerRows { request_id } => {
                 self.load_message_history_picker_rows(request_id)
             }
-            RuntimeCommand::ReloadPromptAssembly => Ok(self.reload_prompt_assembly()),
             RuntimeCommand::RecordMessageHistory {
                 entry_id,
                 text,
                 limit,
             } => self.record_message_history(entry_id, text, limit),
-            RuntimeCommand::MutatePromptAssembly { mutation } => {
-                Ok(self.mutate_prompt_assembly(mutation))
-            }
             RuntimeCommand::Reset => {
                 self.conversation_worker.reset_after_clear();
                 self.provider_conversation = fresh_provider_conversation(&self.options)?;
@@ -216,6 +215,7 @@ impl AppRuntimeCoordinator {
                 self.refresh_prompt_assembly_tool_definitions();
                 self.pending_runtime_events.clear();
                 self.manual_skill_activity_sequence = 0;
+                self.prompt_assembly_edit_session = None;
                 Ok(RuntimeCommandReceipt::Accepted)
             }
         }
@@ -471,6 +471,23 @@ impl RuntimeCoordinator for AppRuntimeCoordinator {
         self.model_refresh.start(request);
         Ok(())
     }
+
+    fn begin_prompt_assembly_edit(
+        &mut self,
+    ) -> Result<runtime_domain::prompt_assembly::PromptAssemblyManagerSnapshot, String> {
+        self.begin_prompt_assembly_edit_impl()
+    }
+
+    fn apply_prompt_assembly_edit_mutation(
+        &mut self,
+        mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation,
+    ) -> Result<runtime_domain::prompt_assembly::PromptAssemblyManagerSnapshot, String> {
+        self.apply_prompt_assembly_edit_mutation_impl(mutation)
+    }
+
+    fn commit_prompt_assembly_edit(&mut self) -> Result<(), String> {
+        self.commit_prompt_assembly_edit_impl()
+    }
 }
 
 impl AppRuntimeCoordinator {
@@ -508,12 +525,6 @@ impl AppRuntimeCoordinator {
                         target: None,
                         message,
                     });
-                }
-                SessionStoreWorkerEvent::PromptAssemblyLoaded { manager } => {
-                    events.push(self.prompt_assembly_reloaded_event(manager));
-                }
-                SessionStoreWorkerEvent::PromptAssemblyMutated { manager } => {
-                    events.push(self.prompt_assembly_mutated_event(manager));
                 }
             }
         }

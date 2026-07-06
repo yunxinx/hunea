@@ -38,6 +38,7 @@ pub(super) fn apply_effect_if_needed(
     effect: Option<AppEffect>,
 ) -> Result<()> {
     dispatch_context_budget_cancellation_if_needed(model, runtime_coordinator);
+    dispatch_prompt_assembly_commit_if_needed(model, runtime_coordinator);
 
     let Some(effect) = effect else {
         return Ok(());
@@ -88,20 +89,28 @@ pub(super) fn apply_effect_if_needed(
             run_open_message_history_picker_effect(model, runtime_coordinator);
             Ok(())
         }
-        AppEffect::ReloadPromptAssembly => {
-            run_simple_runtime_command_effect(
-                model,
-                runtime_coordinator,
-                RuntimeCommand::ReloadPromptAssembly,
-            );
+        AppEffect::BeginPromptAssemblyEdit => {
+            match runtime_coordinator.begin_prompt_assembly_edit() {
+                Ok(snapshot) => {
+                    model.prompt_assembly = snapshot;
+                    model.sync_prompt_overlay_state();
+                }
+                Err(message) => {
+                    model.show_toast(ToastSeverity::Error, message);
+                    // begin 失败：从未成功进入 edit session，关 overlay 但不触发 commit。
+                    model.dismiss_prompt_overlay();
+                }
+            }
             Ok(())
         }
-        AppEffect::MutatePromptAssembly { mutation } => {
-            run_simple_runtime_command_effect(
-                model,
-                runtime_coordinator,
-                RuntimeCommand::MutatePromptAssembly { mutation },
-            );
+        AppEffect::ApplyPromptAssemblyEditMutation { mutation } => {
+            match runtime_coordinator.apply_prompt_assembly_edit_mutation(mutation) {
+                Ok(snapshot) => {
+                    model.prompt_assembly = snapshot;
+                    model.sync_prompt_overlay_state();
+                }
+                Err(message) => model.show_toast(ToastSeverity::Error, message),
+            }
             Ok(())
         }
         AppEffect::OpenSessionPreview { session_id } => {
@@ -201,6 +210,19 @@ fn dispatch_context_budget_cancellation_if_needed(
     if let Err(message) =
         runtime_coordinator.dispatch_runtime_command(RuntimeCommand::CancelContextBudgetSnapshot)
     {
+        model.show_toast(ToastSeverity::Error, message);
+    }
+}
+
+fn dispatch_prompt_assembly_commit_if_needed(
+    model: &mut Model,
+    runtime_coordinator: &mut impl RuntimeCoordinator,
+) {
+    if !model.take_prompt_assembly_commit_request() {
+        return;
+    }
+
+    if let Err(message) = runtime_coordinator.commit_prompt_assembly_edit() {
         model.show_toast(ToastSeverity::Error, message);
     }
 }
@@ -356,49 +378,5 @@ pub(super) fn run_interrupt_current_turn_effect(
         Ok(RuntimeCommandReceipt::Interrupted { .. }) => {}
         Ok(_) => {}
         Err(message) => model.show_toast(ToastSeverity::Error, message),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use runtime_domain::session::{RuntimeCommandReceipt, RuntimeEvent};
-
-    use super::{RuntimeCommand, RuntimeCoordinator, run_simple_runtime_command_effect};
-    use crate::{Model, StartupBannerOptions};
-
-    #[derive(Default)]
-    struct TestRuntimeCoordinator {
-        last_command: Option<RuntimeCommand>,
-    }
-
-    impl RuntimeCoordinator for TestRuntimeCoordinator {
-        fn drain_runtime_events(&mut self) -> Vec<RuntimeEvent> {
-            Vec::new()
-        }
-
-        fn dispatch_runtime_command(
-            &mut self,
-            command: RuntimeCommand,
-        ) -> Result<RuntimeCommandReceipt, String> {
-            self.last_command = Some(command);
-            Ok(RuntimeCommandReceipt::Accepted)
-        }
-    }
-
-    #[test]
-    fn reload_prompt_assembly_effect_dispatches_runtime_command() {
-        let mut model = Model::new(StartupBannerOptions::default());
-        let mut runtime_coordinator = TestRuntimeCoordinator::default();
-
-        run_simple_runtime_command_effect(
-            &mut model,
-            &mut runtime_coordinator,
-            RuntimeCommand::ReloadPromptAssembly,
-        );
-
-        assert_eq!(
-            runtime_coordinator.last_command,
-            Some(RuntimeCommand::ReloadPromptAssembly)
-        );
     }
 }

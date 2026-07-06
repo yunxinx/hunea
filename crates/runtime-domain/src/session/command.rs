@@ -1,5 +1,4 @@
 use super::{ConversationTurnRequest, MessageHistoryEntryId, RuntimeTarget, SessionLoadRequestId};
-use crate::prompt_assembly::PromptAssemblyMutation;
 
 /// `RuntimeCommand` 描述 TUI 向交互式 runtime 发出的统一命令。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,14 +55,10 @@ pub enum RuntimeCommand {
     LoadMessageHistoryPickerRows {
         request_id: SessionLoadRequestId,
     },
-    ReloadPromptAssembly,
     RecordMessageHistory {
         entry_id: MessageHistoryEntryId,
         text: String,
         limit: usize,
-    },
-    MutatePromptAssembly {
-        mutation: PromptAssemblyMutation,
     },
     Reset,
 }
@@ -130,9 +125,7 @@ impl RuntimeCommand {
             | Self::LoadMessageHistoryStartupCache
             | Self::CheckPromptAssemblyMissingSources
             | Self::LoadMessageHistoryPickerRows { .. }
-            | Self::ReloadPromptAssembly
             | Self::RecordMessageHistory { .. }
-            | Self::MutatePromptAssembly { .. }
             | Self::Reset => None,
         }
     }

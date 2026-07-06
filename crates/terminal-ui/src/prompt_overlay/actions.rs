@@ -76,7 +76,7 @@ impl Model {
                 if !prompt_overlay_source_kind_can_remove(selected.kind) {
                     return None;
                 }
-                Some(AppEffect::MutatePromptAssembly {
+                Some(AppEffect::ApplyPromptAssemblyEditMutation {
                     mutation: PromptAssemblyMutation::scoped(
                         selected.scope?,
                         PromptAssemblyScopedMutationKind::RemovePromptSource {
@@ -99,7 +99,7 @@ impl Model {
                 if !prompt_overlay_source_kind_can_remove(selected.kind) {
                     return None;
                 }
-                Some(AppEffect::MutatePromptAssembly {
+                Some(AppEffect::ApplyPromptAssemblyEditMutation {
                     mutation: PromptAssemblyMutation::scoped(
                         prompt_scope_from_origin(selected.origin?)?,
                         PromptAssemblyScopedMutationKind::RemovePromptSource {
@@ -125,7 +125,7 @@ impl Model {
             .as_ref()
             .map(|state| state.draft_scope)
             .unwrap_or(PromptAssemblyScope::Project);
-        Some(AppEffect::MutatePromptAssembly {
+        Some(AppEffect::ApplyPromptAssemblyEditMutation {
             mutation: PromptAssemblyMutation::scoped(
                 scope,
                 PromptAssemblyScopedMutationKind::RestoreCoreSystemOverride,
@@ -139,7 +139,7 @@ impl Model {
         else {
             return None;
         };
-        Some(AppEffect::MutatePromptAssembly {
+        Some(AppEffect::ApplyPromptAssemblyEditMutation {
             mutation: PromptAssemblyMutation::scoped(
                 skill.selection_scope,
                 PromptAssemblyScopedMutationKind::ResetDiscoveredSkillOrder,

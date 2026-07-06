@@ -7,7 +7,7 @@ use runtime_domain::prompt_assembly::{
         save_project_prompt_assembly_state,
     },
 };
-use runtime_domain::session::{PromptAssemblyCommandFailureKind, PromptAssemblyUpdateNotice};
+use runtime_domain::session::PromptAssemblyUpdateNotice;
 
 use super::support::*;
 
@@ -48,7 +48,7 @@ macro_rules! scope_state {
 }
 
 #[test]
-fn reload_prompt_assembly_reads_latest_filesystem_state() {
+fn begin_prompt_assembly_edit_reads_latest_filesystem_state() {
     let root = temp_test_dir("reload-prompt-assembly");
     let work_dir = root.join("repo");
     let skill_dir = work_dir.join(".agents/skills/repo-bootstrap");
@@ -100,17 +100,11 @@ fn reload_prompt_assembly_reads_latest_filesystem_state() {
     });
 
     coordinator
-        .handle_runtime_command(RuntimeCommand::ReloadPromptAssembly)
-        .expect("reload prompt assembly should be accepted");
-
-    let initial_manager = wait_for_runtime_event(
-        &mut coordinator,
-        |event| match event {
-            RuntimeEvent::PromptAssemblyUpdated { manager, .. } => Some(manager),
-            _ => None,
-        },
-        "initial prompt assembly snapshot",
-    );
+        .begin_prompt_assembly_edit()
+        .expect("begin prompt assembly edit should load working copy");
+    let initial_manager = coordinator
+        .peek_prompt_assembly_edit_snapshot()
+        .expect("edit session should be active after begin");
 
     assert!(
         initial_manager
@@ -139,17 +133,14 @@ fn reload_prompt_assembly_reads_latest_filesystem_state() {
     fs::remove_file(skill_dir.join("SKILL.md")).expect("skill file should be removable");
 
     coordinator
-        .handle_runtime_command(RuntimeCommand::ReloadPromptAssembly)
-        .expect("reload prompt assembly should be accepted after filesystem changes");
-
-    let reloaded_manager = wait_for_runtime_event(
-        &mut coordinator,
-        |event| match event {
-            RuntimeEvent::PromptAssemblyUpdated { manager, .. } => Some(manager),
-            _ => None,
-        },
-        "reloaded prompt assembly snapshot",
-    );
+        .commit_prompt_assembly_edit()
+        .expect("commit with no mutation should be a no-op");
+    coordinator
+        .begin_prompt_assembly_edit()
+        .expect("re-entering edit session should re-read filesystem state");
+    let reloaded_manager = coordinator
+        .peek_prompt_assembly_edit_snapshot()
+        .expect("edit session should be active after second begin");
 
     assert!(
         reloaded_manager
@@ -180,7 +171,7 @@ fn reload_prompt_assembly_reads_latest_filesystem_state() {
 }
 
 #[test]
-fn reload_prompt_assembly_reports_structured_load_failure_event() {
+fn begin_prompt_assembly_edit_reports_load_failure() {
     let root = temp_test_dir("reload-prompt-assembly-load-failure");
     let work_dir = root.join("repo");
     fs::create_dir_all(&work_dir).expect("work dir should exist");
@@ -201,133 +192,17 @@ fn reload_prompt_assembly_reports_structured_load_failure_event() {
         ..AppRuntimeOptions::default()
     });
 
-    let receipt = coordinator
-        .handle_runtime_command(RuntimeCommand::ReloadPromptAssembly)
-        .expect("reload command should be accepted and report failures via events");
+    let error = coordinator
+        .begin_prompt_assembly_edit()
+        .expect_err("load failure should be reported via Err");
 
-    assert_eq!(receipt, RuntimeCommandReceipt::Accepted);
-    let (kind, message) = wait_for_runtime_event(
-        &mut coordinator,
-        |event| match event {
-            RuntimeEvent::PromptAssemblyUpdateFailed { kind, message } => Some((kind, message)),
-            _ => None,
-        },
-        "structured prompt assembly load failure",
-    );
-    assert_eq!(kind, PromptAssemblyCommandFailureKind::LoadManager);
     assert!(
-        message.contains("injected prompt assembly load failure"),
-        "failure message should retain store context: {message}"
+        error.contains("injected prompt assembly load failure"),
+        "failure message should retain store context: {error}"
     );
-    cleanup(&root);
-}
-
-#[test]
-fn reload_prompt_assembly_dispatches_without_waiting_for_store_or_project_io() {
-    let root = temp_test_dir("reload-prompt-assembly-async");
-    let work_dir = root.join("repo");
-    fs::create_dir_all(&work_dir).expect("work dir should exist");
-    let (started_tx, started_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel();
-    let store: Arc<dyn SessionStore> =
-        Arc::new(DelayedListSessionStore::new_with_prompt_assembly_delay(
-            Arc::new(InMemorySessionStore::new()),
-            started_tx,
-            release_rx,
-        ));
-    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
-        session_store: Some(store),
-        session_header_template: Some(SessionHeader {
-            session_id: SessionId::new(),
-            work_dir: work_dir.clone(),
-            session_name: None,
-            initial_model: "qwen3".to_string(),
-            git_head: None,
-            cli_version: None,
-        }),
-        ..AppRuntimeOptions::default()
-    });
-    let release_thread = thread::spawn(move || {
-        started_rx
-            .recv()
-            .expect("worker should start prompt assembly load");
-        thread::sleep(Duration::from_millis(200));
-        release_tx
-            .send(())
-            .expect("delayed prompt assembly load should still be waiting");
-    });
-
-    let started = std::time::Instant::now();
-    let receipt = coordinator
-        .handle_runtime_command(RuntimeCommand::ReloadPromptAssembly)
-        .expect("reload prompt assembly command should dispatch");
-
-    assert_eq!(receipt, RuntimeCommandReceipt::Accepted);
     assert!(
-        started.elapsed() < Duration::from_millis(100),
-        "reload command should not wait for prompt assembly I/O"
-    );
-
-    let _ = wait_for_runtime_event(
-        &mut coordinator,
-        |event| match event {
-            RuntimeEvent::PromptAssemblyUpdated { manager, .. } => Some(manager),
-            _ => None,
-        },
-        "prompt assembly snapshot loaded by worker",
-    );
-    release_thread
-        .join()
-        .expect("release thread should finish cleanly");
-    cleanup(&root);
-}
-
-#[test]
-fn mutate_prompt_assembly_reports_structured_apply_failure_event() {
-    let root = temp_test_dir("mutate-prompt-assembly-save-failure");
-    let work_dir = root.join("repo");
-    fs::create_dir_all(&work_dir).expect("work dir should exist");
-    let store: Arc<dyn SessionStore> = Arc::new(FailingSessionStore::new(
-        Arc::new(InMemorySessionStore::new()),
-        FailingSessionStoreLoad::PromptAssemblySave,
-    ));
-    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
-        session_store: Some(store),
-        session_header_template: Some(SessionHeader {
-            session_id: SessionId::new(),
-            work_dir,
-            session_name: None,
-            initial_model: "qwen3".to_string(),
-            git_head: None,
-            cli_version: None,
-        }),
-        ..AppRuntimeOptions::default()
-    });
-
-    let receipt = coordinator
-        .handle_runtime_command(RuntimeCommand::MutatePromptAssembly {
-            mutation: PromptAssemblyMutation::scoped(
-                PromptAssemblyScope::Global,
-                PromptAssemblyScopedMutationKind::CreateExtraPrompt {
-                    content: "# Saved search\nUse ripgrep first.\n".to_string(),
-                },
-            ),
-        })
-        .expect("mutation command should be accepted and report failures via events");
-
-    assert_eq!(receipt, RuntimeCommandReceipt::Accepted);
-    let (kind, message) = wait_for_runtime_event(
-        &mut coordinator,
-        |event| match event {
-            RuntimeEvent::PromptAssemblyUpdateFailed { kind, message } => Some((kind, message)),
-            _ => None,
-        },
-        "structured prompt assembly mutation failure",
-    );
-    assert_eq!(kind, PromptAssemblyCommandFailureKind::ApplyMutation);
-    assert!(
-        message.contains("injected prompt assembly save failure"),
-        "failure message should retain store context: {message}"
+        coordinator.peek_prompt_assembly_edit_snapshot().is_none(),
+        "edit session should not be active after begin failure"
     );
     cleanup(&root);
 }
@@ -355,31 +230,27 @@ fn project_prompt_assembly_mutation_does_not_touch_global_save_path() {
     });
 
     coordinator
-        .handle_runtime_command(RuntimeCommand::MutatePromptAssembly {
-            mutation: PromptAssemblyMutation::scoped(
-                PromptAssemblyScope::Project,
-                PromptAssemblyScopedMutationKind::CreateExtraPrompt {
-                    content: "# Project-only prompt\nThis must not be half-saved.\n".to_string(),
-                },
-            ),
-        })
-        .expect("mutation command should be accepted and report failures via events");
-
-    let manager = wait_for_runtime_event(
-        &mut coordinator,
-        |event| match event {
-            RuntimeEvent::PromptAssemblyUpdated { manager, .. } => Some(manager),
-            _ => None,
-        },
-        "project prompt assembly mutation success",
-    );
+        .begin_prompt_assembly_edit()
+        .expect("begin prompt assembly edit should load working copy");
+    let snapshot = coordinator
+        .apply_prompt_assembly_edit_mutation(PromptAssemblyMutation::scoped(
+            PromptAssemblyScope::Project,
+            PromptAssemblyScopedMutationKind::CreateExtraPrompt {
+                content: "# Project-only prompt\nThis must not be half-saved.\n".to_string(),
+            },
+        ))
+        .expect("project-scoped mutation should apply to working copy");
     assert!(
-        manager
+        snapshot
             .candidates
             .extra_prompts
             .iter()
             .any(|prompt| prompt.title == "Project-only prompt")
     );
+
+    coordinator
+        .commit_prompt_assembly_edit()
+        .expect("commit should save project state without touching global save path");
 
     let project_state = load_project_prompt_assembly_state(&work_dir)
         .expect("project prompt assembly state should remain readable");
@@ -400,23 +271,19 @@ fn project_prompt_assembly_mutation_does_not_touch_global_save_path() {
 }
 
 #[test]
-fn mutate_prompt_assembly_dispatches_without_waiting_for_store_or_project_io() {
-    let root = temp_test_dir("mutate-prompt-assembly-async");
+fn commit_prompt_assembly_edit_reports_save_failure() {
+    let root = temp_test_dir("mutate-prompt-assembly-save-failure");
     let work_dir = root.join("repo");
     fs::create_dir_all(&work_dir).expect("work dir should exist");
-    let (started_tx, started_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel();
-    let store: Arc<dyn SessionStore> =
-        Arc::new(DelayedListSessionStore::new_with_prompt_assembly_delay(
-            Arc::new(InMemorySessionStore::new()),
-            started_tx,
-            release_rx,
-        ));
+    let store: Arc<dyn SessionStore> = Arc::new(FailingSessionStore::new(
+        Arc::new(InMemorySessionStore::new()),
+        FailingSessionStoreLoad::PromptAssemblySave,
+    ));
     let mut coordinator = runtime_coordinator(AppRuntimeOptions {
         session_store: Some(store),
         session_header_template: Some(SessionHeader {
             session_id: SessionId::new(),
-            work_dir: work_dir.clone(),
+            work_dir,
             session_name: None,
             initial_model: "qwen3".to_string(),
             git_head: None,
@@ -424,73 +291,67 @@ fn mutate_prompt_assembly_dispatches_without_waiting_for_store_or_project_io() {
         }),
         ..AppRuntimeOptions::default()
     });
-    let release_thread = thread::spawn(move || {
-        started_rx
-            .recv()
-            .expect("worker should start prompt assembly mutation");
-        thread::sleep(Duration::from_millis(200));
-        release_tx
-            .send(())
-            .expect("delayed prompt assembly mutation should still be waiting");
-    });
 
-    let started = std::time::Instant::now();
-    let receipt = coordinator
-        .handle_runtime_command(RuntimeCommand::MutatePromptAssembly {
-            mutation: PromptAssemblyMutation::scoped(
-                PromptAssemblyScope::Global,
-                PromptAssemblyScopedMutationKind::CreateExtraPrompt {
-                    content: "# Async prompt\nDo not block the UI.\n".to_string(),
-                },
-            ),
-        })
-        .expect("prompt assembly mutation command should dispatch");
+    coordinator
+        .begin_prompt_assembly_edit()
+        .expect("begin prompt assembly edit should load working copy");
+    coordinator
+        .apply_prompt_assembly_edit_mutation(PromptAssemblyMutation::scoped(
+            PromptAssemblyScope::Global,
+            PromptAssemblyScopedMutationKind::CreateExtraPrompt {
+                content: "# Saved search\nUse ripgrep first.\n".to_string(),
+            },
+        ))
+        .expect("global-scoped mutation should apply to working copy");
 
-    assert_eq!(receipt, RuntimeCommandReceipt::Accepted);
+    let error = coordinator
+        .commit_prompt_assembly_edit()
+        .expect_err("global save failure should be reported via Err");
+
     assert!(
-        started.elapsed() < Duration::from_millis(100),
-        "mutation command should not wait for prompt assembly I/O"
+        error.contains("injected prompt assembly save failure"),
+        "failure message should retain store context: {error}"
     );
 
-    let manager = wait_for_runtime_event(
-        &mut coordinator,
-        |event| match event {
-            RuntimeEvent::PromptAssemblyUpdated { manager, .. } => Some(manager),
-            _ => None,
-        },
-        "prompt assembly mutation loaded by worker",
-    );
+    // 失败后 edit session 必须保留 working copy，让用户可重试或继续编辑。
+    let preserved_snapshot = coordinator
+        .peek_prompt_assembly_edit_snapshot()
+        .expect("edit session should remain active after commit failure");
     assert!(
-        manager
+        preserved_snapshot
             .candidates
             .extra_prompts
             .iter()
-            .any(|prompt| prompt.title == "Async prompt")
+            .any(|prompt| prompt.title == "Saved search"),
+        "working copy should retain the unsaved mutation after commit failure"
     );
-    release_thread
-        .join()
-        .expect("release thread should finish cleanly");
+
+    // session 仍在 active 状态，应能继续应用新的 mutation。
+    coordinator
+        .apply_prompt_assembly_edit_mutation(PromptAssemblyMutation::scoped(
+            PromptAssemblyScope::Global,
+            PromptAssemblyScopedMutationKind::CreateExtraPrompt {
+                content: "# Another prompt\n".to_string(),
+            },
+        ))
+        .expect("further mutation should apply to preserved working copy");
     cleanup(&root);
 }
 
 #[test]
-fn prompt_assembly_mutations_queue_without_session_mutation_rejection() {
-    let root = temp_test_dir("prompt-assembly-mutations-queue");
+fn begin_after_commit_failure_preserves_unsaved_working_copy() {
+    let root = temp_test_dir("begin-after-commit-failure-preserve");
     let work_dir = root.join("repo");
     fs::create_dir_all(&work_dir).expect("work dir should exist");
-    let (started_tx, started_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel();
-    let store: Arc<dyn SessionStore> =
-        Arc::new(DelayedListSessionStore::new_with_prompt_assembly_delay(
-            Arc::new(InMemorySessionStore::new()),
-            started_tx,
-            release_rx,
-        ));
+    let store: Arc<dyn SessionStore> = Arc::new(FailingSessionStore::new(
+        Arc::new(InMemorySessionStore::new()),
+        FailingSessionStoreLoad::PromptAssemblySave,
+    ));
     let mut coordinator = runtime_coordinator(AppRuntimeOptions {
         session_store: Some(store),
         session_header_template: Some(SessionHeader {
             session_id: SessionId::new(),
-            work_dir: work_dir.clone(),
+            work_dir,
             session_name: None,
             initial_model: "qwen3".to_string(),
             git_head: None,
@@ -500,65 +361,69 @@ fn prompt_assembly_mutations_queue_without_session_mutation_rejection() {
     });
 
     coordinator
-        .handle_runtime_command(RuntimeCommand::MutatePromptAssembly {
-            mutation: PromptAssemblyMutation::scoped(
-                PromptAssemblyScope::Global,
-                PromptAssemblyScopedMutationKind::CreateExtraPrompt {
-                    content: "# First queued prompt\nInitial mutation.\n".to_string(),
-                },
-            ),
-        })
-        .expect("first prompt assembly mutation should dispatch");
-    started_rx
-        .recv_timeout(Duration::from_secs(1))
-        .expect("first mutation should be waiting in prompt assembly I/O");
-
+        .begin_prompt_assembly_edit()
+        .expect("begin prompt assembly edit should load working copy");
     coordinator
-        .handle_runtime_command(RuntimeCommand::MutatePromptAssembly {
-            mutation: PromptAssemblyMutation::scoped(
-                PromptAssemblyScope::Global,
-                PromptAssemblyScopedMutationKind::CreateExtraPrompt {
-                    content: "# Second queued prompt\nFollow-up mutation.\n".to_string(),
-                },
-            ),
-        })
-        .expect("second prompt assembly mutation should be queued");
+        .apply_prompt_assembly_edit_mutation(PromptAssemblyMutation::scoped(
+            PromptAssemblyScope::Global,
+            PromptAssemblyScopedMutationKind::CreateExtraPrompt {
+                content: "# Unsaved edit\n".to_string(),
+            },
+        ))
+        .expect("global mutation should apply to working copy");
+    coordinator
+        .commit_prompt_assembly_edit()
+        .expect_err("global save failure should retain edit session");
 
-    let immediate_events = RuntimeCoordinator::drain_runtime_events(&mut coordinator);
+    // 再次 begin 必须复用未提交的 session，而非从磁盘重新 load 覆盖未落盘的编辑。
+    let snapshot = coordinator
+        .begin_prompt_assembly_edit()
+        .expect("re-begin should reuse preserved edit session");
     assert!(
-        !immediate_events.iter().any(|event| matches!(
-            event,
-            RuntimeEvent::PromptAssemblyUpdateFailed { message, .. }
-                if message.contains("session mutation is running")
-        )),
-        "prompt assembly mutations should not reject each other as session mutations: {immediate_events:?}"
-    );
-
-    release_tx
-        .send(())
-        .expect("test should release delayed prompt assembly mutation");
-    let manager = wait_for_runtime_event(
-        &mut coordinator,
-        |event| match event {
-            RuntimeEvent::PromptAssemblyUpdated { manager, .. }
-                if manager
-                    .candidates
-                    .extra_prompts
-                    .iter()
-                    .any(|prompt| prompt.title == "Second queued prompt") =>
-            {
-                Some(manager)
-            }
-            _ => None,
-        },
-        "queued prompt assembly mutation loaded by worker",
-    );
-    assert!(
-        manager
+        snapshot
             .candidates
             .extra_prompts
             .iter()
-            .any(|prompt| prompt.title == "First queued prompt")
+            .any(|prompt| prompt.title == "Unsaved edit"),
+        "re-begin after commit failure should preserve unsaved working copy, not reload from disk"
+    );
+    cleanup(&root);
+}
+
+#[test]
+fn commit_prompt_assembly_edit_releases_session_on_noop_commit() {
+    let root = temp_test_dir("commit-prompt-assembly-noop-release");
+    let work_dir = root.join("repo");
+    fs::create_dir_all(&work_dir).expect("work dir should exist");
+    let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        session_store: Some(store),
+        session_header_template: Some(SessionHeader {
+            session_id: SessionId::new(),
+            work_dir,
+            session_name: None,
+            initial_model: "qwen3".to_string(),
+            git_head: None,
+            cli_version: None,
+        }),
+        ..AppRuntimeOptions::default()
+    });
+
+    coordinator
+        .begin_prompt_assembly_edit()
+        .expect("begin prompt assembly edit should load working copy");
+    assert!(
+        coordinator.peek_prompt_assembly_edit_snapshot().is_some(),
+        "edit session should be active after begin"
+    );
+
+    // not dirty commit：不应落盘，但必须释放 edit session，避免 working copy 长期挂在 coordinator 上。
+    coordinator
+        .commit_prompt_assembly_edit()
+        .expect("noop commit should succeed without persistence");
+    assert!(
+        coordinator.peek_prompt_assembly_edit_snapshot().is_none(),
+        "edit session should be released after successful noop commit"
     );
     cleanup(&root);
 }
@@ -624,17 +489,22 @@ fn prompt_assembly_changes_sync_current_empty_session_prelude_immediately() {
     );
 
     coordinator
-        .handle_runtime_command(RuntimeCommand::MutatePromptAssembly {
-            mutation: PromptAssemblyMutation::scoped(
-                PromptAssemblyScope::Project,
-                PromptAssemblyScopedMutationKind::SetPromptSourceEnabled {
-                    kind: PromptSourceKind::ExtraPrompt,
-                    reference_id: "review-rules".to_string(),
-                    enabled: true,
-                },
-            ),
-        })
-        .expect("prompt assembly mutation should be accepted");
+        .begin_prompt_assembly_edit()
+        .expect("begin prompt assembly edit should load working copy");
+    coordinator
+        .apply_prompt_assembly_edit_mutation(PromptAssemblyMutation::scoped(
+            PromptAssemblyScope::Project,
+            PromptAssemblyScopedMutationKind::SetPromptSourceEnabled {
+                kind: PromptSourceKind::ExtraPrompt,
+                reference_id: "review-rules".to_string(),
+                enabled: true,
+            },
+        ))
+        .expect("prompt assembly mutation should apply to working copy");
+    coordinator
+        .commit_prompt_assembly_edit()
+        .expect("commit should persist and emit updated event");
+
     let (updated_manager, notice) = wait_for_runtime_event(
         &mut coordinator,
         |event| match event {
@@ -723,17 +593,21 @@ fn prompt_assembly_changes_on_started_session_apply_only_after_next_new_session_
         .expect("seed history should succeed");
 
     coordinator
-        .handle_runtime_command(RuntimeCommand::MutatePromptAssembly {
-            mutation: PromptAssemblyMutation::scoped(
-                PromptAssemblyScope::Project,
-                PromptAssemblyScopedMutationKind::SetPromptSourceEnabled {
-                    kind: PromptSourceKind::ExtraPrompt,
-                    reference_id: "review-rules".to_string(),
-                    enabled: true,
-                },
-            ),
-        })
-        .expect("prompt assembly mutation should be accepted");
+        .begin_prompt_assembly_edit()
+        .expect("begin prompt assembly edit should load working copy");
+    coordinator
+        .apply_prompt_assembly_edit_mutation(PromptAssemblyMutation::scoped(
+            PromptAssemblyScope::Project,
+            PromptAssemblyScopedMutationKind::SetPromptSourceEnabled {
+                kind: PromptSourceKind::ExtraPrompt,
+                reference_id: "review-rules".to_string(),
+                enabled: true,
+            },
+        ))
+        .expect("prompt assembly mutation should apply to working copy");
+    coordinator
+        .commit_prompt_assembly_edit()
+        .expect("commit should persist and emit updated event");
     let (updated_manager, notice) = wait_for_runtime_event(
         &mut coordinator,
         |event| match event {
@@ -803,30 +677,25 @@ fn dynamic_environment_selection_change_on_empty_session_emits_current_session_n
         }),
         ..AppRuntimeOptions::default()
     });
-    coordinator
-        .handle_runtime_command(RuntimeCommand::ReloadPromptAssembly)
-        .expect("initial prompt assembly reload should be accepted");
-    let _ = wait_for_runtime_event(
-        &mut coordinator,
-        |event| match event {
-            RuntimeEvent::PromptAssemblyUpdated { manager, .. } => Some(manager),
-            _ => None,
-        },
-        "initial prompt assembly snapshot",
-    );
 
     coordinator
-        .handle_runtime_command(RuntimeCommand::MutatePromptAssembly {
-            mutation:
-                runtime_domain::prompt_assembly::PromptAssemblyMutation::SetDynamicEnvironmentSourceSelected {
-                    snapshot_kind:
-                        runtime_domain::dynamic_environment::DynamicEnvironmentSnapshotKind::Baseline,
-                    source_kind:
-                        runtime_domain::dynamic_environment::DynamicEnvironmentSourceKind::Date,
-                    selected: false,
-                },
-        })
-        .expect("dynamic environment mutation should be accepted");
+        .begin_prompt_assembly_edit()
+        .expect("begin prompt assembly edit should load working copy");
+    coordinator
+        .apply_prompt_assembly_edit_mutation(
+            runtime_domain::prompt_assembly::PromptAssemblyMutation::SetDynamicEnvironmentSourceSelected {
+                snapshot_kind:
+                    runtime_domain::dynamic_environment::DynamicEnvironmentSnapshotKind::Baseline,
+                source_kind:
+                    runtime_domain::dynamic_environment::DynamicEnvironmentSourceKind::Date,
+                selected: false,
+            },
+        )
+        .expect("dynamic environment mutation should apply to working copy");
+    coordinator
+        .commit_prompt_assembly_edit()
+        .expect("commit should persist and emit updated event");
+
     let notice = wait_for_runtime_event(
         &mut coordinator,
         |event| match event {
@@ -884,36 +753,44 @@ fn disabling_dynamic_environment_changes_waits_for_next_new_session() {
             git_head: None,
             cli_version: None,
         }),
+        initial_dynamic_environment_session_config: Some(
+            runtime_domain::dynamic_environment::DynamicEnvironmentSessionConfig {
+                baseline_enabled: false,
+                changes_enabled: true,
+                source_selections: vec![
+                    runtime_domain::dynamic_environment::DynamicEnvironmentSourceSelection {
+                        snapshot_kind:
+                            runtime_domain::dynamic_environment::DynamicEnvironmentSnapshotKind::Changes,
+                        source_kind:
+                            runtime_domain::dynamic_environment::DynamicEnvironmentSourceKind::Date,
+                        enabled: true,
+                    },
+                ],
+            },
+        ),
         ..AppRuntimeOptions::default()
     });
-    coordinator
-        .handle_runtime_command(RuntimeCommand::ReloadPromptAssembly)
-        .expect("initial prompt assembly reload should be accepted");
-    let _ = wait_for_runtime_event(
-        &mut coordinator,
-        |event| match event {
-            RuntimeEvent::PromptAssemblyUpdated { manager, .. } => Some(manager),
-            _ => None,
-        },
-        "initial prompt assembly snapshot",
-    );
     coordinator
         .provider_conversation
         .append_items(vec![ConversationItem::text(Role::User, "already started")])
         .expect("seed history should succeed");
 
     coordinator
-        .handle_runtime_command(RuntimeCommand::MutatePromptAssembly {
-            mutation: PromptAssemblyMutation::scoped(
-                PromptAssemblyScope::Global,
-                PromptAssemblyScopedMutationKind::SetPromptSourceEnabled {
-                    kind: PromptSourceKind::DynamicEnvironmentChanges,
-                    reference_id: "env-changes".to_string(),
-                    enabled: false,
-                },
-            ),
-        })
-        .expect("dynamic environment source mutation should be accepted");
+        .begin_prompt_assembly_edit()
+        .expect("begin prompt assembly edit should load working copy");
+    coordinator
+        .apply_prompt_assembly_edit_mutation(PromptAssemblyMutation::scoped(
+            PromptAssemblyScope::Global,
+            PromptAssemblyScopedMutationKind::SetPromptSourceEnabled {
+                kind: PromptSourceKind::DynamicEnvironmentChanges,
+                reference_id: "env-changes".to_string(),
+                enabled: false,
+            },
+        ))
+        .expect("dynamic environment source mutation should apply to working copy");
+    coordinator
+        .commit_prompt_assembly_edit()
+        .expect("commit should persist and emit updated event");
     let notice = wait_for_runtime_event(
         &mut coordinator,
         |event| match event {

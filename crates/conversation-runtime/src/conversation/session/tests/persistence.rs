@@ -37,19 +37,16 @@ fn conversation_worker_persists_config_change_and_flushes_finished_turn() {
     };
     let sender_copy = sender.clone();
     let persistence = request.persistence_cloned();
-    let cancellation = CancellationToken::new();
     let mut state = SessionPersistenceState::default();
     run_persistence(persist_turn_start(
         persistence.as_ref(),
         &sender_copy,
-        &cancellation,
         &mut state,
     ))
     .expect("turn start should persist config and user");
     run_persistence(persist_context_item(
         persistence.as_ref(),
         &sender_copy,
-        &cancellation,
         assistant.clone(),
         &mut state,
     ))
@@ -266,29 +263,78 @@ fn session_persistence_actor_replies_to_pending_flush_when_error_stops_actor() {
 }
 
 #[test]
-fn session_persistence_actor_exits_when_cancelled_with_sender_alive() {
+fn session_persistence_actor_flushes_finish_work_after_conversation_cancellation() {
+    let root = tempdir_path("worker-cancellation-drains-finish-work");
+    let work_dir = root.join("workspace");
+    fs::create_dir_all(&work_dir).expect("work dir should be creatable");
+    let store =
+        Arc::new(run_store(LocalSessionStore::open_in(root)).expect("local store should open"));
+    let store_trait: Arc<dyn SessionStore> = store.clone();
+    let mut conversation =
+        ProviderConversation::with_session_store(store_trait, sample_header(&work_dir, "qwen3"))
+            .expect("persisted conversation should initialize");
+    let user = ConversationItem::text(Role::User, "run a tool");
+    let assistant = ConversationItem::text(Role::Assistant, "tool was interrupted");
+    let request = conversation
+        .prepare_turn(&runtime_domain::session::ConversationTurnRequest::new(
+            "local",
+            ProviderKind::OpenAiCompatible,
+            "qwen3",
+            Some("http://127.0.0.1:1234/v1".to_string()),
+            None,
+            None,
+            user.clone(),
+        ))
+        .expect("turn should prepare");
+
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("test runtime should build")
         .block_on(async {
-            let (_command_sender, command_receiver) = tokio_mpsc::channel(16);
+            let (command_sender, command_receiver) = tokio_mpsc::channel(16);
             let (event_sender, _event_receiver) = mpsc::channel();
             let cancellation = CancellationToken::new();
             let actor = tokio::spawn(run_session_persistence_actor(
-                None,
+                request.persistence_cloned(),
                 command_receiver,
                 event_sender,
                 cancellation.clone(),
             ));
 
-            cancellation.cancel();
-
-            tokio::time::timeout(std::time::Duration::from_millis(100), actor)
+            command_sender
+                .send(SessionPersistenceCommand::ProviderTurnStarted)
                 .await
-                .expect("persistence actor should observe cancellation")
-                .expect("persistence actor should stop cleanly");
+                .expect("turn start command should queue");
+            cancellation.cancel();
+            command_sender
+                .send(SessionPersistenceCommand::ProviderContextItem(assistant))
+                .await
+                .expect("finish context item should queue after cancellation");
+            flush_session_persistence(&command_sender)
+                .await
+                .expect("finish work should flush after cancellation");
+
+            drop(command_sender);
+            actor.await.expect("persistence actor should stop cleanly");
         });
+
+    let metas = run_store(store.list_sessions(
+        &ProjectDir::from_work_dir(&work_dir),
+        SessionListOptions::default(),
+    ))
+    .expect("session meta should list");
+    assert_eq!(metas.len(), 1);
+    let resolved = run_store(store.resolve(&metas[0].session_id, None))
+        .expect("resolved items should be readable");
+
+    assert_eq!(
+        resolved,
+        vec![
+            user,
+            ConversationItem::text(Role::Assistant, "tool was interrupted")
+        ]
+    );
 }
 
 #[test]
@@ -315,7 +361,6 @@ fn persistence_helpers_store_rich_tool_replay_without_duplicate_tool_result() {
         .expect("turn should prepare");
     let (sender, _receiver) = mpsc::channel();
     let persistence = request.persistence_cloned();
-    let cancellation = CancellationToken::new();
     let mut state = SessionPersistenceState::default();
     let started_activity = RuntimeToolActivity {
         activity_id: "call-1".to_string(),
@@ -362,7 +407,6 @@ fn persistence_helpers_store_rich_tool_replay_without_duplicate_tool_result() {
     run_persistence(persist_turn_start(
         persistence.as_ref(),
         &sender,
-        &cancellation,
         &mut state,
     ))
     .expect("turn start should persist");
@@ -387,7 +431,6 @@ fn persistence_helpers_store_rich_tool_replay_without_duplicate_tool_result() {
     run_persistence(persist_context_item(
         persistence.as_ref(),
         &sender,
-        &cancellation,
         ConversationItem::tool_result(
             "call-1",
             vec![ContentBlock::Text("plain provider output".to_string())],
@@ -496,13 +539,11 @@ fn persist_turn_start_keeps_provider_message_in_items_and_transcript_projection_
         .expect("turn should prepare");
     let (sender, _receiver) = mpsc::channel();
     let persistence = request.persistence_cloned();
-    let cancellation = CancellationToken::new();
     let mut state = SessionPersistenceState::default();
 
     run_persistence(persist_turn_start(
         persistence.as_ref(),
         &sender,
-        &cancellation,
         &mut state,
     ))
     .expect("turn start should persist");
@@ -575,13 +616,11 @@ fn persist_turn_start_replays_image_only_user_message_as_bound_message() {
         .expect("turn should prepare");
     let (sender, _receiver) = mpsc::channel();
     let persistence = request.persistence_cloned();
-    let cancellation = CancellationToken::new();
     let mut state = SessionPersistenceState::default();
 
     run_persistence(persist_turn_start(
         persistence.as_ref(),
         &sender,
-        &cancellation,
         &mut state,
     ))
     .expect("turn start should persist");
@@ -639,20 +678,17 @@ fn persist_context_item_replays_image_only_tool_result_with_visible_summary() {
     );
     let (sender, _receiver) = mpsc::channel();
     let persistence = request.persistence_cloned();
-    let cancellation = CancellationToken::new();
     let mut state = SessionPersistenceState::default();
 
     run_persistence(persist_turn_start(
         persistence.as_ref(),
         &sender,
-        &cancellation,
         &mut state,
     ))
     .expect("turn start should persist");
     run_persistence(persist_context_item(
         persistence.as_ref(),
         &sender,
-        &cancellation,
         tool_result,
         &mut state,
     ))

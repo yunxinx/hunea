@@ -92,38 +92,21 @@ pub(super) async fn run_session_persistence_actor(
     persistence: Option<PreparedConversationPersistence>,
     mut receiver: tokio_mpsc::Receiver<SessionPersistenceCommand>,
     sender: mpsc::Sender<ConversationWorkerEvent>,
-    cancellation: CancellationToken,
+    conversation_cancellation: CancellationToken,
 ) {
     let mut state = SessionPersistenceState::default();
-    loop {
-        let command = tokio::select! {
-            _ = cancellation.cancelled() => {
-                let error = Arc::new(SessionPersistenceError::WorkerStopped);
-                cancel_pending_flushes(drain_pending_commands(&mut receiver), error);
-                break;
-            },
-            command = receiver.recv() => {
-                let Some(command) = command else {
-                    break;
-                };
-                command
-            }
-        };
+    while let Some(command) = receiver.recv().await {
         let result = match command {
             SessionPersistenceCommand::ProviderTurnStarted => {
-                persist_turn_start(persistence.as_ref(), &sender, &cancellation, &mut state)
+                persist_turn_start(persistence.as_ref(), &sender, &mut state)
                     .await
                     .map_err(Arc::new)
             }
-            SessionPersistenceCommand::ProviderContextItem(item) => persist_context_item(
-                persistence.as_ref(),
-                &sender,
-                &cancellation,
-                item,
-                &mut state,
-            )
-            .await
-            .map_err(Arc::new),
+            SessionPersistenceCommand::ProviderContextItem(item) => {
+                persist_context_item(persistence.as_ref(), &sender, item, &mut state)
+                    .await
+                    .map_err(Arc::new)
+            }
             SessionPersistenceCommand::ToolActivityStarted(activity) => {
                 persist_tool_activity_started(persistence.as_ref(), activity, &mut state)
                     .await
@@ -157,7 +140,7 @@ pub(super) async fn run_session_persistence_actor(
 
         if let Err(error) = result {
             let message = error.to_string();
-            cancellation.cancel();
+            conversation_cancellation.cancel();
             let _ = sender.send(ConversationWorkerEvent::progress(
                 ConversationEvent::Failed { message },
             ));
@@ -192,7 +175,6 @@ fn cancel_pending_flushes(
 pub(super) async fn persist_turn_start(
     persistence: Option<&PreparedConversationPersistence>,
     sender: &mpsc::Sender<ConversationWorkerEvent>,
-    _cancellation: &CancellationToken,
     state: &mut SessionPersistenceState,
 ) -> Result<(), SessionPersistenceError> {
     if state.has_persisted_turn_start {
@@ -257,7 +239,6 @@ pub(super) async fn persist_turn_start(
 pub(super) async fn persist_context_item(
     persistence: Option<&PreparedConversationPersistence>,
     sender: &mpsc::Sender<ConversationWorkerEvent>,
-    _cancellation: &CancellationToken,
     item: ConversationItem,
     state: &mut SessionPersistenceState,
 ) -> Result<(), SessionPersistenceError> {

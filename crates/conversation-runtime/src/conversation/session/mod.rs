@@ -487,17 +487,16 @@ fn send_repair_items(
     ledger: &Mutex<ProviderContextRepairLedger>,
     sender: &tokio_mpsc::Sender<SessionPersistenceCommand>,
     content: &'static str,
-    cancellation: &CancellationToken,
+    conversation_cancellation: &CancellationToken,
     progress_sender: &mpsc::Sender<ConversationWorkerEvent>,
 ) {
     for item in take_provider_context_repair_items(ledger, content) {
-        try_send_session_persistence(
+        if !try_send_session_persistence(
             sender,
             SessionPersistenceCommand::ProviderContextItem(item),
-            cancellation,
+            conversation_cancellation,
             progress_sender,
-        );
-        if cancellation.is_cancelled() {
+        ) {
             break;
         }
     }
@@ -532,26 +531,28 @@ async fn retry_conversation_after_attempt(
 fn try_send_session_persistence(
     sender: &tokio_mpsc::Sender<SessionPersistenceCommand>,
     command: SessionPersistenceCommand,
-    cancellation: &CancellationToken,
+    conversation_cancellation: &CancellationToken,
     progress_sender: &mpsc::Sender<ConversationWorkerEvent>,
-) {
+) -> bool {
     match sender.try_send(command) {
-        Ok(()) => {}
+        Ok(()) => true,
         Err(tokio_mpsc::error::TrySendError::Full(_)) => {
-            cancellation.cancel();
+            conversation_cancellation.cancel();
             let _ = progress_sender.send(ConversationWorkerEvent::progress(
                 ConversationEvent::Failed {
                     message: "conversation session persistence queue is full".to_string(),
                 },
             ));
+            false
         }
         Err(tokio_mpsc::error::TrySendError::Closed(_)) => {
-            cancellation.cancel();
+            conversation_cancellation.cancel();
             let _ = progress_sender.send(ConversationWorkerEvent::progress(
                 ConversationEvent::Failed {
                     message: "conversation session persistence worker stopped".to_string(),
                 },
             ));
+            false
         }
     }
 }

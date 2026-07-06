@@ -151,6 +151,89 @@ fn manager_snapshot_reports_invalid_skill_files_as_diagnostics() {
 }
 
 #[test]
+fn discover_skills_from_root_uses_stable_natural_directory_order() {
+    let root = temp_dir("skill-discovery-stable-root-order");
+    for (dir_name, skill_name) in [
+        ("zzz", "zzz"),
+        ("aaa", "aaa"),
+        ("mmm", "mmm"),
+        ("bbb", "bbb"),
+        ("ccc", "ccc"),
+    ] {
+        let skill_dir = root.join(dir_name);
+        fs::create_dir_all(&skill_dir).expect("skill dir should exist");
+        fs::write(
+            skill_dir.join(SKILL_FILE_NAME),
+            format!("---\nname: {skill_name}\ndescription: Test skill.\n---\n# {skill_name}\n"),
+        )
+        .expect("skill file should exist");
+    }
+
+    let mut discovered = Vec::new();
+    let mut diagnostics = Vec::new();
+    let mut seen_names = HashMap::new();
+    discover_skills_from_root(
+        &root,
+        PromptSourceOrigin::Project,
+        &mut discovered,
+        &mut seen_names,
+        &mut diagnostics,
+    );
+
+    assert_eq!(diagnostics, Vec::new());
+    assert_eq!(
+        discovered
+            .iter()
+            .map(|skill| skill.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["aaa", "bbb", "ccc", "mmm", "zzz"]
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn discover_nested_skill_dirs_use_stable_natural_directory_order() {
+    let root = temp_dir("skill-discovery-stable-nested-order");
+    let nested_root = root.join("nested");
+    for (dir_name, skill_name) in [
+        ("zzz", "zzz"),
+        ("aaa", "aaa"),
+        ("mmm", "mmm"),
+        ("bbb", "bbb"),
+        ("ccc", "ccc"),
+    ] {
+        let skill_dir = nested_root.join(dir_name);
+        fs::create_dir_all(&skill_dir).expect("nested skill dir should exist");
+        fs::write(
+            skill_dir.join(SKILL_FILE_NAME),
+            format!("---\nname: {skill_name}\ndescription: Test skill.\n---\n# {skill_name}\n"),
+        )
+        .expect("skill file should exist");
+    }
+
+    let mut discovered = Vec::new();
+    let mut diagnostics = Vec::new();
+    let mut seen_names = HashMap::new();
+    discover_skill_dir(
+        &nested_root,
+        PromptSourceOrigin::Project,
+        &mut discovered,
+        &mut seen_names,
+        &mut diagnostics,
+    );
+
+    assert_eq!(diagnostics, Vec::new());
+    assert_eq!(
+        discovered
+            .iter()
+            .map(|skill| skill.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["aaa", "bbb", "ccc", "mmm", "zzz"]
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn manager_snapshot_includes_default_dynamic_environment_sources() {
     let work_dir = temp_dir("dynamic-defaults");
     let snapshot = resolve_prompt_assembly_manager_snapshot(
@@ -865,6 +948,8 @@ fn manager_snapshot_keeps_project_and_global_skill_duplicates_for_overlay() {
 #[test]
 fn discovered_skill_inventory_keeps_manual_only_skills_visible() {
     let work_dir = temp_dir("manual-only-skill-visible");
+    let global_skill_root = work_dir.join("global-skills");
+    fs::create_dir_all(&global_skill_root).expect("global skill root should exist");
     let manual_skill_dir = work_dir.join(".agents/skills/zzz-manual");
     fs::create_dir_all(&manual_skill_dir).expect("skill dir should exist");
     fs::write(
@@ -880,10 +965,11 @@ fn discovered_skill_inventory_keeps_manual_only_skills_visible() {
     )
     .expect("skill file should exist");
 
-    let snapshot = resolve_prompt_assembly_manager_snapshot(
+    let snapshot = resolve_prompt_assembly_manager_snapshot_with_global_skill_root(
         &work_dir,
         &PromptAssemblyScopeState::new(PromptAssemblyScope::Global),
         &PromptAssemblyScopeState::new(PromptAssemblyScope::Project),
+        Some(&global_skill_root),
         &[],
     );
 
@@ -896,23 +982,15 @@ fn discovered_skill_inventory_keeps_manual_only_skills_visible() {
     assert!(!skill.selection.can_select());
     assert!(!skill.selection.is_selected());
     assert_eq!(skill.selection.selected_order(), None);
-    let manual_index = snapshot
-        .candidates
-        .discovered_skills
-        .iter()
-        .position(|skill| skill.skill_name == "zzz-manual")
-        .expect("manual-only skill should stay in inventory");
-    assert!(
-        snapshot.candidates.discovered_skills[..manual_index]
-            .windows(2)
-            .all(|pair| pair[0].title <= pair[1].title),
-        "discovery-eligible ordering should stay intact before manual-only suffix"
-    );
-    assert!(
-        snapshot.candidates.discovered_skills[..manual_index]
+    assert_eq!(
+        snapshot
+            .candidates
+            .discovered_skills
             .iter()
-            .all(|skill| skill.selection.can_select()),
-        "manual-only skills should sort after discovery-eligible skills"
+            .map(|skill| (skill.skill_name.as_str(), skill.selection.can_select()))
+            .collect::<Vec<_>>(),
+        vec![("aaa-discovery", true), ("zzz-manual", false)],
+        "manual-only skills should remain visible after discovery-eligible skills"
     );
 
     let generated = snapshot

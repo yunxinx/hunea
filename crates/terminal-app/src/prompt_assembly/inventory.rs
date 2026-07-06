@@ -384,33 +384,13 @@ pub(super) fn discover_skills_from_root(
         return;
     }
 
-    let entries = match fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(error) => {
-            diagnostics.push(PromptAssemblyDiagnostic {
-                origin: Some(origin),
-                path: Some(root.to_path_buf()),
-                message: format!("read skill directory: {error}"),
-            });
-            return;
-        }
-    };
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(error) => {
-                diagnostics.push(PromptAssemblyDiagnostic {
-                    origin: Some(origin),
-                    path: Some(root.to_path_buf()),
-                    message: format!("read skill directory entry: {error}"),
-                });
-                continue;
-            }
-        };
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
+    for path in sorted_skill_child_dirs(
+        root,
+        origin,
+        diagnostics,
+        "read skill directory",
+        "read skill directory entry",
+    ) {
         discover_skill_dir(&path, origin, discovered, seen_names, diagnostics);
     }
 }
@@ -443,17 +423,37 @@ pub(super) fn discover_skill_dir(
         return;
     }
 
+    for path in sorted_skill_child_dirs(
+        dir,
+        origin,
+        diagnostics,
+        "read nested skill directory",
+        "read nested skill directory entry",
+    ) {
+        discover_skill_dir(&path, origin, discovered, seen_names, diagnostics);
+    }
+}
+
+fn sorted_skill_child_dirs(
+    dir: &Path,
+    origin: PromptSourceOrigin,
+    diagnostics: &mut Vec<PromptAssemblyDiagnostic>,
+    read_error_context: &str,
+    entry_error_context: &str,
+) -> Vec<PathBuf> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) => {
             diagnostics.push(PromptAssemblyDiagnostic {
                 origin: Some(origin),
                 path: Some(dir.to_path_buf()),
-                message: format!("read nested skill directory: {error}"),
+                message: format!("{read_error_context}: {error}"),
             });
-            return;
+            return Vec::new();
         }
     };
+
+    let mut child_dirs = Vec::new();
     for entry in entries {
         let entry = match entry {
             Ok(entry) => entry,
@@ -461,16 +461,27 @@ pub(super) fn discover_skill_dir(
                 diagnostics.push(PromptAssemblyDiagnostic {
                     origin: Some(origin),
                     path: Some(dir.to_path_buf()),
-                    message: format!("read nested skill directory entry: {error}"),
+                    message: format!("{entry_error_context}: {error}"),
                 });
                 continue;
             }
         };
         let path = entry.path();
         if path.is_dir() {
-            discover_skill_dir(&path, origin, discovered, seen_names, diagnostics);
+            child_dirs.push(path);
         }
     }
+    child_dirs.sort_by(|left, right| {
+        natural_sort_text_cmp(&skill_dir_sort_key(left), &skill_dir_sort_key(right))
+            .then_with(|| left.cmp(right))
+    });
+    child_dirs
+}
+
+fn skill_dir_sort_key(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path_component_key(path))
 }
 
 pub(super) fn parse_skill_file(

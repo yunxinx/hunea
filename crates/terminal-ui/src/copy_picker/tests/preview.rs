@@ -47,8 +47,12 @@ fn copy_picker_preview_render_does_not_change_scroll_offset() {
         .as_mut()
         .and_then(|state| state.preview.as_mut())
         .expect("copy picker preview should be open");
-    preview.transcript_preview.is_following_bottom = true;
-    preview.transcript_preview.overlay.scroll_offset = 0;
+    let transcript_preview = preview
+        .mode
+        .as_transcript_mut()
+        .expect("assistant preview should use transcript mode");
+    transcript_preview.is_following_bottom = true;
+    transcript_preview.overlay.scroll_offset = 0;
 
     let _ = render_model_buffer(&mut model, 60, 8);
 
@@ -56,7 +60,8 @@ fn copy_picker_preview_render_does_not_change_scroll_offset() {
         .copy_picker
         .as_ref()
         .and_then(|state| state.preview.as_ref())
-        .map(|preview| preview.transcript_preview.overlay.scroll_offset);
+        .and_then(|preview| preview.mode.as_transcript())
+        .map(|preview| preview.overlay.scroll_offset);
     assert_eq!(
         scroll_offset,
         Some(0),
@@ -90,9 +95,9 @@ fn copy_picker_preview_transcript_tracks_resize_after_opening() {
         .copy_picker
         .as_mut()
         .and_then(|state| state.preview.as_mut())
+        .and_then(|preview| preview.mode.as_transcript_mut())
         .map(|preview| {
             preview
-                .transcript_preview
                 .transcript
                 .progressive_item_metrics_index()
                 .line_count
@@ -108,9 +113,9 @@ fn copy_picker_preview_transcript_tracks_resize_after_opening() {
         .copy_picker
         .as_mut()
         .and_then(|state| state.preview.as_mut())
+        .and_then(|preview| preview.mode.as_transcript_mut())
         .map(|preview| {
             preview
-                .transcript_preview
                 .transcript
                 .progressive_item_metrics_index()
                 .line_count
@@ -123,7 +128,7 @@ fn copy_picker_preview_transcript_tracks_resize_after_opening() {
 }
 
 #[test]
-fn copy_picker_preview_transcript_tracks_palette_after_opening() {
+fn copy_picker_preview_renders_user_message_without_user_surface() {
     let mut model = Model::new(StartupBannerOptions::default());
     model.set_window(80, 12);
     model.set_palette(default_palette(), true);
@@ -143,36 +148,24 @@ fn copy_picker_preview_transcript_tracks_palette_after_opening() {
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(' '))));
     assert!(model.copy_picker_preview_active());
 
-    let surface_line_count = model
-        .copy_picker
-        .as_mut()
-        .and_then(|state| state.preview.as_mut())
-        .map(|preview| {
-            preview
-                .transcript_preview
-                .transcript
-                .progressive_item_metrics_index()
-                .line_count
-        })
-        .expect("copy picker preview should be open");
+    let buffer = render_model_buffer(&mut model, 80, 12);
+    let rows = rendered_rows(&buffer);
+    let body_y = rows
+        .iter()
+        .position(|row| row.contains("surface-backed user message"))
+        .expect("preview text row");
+    let top_surface_row = "▄".repeat(80);
+    let bottom_surface_row = "▀".repeat(80);
 
-    model.set_palette(terminal_default_palette(), false);
-
-    let terminal_default_line_count = model
-        .copy_picker
-        .as_mut()
-        .and_then(|state| state.preview.as_mut())
-        .map(|preview| {
-            preview
-                .transcript_preview
-                .transcript
-                .progressive_item_metrics_index()
-                .line_count
-        })
-        .expect("copy picker preview should stay open after palette change");
     assert!(
-        terminal_default_line_count < surface_line_count,
-        "open copy picker preview should refresh user-message surface metrics after palette change: surface={surface_line_count}, terminal_default={terminal_default_line_count}"
+        rows.iter()
+            .all(|row| row != &top_surface_row && row != &bottom_surface_row),
+        "copy picker user preview should not render framed surface decoration rows: {rows:?}"
+    );
+    assert_ne!(
+        buffer[(0, body_y as u16)].bg,
+        default_palette().surface.unwrap(),
+        "copy picker user preview must not use composer/user surface background"
     );
 }
 

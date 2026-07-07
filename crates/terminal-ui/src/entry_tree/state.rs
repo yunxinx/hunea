@@ -6,7 +6,7 @@ use crate::{
     list_selection::{
         ListNavigationDirection, PagedSelection, VisibleWindowSelection, row_index_by_id,
     },
-    transcript_preview::TranscriptPreviewState,
+    plain_text_preview::MessagePreviewMode,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -62,6 +62,11 @@ pub(super) struct EntryTreeBranchPreviewMetadata {
     pub(super) metadata_now_ms: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct EntryTreePreviewState {
+    pub(super) mode: MessagePreviewMode,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) enum EntryTreeBranchPreviewSource {
     #[default]
@@ -84,7 +89,11 @@ impl Default for EntryTreeBranchPreviewState {
     }
 }
 
-pub(super) type EntryTreePreviewState = TranscriptPreviewState;
+impl EntryTreePreviewState {
+    pub(super) fn new(mode: MessagePreviewMode) -> Self {
+        Self { mode }
+    }
+}
 
 impl EntryTreeState {
     fn selection(&self) -> PagedSelection {

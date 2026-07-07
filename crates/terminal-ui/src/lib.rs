@@ -41,6 +41,7 @@ mod model_panel;
 mod overlay_input_result;
 mod path_resolve;
 mod picker_scrollbar;
+mod plain_text_preview;
 mod prompt_overlay;
 mod relative_age;
 mod render_frame;

@@ -53,7 +53,6 @@ impl Model {
 
     fn render_copy_picker_preview(&mut self, frame: &mut RenderFrame<'_>, area: Rect) {
         let palette = self.palette;
-        let content_height = usize::from(area.height.saturating_sub(2).max(1));
         let Some(preview) = self
             .copy_picker
             .as_mut()
@@ -61,17 +60,11 @@ impl Model {
         else {
             return;
         };
-        render_transcript_overlay_view(
+        preview.mode.render(
             frame,
             area,
-            &mut preview.transcript_preview.transcript,
-            &mut preview.transcript_preview.overlay,
-            TranscriptOverlayRenderOptions {
-                palette,
-                content_height,
-                footer_hint: copy_picker_preview_footer_hint(area.width),
-                progress_style: TranscriptOverlayProgressStyle::Page,
-            },
+            palette,
+            copy_picker_preview_footer_hint(area.width),
         );
     }
 

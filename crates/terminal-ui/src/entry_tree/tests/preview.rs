@@ -1,4 +1,5 @@
 use super::*;
+use crate::theme::terminal_default_palette;
 
 #[test]
 fn entry_tree_space_opens_single_message_preview_and_enter_is_ignored() {
@@ -153,8 +154,12 @@ fn entry_tree_preview_render_does_not_change_scroll_offset() {
         .as_mut()
         .and_then(|state| state.preview.as_mut())
         .expect("entry tree preview should be open");
-    preview.is_following_bottom = true;
-    preview.overlay.scroll_offset = 0;
+    let transcript_preview = preview
+        .mode
+        .as_transcript_mut()
+        .expect("assistant preview should use transcript mode");
+    transcript_preview.is_following_bottom = true;
+    transcript_preview.overlay.scroll_offset = 0;
 
     let _ = render_model_buffer(&mut model, 60, 8);
 
@@ -162,6 +167,7 @@ fn entry_tree_preview_render_does_not_change_scroll_offset() {
         .entry_tree
         .as_ref()
         .and_then(|state| state.preview.as_ref())
+        .and_then(|preview| preview.mode.as_transcript())
         .map(|preview| preview.overlay.scroll_offset);
     assert_eq!(
         scroll_offset,
@@ -195,6 +201,7 @@ fn entry_tree_preview_transcript_tracks_resize_after_opening() {
         .entry_tree
         .as_mut()
         .and_then(|state| state.preview.as_mut())
+        .and_then(|preview| preview.mode.as_transcript_mut())
         .map(|preview| {
             preview
                 .transcript
@@ -212,6 +219,7 @@ fn entry_tree_preview_transcript_tracks_resize_after_opening() {
         .entry_tree
         .as_mut()
         .and_then(|state| state.preview.as_mut())
+        .and_then(|preview| preview.mode.as_transcript_mut())
         .map(|preview| {
             preview
                 .transcript
@@ -226,7 +234,60 @@ fn entry_tree_preview_transcript_tracks_resize_after_opening() {
 }
 
 #[test]
-fn entry_tree_preview_transcript_tracks_palette_after_opening() {
+fn entry_tree_preview_transcript_refreshes_palette_after_opening() {
+    let mut model = ready_model();
+    model.set_window(80, 12);
+    model.open_entry_tree_loading();
+    model.apply_entry_tree_payload(SessionTreePayload {
+        rows: vec![tree_row_with_preview_replay_items(
+            "assistant-quoted",
+            SessionTreeRowKind::Assistant,
+            "assistant preview",
+            vec![TranscriptReplayItem::Message {
+                role: TranscriptReplayRole::Assistant,
+                content: "> quoted preview".to_string(),
+            }],
+        )],
+        current_row_id: Some("assistant-quoted".to_string()),
+    });
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(' '))));
+    assert!(model.entry_tree_preview_active());
+
+    let default_buffer = render_model_buffer(&mut model, 80, 12);
+    let default_rows = rendered_rows(&default_buffer);
+    let quoted_row = default_rows
+        .iter()
+        .position(|row| row.contains("quoted preview"))
+        .expect("quoted preview row");
+    let quoted_column = default_rows[quoted_row]
+        .find("quoted preview")
+        .expect("quoted preview column");
+    assert_eq!(
+        default_buffer[(quoted_column as u16, quoted_row as u16)].fg,
+        default_palette().quote,
+        "entry tree transcript preview should use the active palette before switching"
+    );
+
+    model.set_palette(terminal_default_palette(), false);
+
+    let terminal_default_buffer = render_model_buffer(&mut model, 80, 12);
+    let terminal_default_rows = rendered_rows(&terminal_default_buffer);
+    let quoted_row = terminal_default_rows
+        .iter()
+        .position(|row| row.contains("quoted preview"))
+        .expect("quoted preview row after palette switch");
+    let quoted_column = terminal_default_rows[quoted_row]
+        .find("quoted preview")
+        .expect("quoted preview column after palette switch");
+    assert_eq!(
+        terminal_default_buffer[(quoted_column as u16, quoted_row as u16)].fg,
+        terminal_default_palette().quote,
+        "entry tree transcript preview should refresh quote styling after palette changes"
+    );
+}
+
+#[test]
+fn entry_tree_preview_renders_user_message_without_user_surface() {
     let mut model = ready_model();
     model.set_window(80, 12);
     model.open_entry_tree_loading();
@@ -245,34 +306,24 @@ fn entry_tree_preview_transcript_tracks_palette_after_opening() {
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(' '))));
     assert!(model.entry_tree_preview_active());
 
-    let surface_line_count = model
-        .entry_tree
-        .as_mut()
-        .and_then(|state| state.preview.as_mut())
-        .map(|preview| {
-            preview
-                .transcript
-                .progressive_item_metrics_index()
-                .line_count
-        })
-        .expect("entry tree preview should be open");
+    let buffer = render_model_buffer(&mut model, 80, 12);
+    let rows = rendered_rows(&buffer);
+    let body_y = rows
+        .iter()
+        .position(|row| row.contains("surface-backed user message"))
+        .expect("preview text row");
+    let top_surface_row = "▄".repeat(80);
+    let bottom_surface_row = "▀".repeat(80);
 
-    model.set_palette(terminal_default_palette(), false);
-
-    let terminal_default_line_count = model
-        .entry_tree
-        .as_mut()
-        .and_then(|state| state.preview.as_mut())
-        .map(|preview| {
-            preview
-                .transcript
-                .progressive_item_metrics_index()
-                .line_count
-        })
-        .expect("entry tree preview should stay open after palette change");
     assert!(
-        terminal_default_line_count < surface_line_count,
-        "open entry tree preview should refresh user-message surface metrics after palette change: surface={surface_line_count}, terminal_default={terminal_default_line_count}"
+        rows.iter()
+            .all(|row| row != &top_surface_row && row != &bottom_surface_row),
+        "entry tree user preview should not render framed surface decoration rows: {rows:?}"
+    );
+    assert_ne!(
+        buffer[(0, body_y as u16)].bg,
+        default_palette().surface.unwrap(),
+        "entry tree user preview must not use composer/user surface background"
     );
 }
 

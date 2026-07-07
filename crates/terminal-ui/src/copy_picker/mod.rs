@@ -36,13 +36,6 @@ use crate::{
         tertiary_text_style,
     },
     toast::ToastSeverity,
-    tool_result::ToolActivityRenderMode,
-    transcript::{ReasoningRenderMode, preview_page_offset as copy_picker_preview_page_offset},
-    transcript_overlay::{
-        TranscriptOverlayProgressStyle, TranscriptOverlayRenderOptions,
-        render_transcript_overlay_view,
-    },
-    transcript_preview::TranscriptPreviewState,
 };
 
 const COPY_PICKER_BODY_HORIZONTAL_PADDING: usize = 2;

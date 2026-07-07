@@ -1,4 +1,5 @@
 use super::*;
+use crate::plain_text_preview::{MessagePreviewMode, preview_body_text};
 
 impl Model {
     pub(crate) fn move_entry_tree_preview_page(&mut self, direction: isize) {
@@ -8,13 +9,9 @@ impl Model {
             .as_mut()
             .and_then(|state| state.preview.as_mut())
         {
-            preview.overlay.scroll_offset = entry_tree_preview_page_offset(
-                &mut preview.transcript,
-                content_height,
-                preview.overlay.scroll_offset,
-                direction,
-            );
-            preview.is_following_bottom = false;
+            preview
+                .mode
+                .move_page(self.width, content_height, direction);
             return;
         }
 
@@ -24,13 +21,9 @@ impl Model {
             .and_then(|state| state.branch_preview.as_mut())
             .and_then(|preview| preview.message_preview.as_mut())
         {
-            preview.overlay.scroll_offset = entry_tree_preview_page_offset(
-                &mut preview.transcript,
-                content_height,
-                preview.overlay.scroll_offset,
-                direction,
-            );
-            preview.is_following_bottom = false;
+            preview
+                .mode
+                .move_page(self.width, content_height, direction);
         }
     }
 
@@ -46,7 +39,7 @@ impl Model {
 
     pub(super) fn open_entry_tree_preview(&mut self) {
         let from_branch_preview = self.entry_tree_branch_preview_active();
-        let mut transcript = {
+        let preview_mode = {
             let selected_row = if from_branch_preview {
                 self.entry_tree
                     .as_ref()
@@ -60,16 +53,19 @@ impl Model {
             let Some(row) = selected_row else {
                 return;
             };
-            self.transcript_from_session_tree_preview_replay_with_tool_activity_render_mode(
-                SessionTreePreviewReplay::from_session_tree_row(row),
-                ToolActivityRenderMode::DebugDetailed,
-            )
+            if matches!(row.kind, SessionTreeRowKind::User) {
+                MessagePreviewMode::plain_text(preview_body_text(
+                    &row.preview_content,
+                    &row.preview_replay_items,
+                ))
+            } else {
+                let transcript = self.message_preview_transcript_from_session_tree_preview_replay(
+                    SessionTreePreviewReplay::from_session_tree_row(row),
+                );
+                MessagePreviewMode::transcript(transcript, self.transcript_overlay_content_height())
+            }
         };
-
-        transcript.set_reasoning_render_mode(ReasoningRenderMode::Detailed);
-        let content_height = self.transcript_overlay_content_height();
-        let mut preview = EntryTreePreviewState::following_bottom(transcript);
-        preview.sync_follow_bottom(content_height);
+        let preview = EntryTreePreviewState::new(preview_mode);
 
         if let Some(preview_state) = self
             .entry_tree
@@ -88,20 +84,15 @@ impl Model {
         let Some(state) = self.entry_tree.as_mut() else {
             return;
         };
-        if let Some(preview) = state
-            .preview
-            .as_mut()
-            .filter(|preview| preview.is_following_bottom)
-        {
-            preview.sync_follow_bottom(content_height);
+        if let Some(preview) = state.preview.as_mut() {
+            preview.mode.sync_follow_bottom(content_height);
         }
         if let Some(preview) = state
             .branch_preview
             .as_mut()
             .and_then(|preview| preview.message_preview.as_mut())
-            .filter(|preview| preview.is_following_bottom)
         {
-            preview.sync_follow_bottom(content_height);
+            preview.mode.sync_follow_bottom(content_height);
         }
     }
 
@@ -111,14 +102,14 @@ impl Model {
             return;
         };
         if let Some(preview) = state.preview.as_mut() {
-            preview.set_width(width, content_height);
+            preview.mode.sync_width(width, content_height);
         }
         if let Some(preview) = state
             .branch_preview
             .as_mut()
             .and_then(|preview| preview.message_preview.as_mut())
         {
-            preview.set_width(width, content_height);
+            preview.mode.sync_width(width, content_height);
         }
     }
 
@@ -128,14 +119,14 @@ impl Model {
             return;
         };
         if let Some(preview) = state.preview.as_mut() {
-            preview.set_palette(palette, content_height);
+            preview.mode.sync_palette(palette, content_height);
         }
         if let Some(preview) = state
             .branch_preview
             .as_mut()
             .and_then(|preview| preview.message_preview.as_mut())
         {
-            preview.set_palette(palette, content_height);
+            preview.mode.sync_palette(palette, content_height);
         }
     }
 

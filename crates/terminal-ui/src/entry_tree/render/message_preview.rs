@@ -7,21 +7,14 @@ impl Model {
         area: Rect,
     ) {
         let palette = self.palette;
-        let content_height = usize::from(area.height.saturating_sub(2).max(1));
         let Some(preview) = self.entry_tree_message_preview_mut() else {
             return;
         };
-        render_transcript_overlay_view(
+        preview.mode.render(
             frame,
             area,
-            &mut preview.transcript,
-            &mut preview.overlay,
-            TranscriptOverlayRenderOptions {
-                palette,
-                content_height,
-                footer_hint: entry_tree_preview_footer_hint(area.width),
-                progress_style: TranscriptOverlayProgressStyle::Page,
-            },
+            palette,
+            entry_tree_preview_footer_hint(area.width),
         );
     }
 

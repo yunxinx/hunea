@@ -1,4 +1,5 @@
 use super::*;
+use crate::plain_text_preview::MessagePreviewMode;
 
 impl Model {
     pub(crate) fn copy_picker_active(&self) -> bool {
@@ -181,13 +182,9 @@ impl Model {
             .as_mut()
             .and_then(|state| state.preview.as_mut())
         {
-            preview.transcript_preview.overlay.scroll_offset = copy_picker_preview_page_offset(
-                &mut preview.transcript_preview.transcript,
-                content_height,
-                preview.transcript_preview.overlay.scroll_offset,
-                direction,
-            );
-            preview.transcript_preview.is_following_bottom = false;
+            preview
+                .mode
+                .move_page(self.width, content_height, direction);
         }
     }
 
@@ -213,22 +210,20 @@ impl Model {
             let Some(row) = state.selected_row() else {
                 return;
             };
-            let transcript = self
-                .transcript_from_session_tree_preview_replay_with_tool_activity_render_mode(
+            let mode = if matches!(row.kind, CopyableSessionTreeRowKind::User) {
+                MessagePreviewMode::plain_text(row.preview_body_text())
+            } else {
+                let transcript = self.message_preview_transcript_from_session_tree_preview_replay(
                     row.preview_replay(),
-                    ToolActivityRenderMode::DebugDetailed,
                 );
-            (state.selected, transcript)
+                MessagePreviewMode::transcript(transcript, self.transcript_overlay_content_height())
+            };
+            (state.selected, mode)
         };
 
-        let (row_index, mut transcript) = preview_target;
-        transcript.set_reasoning_render_mode(ReasoningRenderMode::Detailed);
-        let content_height = self.transcript_overlay_content_height();
-        let mut transcript_preview = TranscriptPreviewState::following_bottom(transcript);
-        transcript_preview.sync_follow_bottom(content_height);
         let preview = CopyPickerPreviewState {
-            row_index,
-            transcript_preview,
+            row_index: preview_target.0,
+            mode: preview_target.1,
         };
 
         if let Some(state) = self.copy_picker.as_mut() {
@@ -242,13 +237,10 @@ impl Model {
             .copy_picker
             .as_mut()
             .and_then(|state| state.preview.as_mut())
-            .filter(|preview| preview.transcript_preview.is_following_bottom)
         else {
             return;
         };
-        preview
-            .transcript_preview
-            .sync_follow_bottom(content_height);
+        preview.mode.sync_follow_bottom(content_height);
     }
 
     pub(crate) fn sync_copy_picker_preview_width(&mut self, width: u16) {
@@ -258,7 +250,7 @@ impl Model {
             .as_mut()
             .and_then(|state| state.preview.as_mut())
         {
-            preview.transcript_preview.set_width(width, content_height);
+            preview.mode.sync_width(width, content_height);
         }
     }
 
@@ -269,9 +261,7 @@ impl Model {
             .as_mut()
             .and_then(|state| state.preview.as_mut())
         {
-            preview
-                .transcript_preview
-                .set_palette(palette, content_height);
+            preview.mode.sync_palette(palette, content_height);
         }
     }
 

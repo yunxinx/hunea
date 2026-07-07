@@ -37,12 +37,6 @@ use crate::{
     },
     time::current_unix_timestamp_ms,
     toast::ToastSeverity,
-    tool_result::ToolActivityRenderMode,
-    transcript::{ReasoningRenderMode, preview_page_offset as entry_tree_preview_page_offset},
-    transcript_overlay::{
-        TranscriptOverlayProgressStyle, TranscriptOverlayRenderOptions,
-        render_transcript_overlay_view,
-    },
 };
 
 #[cfg(test)]

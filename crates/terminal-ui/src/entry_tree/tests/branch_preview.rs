@@ -500,6 +500,7 @@ fn entry_tree_branch_message_preview_transcript_tracks_resize_after_opening() {
         .as_mut()
         .and_then(|state| state.branch_preview.as_mut())
         .and_then(|preview| preview.message_preview.as_mut())
+        .and_then(|preview| preview.mode.as_transcript_mut())
         .map(|preview| {
             preview
                 .transcript
@@ -518,6 +519,7 @@ fn entry_tree_branch_message_preview_transcript_tracks_resize_after_opening() {
         .as_mut()
         .and_then(|state| state.branch_preview.as_mut())
         .and_then(|preview| preview.message_preview.as_mut())
+        .and_then(|preview| preview.mode.as_transcript_mut())
         .map(|preview| {
             preview
                 .transcript
@@ -532,7 +534,7 @@ fn entry_tree_branch_message_preview_transcript_tracks_resize_after_opening() {
 }
 
 #[test]
-fn entry_tree_branch_message_preview_transcript_tracks_palette_after_opening() {
+fn entry_tree_branch_message_preview_renders_user_message_without_user_surface() {
     let mut model = ready_model();
     model.set_window(80, 12);
     model.open_entry_tree_loading();
@@ -565,36 +567,24 @@ fn entry_tree_branch_message_preview_transcript_tracks_palette_after_opening() {
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(' '))));
     assert!(model.entry_tree_preview_active());
 
-    let surface_line_count = model
-        .entry_tree
-        .as_mut()
-        .and_then(|state| state.branch_preview.as_mut())
-        .and_then(|preview| preview.message_preview.as_mut())
-        .map(|preview| {
-            preview
-                .transcript
-                .progressive_item_metrics_index()
-                .line_count
-        })
-        .expect("branch message preview should be open");
+    let buffer = render_model_buffer(&mut model, 80, 12);
+    let rows = rendered_rows(&buffer);
+    let body_y = rows
+        .iter()
+        .position(|row| row.contains("surface-backed user message"))
+        .expect("preview text row");
+    let top_surface_row = "▄".repeat(80);
+    let bottom_surface_row = "▀".repeat(80);
 
-    model.set_palette(terminal_default_palette(), false);
-
-    let terminal_default_line_count = model
-        .entry_tree
-        .as_mut()
-        .and_then(|state| state.branch_preview.as_mut())
-        .and_then(|preview| preview.message_preview.as_mut())
-        .map(|preview| {
-            preview
-                .transcript
-                .progressive_item_metrics_index()
-                .line_count
-        })
-        .expect("branch message preview should stay open after palette change");
     assert!(
-        terminal_default_line_count < surface_line_count,
-        "open branch message preview should refresh user-message surface metrics after palette change: surface={surface_line_count}, terminal_default={terminal_default_line_count}"
+        rows.iter()
+            .all(|row| row != &top_surface_row && row != &bottom_surface_row),
+        "branch message user preview should not render framed surface decoration rows: {rows:?}"
+    );
+    assert_ne!(
+        buffer[(0, body_y as u16)].bg,
+        default_palette().surface.unwrap(),
+        "branch message user preview must not use composer/user surface background"
     );
 }
 

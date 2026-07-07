@@ -1,4 +1,5 @@
 use super::*;
+use crate::plain_text_preview::MessagePreviewMode;
 
 #[derive(Debug, Clone)]
 pub(crate) struct CopyPickerState {
@@ -23,7 +24,7 @@ pub(super) struct CopyPickerRow {
 #[derive(Debug, Clone)]
 pub(super) struct CopyPickerPreviewState {
     pub(super) row_index: usize,
-    pub(super) transcript_preview: TranscriptPreviewState,
+    pub(super) mode: MessagePreviewMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,6 +228,10 @@ impl CopyPickerRow {
 
     pub(super) fn preview_replay(&self) -> SessionTreePreviewReplay<'_> {
         SessionTreePreviewReplay::from_copyable_parts(self.kind, &self.replay_items, &self.raw_text)
+    }
+
+    pub(super) fn preview_body_text(&self) -> String {
+        crate::plain_text_preview::preview_body_text(&self.raw_text, &self.replay_items)
     }
 
     fn append_text_for_format(&self, format: CopyPickerTextFormat, text: &mut String) {

@@ -407,6 +407,16 @@ impl Model {
         }
     }
 
+    pub(crate) fn message_preview_transcript_from_session_tree_preview_replay(
+        &self,
+        replay: SessionTreePreviewReplay<'_>,
+    ) -> crate::transcript::Transcript {
+        self.transcript_from_session_tree_preview_replay_with_tool_activity_render_mode(
+            replay,
+            ToolActivityRenderMode::DebugDetailed,
+        )
+    }
+
     fn transcript_from_replay_item_refs_with_tool_activity_render_mode(
         &self,
         items: &[TranscriptReplayItem],

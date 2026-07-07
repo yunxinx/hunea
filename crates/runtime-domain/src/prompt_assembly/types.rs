@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::dynamic_environment::DynamicEnvironmentSourceKind;
+use crate::dynamic_environment::{DynamicEnvironmentObservation, DynamicEnvironmentSourceKind};
 
 use super::persistence::PromptAssemblyScope;
 use super::resolution::resolve_prompt_assembly;
@@ -288,6 +288,7 @@ pub struct PromptAssemblyManagerSnapshot {
     pub sources: PromptAssemblySourceInventorySnapshot,
     pub candidates: PromptAssemblyCandidateInventorySnapshot,
     pub core_system: PromptAssemblyCoreSystemSnapshot,
+    pub dynamic_environment_observations: Vec<DynamicEnvironmentObservation>,
     pub diagnostics: Vec<PromptAssemblyDiagnostic>,
 }
 

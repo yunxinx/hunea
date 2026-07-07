@@ -38,7 +38,7 @@ pub(super) struct DynamicEnvironmentRequest {
 
 #[derive(Debug, Default)]
 pub(super) struct DynamicEnvironmentInjection {
-    pub(super) prefix_texts: Vec<String>,
+    pub(super) appended_user_texts: Vec<String>,
     pub(super) next_observations: Option<Vec<DynamicEnvironmentObservation>>,
 }
 
@@ -231,17 +231,22 @@ pub(super) async fn build_dynamic_environment_injection(
         .await
         .map_err(|error| error.to_string())?;
     let snapshot_observations = match snapshot_kind {
-        DynamicEnvironmentSnapshotKind::Baseline => observations.clone(),
+        DynamicEnvironmentSnapshotKind::Baseline => dynamic_environment_changes(
+            &request.session_config.static_baseline_observations,
+            &observations,
+        ),
         DynamicEnvironmentSnapshotKind::Changes => {
             dynamic_environment_changes(&request.previous_observations, &observations)
         }
     };
 
-    let mut injection = DynamicEnvironmentInjection::default();
+    let mut injection = DynamicEnvironmentInjection {
+        appended_user_texts: Vec::new(),
+        next_observations: Some(observations),
+    };
     if let Some(snapshot) = build_dynamic_environment_snapshot(snapshot_kind, snapshot_observations)
     {
-        injection.prefix_texts.push(snapshot.body);
-        injection.next_observations = Some(observations);
+        injection.appended_user_texts.push(snapshot.body);
     }
     Ok(injection)
 }
@@ -274,6 +279,188 @@ mod tests {
 
     use super::*;
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn baseline_skips_duplicate_static_env_but_advances_observations() {
+        let observer = Arc::new(FixedObserver::new(vec![observation(
+            DynamicEnvironmentSourceKind::Workdir,
+            "workspace",
+            "Workdir: /tmp/repo",
+        )]));
+        let request = DynamicEnvironmentRequest {
+            work_dir: std::env::temp_dir(),
+            session_config: DynamicEnvironmentSessionConfig {
+                baseline_enabled: true,
+                changes_enabled: false,
+                source_selections: vec![DynamicEnvironmentSourceSelection {
+                    snapshot_kind: DynamicEnvironmentSnapshotKind::Baseline,
+                    source_kind: DynamicEnvironmentSourceKind::Workdir,
+                    enabled: true,
+                }],
+                static_baseline_observations: vec![observation(
+                    DynamicEnvironmentSourceKind::Workdir,
+                    "workspace",
+                    "Workdir: /tmp/repo",
+                )],
+            },
+            is_first_turn: true,
+            previous_observations: Vec::new(),
+        };
+
+        let injection =
+            build_dynamic_environment_injection(observer, request, &CancellationToken::new())
+                .await
+                .expect("dynamic environment injection should succeed");
+
+        assert!(injection.appended_user_texts.is_empty());
+        assert_eq!(
+            injection.next_observations,
+            Some(vec![observation(
+                DynamicEnvironmentSourceKind::Workdir,
+                "workspace",
+                "Workdir: /tmp/repo",
+            )])
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn baseline_injects_only_diff_against_static_env() {
+        let observer = Arc::new(FixedObserver::new(vec![
+            observation(
+                DynamicEnvironmentSourceKind::Date,
+                "2026-07-07",
+                "2026-07-07",
+            ),
+            observation(
+                DynamicEnvironmentSourceKind::Workdir,
+                "workspace-b",
+                "Workdir: /tmp/other",
+            ),
+        ]));
+        let request = DynamicEnvironmentRequest {
+            work_dir: std::env::temp_dir(),
+            session_config: DynamicEnvironmentSessionConfig {
+                baseline_enabled: true,
+                changes_enabled: false,
+                source_selections: vec![
+                    DynamicEnvironmentSourceSelection {
+                        snapshot_kind: DynamicEnvironmentSnapshotKind::Baseline,
+                        source_kind: DynamicEnvironmentSourceKind::Date,
+                        enabled: true,
+                    },
+                    DynamicEnvironmentSourceSelection {
+                        snapshot_kind: DynamicEnvironmentSnapshotKind::Baseline,
+                        source_kind: DynamicEnvironmentSourceKind::Workdir,
+                        enabled: true,
+                    },
+                ],
+                static_baseline_observations: vec![
+                    observation(
+                        DynamicEnvironmentSourceKind::Date,
+                        "2026-07-07",
+                        "2026-07-07",
+                    ),
+                    observation(
+                        DynamicEnvironmentSourceKind::Workdir,
+                        "workspace-a",
+                        "Workdir: /tmp/repo",
+                    ),
+                ],
+            },
+            is_first_turn: true,
+            previous_observations: Vec::new(),
+        };
+
+        let injection =
+            build_dynamic_environment_injection(observer, request, &CancellationToken::new())
+                .await
+                .expect("dynamic environment injection should succeed");
+
+        assert_eq!(
+            injection.appended_user_texts,
+            vec![
+                "<system-reminder>\nEnvironment baseline for this session:\n- Workdir: Workdir: /tmp/other\n</system-reminder>"
+                    .to_string(),
+            ]
+        );
+        assert_eq!(
+            injection.next_observations,
+            Some(vec![
+                observation(
+                    DynamicEnvironmentSourceKind::Date,
+                    "2026-07-07",
+                    "2026-07-07",
+                ),
+                observation(
+                    DynamicEnvironmentSourceKind::Workdir,
+                    "workspace-b",
+                    "Workdir: /tmp/other",
+                ),
+            ])
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn changes_compare_against_previous_observations() {
+        let observer = Arc::new(FixedObserver::new(vec![
+            observation(
+                DynamicEnvironmentSourceKind::Date,
+                "2026-07-08",
+                "2026-07-08",
+            ),
+            observation(
+                DynamicEnvironmentSourceKind::Workdir,
+                "workspace",
+                "Workdir: /tmp/repo",
+            ),
+        ]));
+        let request = DynamicEnvironmentRequest {
+            work_dir: std::env::temp_dir(),
+            session_config: DynamicEnvironmentSessionConfig {
+                baseline_enabled: false,
+                changes_enabled: true,
+                source_selections: vec![
+                    DynamicEnvironmentSourceSelection {
+                        snapshot_kind: DynamicEnvironmentSnapshotKind::Changes,
+                        source_kind: DynamicEnvironmentSourceKind::Date,
+                        enabled: true,
+                    },
+                    DynamicEnvironmentSourceSelection {
+                        snapshot_kind: DynamicEnvironmentSnapshotKind::Changes,
+                        source_kind: DynamicEnvironmentSourceKind::Workdir,
+                        enabled: true,
+                    },
+                ],
+                static_baseline_observations: Vec::new(),
+            },
+            is_first_turn: false,
+            previous_observations: vec![
+                observation(
+                    DynamicEnvironmentSourceKind::Date,
+                    "2026-07-07",
+                    "2026-07-07",
+                ),
+                observation(
+                    DynamicEnvironmentSourceKind::Workdir,
+                    "workspace",
+                    "Workdir: /tmp/repo",
+                ),
+            ],
+        };
+
+        let injection =
+            build_dynamic_environment_injection(observer, request, &CancellationToken::new())
+                .await
+                .expect("dynamic environment injection should succeed");
+
+        assert_eq!(
+            injection.appended_user_texts,
+            vec![
+                "<system-reminder>\nEnvironment changed since the last turn:\n- Date: 2026-07-08\n</system-reminder>"
+                    .to_string(),
+            ]
+        );
+    }
+
     #[test]
     fn shutdown_waits_for_active_observation_to_finish_after_cancellation() {
         let (started_tx, started_rx) = std_mpsc::channel();
@@ -297,6 +484,7 @@ mod tests {
                         source_kind: DynamicEnvironmentSourceKind::Date,
                         enabled: true,
                     }],
+                    static_baseline_observations: Vec::new(),
                 },
                 is_first_turn: true,
                 previous_observations: Vec::new(),
@@ -334,6 +522,37 @@ mod tests {
         started: Mutex<Option<std_mpsc::Sender<()>>>,
         cancelled: Mutex<Option<std_mpsc::Sender<()>>>,
         finish: Mutex<Option<oneshot::Receiver<()>>>,
+    }
+
+    struct FixedObserver {
+        observations: Vec<DynamicEnvironmentObservation>,
+    }
+
+    impl FixedObserver {
+        fn new(observations: Vec<DynamicEnvironmentObservation>) -> Self {
+            Self { observations }
+        }
+    }
+
+    impl crate::dynamic_environment::DynamicEnvironmentObserver for FixedObserver {
+        fn observe<'a>(
+            &'a self,
+            _work_dir: &'a Path,
+            _sources: &'a [DynamicEnvironmentSourceKind],
+            _cancellation: &'a CancellationToken,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            Vec<DynamicEnvironmentObservation>,
+                            crate::dynamic_environment::DynamicEnvironmentObservationError,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async move { Ok(self.observations.clone()) })
+        }
     }
 
     impl crate::dynamic_environment::DynamicEnvironmentObserver for ShutdownBlockingObserver {
@@ -379,6 +598,19 @@ mod tests {
                     })
                     .collect())
             })
+        }
+    }
+
+    fn observation(
+        source_kind: DynamicEnvironmentSourceKind,
+        fingerprint: &str,
+        summary: &str,
+    ) -> DynamicEnvironmentObservation {
+        DynamicEnvironmentObservation {
+            source_kind,
+            fingerprint: fingerprint.to_string(),
+            summary: summary.to_string(),
+            details: None,
         }
     }
 }

@@ -210,6 +210,7 @@ impl Model {
                         tools: Vec::new(),
                         dynamic_environment: Vec::new(),
                     },
+                    dynamic_environment_observations: Vec::new(),
                     core_system: PromptAssemblyCoreSystemSnapshot {
                         builtin_body: String::new(),
                         global_override: None,

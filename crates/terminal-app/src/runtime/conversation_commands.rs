@@ -185,7 +185,7 @@ impl AppRuntimeCoordinator {
             manual_skill_activities,
         } = pending_turn;
         let mut turn_options = PreparedTurnOptions::default()
-            .with_provider_prefix_texts(dynamic_environment.prefix_texts)
+            .with_appended_user_texts(dynamic_environment.appended_user_texts)
             .with_transcript_user_message(transcript_user_message)
             .with_transcript_replay_after_user(
                 self.manual_skill_replay_items(&manual_skill_activities),
@@ -241,7 +241,7 @@ impl AppRuntimeCoordinator {
     }
 
     #[cfg(test)]
-    pub(super) fn dynamic_environment_prefix_items(
+    pub(super) fn dynamic_environment_injection(
         &mut self,
     ) -> Result<DynamicEnvironmentInjection, String> {
         let Some(work_dir) = self

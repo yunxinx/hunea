@@ -38,6 +38,8 @@ pub struct DynamicEnvironmentSessionConfig {
     pub changes_enabled: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_selections: Vec<DynamicEnvironmentSourceSelection>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub static_baseline_observations: Vec<DynamicEnvironmentObservation>,
 }
 
 /// `DynamicEnvironmentObservation` 是一次环境观测的可比较结果。

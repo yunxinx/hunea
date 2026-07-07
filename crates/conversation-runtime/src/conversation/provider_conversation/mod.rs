@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use provider_protocol::{ConversationItem, Role};
+use provider_protocol::{ContentBlock, ConversationItem, Role};
 use runtime_domain::{
     dynamic_environment::{DynamicEnvironmentObservation, DynamicEnvironmentSessionConfig},
     prompt_assembly::PromptPreludeSnapshot,
@@ -154,27 +154,17 @@ impl PreparedConversationRequest {
 /// `PreparedTurnOptions` 收敛一次 turn 准备过程中可选的 provider/transcript 输入。
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct PreparedTurnOptions {
-    provider_prefix_items: Vec<ConversationItem>,
+    appended_user_texts: Vec<String>,
     transcript_user_message: Option<TranscriptUserMessage>,
     transcript_replay_after_user: Vec<TranscriptReplayItem>,
     dynamic_environment_observations: Option<Vec<DynamicEnvironmentObservation>>,
 }
 
 impl PreparedTurnOptions {
-    /// `with_provider_prefix_items` 在真实用户消息前追加 provider-visible meta items。
+    /// `with_appended_user_texts` 追加到当前 user message 文本块尾部的 provider-visible 文本块。
     #[must_use]
-    pub fn with_provider_prefix_items(mut self, items: Vec<ConversationItem>) -> Self {
-        self.provider_prefix_items = items;
-        self
-    }
-
-    /// `with_provider_prefix_texts` 以 user text item 形式追加 provider-visible meta texts。
-    #[must_use]
-    pub fn with_provider_prefix_texts(mut self, texts: Vec<String>) -> Self {
-        self.provider_prefix_items = texts
-            .into_iter()
-            .map(|text| ConversationItem::text(Role::User, text))
-            .collect();
+    pub fn with_appended_user_texts(mut self, texts: Vec<String>) -> Self {
+        self.appended_user_texts = texts;
         self
     }
 
@@ -446,15 +436,9 @@ impl ProviderConversation {
         }
 
         let user_message = turn.message().clone();
-        let mut current_user_items = options.provider_prefix_items;
-        current_user_items.push(user_message.clone());
-        self.pending_user_items = current_user_items;
         let next_dynamic_environment_observations = options
             .dynamic_environment_observations
             .unwrap_or_else(|| self.dynamic_environment_observations.clone());
-        self.pending_dynamic_environment_observations =
-            Some(next_dynamic_environment_observations.clone());
-        self.upstream_context_tokens = None;
         let transcript_user_message = options
             .transcript_user_message
             .or_else(|| turn.transcript_user_message().cloned())
@@ -464,6 +448,15 @@ impl ProviderConversation {
                 skill_bindings: Vec::new(),
                 custom_prompt_bindings: Vec::new(),
             });
+        let provider_user_message = prepare_provider_user_message(
+            &user_message,
+            &transcript_user_message,
+            &options.appended_user_texts,
+        );
+        self.pending_user_items = vec![provider_user_message];
+        self.pending_dynamic_environment_observations =
+            Some(next_dynamic_environment_observations.clone());
+        self.upstream_context_tokens = None;
         let system_prompt = self.system_prompt.clone();
         let prompt_prelude = self.prompt_prelude.clone();
         let persistence =
@@ -497,6 +490,36 @@ impl ProviderConversation {
             persistence,
         ))
     }
+}
+
+fn prepare_provider_user_message(
+    user_message: &ConversationItem,
+    transcript_user_message: &TranscriptUserMessage,
+    appended_user_texts: &[String],
+) -> ConversationItem {
+    let mut content = if transcript_user_message.attachments.is_empty()
+        && transcript_user_message.skill_bindings.is_empty()
+        && transcript_user_message.custom_prompt_bindings.is_empty()
+        && transcript_user_message.content == user_message.text_content()
+    {
+        user_message.content_blocks().unwrap_or_default().to_vec()
+    } else {
+        transcript_user_message.provider_content_with_text(user_message.text_content())
+    };
+    if appended_user_texts.is_empty() {
+        return ConversationItem::user(content);
+    }
+    let appended_user_content_blocks = appended_user_texts.iter().cloned().map(ContentBlock::Text);
+
+    let insertion_index = content
+        .iter()
+        .position(|block| !matches!(block, ContentBlock::Text(_)))
+        .unwrap_or(content.len());
+    content.splice(
+        insertion_index..insertion_index,
+        appended_user_content_blocks,
+    );
+    ConversationItem::user(content)
 }
 
 fn normalize_system_prompt(prompt: String) -> Option<String> {

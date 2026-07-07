@@ -766,6 +766,7 @@ fn disabling_dynamic_environment_changes_waits_for_next_new_session() {
                         enabled: true,
                     },
                 ],
+                static_baseline_observations: Vec::new(),
             },
         ),
         ..AppRuntimeOptions::default()
@@ -805,10 +806,10 @@ fn disabling_dynamic_environment_changes_waits_for_next_new_session() {
     );
 
     let current_session_injection = coordinator
-        .dynamic_environment_prefix_items()
+        .dynamic_environment_injection()
         .expect("current session dynamic environment should resolve");
     assert!(
-        !current_session_injection.prefix_texts.is_empty(),
+        !current_session_injection.appended_user_texts.is_empty(),
         "current started session should keep the old dynamic environment config until reset"
     );
 
@@ -820,10 +821,10 @@ fn disabling_dynamic_environment_changes_waits_for_next_new_session() {
         .append_items(vec![ConversationItem::text(Role::User, "fresh session")])
         .expect("fresh session history should seed");
     let next_session_injection = coordinator
-        .dynamic_environment_prefix_items()
+        .dynamic_environment_injection()
         .expect("next new session dynamic environment should resolve");
     assert!(
-        next_session_injection.prefix_texts.is_empty(),
+        next_session_injection.appended_user_texts.is_empty(),
         "after reset the disabled dynamic environment source should stop injecting changes"
     );
     cleanup(&root);

@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 
-use provider_protocol::{ContentBlock, ConversationItem, Role, ToolCall};
+use provider_protocol::{ContentBlock, ConversationItem, ImageDetail, Role, ToolCall};
 use runtime_domain::dynamic_environment::{
     DynamicEnvironmentObservation, DynamicEnvironmentSessionConfig, DynamicEnvironmentSnapshotKind,
     DynamicEnvironmentSourceKind, DynamicEnvironmentSourceSelection,
@@ -355,12 +355,23 @@ fn prepare_turn_with_transcript_keeps_provider_and_transcript_user_messages_sepa
 }
 
 #[test]
-fn prepare_turn_with_transcript_can_prepend_provider_visible_meta_items() {
-    let work_dir = PathBuf::from("/tmp/hunea-provider-conversation-prefix");
+fn prepare_turn_with_transcript_appends_dynamic_environment_block_to_same_user_message() {
+    let work_dir = PathBuf::from("/tmp/hunea-provider-conversation-append");
     let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
     let mut conversation =
         ProviderConversation::with_session_store(store, sample_header(&work_dir, "qwen3"))
             .expect("persisted conversation should initialize");
+    let transcript_user_message = TranscriptUserMessage {
+        content: "actual user message".to_string(),
+        attachments: vec![runtime_domain::session::TranscriptUserAttachment::Image {
+            data_base64: "ZGF0YQ==".to_string(),
+            mime_type: "image/png".to_string(),
+            uri: Some("file:///tmp/screenshot.png".to_string()),
+            detail: Some(ImageDetail::High),
+        }],
+        skill_bindings: Vec::new(),
+        custom_prompt_bindings: Vec::new(),
+    };
     let turn = ConversationTurnRequest::new(
         "local",
         ProviderKind::OpenAiCompatible,
@@ -368,56 +379,49 @@ fn prepare_turn_with_transcript_can_prepend_provider_visible_meta_items() {
         Some("http://127.0.0.1:1234/v1".to_string()),
         None,
         None,
-        ConversationItem::text(Role::User, "actual user message"),
-    );
-    let meta_item = ConversationItem::text(
-        Role::User,
-        "<system-reminder>\nEnvironment baseline\n</system-reminder>",
+        transcript_user_message.provider_message(),
     );
 
     let request = conversation
         .prepare_turn_with_options(
             &turn,
             PreparedTurnOptions::default()
-                .with_provider_prefix_items(vec![meta_item.clone()])
-                .with_transcript_user_message(TranscriptUserMessage {
-                    content: "actual user message".to_string(),
-                    attachments: Vec::new(),
-                    skill_bindings: Vec::new(),
-                    custom_prompt_bindings: Vec::new(),
-                }),
+                .with_appended_user_texts(vec![
+                    "<system-reminder>\nEnvironment baseline\n</system-reminder>".to_string(),
+                ])
+                .with_transcript_user_message(transcript_user_message.clone()),
         )
         .expect("turn should prepare");
     let persistence = request
         .persistence_cloned()
         .expect("persistence should be attached");
 
+    assert_eq!(request.items().len(), 1);
+    assert_eq!(persistence.current_user_items.len(), 1);
+    assert_eq!(request.items()[0], persistence.current_user_items[0]);
+    assert_eq!(request.items()[0].role(), Some(Role::User));
     assert_eq!(
-        request
-            .items()
-            .iter()
-            .map(ConversationItem::text_content)
-            .collect::<Vec<_>>(),
-        vec![
-            "<system-reminder>\nEnvironment baseline\n</system-reminder>",
-            "actual user message"
-        ]
-    );
-    assert_eq!(
-        persistence
-            .current_user_items
-            .iter()
-            .map(ConversationItem::text_content)
-            .collect::<Vec<_>>(),
-        vec![
-            "<system-reminder>\nEnvironment baseline\n</system-reminder>",
-            "actual user message"
-        ]
+        request.items()[0].content_blocks(),
+        Some(
+            vec![
+                ContentBlock::Text("actual user message".to_string()),
+                ContentBlock::Text(
+                    "<system-reminder>\nEnvironment baseline\n</system-reminder>".to_string(),
+                ),
+                ContentBlock::Image {
+                    data_base64: "ZGF0YQ==".to_string(),
+                    mime_type: "image/png".to_string(),
+                    uri: Some("file:///tmp/screenshot.png".to_string()),
+                    detail: Some(ImageDetail::High),
+                },
+            ]
+            .as_slice()
+        )
     );
 }
 
 #[test]
-fn prepare_turn_options_bind_transcript_prefix_and_dynamic_environment() {
+fn prepare_turn_options_bind_transcript_append_and_dynamic_environment() {
     let work_dir = PathBuf::from("/tmp/hunea-provider-conversation-options");
     let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
     let mut conversation =
@@ -453,7 +457,7 @@ fn prepare_turn_options_bind_transcript_prefix_and_dynamic_environment() {
         .prepare_turn_with_options(
             &turn,
             PreparedTurnOptions::default()
-                .with_provider_prefix_texts(vec!["<env>Workdir: /tmp/repo</env>".to_string()])
+                .with_appended_user_texts(vec!["<env>Workdir: /tmp/repo</env>".to_string()])
                 .with_transcript_user_message(transcript_user_message.clone())
                 .with_transcript_replay_after_user(transcript_replay_after_user.clone())
                 .with_dynamic_environment_observations(observations.clone()),
@@ -464,12 +468,11 @@ fn prepare_turn_options_bind_transcript_prefix_and_dynamic_environment() {
         .expect("persistence should be attached");
 
     assert_eq!(
-        request
-            .items()
-            .iter()
-            .map(ConversationItem::text_content)
-            .collect::<Vec<_>>(),
-        vec!["<env>Workdir: /tmp/repo</env>", "actual user message"]
+        request.items(),
+        vec![ConversationItem::user(vec![
+            ContentBlock::Text("actual user message".to_string()),
+            ContentBlock::Text("<env>Workdir: /tmp/repo</env>".to_string()),
+        ])]
     );
     assert_eq!(persistence.transcript_user_message, transcript_user_message);
     assert_eq!(
@@ -659,6 +662,7 @@ fn persisted_conversation_restores_dynamic_environment_session_config() {
             source_kind: DynamicEnvironmentSourceKind::Date,
             enabled: true,
         }],
+        static_baseline_observations: Vec::new(),
     };
     block_on_session(store.append_config_change(
         &session_id,

@@ -291,7 +291,7 @@ fn startup_prompt_missing_source_check_reports_load_failure() {
 }
 
 #[test]
-fn dynamic_environment_does_not_advance_observations_without_injected_snapshot() {
+fn dynamic_environment_without_selected_sources_does_not_observe_or_inject() {
     let root = temp_test_dir("dynamic-environment-empty-snapshot");
     let work_dir = root.join("repo");
     fs::create_dir_all(&work_dir).expect("work dir should exist");
@@ -333,16 +333,16 @@ fn dynamic_environment_does_not_advance_observations_without_injected_snapshot()
     });
 
     let injection = coordinator
-        .dynamic_environment_prefix_items()
+        .dynamic_environment_injection()
         .expect("dynamic environment assembly should succeed");
 
     assert!(
-        injection.prefix_texts.is_empty(),
+        injection.appended_user_texts.is_empty(),
         "no dynamic source is selected, so no provider-visible snapshot should be injected"
     );
     assert_eq!(
         injection.next_observations, None,
-        "unsent observations must not become the next comparison baseline"
+        "when no source is selected there is no successful observation to advance"
     );
     cleanup(&root);
 }
@@ -387,6 +387,7 @@ fn conversation_submit_dispatches_without_waiting_for_dynamic_environment_observ
                         enabled: true,
                     },
                 ],
+                static_baseline_observations: Vec::new(),
             },
         ),
         ..AppRuntimeOptions::default()
@@ -478,6 +479,7 @@ fn interrupting_pending_dynamic_environment_cancels_observation() {
                         enabled: true,
                     },
                 ],
+                static_baseline_observations: Vec::new(),
             },
         ),
         ..AppRuntimeOptions::default()

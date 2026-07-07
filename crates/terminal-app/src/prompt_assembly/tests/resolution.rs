@@ -68,15 +68,20 @@ fn resolve_initial_prompt_prelude_orders_core_extra_discovery_and_long_lived_ski
         Some(&missing_global_instructions_path),
     );
 
-    assert_eq!(prelude.sections.len(), 4);
+    assert_eq!(prelude.sections.len(), 5);
     assert_eq!(prelude.sections[0].kind, PromptSourceKind::CoreSystemPrompt);
     assert_eq!(prelude.sections[1].reference_id, "repo-rules");
-    assert_eq!(prelude.sections[2].reference_id, "skill-discovery");
-    assert_eq!(prelude.sections[3].reference_id, "repo-bootstrap");
+    assert_eq!(
+        prelude.sections[2].kind,
+        PromptSourceKind::DynamicEnvironmentBaseline
+    );
+    assert_eq!(prelude.sections[3].reference_id, "skill-discovery");
+    assert_eq!(prelude.sections[4].reference_id, "repo-bootstrap");
     let effective = prelude
         .effective_system_prompt()
         .expect("effective prompt should exist");
     assert!(effective.starts_with("global core\n\nproject rules\n\n"));
+    assert!(effective.contains("Environment baseline for this session:"));
     assert!(effective.contains("<available_skills>"));
     assert!(effective.contains("<name>repo-bootstrap</name>"));
     assert!(effective.contains("<skill>\n<name>repo-bootstrap</name>"));
@@ -160,6 +165,7 @@ fn resolve_initial_prompt_prelude_places_instruction_files_between_core_and_extr
         vec![
             PromptSourceKind::CoreSystemPrompt,
             PromptSourceKind::ExtraPrompt,
+            PromptSourceKind::DynamicEnvironmentBaseline,
             PromptSourceKind::InstructionsFile,
             PromptSourceKind::SkillDiscovery,
             PromptSourceKind::InstructionsFile,
@@ -173,6 +179,10 @@ fn resolve_initial_prompt_prelude_places_instruction_files_between_core_and_extr
     assert!(
         effective.starts_with("global core\n\nproject rules\n\n"),
         "explicitly ordered project prompt should stay ahead of discovered instructions: {effective}"
+    );
+    assert!(
+        effective.contains("Environment baseline for this session:"),
+        "static dynamic environment baseline should participate in prompt prelude ordering: {effective}"
     );
     assert!(
         !effective.contains("outside instructions"),
@@ -244,6 +254,51 @@ fn resolve_initial_prompt_assembly_keeps_inactive_sources_for_manager_view() {
             .map(|source| source.reference_id.as_str())
             .collect::<Vec<_>>(),
         vec!["disabled", "missing"]
+    );
+}
+
+#[test]
+fn dynamic_environment_session_config_uses_static_baseline_observations_from_manager() {
+    let work_dir = temp_dir("dynamic-environment-baseline-config");
+    let manager = resolve_prompt_assembly_manager_snapshot(
+        &work_dir,
+        &scope_state! {
+            scope: PromptAssemblyScope::Global,
+            core_system_override: None,
+            entries: vec![],
+            skill_discovery_override: None,
+            skill_discovery_skills: Vec::new(),
+            extra_prompts: Vec::new(),
+            tool_guidelines_override: None,
+            tool_selections: Vec::new(),
+            dynamic_environment_sources: vec![
+                runtime_domain::dynamic_environment::DynamicEnvironmentSourceSelection {
+                    snapshot_kind: runtime_domain::dynamic_environment::DynamicEnvironmentSnapshotKind::Baseline,
+                    source_kind: runtime_domain::dynamic_environment::DynamicEnvironmentSourceKind::Date,
+                    enabled: true,
+                },
+                runtime_domain::dynamic_environment::DynamicEnvironmentSourceSelection {
+                    snapshot_kind: runtime_domain::dynamic_environment::DynamicEnvironmentSnapshotKind::Changes,
+                    source_kind: runtime_domain::dynamic_environment::DynamicEnvironmentSourceKind::Date,
+                    enabled: false,
+                },
+            ],
+        },
+        &PromptAssemblyScopeState::new(PromptAssemblyScope::Project),
+        &[],
+    );
+
+    let session_config = dynamic_environment_session_config_from_manager(&manager);
+
+    assert!(session_config.baseline_enabled);
+    assert!(
+        session_config
+            .static_baseline_observations
+            .iter()
+            .any(|observation| {
+                observation.source_kind
+                    == runtime_domain::dynamic_environment::DynamicEnvironmentSourceKind::Date
+            })
     );
 }
 #[test]

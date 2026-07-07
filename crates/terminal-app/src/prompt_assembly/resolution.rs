@@ -49,7 +49,36 @@ pub(crate) fn dynamic_environment_session_config_from_manager(
             .iter()
             .any(|source| source.kind == PromptSourceKind::DynamicEnvironmentChanges),
         source_selections,
+        static_baseline_observations: static_dynamic_environment_baseline_observations(manager),
     }
+}
+
+fn static_dynamic_environment_baseline_observations(
+    manager: &PromptAssemblyManagerSnapshot,
+) -> Vec<DynamicEnvironmentObservation> {
+    let baseline_active = manager
+        .resolution
+        .assembly
+        .active_sources
+        .iter()
+        .any(|source| source.kind == PromptSourceKind::DynamicEnvironmentBaseline);
+    if !baseline_active {
+        return Vec::new();
+    }
+
+    let selected_sources = manager
+        .candidates
+        .dynamic_environment
+        .iter()
+        .filter(|candidate| candidate.baseline_selected)
+        .map(|candidate| candidate.source_kind)
+        .collect::<Vec<_>>();
+    manager
+        .dynamic_environment_observations
+        .iter()
+        .filter(|observation| selected_sources.contains(&observation.source_kind))
+        .cloned()
+        .collect()
 }
 
 #[cfg(test)]
@@ -215,11 +244,7 @@ pub(super) fn resolve_prompt_assembly_manager_snapshot_with_overrides(
         if !matches!(source.status, PromptSourceStatus::Active { .. }) {
             continue;
         }
-        if matches!(
-            source.kind,
-            PromptSourceKind::DynamicEnvironmentBaseline
-                | PromptSourceKind::DynamicEnvironmentChanges
-        ) {
+        if source.kind == PromptSourceKind::DynamicEnvironmentChanges {
             continue;
         }
 
@@ -283,6 +308,13 @@ pub(super) fn resolve_prompt_assembly_manager_snapshot_with_overrides(
                 global_state,
                 project_state,
             ),
+        },
+        dynamic_environment_observations: {
+            let mut observations = dynamic_environment_observations
+                .into_values()
+                .collect::<Vec<_>>();
+            observations.sort_by_key(|observation| observation.source_kind);
+            observations
         },
         diagnostics,
         core_system: PromptAssemblyCoreSystemSnapshot {

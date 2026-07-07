@@ -339,7 +339,7 @@ fn render_markdown_unknown_fenced_code_language_stays_plain_text() {
 }
 
 #[test]
-fn render_markdown_inline_code_keeps_code_background() {
+fn render_markdown_inline_code_uses_command_accent_foreground() {
     let palette = default_palette();
     let lines = render_markdown_lines("use `cargo test` first", 80, palette);
     let code_span = lines[0]
@@ -349,9 +349,11 @@ fn render_markdown_inline_code_keeps_code_background() {
         .expect("inline code span should render separately");
 
     assert_eq!(
-        code_span.style.bg, palette.surface,
-        "行内代码背景色不属于本次代码块背景调整范围"
+        code_span.style.fg,
+        Some(palette.command_accent),
+        "行内代码应改为使用 command_accent 前景色"
     );
+    assert_eq!(code_span.style.bg, None, "行内代码不应再使用背景色");
 }
 
 #[test]
@@ -627,10 +629,11 @@ fn render_markdown_table_preserves_inline_styles_inside_cells() {
         "table cells should preserve strong styling: {lines:?}"
     );
     assert!(
-        lines
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .any(|span| span.content.as_ref() == "code" && span.style.bg == palette.surface),
+        lines.iter().flat_map(|line| line.spans.iter()).any(|span| {
+            span.content.as_ref() == "code"
+                && span.style.fg == Some(palette.command_accent)
+                && span.style.bg.is_none()
+        }),
         "table cells should preserve inline code styling: {lines:?}"
     );
     let destination_span = lines
@@ -684,8 +687,8 @@ fn render_markdown_table_header_style_is_base_for_inline_cell_styles() {
         .iter()
         .find(|span| span.content.as_ref() == "Code")
         .expect("header inline code should render");
-    assert_eq!(code_header.style.fg, Some(palette.main));
-    assert_eq!(code_header.style.bg, palette.surface);
+    assert_eq!(code_header.style.fg, Some(palette.command_accent));
+    assert_eq!(code_header.style.bg, None);
 }
 
 #[test]

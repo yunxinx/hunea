@@ -4,7 +4,9 @@ use std::{
 };
 
 use crate::{
-    theme::{TerminalPalette, quote_text_style, table_header_text_style},
+    theme::{
+        TerminalPalette, command_accent_text_style, quote_text_style, table_header_text_style,
+    },
     transcript::{
         markdown_blocks::{MarkdownBlockKind, should_insert_markdown_block_spacing},
         markdown_highlight::highlight_code_chunks,
@@ -31,6 +33,7 @@ struct InlineStyleState {
     strong_depth: usize,
     strike_depth: usize,
     code_depth: usize,
+    math_depth: usize,
     heading_style: Option<Style>,
 }
 
@@ -597,7 +600,9 @@ impl MarkdownRenderer {
     }
 
     fn push_inline_math(&mut self, math: &str) {
-        self.push_inline_code(math);
+        self.inline_styles.math_depth += 1;
+        self.push_text(math);
+        self.inline_styles.math_depth = self.inline_styles.math_depth.saturating_sub(1);
     }
 
     fn push_display_math(&mut self, math: &str) {
@@ -801,34 +806,14 @@ impl MarkdownRenderer {
     }
 
     fn current_text_style(&self) -> Style {
-        let mut style = self.base_text_style();
-
-        if self.inline_styles.strong_depth > 0 {
-            style = style.add_modifier(Modifier::BOLD);
-        }
-        if self.inline_styles.emphasis_depth > 0 {
-            style = style.add_modifier(Modifier::ITALIC);
-        }
-        if self.inline_styles.strike_depth > 0 {
-            style = style.add_modifier(Modifier::CROSSED_OUT);
-        }
-        if self.inline_styles.code_depth > 0 {
-            style = self.code_style();
-        }
-        if let Some(heading_style) = self.inline_styles.heading_style {
-            style = style.patch(heading_style);
-        }
-
-        if !self.link_stack.is_empty() {
-            style = style.add_modifier(Modifier::UNDERLINED);
-        }
-
-        style
+        self.apply_inline_text_style(self.base_text_style())
     }
 
     fn current_table_cell_text_style(&self) -> Style {
-        let mut style = Style::new();
+        self.apply_inline_text_style(Style::new())
+    }
 
+    fn apply_inline_text_style(&self, mut style: Style) -> Style {
         if self.inline_styles.strong_depth > 0 {
             style = style.add_modifier(Modifier::BOLD);
         }
@@ -838,8 +823,10 @@ impl MarkdownRenderer {
         if self.inline_styles.strike_depth > 0 {
             style = style.add_modifier(Modifier::CROSSED_OUT);
         }
-        if self.inline_styles.code_depth > 0 {
+        if self.inline_styles.math_depth > 0 {
             style = self.code_style();
+        } else if self.inline_styles.code_depth > 0 {
+            style = self.inline_code_style();
         }
         if let Some(heading_style) = self.inline_styles.heading_style {
             style = style.patch(heading_style);
@@ -886,6 +873,11 @@ impl MarkdownRenderer {
             }
             style
         }
+    }
+
+    /// 行内代码使用 `command_accent` 前景色，不再叠加 surface 背景。
+    fn inline_code_style(&self) -> Style {
+        command_accent_text_style(self.palette)
     }
 
     fn highlighted_code_style(&self) -> Style {

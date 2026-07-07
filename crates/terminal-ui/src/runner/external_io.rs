@@ -21,7 +21,7 @@ use arboard::Clipboard;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use color_eyre::eyre::Result;
 
-use crate::{AppEvent, ExternalEditorLaunch, Model};
+use crate::{AppEffect, AppEvent, ExternalEditorLaunch, Model};
 
 use super::{
     apply_model_event_without_effect,
@@ -386,7 +386,7 @@ pub(super) fn run_external_editor_effect(
     terminal: &mut TuiTerminal,
     model: &mut Model,
     launch: ExternalEditorLaunch,
-) -> Result<()> {
+) -> Result<Option<AppEffect>> {
     TerminalSession::suspend(terminal)?;
     let failed = run_external_editor_command(&launch.command).is_err();
     TerminalSession::resume(terminal)?;
@@ -400,16 +400,11 @@ pub(super) fn run_external_editor_effect(
         },
         "external editor terminal resize",
     );
-    apply_model_event_without_effect(
-        model,
-        AppEvent::ExternalEditorFinished {
-            draft_path: launch.draft_path,
-            original_draft: launch.original_draft,
-            failed,
-        },
-        "external editor finished",
-    );
-    Ok(())
+    Ok(model.update(AppEvent::ExternalEditorFinished {
+        draft_path: launch.draft_path,
+        original_draft: launch.original_draft,
+        failed,
+    }))
 }
 
 pub(super) fn run_copy_selection_effect(

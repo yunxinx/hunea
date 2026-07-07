@@ -1,9 +1,16 @@
+use ratatui::{buffer::Buffer, style::Color};
 use runtime_domain::{
     model_catalog::{ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource},
+    prompt_assembly::persistence::PromptAssemblyScope,
+    prompt_assembly::{
+        PromptAssemblyDiscoveredSkill, PromptAssemblyManagerSnapshot, PromptAssemblySelectionState,
+        PromptSourceOrigin,
+    },
     provider::ProviderKind,
     session::{
         RuntimeEvent, RuntimeIdentity, RuntimeTarget, SessionResumePayload, TranscriptReplayItem,
-        TranscriptReplayRole,
+        TranscriptReplayRole, TranscriptSkillBinding, TranscriptUserAttachment,
+        TranscriptUserMessage,
     },
     session::{
         RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityContent,
@@ -11,7 +18,10 @@ use runtime_domain::{
     },
 };
 
-use crate::{Model, ModelOptions, StartupBannerOptions, runtime::event_apply::RuntimeEventApply};
+use crate::{
+    Model, ModelOptions, StartupBannerOptions, runtime::event_apply::RuntimeEventApply,
+    test_helpers::render_model_buffer, theme::default_palette,
+};
 
 #[test]
 fn session_resumed_rebuilds_visible_transcript_and_restores_model() {
@@ -84,6 +94,32 @@ fn runtime_start_events_use_toasts_not_status_notice() {
         model.active_toast_text_for_test(),
         Some("Runtime start failed: connection refused")
     );
+}
+
+#[test]
+fn prompt_missing_source_check_uses_single_aggregated_toast() {
+    let mut model = Model::new(StartupBannerOptions::default());
+
+    model.apply_runtime_event(RuntimeEvent::PromptAssemblyMissingSourcesChecked {
+        missing_count: 2,
+    });
+
+    assert_eq!(model.current_status_notice_text(), "");
+    assert_eq!(
+        model.active_toast_text_for_test(),
+        Some("2 prompt sources are missing; open /prompt to repair them")
+    );
+}
+
+#[test]
+fn prompt_missing_source_check_skips_toast_when_nothing_is_missing() {
+    let mut model = Model::new(StartupBannerOptions::default());
+
+    model.apply_runtime_event(RuntimeEvent::PromptAssemblyMissingSourcesChecked {
+        missing_count: 0,
+    });
+
+    assert_eq!(model.active_toast_text_for_test(), None);
 }
 
 #[test]
@@ -198,6 +234,95 @@ fn session_resumed_replays_terminal_snapshot_for_tool_activity() {
     assert!(!transcript.contains("runtime terminal unavailable"));
 }
 
+#[test]
+fn session_resumed_keeps_valid_skill_binding_colored() {
+    let mut model = model_with_manual_skill("code-review");
+
+    model.apply_runtime_event(RuntimeEvent::SessionResumed {
+        payload: SessionResumePayload {
+            session_id: "session-1".to_string(),
+            transcript: vec![TranscriptReplayItem::BoundUserMessage {
+                message: TranscriptUserMessage {
+                    content: "$code-review please inspect".to_string(),
+                    attachments: Vec::new(),
+                    skill_bindings: vec![TranscriptSkillBinding {
+                        skill_name: "code-review".to_string(),
+                        origin: PromptSourceOrigin::Project,
+                        skill_path: "/tmp/code-review/SKILL.md".to_string(),
+                        start_char: 0,
+                        end_char: 12,
+                    }],
+                    custom_prompt_bindings: Vec::new(),
+                },
+            }],
+            restored_model: None,
+        },
+    });
+
+    let buffer = render_model_buffer(&mut model, 60, 10);
+    assert_text_cells_use_color(&buffer, "$code-review", default_palette().command_accent);
+}
+
+#[test]
+fn session_resumed_keeps_labeled_image_attachment_colored_without_duplicate_summary() {
+    let mut model = model_with_manual_skill("unused");
+
+    model.apply_runtime_event(RuntimeEvent::SessionResumed {
+        payload: SessionResumePayload {
+            session_id: "session-1".to_string(),
+            transcript: vec![TranscriptReplayItem::BoundUserMessage {
+                message: TranscriptUserMessage {
+                    content: "啊\n[Image #1] inspect".to_string(),
+                    attachments: vec![TranscriptUserAttachment::local_image(
+                        "iVBORw0KGgo=",
+                        "image/png",
+                        Some("assets/a.png".to_string()),
+                    )],
+                    skill_bindings: Vec::new(),
+                    custom_prompt_bindings: Vec::new(),
+                },
+            }],
+            restored_model: None,
+        },
+    });
+
+    let transcript = model.transcript_plain_items().join("\n");
+    assert!(transcript.contains("[Image #1] inspect"));
+    assert!(!transcript.contains("Attached image"));
+
+    let buffer = render_model_buffer(&mut model, 60, 10);
+    assert_text_cells_use_color(&buffer, "[Image #1]", default_palette().command_accent);
+}
+
+#[test]
+fn session_resumed_drops_missing_skill_binding_color() {
+    let mut model = model_with_manual_skill("other-skill");
+
+    model.apply_runtime_event(RuntimeEvent::SessionResumed {
+        payload: SessionResumePayload {
+            session_id: "session-1".to_string(),
+            transcript: vec![TranscriptReplayItem::BoundUserMessage {
+                message: TranscriptUserMessage {
+                    content: "$code-review please inspect".to_string(),
+                    attachments: Vec::new(),
+                    skill_bindings: vec![TranscriptSkillBinding {
+                        skill_name: "code-review".to_string(),
+                        origin: PromptSourceOrigin::Project,
+                        skill_path: "/tmp/code-review/SKILL.md".to_string(),
+                        start_char: 0,
+                        end_char: 12,
+                    }],
+                    custom_prompt_bindings: Vec::new(),
+                },
+            }],
+            restored_model: None,
+        },
+    });
+
+    let buffer = render_model_buffer(&mut model, 60, 10);
+    assert_text_cells_do_not_use_color(&buffer, "$code-review", default_palette().command_accent);
+}
+
 fn model_catalog() -> ModelCatalog {
     ModelCatalog::new(vec![ModelProvider::new(
         "local",
@@ -210,4 +335,55 @@ fn model_catalog() -> ModelCatalog {
             ModelEntry::new("qwen3", None, ModelSource::Configured),
         ],
     )])
+}
+
+fn model_with_manual_skill(skill_name: &str) -> Model {
+    let mut prompt_assembly = PromptAssemblyManagerSnapshot::default();
+    prompt_assembly.candidates.manual_skills = vec![PromptAssemblyDiscoveredSkill {
+        skill_name: skill_name.to_string(),
+        title: skill_name.to_string(),
+        description: "Manual skill".to_string(),
+        origin: PromptSourceOrigin::Project,
+        selection_scope: PromptAssemblyScope::Project,
+        skill_path: format!("/tmp/{skill_name}/SKILL.md").into(),
+        body: "# Manual Skill".to_string(),
+        selection: PromptAssemblySelectionState::from_parts(false, false, None),
+    }];
+    let mut model = Model::new_with_options(
+        StartupBannerOptions::default(),
+        ModelOptions {
+            prompt_assembly: Some(prompt_assembly),
+            ..ModelOptions::default()
+        },
+    );
+    model.set_window(60, 10);
+    model.set_palette(default_palette(), true);
+    model
+}
+
+fn assert_text_cells_use_color(buffer: &Buffer, text: &str, expected: Color) {
+    let (row, column) = find_text(buffer, text).expect("text should render in buffer");
+    for offset in 0..text.chars().count() {
+        assert_eq!(buffer[(column + offset as u16, row)].fg, expected);
+    }
+}
+
+fn assert_text_cells_do_not_use_color(buffer: &Buffer, text: &str, unexpected: Color) {
+    let (row, column) = find_text(buffer, text).expect("text should render in buffer");
+    for offset in 0..text.chars().count() {
+        assert_ne!(buffer[(column + offset as u16, row)].fg, unexpected);
+    }
+}
+
+fn find_text(buffer: &Buffer, needle: &str) -> Option<(u16, u16)> {
+    for row in 0..buffer.area.height {
+        let rendered = (0..buffer.area.width)
+            .map(|column| buffer[(column, row)].symbol())
+            .collect::<String>();
+        if let Some(byte_index) = rendered.find(needle) {
+            let column = rendered[..byte_index].chars().count();
+            return Some((row, column as u16));
+        }
+    }
+    None
 }

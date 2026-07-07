@@ -1,8 +1,9 @@
 use super::*;
 use crate::{
     AppEvent, ModelOptions, Sender, StartupBannerOptions, StatusLineItem, StyleMode,
-    document::DocumentAnchorRegion,
+    document::DocumentAnchorRegion, theme::default_palette,
 };
+use ratatui::style::Modifier;
 
 #[test]
 fn single_unmatched_character_keeps_command_panel_active() {
@@ -105,13 +106,42 @@ fn rendered_command_panel_line_respects_available_width() {
         .next()
         .expect("exit item should exist");
     let (_, plain_line, selectable) =
-        model.render_command_panel_line(&item, true, 8, display_width(&item.name));
+        model.render_command_panel_line(&item, "", true, 8, display_width(&item.name));
 
     assert_eq!(display_width(&plain_line), 8);
     assert_eq!(
         selectable.content_columns().map(|(start, _)| start),
         Some(2)
     );
+}
+
+#[test]
+fn command_panel_highlights_subsequence_matches_in_command_name() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.set_palette(default_palette(), true);
+    model.set_window(80, 12);
+    model.composer.reset_text_and_move_to_end("/md");
+    model.sync_command_panel_navigation();
+
+    let panel = model.current_inline_command_panel_render_result();
+    let command_line_index = panel
+        .plain_lines
+        .iter()
+        .position(|line| line.contains("/models"))
+        .expect("models command should render");
+    let command_line = &panel.lines[command_line_index];
+
+    let highlighted_text = command_line
+        .spans
+        .iter()
+        .filter(|span| {
+            span.style.bg == default_palette().surface
+                || span.style.add_modifier.contains(Modifier::REVERSED)
+        })
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+
+    assert_eq!(highlighted_text, "md");
 }
 
 #[test]

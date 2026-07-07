@@ -48,6 +48,7 @@ impl ToolLoopResponse {
 pub struct ToolLoopCompletion {
     pub response: ToolLoopResponse,
     pub metrics: Option<ProviderRequestMetrics>,
+    pub upstream_context_tokens: Option<usize>,
 }
 
 /// `ToolLoopClock` 抽象 runtime 计时来源，方便测试审批等待时间剔除逻辑。

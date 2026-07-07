@@ -18,7 +18,7 @@ fn model_advance_uses_tick_time_for_toast_enter_completion() {
 
     assert_eq!(
         model.next_timeout_deadline(),
-        Some(started_at + TOAST_ENTER_DURATION + Duration::from_secs(2)),
+        Some(started_at + TOAST_ENTER_DURATION + Duration::from_secs(3)),
         "toast visible deadline should be based on the frame time used for rendering"
     );
 }

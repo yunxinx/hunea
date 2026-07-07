@@ -27,6 +27,7 @@ const ASSISTANT_PROSE_LEAD_WORDS: &[&str] = &[
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WrapMode {
     Assistant,
+    PlainText,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -56,6 +57,20 @@ pub(crate) fn wrap_prompt_text(
         .into_iter()
         .map(|line| line.text)
         .collect()
+}
+
+/// `wrap_plain_text` 用于纯文本预览场景的按词换行。
+pub(crate) fn wrap_plain_text(
+    value: impl AsRef<str>,
+    width: usize,
+    line_prefix_width: usize,
+) -> Vec<String> {
+    wrap_text(
+        value.as_ref(),
+        width,
+        line_prefix_width,
+        WrapMode::PlainText,
+    )
 }
 
 #[cfg(test)]
@@ -155,7 +170,7 @@ fn wrap_display_line(
 }
 
 fn should_hard_wrap_line(line: &str, mode: WrapMode) -> bool {
-    if leading_space_count(line) >= 4 {
+    if mode == WrapMode::Assistant && leading_space_count(line) >= 4 {
         return true;
     }
 
@@ -705,7 +720,7 @@ pub(crate) fn should_start_new_wrap_segment(
 
 #[cfg(test)]
 mod tests {
-    use super::{wrap_assistant_text, wrap_prompt_text};
+    use super::{wrap_assistant_text, wrap_plain_text, wrap_prompt_text};
 
     #[test]
     fn wrap_prompt_text_word_wraps_plain_prose() {
@@ -893,6 +908,14 @@ mod tests {
         assert_eq!(
             wrap_prompt_text("a\tb", 1, 2),
             vec!["a", " ", " ", " ", " ", " ", " ", "b"]
+        );
+    }
+
+    #[test]
+    fn wrap_plain_text_word_wraps_four_space_indented_prose() {
+        assert_eq!(
+            wrap_plain_text("    hello world", 10, 0),
+            vec!["    hello", "world"]
         );
     }
 }

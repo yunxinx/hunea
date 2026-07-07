@@ -16,8 +16,9 @@ use crash_recovery_support::{
 };
 use provider_protocol::{ContentBlock, ConversationItem, Role, ToolCall};
 use session_store::{
-    ConfigSnapshot, ProjectDir, SessionEntry, SessionEntryKind, SessionHeader, SessionId,
-    SessionListOptions, SessionMeta, SessionStore,
+    ConfigSnapshot, ProjectDir, SessionCatalogStore, SessionEntry, SessionEntryKind,
+    SessionFlushStore, SessionHeader, SessionId, SessionLifecycleStore, SessionListOptions,
+    SessionMeta,
 };
 
 #[tokio::test]
@@ -155,6 +156,9 @@ async fn local_store_rebuilds_sqlite_index_from_jsonl_after_index_deletion() {
                     provider_id: "local".to_string(),
                     model: "gpt-4.1-mini".to_string(),
                     system_prompt: Some("brief".to_string()),
+                    prompt_prelude: None,
+                    dynamic_environment_session_config: None,
+                    dynamic_environment_observations: Vec::new(),
                 },
             )
             .await

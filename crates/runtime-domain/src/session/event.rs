@@ -6,6 +6,20 @@ use super::{
     SessionResumePayload, SessionTreePayload, context_budget::ContextBudgetLoadErrorPayload,
 };
 use crate::context_budget::ContextBudgetSnapshot;
+use crate::prompt_assembly::PromptAssemblyManagerSnapshot;
+
+/// `PromptAssemblyUpdateNotice` 描述 `/prompt` 变更对当前运行时会话的生效范围。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptAssemblyUpdateNotice {
+    CurrentEmptySessionUpdated,
+    NextNewSessionUpdated,
+}
+
+/// `PromptAssemblyCommandFailureKind` 表示 `/prompt` 命令失败的机器可识别阶段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptAssemblyCommandFailureKind {
+    CheckMissingSources,
+}
 
 /// `RuntimeEvent` 描述交互式 runtime 返回给 TUI 的统一事件。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,6 +143,9 @@ pub enum RuntimeEvent {
     MessageHistoryStartupCacheLoadFailed {
         message: String,
     },
+    PromptAssemblyMissingSourcesChecked {
+        missing_count: usize,
+    },
     MessageHistoryPickerRowsLoaded {
         request_id: SessionLoadRequestId,
         rows: Vec<MessageHistoryRow>,
@@ -142,6 +159,14 @@ pub enum RuntimeEvent {
     },
     MessageHistoryRecordFailed {
         entry_id: MessageHistoryEntryId,
+        message: String,
+    },
+    PromptAssemblyUpdated {
+        manager: PromptAssemblyManagerSnapshot,
+        notice: Option<PromptAssemblyUpdateNotice>,
+    },
+    PromptAssemblyUpdateFailed {
+        kind: PromptAssemblyCommandFailureKind,
         message: String,
     },
     MessageFinished {
@@ -200,10 +225,13 @@ impl RuntimeEvent {
             | Self::SessionBranchSwitchFailed { .. }
             | Self::MessageHistoryStartupCacheLoaded { .. }
             | Self::MessageHistoryStartupCacheLoadFailed { .. }
+            | Self::PromptAssemblyMissingSourcesChecked { .. }
             | Self::MessageHistoryPickerRowsLoaded { .. }
             | Self::MessageHistoryPickerRowsLoadFailed { .. }
             | Self::MessageHistoryRecorded { .. }
             | Self::MessageHistoryRecordFailed { .. }
+            | Self::PromptAssemblyUpdated { .. }
+            | Self::PromptAssemblyUpdateFailed { .. }
             | Self::ContextBudgetSnapshotLoaded { .. }
             | Self::ContextBudgetSnapshotLoadFailed { .. } => None,
         }

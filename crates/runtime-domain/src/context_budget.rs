@@ -1,11 +1,12 @@
 //! Context budget snapshot for the next prepared provider turn.
 
-use std::{fmt, num::NonZeroU32};
+use std::{fmt, num::NonZeroUsize};
 
 /// Extensible segment kind for context budget breakdown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SegmentKind {
     System,
+    SkillDiscovery,
     UserMessage,
     AssistantMessage,
     ToolResult,
@@ -18,6 +19,7 @@ impl SegmentKind {
     pub const fn default_label(self) -> &'static str {
         match self {
             Self::System => "system",
+            Self::SkillDiscovery => "skill_discovery",
             Self::UserMessage => "user",
             Self::AssistantMessage => "assistant",
             Self::ToolResult => "tool_result",
@@ -36,32 +38,32 @@ pub struct ContextSegment {
 
 /// `ContextTokenLimit` 表示一个严格大于 0 的 context token 上限。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ContextTokenLimit(NonZeroU32);
+pub struct ContextTokenLimit(NonZeroUsize);
 
 impl ContextTokenLimit {
     /// `get` 返回原始的正整数 token 上限。
-    pub const fn get(self) -> u32 {
+    pub const fn get(self) -> usize {
         self.0.get()
     }
 
     /// `new` 从原始整数构造非零上限。
-    pub const fn new(value: u32) -> Option<Self> {
-        match NonZeroU32::new(value) {
+    pub const fn new(value: usize) -> Option<Self> {
+        match NonZeroUsize::new(value) {
             Some(value) => Some(Self(value)),
             None => None,
         }
     }
 }
 
-impl TryFrom<u32> for ContextTokenLimit {
+impl TryFrom<usize> for ContextTokenLimit {
     type Error = ContextTokenLimitError;
 
-    fn try_from(value: u32) -> Result<Self, Self::Error> {
+    fn try_from(value: usize) -> Result<Self, Self::Error> {
         Self::new(value).ok_or(ContextTokenLimitError)
     }
 }
 
-impl From<ContextTokenLimit> for u32 {
+impl From<ContextTokenLimit> for usize {
     fn from(value: ContextTokenLimit) -> Self {
         value.get()
     }
@@ -83,8 +85,8 @@ impl std::error::Error for ContextTokenLimitError {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContextWindowUsage {
     pub limit: ContextTokenLimit,
-    /// `used` 是 UI 展示用绝对 token 数。
-    pub used: u32,
+    /// `used` 保留完整估算值，避免大上下文在 UI 边界静默饱和。
+    pub used: usize,
 }
 
 /// Estimated token breakdown for one prepared turn.
@@ -112,7 +114,7 @@ pub fn context_window_usage(
 ) -> ContextWindowUsage {
     ContextWindowUsage {
         limit: context_limit,
-        used: u32::try_from(total_estimated_tokens).unwrap_or(u32::MAX),
+        used: total_estimated_tokens,
     }
 }
 
@@ -125,6 +127,22 @@ mod tests {
         assert!(
             ContextTokenLimit::try_from(0).is_err(),
             "zero should stay invalid at the type boundary"
+        );
+    }
+
+    #[test]
+    fn context_token_limit_preserves_usize_width() {
+        if usize::BITS <= u32::BITS {
+            return;
+        }
+
+        let large_limit = usize::try_from(u32::MAX).expect("u32::MAX should fit in usize") + 1;
+
+        assert_eq!(
+            ContextTokenLimit::try_from(large_limit)
+                .expect("usize-scale limit should be valid")
+                .get(),
+            large_limit
         );
     }
 
@@ -151,13 +169,14 @@ mod tests {
     }
 
     #[test]
-    fn context_window_usage_clamps_display_value_when_total_exceeds_u32_max() {
+    fn context_window_usage_preserves_large_display_values() {
+        let estimated_tokens = usize::try_from(u32::MAX).expect("u32::MAX should fit in usize") + 1;
         let usage = context_window_usage(
-            usize::try_from(u32::MAX).expect("u32::MAX should fit in usize") + 1,
+            estimated_tokens,
             ContextTokenLimit::try_from(256_000).expect("fixture limit should be valid"),
         );
 
-        assert_eq!(usage.used, u32::MAX);
+        assert_eq!(usage.used, estimated_tokens);
     }
 
     #[test]

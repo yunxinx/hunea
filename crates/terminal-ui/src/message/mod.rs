@@ -100,7 +100,8 @@ impl MessageItem {
     ) -> Self {
         let style_mode = style_mode.normalized();
         let content = content.into();
-        let render_cache_key = message_item_render_cache_key(sender, &content, style_mode);
+        let render_cache_key =
+            message_item_render_cache_key(sender, &content, style_mode, source_message.as_ref());
         let content = Rc::from(content);
         Self {
             sender,
@@ -114,9 +115,13 @@ impl MessageItem {
     /// `render_lines` 将消息渲染为带样式的文本行。
     pub fn render_lines(&self, width: u16, palette: TerminalPalette) -> Vec<Line<'static>> {
         match self.sender {
-            Sender::User => {
-                render_user_message_lines(self.content.as_ref(), width, palette, self.style_mode)
-            }
+            Sender::User => render_user_message_lines(
+                self.content.as_ref(),
+                width,
+                palette,
+                self.style_mode,
+                self.source_message.as_ref(),
+            ),
             Sender::Assistant => render_assistant_message(
                 markdown_display_content(self.content.as_ref()),
                 width,
@@ -174,6 +179,10 @@ impl MessageItem {
             .as_ref()
             .map(ComposerSourceMessage::content)
             .unwrap_or_else(|| self.content.as_ref())
+    }
+
+    pub(crate) fn source_message(&self) -> Option<&ComposerSourceMessage> {
+        self.source_message.as_ref()
     }
 
     pub(crate) fn render_cache_key(&self) -> u64 {
@@ -271,6 +280,7 @@ impl MessageItem {
                 width,
                 palette,
                 self.style_mode,
+                self.source_message.as_ref(),
             )
         })
     }
@@ -307,13 +317,37 @@ pub(crate) fn message_item_render_cache_key_call_count() -> usize {
     MESSAGE_ITEM_RENDER_CACHE_KEY_CALL_COUNT.get()
 }
 
-fn message_item_render_cache_key(sender: Sender, content: &str, style_mode: StyleMode) -> u64 {
+fn message_item_render_cache_key(
+    sender: Sender,
+    content: &str,
+    style_mode: StyleMode,
+    source_message: Option<&ComposerSourceMessage>,
+) -> u64 {
     #[cfg(test)]
     MESSAGE_ITEM_RENDER_CACHE_KEY_CALL_COUNT.with(|count| count.set(count.get() + 1));
 
     let mut hasher = DefaultHasher::new();
     if sender == Sender::User {
         style_mode.hash(&mut hasher);
+        if let Some(message) = source_message {
+            for binding in message.skill_bindings() {
+                binding.skill_name.hash(&mut hasher);
+                binding.origin.hash(&mut hasher);
+                binding.skill_path.hash(&mut hasher);
+                binding.start_char.hash(&mut hasher);
+                binding.end_char.hash(&mut hasher);
+            }
+            for binding in message.custom_prompt_bindings() {
+                binding.reference_id.hash(&mut hasher);
+                binding.origin.hash(&mut hasher);
+                binding.start_char.hash(&mut hasher);
+                binding.end_char.hash(&mut hasher);
+            }
+            for (start_char, end_char) in message.attachment_highlight_ranges() {
+                start_char.hash(&mut hasher);
+                end_char.hash(&mut hasher);
+            }
+        }
     }
     content.hash(&mut hasher);
     hasher.finish()

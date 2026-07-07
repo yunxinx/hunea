@@ -9,8 +9,8 @@ use std::{
 
 use conversation_runtime::ProviderConversation;
 use runtime_domain::session::{
-    MessageHistoryEntryId, RuntimeEvent, SessionLoadRequestId, SessionPickerRow,
-    SessionResumePayload, SessionTreePayload,
+    MessageHistoryEntryId, PromptAssemblyCommandFailureKind, RuntimeEvent, SessionLoadRequestId,
+    SessionPickerRow, SessionResumePayload, SessionTreePayload,
 };
 use session_store::{ProjectDir, SessionHeader, SessionId, SessionListOptions, SessionStore};
 
@@ -108,6 +108,10 @@ enum SessionStoreCommand {
     },
     LoadMessageHistoryStartupCache {
         store: Arc<dyn SessionStore>,
+    },
+    CheckPromptAssemblyMissingSources {
+        store: Arc<dyn SessionStore>,
+        work_dir: std::path::PathBuf,
     },
     LoadMessageHistoryPickerRows {
         store: Arc<dyn SessionStore>,
@@ -337,6 +341,17 @@ impl SessionStoreWorker {
     ) -> Result<(), String> {
         self.send_command(
             SessionStoreCommand::LoadMessageHistoryStartupCache { store },
+            false,
+        )
+    }
+
+    pub(super) fn check_prompt_assembly_missing_sources(
+        &mut self,
+        store: Arc<dyn SessionStore>,
+        work_dir: std::path::PathBuf,
+    ) -> Result<(), String> {
+        self.send_command(
+            SessionStoreCommand::CheckPromptAssemblyMissingSources { store, work_dir },
             false,
         )
     }
@@ -682,6 +697,57 @@ async fn handle_session_command(command: SessionStoreCommand) -> SessionStoreWor
                     },
                 ),
             }
+        }
+        SessionStoreCommand::CheckPromptAssemblyMissingSources { store, work_dir } => {
+            let global_state = match store.load_global_prompt_assembly_state().await {
+                Ok(state) => state,
+                Err(error) => {
+                    return SessionStoreWorkerEvent::runtime(
+                        RuntimeEvent::PromptAssemblyUpdateFailed {
+                            kind: PromptAssemblyCommandFailureKind::CheckMissingSources,
+                            message: format!("load global prompt assembly state: {error}"),
+                        },
+                    );
+                }
+            };
+            let missing_count = match tokio::task::spawn_blocking(move || {
+                let project_state =
+                    runtime_domain::prompt_assembly::persistence::load_project_prompt_assembly_state(
+                        &work_dir,
+                    )?;
+                Ok::<_, runtime_domain::prompt_assembly::persistence::ProjectPromptAssemblyError>(
+                    crate::prompt_assembly::check_prompt_assembly_missing_sources_from_states(
+                        &work_dir,
+                        &global_state,
+                        &project_state,
+                        &[],
+                    )
+                    .missing_count,
+                )
+            })
+            .await
+            {
+                Ok(Ok(missing_count)) => missing_count,
+                Ok(Err(error)) => {
+                    return SessionStoreWorkerEvent::runtime(
+                        RuntimeEvent::PromptAssemblyUpdateFailed {
+                            kind: PromptAssemblyCommandFailureKind::CheckMissingSources,
+                            message: format!("load project prompt assembly state: {error}"),
+                        },
+                    );
+                }
+                Err(error) => {
+                    return SessionStoreWorkerEvent::runtime(
+                        RuntimeEvent::PromptAssemblyUpdateFailed {
+                            kind: PromptAssemblyCommandFailureKind::CheckMissingSources,
+                            message: format!("check prompt assembly missing sources task panicked: {error}"),
+                        },
+                    );
+                }
+            };
+            SessionStoreWorkerEvent::runtime(RuntimeEvent::PromptAssemblyMissingSourcesChecked {
+                missing_count,
+            })
         }
         SessionStoreCommand::LoadMessageHistoryPickerRows { store, request_id } => {
             match store.load_message_history_all().await {

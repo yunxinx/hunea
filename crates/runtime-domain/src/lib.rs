@@ -1,12 +1,15 @@
 pub mod context_budget;
+pub mod dynamic_environment;
 pub mod envinfo;
 pub mod model_catalog;
 pub mod model_context_limit;
 mod model_family;
 pub mod paths;
 pub mod phrases;
+pub mod prompt_assembly;
 pub mod provider;
 pub mod request_policy;
 pub mod session;
+pub mod text;
 pub mod time;
 pub mod token_count;

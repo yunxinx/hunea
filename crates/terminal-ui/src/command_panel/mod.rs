@@ -9,6 +9,7 @@ use super::{
     AppEffect, EscRewindMode, Model, debug,
     display_width::display_width,
     overlay_input_result::OverlayInputResult,
+    search_highlight::{highlighted_subsequence_spans, search_match_style},
     selection::SelectableLineRange,
     status_line::{
         status_line_gap_before, status_line_pair_height, truncate_display_width_with_ellipsis,
@@ -28,6 +29,7 @@ pub(super) enum CommandPanelAction {
     Exit,
     OpenResumePicker,
     OpenCopyPicker,
+    OpenPromptOverlay,
     OpenContextBudget,
     OpenMessageHistory,
     OpenEntryRewind,
@@ -286,6 +288,7 @@ impl Model {
             if let Some(item) = state.items.get(index) {
                 let (line, plain_line, line_selectable) = self.render_command_panel_line(
                     item,
+                    &state.query,
                     index == state.selected,
                     width,
                     command_column_width,
@@ -307,6 +310,7 @@ impl Model {
     fn render_command_panel_line(
         &self,
         item: &CommandPanelItem,
+        query: &str,
         selected: bool,
         width: usize,
         command_column_width: usize,
@@ -345,20 +349,25 @@ impl Model {
         } else {
             secondary_text_style(self.palette)
         };
+        let highlighted_name_style = search_match_style(name_style, self.palette.surface);
         let description_style = if selected {
             primary_text_style(self.palette)
         } else {
             secondary_text_style(self.palette)
         };
+        let mut spans = vec![Span::raw(" ".repeat(inset_width))];
+        spans.extend(highlighted_subsequence_spans(
+            &command_text,
+            query,
+            name_style,
+            highlighted_name_style,
+        ));
+        spans.push(Span::raw(gap_text));
+        spans.push(Span::styled(description_text, description_style));
+        spans.push(Span::raw(" ".repeat(padding)));
 
         (
-            Line::from(vec![
-                Span::raw(" ".repeat(inset_width)),
-                Span::styled(command_text.clone(), name_style),
-                Span::raw(gap_text),
-                Span::styled(description_text, description_style),
-                Span::raw(" ".repeat(padding)),
-            ]),
+            Line::from(spans),
             plain_line.clone(),
             command_panel_selectable_range(&plain_line, width),
         )
@@ -393,42 +402,50 @@ impl Model {
             CommandPanelAction::OpenResumePicker => {
                 self.composer_mut().clear();
                 self.sync_command_panel_navigation();
-                self.sync_file_picker_state();
+                self.sync_composer_attached_picker_state();
                 self.sync_composer_height();
                 Some(AppEffect::OpenResumePicker)
             }
             CommandPanelAction::OpenContextBudget => {
                 self.composer_mut().clear();
                 self.sync_command_panel_navigation();
-                self.sync_file_picker_state();
+                self.sync_composer_attached_picker_state();
                 self.sync_composer_height();
                 Some(AppEffect::OpenContextBudget)
             }
             CommandPanelAction::OpenCopyPicker => {
                 self.composer_mut().clear();
                 self.sync_command_panel_navigation();
-                self.sync_file_picker_state();
+                self.sync_composer_attached_picker_state();
                 self.sync_composer_height();
                 Some(AppEffect::OpenCopyPicker)
+            }
+            CommandPanelAction::OpenPromptOverlay => {
+                self.composer_mut().clear();
+                self.sync_command_panel_navigation();
+                self.sync_composer_attached_picker_state();
+                self.sync_composer_height();
+                self.open_prompt_overlay();
+                Some(AppEffect::BeginPromptAssemblyEdit)
             }
             CommandPanelAction::OpenMessageHistory => {
                 self.composer_mut().clear();
                 self.sync_command_panel_navigation();
-                self.sync_file_picker_state();
+                self.sync_composer_attached_picker_state();
                 self.sync_composer_height();
                 Some(AppEffect::OpenMessageHistory)
             }
             CommandPanelAction::OpenEntryRewind => {
                 self.composer_mut().clear();
                 self.sync_command_panel_navigation();
-                self.sync_file_picker_state();
+                self.sync_composer_attached_picker_state();
                 self.sync_composer_height();
                 Some(AppEffect::OpenEntryRewind)
             }
             CommandPanelAction::OpenCoarseRewind => {
                 self.composer_mut().clear();
                 self.sync_command_panel_navigation();
-                self.sync_file_picker_state();
+                self.sync_composer_attached_picker_state();
                 self.sync_composer_height();
                 self.open_coarse_rewind_from_command()
             }
@@ -558,6 +575,12 @@ fn filter_base_command_panel_items(
         aliases: Vec::new(),
         description: "Select model for this session".to_string(),
         action: CommandPanelAction::OpenModelPanel,
+    });
+    items.push(CommandPanelItem {
+        name: "/prompt".to_string(),
+        aliases: Vec::new(),
+        description: "Inspect prompt assembly for the next new session".to_string(),
+        action: CommandPanelAction::OpenPromptOverlay,
     });
     if debug_commands_enabled {
         items.extend(debug::command_panel_items());

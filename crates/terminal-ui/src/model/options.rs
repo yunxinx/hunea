@@ -1,6 +1,7 @@
 use runtime_domain::{
     model_catalog::{ModelCatalog, ModelSelection},
     phrases::StatusPhraseOrder,
+    prompt_assembly::PromptAssemblyManagerSnapshot,
 };
 
 use crate::{
@@ -47,6 +48,7 @@ pub struct ModelOptions {
     pub requires_model_selection: bool,
     pub status_phrases: Vec<String>,
     pub status_phrase_order: StatusPhraseOrder,
+    pub prompt_assembly: Option<PromptAssemblyManagerSnapshot>,
 }
 
 impl Default for ModelOptions {
@@ -77,6 +79,7 @@ impl Default for ModelOptions {
             requires_model_selection: false,
             status_phrases: default_status_phrases(),
             status_phrase_order: StatusPhraseOrder::Random,
+            prompt_assembly: None,
         }
     }
 }

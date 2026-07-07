@@ -10,18 +10,19 @@ use ratatui::{
 
 use super::activity::{
     RuntimeDiffDetailLine, RuntimeExecuteFooterLine, RuntimeExecuteFooterStatus,
-    RuntimeExecuteTranscriptBlock, RuntimeToolActivityDetailBlock, active_marker_visible_at,
-    is_execute_like_tool_call, is_list_dir_tool_call, is_runtime_read_tool_activity,
-    list_dir_tool_call_title_chunks, runtime_diff_line_prefix,
-    runtime_read_tool_activity_title_chunks, runtime_tool_activity_detail_blocks,
-    runtime_tool_activity_diff_header_chunks, runtime_tool_activity_diff_line_style,
-    runtime_tool_activity_diff_row_style, runtime_tool_activity_display_title,
-    runtime_tool_activity_has_diff_content, runtime_tool_activity_location_suffix,
-    runtime_tool_activity_status_color, runtime_write_tool_activity_title_chunks, style_for_color,
+    RuntimeExecuteTranscriptBlock, RuntimeToolActivityDetailBlock, ToolActivityGroupFamily,
+    active_marker_visible_at, execute_tool_call_shell_command, is_execute_like_tool_call,
+    is_list_dir_tool_call, is_runtime_read_tool_activity, list_dir_tool_call_title_chunks,
+    runtime_diff_line_prefix, runtime_read_tool_activity_title_chunks,
+    runtime_tool_activity_detail_blocks, runtime_tool_activity_diff_header_chunks,
+    runtime_tool_activity_diff_line_style, runtime_tool_activity_diff_row_style,
+    runtime_tool_activity_display_title, runtime_tool_activity_has_diff_content,
+    runtime_tool_activity_location_suffix, runtime_tool_activity_status_color,
+    runtime_write_tool_activity_title_chunks, style_for_color,
 };
 use super::approval::{ParsedToolResultLine, looks_like_shell_command, style_core_result_line};
 use super::exploration::{
-    coalesce_adjacent_target_display_lines, exploration_display_lines,
+    coalesce_adjacent_target_display_lines, exploration_display_lines, exploration_group_family,
     failed_tool_call_detail_text, is_groupable_exploration_tool_call,
     standalone_exploration_tool_call, wrap_exploration_display_line,
     wrap_failed_exploration_detail_line,
@@ -217,6 +218,12 @@ impl ToolResultItem {
         let ToolResultBody::Exploration(calls) = &mut self.body else {
             return false;
         };
+        let Some(existing_family) = exploration_group_family(calls) else {
+            return false;
+        };
+        if exploration_group_family(std::slice::from_ref(&call)) != Some(existing_family) {
+            return false;
+        }
 
         calls.push(call);
         self.exploration_open = true;
@@ -512,6 +519,7 @@ impl ToolResultItem {
         let mut lines = Vec::new();
 
         if !display_lines.is_empty() {
+            let group_family = exploration_group_family(calls);
             let active_started_at = self.active_marker_started_at.filter(|_| {
                 calls.iter().any(|call| {
                     call.status != RuntimeToolActivityStatus::Failed
@@ -531,11 +539,7 @@ impl ToolResultItem {
                 palette.quote
             };
             let marker_style = style_for_color(marker_color).add_modifier(Modifier::BOLD);
-            let title = if active_started_at.is_some() {
-                "Exploring"
-            } else {
-                "Explored"
-            };
+            let title = grouped_exploration_title(group_family, active_started_at.is_some());
             let marker_text = if marker_visible {
                 TOOL_EXPLORATION_PREFIX
             } else {
@@ -852,7 +856,8 @@ impl ToolResultItem {
         let title = runtime_tool_activity_display_title(call);
         let title_style = Style::new().add_modifier(Modifier::BOLD);
         if is_finished_execute_like_tool_call(call) {
-            let title = runtime_finished_execute_title(&title);
+            let title = execute_tool_call_shell_command(call)
+                .unwrap_or_else(|| runtime_finished_execute_title(&title));
             let mut chunks = vec![
                 HighlightChunk {
                     text: "Ran".to_string(),
@@ -872,6 +877,17 @@ impl ToolResultItem {
                 });
             }
             return chunks;
+        }
+
+        if let Some(command) = execute_tool_call_shell_command(call) {
+            if looks_like_shell_command(&command) {
+                return self.shell_command_chunks_with_style(&command, title_style);
+            }
+
+            return vec![HighlightChunk {
+                text: command,
+                style: title_style,
+            }];
         }
 
         if looks_like_shell_command(&title) {
@@ -1186,5 +1202,21 @@ impl ToolResultItem {
 
     fn is_compact_approval_suspended(&self) -> bool {
         self.approval_suspended && self.render_mode == ToolActivityRenderMode::Compact
+    }
+}
+
+fn grouped_exploration_title(
+    family: Option<ToolActivityGroupFamily>,
+    is_active: bool,
+) -> &'static str {
+    match family {
+        Some(ToolActivityGroupFamily::SkillUsage) => "Use Skills",
+        Some(ToolActivityGroupFamily::Exploration) | None => {
+            if is_active {
+                "Exploring"
+            } else {
+                "Explored"
+            }
+        }
     }
 }

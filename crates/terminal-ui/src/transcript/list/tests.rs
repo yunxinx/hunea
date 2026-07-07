@@ -280,6 +280,49 @@ fn exploration_tool_activities_coalesce_into_single_transcript_item() {
 }
 
 #[test]
+fn skill_usage_and_regular_exploration_render_as_separate_transcript_items() {
+    let mut transcript = Transcript::new(default_palette());
+
+    transcript.append_runtime_tool_activity(RuntimeToolActivity {
+        activity_id: "call-skill-code-review".to_string(),
+        title: "Read /tmp/repo/.agents/skills/code-review/SKILL.md".to_string(),
+        kind: RuntimeToolKind::Read,
+        status: RuntimeToolActivityStatus::Completed,
+        content: vec![RuntimeToolActivityContent::Text("content".to_string())],
+        locations: Vec::new(),
+        raw_input: Some(
+            serde_json::json!({
+                "path": "/tmp/repo/.agents/skills/code-review/SKILL.md",
+                "hunea_skill_name": "code-review",
+                "hunea_skill_origin": "project",
+            })
+            .into(),
+        ),
+        raw_output: Some("content".into()),
+    });
+    transcript.append_runtime_tool_activity(RuntimeToolActivity {
+        activity_id: "call-read-cargo".to_string(),
+        title: "Read Cargo.toml".to_string(),
+        kind: RuntimeToolKind::Read,
+        status: RuntimeToolActivityStatus::Completed,
+        content: vec![RuntimeToolActivityContent::Text(
+            "[package]\nname = \"hunea\"".to_string(),
+        )],
+        locations: Vec::new(),
+        raw_input: Some(serde_json::json!({ "path": "Cargo.toml" }).into()),
+        raw_output: Some("[package]\nname = \"hunea\"".into()),
+    });
+
+    assert_eq!(
+        transcript.plain_items(),
+        vec![
+            "● Use code-review Skill".to_string(),
+            "● Read Cargo.toml".to_string(),
+        ]
+    );
+}
+
+#[test]
 fn exploration_group_keeps_activity_ids_and_coalesces_adjacent_reads() {
     let mut transcript = Transcript::new(default_palette());
 

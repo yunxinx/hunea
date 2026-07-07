@@ -12,6 +12,7 @@ use conversation_runtime::context_budget::{
 use conversation_runtime::{ConversationItem, ToolDefinition};
 use runtime_domain::{
     context_budget::{ContextBudgetSnapshot, ContextTokenLimit},
+    prompt_assembly::PromptPreludeSnapshot,
     provider::ProviderKind,
     session::{ContextBudgetLoadErrorPayload, RuntimeEvent, SessionLoadRequestId},
 };
@@ -27,14 +28,28 @@ pub(super) struct ContextBudgetWorker {
 }
 
 #[derive(Debug)]
+pub(super) struct ContextBudgetSnapshotRequest {
+    pub(super) request_id: SessionLoadRequestId,
+    pub(super) provider_kind: ProviderKind,
+    pub(super) model_id: String,
+    pub(super) items: Arc<[ConversationItem]>,
+    pub(super) prompt_prelude: Option<PromptPreludeSnapshot>,
+    pub(super) tool_definitions: Vec<ToolDefinition>,
+    pub(super) context_limit: ContextTokenLimit,
+    pub(super) upstream_context_tokens: Option<usize>,
+}
+
+#[derive(Debug)]
 struct ContextBudgetWorkerCommand {
     request_id: SessionLoadRequestId,
     generation: u64,
     provider_kind: ProviderKind,
     model_id: String,
     items: Arc<[ConversationItem]>,
+    prompt_prelude: Option<PromptPreludeSnapshot>,
     tool_definitions: Vec<ToolDefinition>,
     context_limit: ContextTokenLimit,
+    upstream_context_tokens: Option<usize>,
 }
 
 enum WorkerControl {
@@ -87,6 +102,8 @@ impl ContextBudgetWorker {
         let (worker_tx, worker_rx) = mpsc::channel();
         let (result_tx, result_rx) = mpsc::channel();
         let worker_generation = Arc::clone(&current_generation);
+        // `/context` 投影偏 CPU 密集且会合并快速请求；专用线程避免占用 Tokio
+        // shared blocking pool，generation 检查负责在投影阶段之间协作式取消。
         let worker_thread = thread::Builder::new()
             .name("context-budget-worker".to_string())
             .spawn(move || worker_loop(worker_rx, result_tx, worker_generation))
@@ -110,26 +127,33 @@ impl ContextBudgetWorker {
 
     pub(super) fn load_snapshot(
         &mut self,
-        request_id: SessionLoadRequestId,
-        provider_kind: ProviderKind,
-        model_id: String,
-        items: Arc<[ConversationItem]>,
-        tool_definitions: Vec<ToolDefinition>,
-        context_limit: ContextTokenLimit,
+        request: ContextBudgetSnapshotRequest,
     ) -> Result<(), ContextBudgetWorkerLoadError> {
         if self.worker_tx.is_none() {
             return Err(ContextBudgetWorkerLoadError::WorkerStopped);
         }
 
         let generation = self.bump_generation();
+        let ContextBudgetSnapshotRequest {
+            request_id,
+            provider_kind,
+            model_id,
+            items,
+            prompt_prelude,
+            tool_definitions,
+            context_limit,
+            upstream_context_tokens,
+        } = request;
         let command = ContextBudgetWorkerCommand {
             request_id,
             generation,
             provider_kind,
             model_id,
             items,
+            prompt_prelude,
             tool_definitions,
             context_limit,
+            upstream_context_tokens,
         };
 
         if self.active_generation.is_some() {
@@ -158,11 +182,9 @@ impl ContextBudgetWorker {
             let _ = worker_tx.send(WorkerControl::Shutdown);
         }
 
-        if let Some(worker_thread) = self.worker_thread.take() {
-            worker_thread
-                .join()
-                .map_err(|_| "context budget worker thread panicked during shutdown".to_string())?;
-        }
+        // `/context` cancellation is cooperative. Dropping the handle lets shutdown return even
+        // when a stale projection is still between cancellation checkpoints.
+        let _ = self.worker_thread.take();
 
         self.drain_result_channel();
         Ok(())
@@ -315,8 +337,10 @@ fn handle_context_budget_command(
         provider_kind,
         model_id,
         items,
+        prompt_prelude,
         tool_definitions,
         context_limit,
+        upstream_context_tokens,
     } = command;
 
     let is_cancelled = || current_generation.load(Ordering::Acquire) != generation;
@@ -330,7 +354,9 @@ fn handle_context_budget_command(
         &items,
         &tool_definitions,
         context_limit,
-    );
+    )
+    .with_prompt_prelude(prompt_prelude.as_ref());
+    let probe = probe.with_upstream_context_tokens(upstream_context_tokens);
 
     match build_context_budget_snapshot_with_cancellation(probe, is_cancelled) {
         Ok(Some(snapshot)) => ContextBudgetTaskResult::Loaded(snapshot),
@@ -460,9 +486,11 @@ mod tests {
                 provider_protocol::Role::User,
                 "hello",
             )]),
+            prompt_prelude: None,
             tool_definitions: Vec::new(),
             context_limit: ContextTokenLimit::try_from(1_000)
                 .expect("fixture limit should be valid"),
+            upstream_context_tokens: None,
         }
     }
 
@@ -473,8 +501,10 @@ mod tests {
             provider_kind: command.provider_kind,
             model_id: command.model_id.clone(),
             items: Arc::clone(&command.items),
+            prompt_prelude: command.prompt_prelude.clone(),
             tool_definitions: command.tool_definitions.clone(),
             context_limit: command.context_limit,
+            upstream_context_tokens: command.upstream_context_tokens,
         }
     }
 }

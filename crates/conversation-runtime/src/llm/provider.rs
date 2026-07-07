@@ -1,7 +1,13 @@
-use std::{env, time::Duration};
+use std::{
+    env,
+    sync::{Mutex, OnceLock, mpsc},
+    thread,
+    time::Duration,
+};
 
 use openai_compat_provider::{
     DEFAULT_OPENAI_BASE_URL, OpenAiChatCompletionsClient, OpenAiClientConfig,
+    OpenAiCompatibleClient, OpenAiResponsesClient,
 };
 use provider_protocol::ProviderClient;
 use runtime_domain::{provider::ProviderKind, session::ProviderRequest};
@@ -11,7 +17,7 @@ use crate::llm::ProviderRequestError;
 
 pub(crate) fn openai_client_for_request(
     request: &ProviderRequest,
-) -> Result<OpenAiChatCompletionsClient, ProviderRequestError> {
+) -> Result<OpenAiCompatibleClient, ProviderRequestError> {
     openai_client_from_parts(
         &request.provider_id,
         request.provider_kind,
@@ -23,7 +29,7 @@ pub(crate) fn openai_client_for_request(
 
 pub(crate) fn openai_client_for_prepared_request(
     request: &PreparedConversationRequest,
-) -> Result<OpenAiChatCompletionsClient, ProviderRequestError> {
+) -> Result<OpenAiCompatibleClient, ProviderRequestError> {
     openai_client_from_parts(
         request.provider_id(),
         request.provider_kind(),
@@ -39,9 +45,9 @@ fn openai_client_from_parts(
     base_url: Option<&str>,
     api_key: Option<&runtime_domain::provider::ProviderApiKey>,
     api_key_env: Option<&str>,
-) -> Result<OpenAiChatCompletionsClient, ProviderRequestError> {
+) -> Result<OpenAiCompatibleClient, ProviderRequestError> {
     let config = match provider_kind {
-        ProviderKind::OpenAiCompatible => {
+        ProviderKind::OpenAiCompatible | ProviderKind::OpenAiResponses => {
             let Some(base_url) = base_url.filter(|value| !value.trim().is_empty()) else {
                 return Err(ProviderRequestError::MissingBaseUrl {
                     provider_id: provider_id.to_string(),
@@ -76,7 +82,20 @@ fn openai_client_from_parts(
         }
     }?;
 
-    OpenAiChatCompletionsClient::new(config).map_err(Into::into)
+    match provider_kind {
+        ProviderKind::OpenAiResponses => OpenAiResponsesClient::new(config)
+            .map(OpenAiCompatibleClient::Responses)
+            .map_err(Into::into),
+        ProviderKind::OpenAiCompatible | ProviderKind::OpenAi => {
+            OpenAiChatCompletionsClient::new(config)
+                .map(OpenAiCompatibleClient::ChatCompletions)
+                .map_err(Into::into)
+        }
+        provider_kind => Err(ProviderRequestError::UnsupportedProvider {
+            provider_id: provider_id.to_string(),
+            provider_kind,
+        }),
+    }
 }
 
 fn openai_config_for_base_url(
@@ -93,22 +112,92 @@ fn openai_config_for_base_url(
 pub(crate) fn list_provider_models(
     request: &ProviderRequest,
 ) -> Result<Vec<String>, ProviderRequestError> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|source| {
-            ProviderRequestError::Provider(format!("start model sync runtime: {source}"))
-        })?;
+    model_list_worker()?.list_models(request.clone())
+}
 
-    runtime.block_on(async {
-        tokio::time::timeout(Duration::from_secs(3), async {
-            let client = openai_client_for_request(request)?;
-            let models = client.list_models().await?;
-            Ok(models.into_iter().map(|model| model.id).collect::<Vec<_>>())
+#[derive(Clone)]
+struct ModelListWorker {
+    sender: mpsc::Sender<ModelListJob>,
+}
+
+struct ModelListJob {
+    request: ProviderRequest,
+    result_sender: mpsc::SyncSender<Result<Vec<String>, ProviderRequestError>>,
+}
+
+static MODEL_LIST_WORKER: OnceLock<ModelListWorker> = OnceLock::new();
+static MODEL_LIST_WORKER_INIT: Mutex<()> = Mutex::new(());
+
+impl ModelListWorker {
+    fn list_models(&self, request: ProviderRequest) -> Result<Vec<String>, ProviderRequestError> {
+        let (result_sender, result_receiver) = mpsc::sync_channel(1);
+        self.sender
+            .send(ModelListJob {
+                request,
+                result_sender,
+            })
+            .map_err(|_| ProviderRequestError::Provider("model sync worker stopped".to_string()))?;
+        result_receiver
+            .recv()
+            .map_err(|_| ProviderRequestError::Provider("model sync worker stopped".to_string()))?
+    }
+}
+
+fn model_list_worker() -> Result<ModelListWorker, ProviderRequestError> {
+    if let Some(worker) = MODEL_LIST_WORKER.get() {
+        return Ok(worker.clone());
+    }
+    let _init_guard = MODEL_LIST_WORKER_INIT.lock().map_err(|_| {
+        ProviderRequestError::Provider("model sync worker init lock was poisoned".to_string())
+    })?;
+    if let Some(worker) = MODEL_LIST_WORKER.get() {
+        return Ok(worker.clone());
+    }
+    let worker = start_model_list_worker()?;
+    let _ = MODEL_LIST_WORKER.set(worker.clone());
+    Ok(worker)
+}
+
+fn start_model_list_worker() -> Result<ModelListWorker, ProviderRequestError> {
+    let (sender, receiver) = mpsc::channel::<ModelListJob>();
+    thread::Builder::new()
+        .name("hunea-model-list-worker".to_string())
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            match runtime {
+                Ok(runtime) => {
+                    while let Ok(job) = receiver.recv() {
+                        let result = runtime.block_on(async {
+                            tokio::time::timeout(Duration::from_secs(3), async {
+                                let client = openai_client_for_request(&job.request)?;
+                                let models = client.list_models().await?;
+                                Ok(models.into_iter().map(|model| model.id).collect::<Vec<_>>())
+                            })
+                            .await
+                            .map_err(|_| {
+                                ProviderRequestError::Provider("model sync timed out".to_string())
+                            })?
+                        });
+                        let _ = job.result_sender.send(result);
+                    }
+                }
+                Err(error) => {
+                    for job in receiver {
+                        let _ =
+                            job.result_sender
+                                .send(Err(ProviderRequestError::Provider(format!(
+                                    "start model sync runtime: {error}"
+                                ))));
+                    }
+                }
+            }
         })
-        .await
-        .map_err(|_| ProviderRequestError::Provider("model sync timed out".to_string()))?
-    })
+        .map_err(|source| {
+            ProviderRequestError::Provider(format!("start model sync worker: {source}"))
+        })?;
+    Ok(ModelListWorker { sender })
 }
 
 fn optional_api_key_from_parts(
@@ -190,6 +279,26 @@ mod tests {
             .expect_err("official OpenAI provider should require API key");
 
         assert!(error.to_string().contains("requires API key"));
+    }
+
+    #[test]
+    fn openai_responses_request_uses_responses_client() {
+        let request = ProviderRequest {
+            provider_id: "responses".to_string(),
+            provider_kind: ProviderKind::OpenAiResponses,
+            model_id: "fast-responses-model".to_string(),
+            base_url: Some("https://responses.example.com/v1".to_string()),
+            api_key: None,
+            api_key_env: None,
+            items: vec![user_item("hello")],
+        };
+
+        let client = openai_client_for_request(&request).expect("client should build");
+
+        assert!(matches!(
+            client,
+            openai_compat_provider::OpenAiCompatibleClient::Responses(_)
+        ));
     }
 
     #[test]

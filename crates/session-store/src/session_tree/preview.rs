@@ -274,9 +274,17 @@ fn runtime_tool_activity_content_preview_text(
         RuntimeToolActivityContent::Terminal { terminal_id } => {
             non_empty_preview_content(terminal_id)
         }
-        RuntimeToolActivityContent::Image { .. }
-        | RuntimeToolActivityContent::Audio { .. }
-        | RuntimeToolActivityContent::Resource { text: None, .. } => None,
+        RuntimeToolActivityContent::Image { mime_type, uri } => {
+            let label = match uri.as_deref().filter(|uri| !uri.trim().is_empty()) {
+                Some(uri) => format!("[Attached image: {mime_type} {uri}]"),
+                None => format!("[Attached image: {mime_type}]"),
+            };
+            non_empty_preview_content(&label)
+        }
+        RuntimeToolActivityContent::Audio { mime_type } => {
+            non_empty_preview_content(&format!("[Attached audio: {mime_type}]"))
+        }
+        RuntimeToolActivityContent::Resource { text: None, .. } => None,
     }
 }
 
@@ -296,11 +304,11 @@ fn session_tree_fallback_preview_content(
                 ..
             } if item.text_content().trim().is_empty() => assistant_tool_call_summary(item),
             ConversationItem::ToolResult { call_id, .. }
-                if item.text_content().trim().is_empty() =>
+                if item.summary_text_content().trim().is_empty() =>
             {
                 format!("tool result {call_id}")
             }
-            _ => item.text_content(),
+            _ => item.summary_text_content(),
         },
         _ => match kind {
             SessionTreeSnapshotRowKind::User => "user message".to_string(),
@@ -344,6 +352,9 @@ mod tests {
                 provider_id: "local".to_string(),
                 model: "qwen3".to_string(),
                 system_prompt: None,
+                prompt_prelude: None,
+                dynamic_environment_session_config: None,
+                dynamic_environment_observations: Vec::new(),
             }),
         };
 

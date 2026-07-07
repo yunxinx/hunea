@@ -10,6 +10,7 @@ use super::super::{
     search::{ManagedSearchToolConfig, find, grep},
 };
 use super::{
+    error::WorkspaceFileError,
     file_state::WorkspaceReadState,
     mutation::WorkspaceMutationQueue,
     workspace_access::{WorkspaceAccess, local_workspace_access},
@@ -39,6 +40,10 @@ pub fn workspace_readonly_tool_registry_with_options(
         &root,
         access.clone(),
         read_state,
+    ));
+    registry.insert(super::view_image::view_image_tool_with_access(
+        &root,
+        access.clone(),
     ));
     registry.insert(super::list_dir::list_dir_tool_with_access(
         &root,
@@ -75,6 +80,10 @@ pub fn workspace_tool_registry_with_options(
         access.clone(),
         read_state.clone(),
     ));
+    registry.insert(super::view_image::view_image_tool_with_access(
+        &root,
+        access.clone(),
+    ));
     registry.insert(super::list_dir::list_dir_tool_with_access(
         &root,
         access.clone(),
@@ -107,26 +116,35 @@ pub(crate) fn resolve_workspace_path(
     access: &dyn WorkspaceAccess,
     root: &Path,
     requested: &str,
-) -> Result<PathBuf, String> {
+) -> Result<PathBuf, WorkspaceFileError> {
     let requested = requested.trim();
     if requested.is_empty() {
-        return Err("'path' is required".to_string());
+        return Err(WorkspaceFileError::MissingPath);
     }
 
     let root = access
         .canonicalize(root)
-        .map_err(|error| format!("workspace root is unavailable: {error}"))?;
+        .map_err(|source| WorkspaceFileError::WorkspaceRoot {
+            path: root.to_path_buf(),
+            source,
+        })?;
     let requested_path = Path::new(requested);
     let candidate = if requested_path.is_absolute() {
         requested_path.to_path_buf()
     } else {
         root.join(requested_path)
     };
-    let candidate = access
-        .canonicalize(&candidate)
-        .map_err(|error| format!("path not found: {requested}: {error}"))?;
+    let candidate =
+        access
+            .canonicalize(&candidate)
+            .map_err(|source| WorkspaceFileError::PathNotFound {
+                requested: requested.to_string(),
+                source,
+            })?;
     if !candidate.starts_with(&root) {
-        return Err(format!("path is outside workspace: {requested}"));
+        return Err(WorkspaceFileError::PathOutsideWorkspace {
+            requested: requested.to_string(),
+        });
     }
     Ok(candidate)
 }
@@ -135,15 +153,18 @@ pub(crate) fn resolve_workspace_write_path(
     access: &dyn WorkspaceAccess,
     root: &Path,
     requested: &str,
-) -> Result<PathBuf, String> {
+) -> Result<PathBuf, WorkspaceFileError> {
     let requested = requested.trim();
     if requested.is_empty() {
-        return Err("'path' is required".to_string());
+        return Err(WorkspaceFileError::MissingPath);
     }
 
     let root = access
         .canonicalize(root)
-        .map_err(|error| format!("workspace root is unavailable: {error}"))?;
+        .map_err(|source| WorkspaceFileError::WorkspaceRoot {
+            path: root.to_path_buf(),
+            source,
+        })?;
     let requested_path = Path::new(requested);
     let candidate = if requested_path.is_absolute() {
         requested_path.to_path_buf()
@@ -156,13 +177,18 @@ pub(crate) fn resolve_workspace_write_path(
             if path.starts_with(&root) {
                 Ok(path)
             } else {
-                Err(format!("path is outside workspace: {requested}"))
+                Err(WorkspaceFileError::PathOutsideWorkspace {
+                    requested: requested.to_string(),
+                })
             }
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             resolve_missing_workspace_path(access, &root, &candidate, requested)
         }
-        Err(error) => Err(format!("path not found: {requested}: {error}")),
+        Err(source) => Err(WorkspaceFileError::PathNotFound {
+            requested: requested.to_string(),
+            source,
+        }),
     }
 }
 
@@ -171,20 +197,26 @@ fn resolve_missing_workspace_path(
     root: &Path,
     candidate: &Path,
     requested: &str,
-) -> Result<PathBuf, String> {
+) -> Result<PathBuf, WorkspaceFileError> {
     reject_parent_components(requested)?;
 
     let parent = candidate
         .parent()
-        .ok_or_else(|| format!("path is outside workspace: {requested}"))?;
+        .ok_or_else(|| WorkspaceFileError::PathOutsideWorkspace {
+            requested: requested.to_string(),
+        })?;
     let (raw_parent, canonical_parent) = nearest_existing_ancestor(access, parent, requested)?;
     if !canonical_parent.starts_with(root) {
-        return Err(format!("path is outside workspace: {requested}"));
+        return Err(WorkspaceFileError::PathOutsideWorkspace {
+            requested: requested.to_string(),
+        });
     }
 
-    let suffix = candidate
-        .strip_prefix(&raw_parent)
-        .map_err(|_| format!("path is outside workspace: {requested}"))?;
+    let suffix = candidate.strip_prefix(&raw_parent).map_err(|_| {
+        WorkspaceFileError::PathOutsideWorkspace {
+            requested: requested.to_string(),
+        }
+    })?;
     Ok(canonical_parent.join(suffix))
 }
 
@@ -192,27 +224,38 @@ fn nearest_existing_ancestor(
     access: &dyn WorkspaceAccess,
     path: &Path,
     requested: &str,
-) -> Result<(PathBuf, PathBuf), String> {
+) -> Result<(PathBuf, PathBuf), WorkspaceFileError> {
     let mut current = path;
     loop {
         match access.canonicalize(current) {
             Ok(path) => return Ok((current.to_path_buf(), path)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                current = current
-                    .parent()
-                    .ok_or_else(|| format!("path not found: {requested}: {error}"))?;
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                let Some(parent) = current.parent() else {
+                    return Err(WorkspaceFileError::PathNotFound {
+                        requested: requested.to_string(),
+                        source,
+                    });
+                };
+                current = parent;
             }
-            Err(error) => return Err(format!("path not found: {requested}: {error}")),
+            Err(source) => {
+                return Err(WorkspaceFileError::PathNotFound {
+                    requested: requested.to_string(),
+                    source,
+                });
+            }
         }
     }
 }
 
-fn reject_parent_components(requested: &str) -> Result<(), String> {
+fn reject_parent_components(requested: &str) -> Result<(), WorkspaceFileError> {
     let has_parent_component = Path::new(requested)
         .components()
         .any(|component| matches!(component, Component::ParentDir));
     if has_parent_component {
-        return Err(format!("path is outside workspace: {requested}"));
+        return Err(WorkspaceFileError::PathOutsideWorkspace {
+            requested: requested.to_string(),
+        });
     }
     Ok(())
 }
@@ -228,7 +271,7 @@ mod tests {
     use super::super::workspace_access::{
         WorkspaceAccess, WorkspaceDirectoryEntry, WorkspaceMetadata,
     };
-    use super::resolve_workspace_path;
+    use super::{super::error::WorkspaceFileError, resolve_workspace_path};
 
     struct FakeWorkspaceAccess {
         canonical_paths: HashMap<PathBuf, PathBuf>,
@@ -304,6 +347,26 @@ mod tests {
         let error = resolve_workspace_path(&access, Path::new("/workspace-link"), "/etc/passwd")
             .expect_err("outside path should be rejected");
 
-        assert_eq!(error, "path is outside workspace: /etc/passwd");
+        assert!(matches!(
+            error,
+            WorkspaceFileError::PathOutsideWorkspace { requested } if requested == "/etc/passwd"
+        ));
+    }
+
+    #[test]
+    fn resolve_workspace_path_preserves_not_found_source() {
+        let access = FakeWorkspaceAccess::new([(
+            PathBuf::from("/workspace-link"),
+            PathBuf::from("/srv/workspace"),
+        )]);
+
+        let error = resolve_workspace_path(&access, Path::new("/workspace-link"), "missing.txt")
+            .expect_err("missing path should be rejected");
+
+        let WorkspaceFileError::PathNotFound { requested, source } = error else {
+            panic!("missing path should retain the filesystem source error");
+        };
+        assert_eq!(requested, "missing.txt");
+        assert_eq!(source.kind(), io::ErrorKind::NotFound);
     }
 }

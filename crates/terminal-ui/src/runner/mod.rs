@@ -72,6 +72,28 @@ pub trait RuntimeCoordinator {
     ) -> std::result::Result<(), String> {
         Err("Model refresh runtime is not available".to_string())
     }
+
+    /// `begin_prompt_assembly_edit` 进入 `/prompt` overlay 时调用，加载 working copy，返回初始 snapshot。
+    fn begin_prompt_assembly_edit(
+        &mut self,
+    ) -> std::result::Result<runtime_domain::prompt_assembly::PromptAssemblyManagerSnapshot, String>
+    {
+        Err("Prompt assembly editing is not available".to_string())
+    }
+
+    /// `apply_prompt_assembly_edit_mutation` 在 working copy 上同步应用 mutation，返回刷新后的 snapshot。
+    fn apply_prompt_assembly_edit_mutation(
+        &mut self,
+        _mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation,
+    ) -> std::result::Result<runtime_domain::prompt_assembly::PromptAssemblyManagerSnapshot, String>
+    {
+        Err("Prompt assembly editing is not available".to_string())
+    }
+
+    /// `commit_prompt_assembly_edit` 退出 `/prompt` overlay 时调用，diff baseline 决定是否落盘+通知。
+    fn commit_prompt_assembly_edit(&mut self) -> std::result::Result<(), String> {
+        Ok(())
+    }
 }
 
 /// `NoopRuntimeCoordinator` 让纯 TUI 构建可以独立运行到模型更新层。
@@ -155,6 +177,11 @@ pub fn run_with_runtime_coordinator(
 
     if let Err(message) =
         runtime_coordinator.dispatch_runtime_command(RuntimeCommand::LoadMessageHistoryStartupCache)
+    {
+        model.show_toast(crate::toast::ToastSeverity::Error, message);
+    }
+    if let Err(message) = runtime_coordinator
+        .dispatch_runtime_command(RuntimeCommand::CheckPromptAssemblyMissingSources)
     {
         model.show_toast(crate::toast::ToastSeverity::Error, message);
     }

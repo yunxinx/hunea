@@ -85,6 +85,11 @@ pub(crate) fn runtime_options_from_app_config_and_models(
         managed_search_authorization_config_path: appconfig::user_config_file_path(),
         session_store: None,
         session_header_template: None,
+        prompt_assembly_manager: None,
+        initial_prompt_prelude: None,
+        initial_dynamic_environment_session_config: None,
+        dynamic_environment_observer:
+            crate::dynamic_environment::default_dynamic_environment_observer(),
     }
 }
 
@@ -137,6 +142,7 @@ fn model_options_from_configs(
         requires_model_selection: loaded_models.requires_model_selection,
         status_phrases: loaded_phrases.phrases.clone(),
         status_phrase_order: loaded_phrases.order,
+        prompt_assembly: None,
     }
 }
 

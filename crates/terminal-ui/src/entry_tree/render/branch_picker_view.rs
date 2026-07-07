@@ -2,6 +2,7 @@ use super::{
     shared::{EntryTreeWidget, branch_message_count_label},
     *,
 };
+use crate::picker_scrollbar::PickerScrollbar;
 
 impl Model {
     pub(in crate::entry_tree::render) fn render_entry_tree_branch_picker(
@@ -56,17 +57,14 @@ impl Model {
         }
 
         if has_scrollbar {
-            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(None)
-                .end_symbol(None)
-                .track_symbol(Some("┃"))
-                .thumb_symbol("█")
-                .thumb_style(secondary_text_style(self.palette))
-                .track_style(tertiary_text_style(self.palette));
-            let mut scrollbar_state = ScrollbarState::new(picker.items.len())
-                .position(picker.scroll)
-                .viewport_content_length(list_rows);
-            scrollbar.render(popup_area, frame.buffer_mut(), &mut scrollbar_state);
+            PickerScrollbar::new(
+                picker.items.len(),
+                list_rows,
+                picker.scroll,
+                secondary_text_style(self.palette),
+                tertiary_text_style(self.palette),
+            )
+            .render(popup_area, frame.buffer_mut());
         }
     }
 

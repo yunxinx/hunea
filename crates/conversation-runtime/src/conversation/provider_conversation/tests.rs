@@ -4,13 +4,25 @@ use std::{
 };
 
 use provider_protocol::{ContentBlock, ConversationItem, Role, ToolCall};
+use runtime_domain::dynamic_environment::{
+    DynamicEnvironmentObservation, DynamicEnvironmentSessionConfig, DynamicEnvironmentSnapshotKind,
+    DynamicEnvironmentSourceKind, DynamicEnvironmentSourceSelection,
+};
+use runtime_domain::prompt_assembly::{
+    PromptPreludeSection, PromptPreludeSnapshot, PromptSourceKind, PromptSourceOrigin,
+};
 use session_store::{
-    InMemorySessionStore, SessionHeader, SessionId, SessionStore, SessionStoreError,
+    InMemorySessionStore, SessionHeader, SessionId, SessionLifecycleStore, SessionStore,
+    SessionStoreError,
 };
 
-use super::{PersistedConversationItem, ProviderConversation, ProviderConversationError};
+use super::{
+    PersistedConversationItem, PreparedTurnOptions, ProviderConversation, ProviderConversationError,
+};
 use crate::ProviderKind;
-use runtime_domain::session::ConversationTurnRequest;
+use runtime_domain::session::{
+    ConversationTurnRequest, TranscriptReplayItem, TranscriptReplayRole, TranscriptUserMessage,
+};
 
 #[test]
 fn prepare_turn_uses_session_history_and_current_user_message() {
@@ -76,6 +88,47 @@ fn prepare_turn_prepends_system_prompt_without_persisting_it_in_history() {
     assert_eq!(request.items()[0].role(), Some(Role::System));
     assert_eq!(request.items()[0].text_content(), "You are helpful");
     assert!(session.is_history_empty());
+}
+
+#[test]
+fn prepare_turn_uses_prompt_prelude_effective_system_prompt() {
+    let mut session = ProviderConversation::new();
+    session.set_prompt_prelude(Some(PromptPreludeSnapshot {
+        sections: vec![
+            PromptPreludeSection {
+                reference_id: "core-system".to_string(),
+                kind: PromptSourceKind::CoreSystemPrompt,
+                title: "Core system prompt".to_string(),
+                origin: Some(PromptSourceOrigin::Builtin),
+                body: "core guidance".to_string(),
+            },
+            PromptPreludeSection {
+                reference_id: "repo-rules".to_string(),
+                kind: PromptSourceKind::ExtraPrompt,
+                title: "repo-rules".to_string(),
+                origin: Some(PromptSourceOrigin::Project),
+                body: "project rules".to_string(),
+            },
+        ],
+    }));
+
+    let request = session
+        .prepare_turn(&ConversationTurnRequest::new(
+            "local",
+            ProviderKind::OpenAiCompatible,
+            "qwen3",
+            Some("http://127.0.0.1:1234/v1".to_string()),
+            None,
+            None,
+            ConversationItem::text(Role::User, "hello"),
+        ))
+        .expect("turn should prepare");
+
+    assert_eq!(request.items()[0].role(), Some(Role::System));
+    assert_eq!(
+        request.items()[0].text_content(),
+        "core guidance\n\nproject rules"
+    );
 }
 
 #[test]
@@ -234,6 +287,202 @@ fn commit_turn_items_keeps_tool_items_for_future_turns() {
 }
 
 #[test]
+fn prepare_turn_with_transcript_keeps_provider_and_transcript_user_messages_separate() {
+    let work_dir = PathBuf::from("/tmp/hunea-provider-conversation");
+    let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+    let mut conversation =
+        ProviderConversation::with_session_store(store, sample_header(&work_dir, "qwen3"))
+            .expect("persisted conversation should initialize");
+    let turn = ConversationTurnRequest::new(
+        "local",
+        ProviderKind::OpenAiCompatible,
+        "qwen3",
+        Some("http://127.0.0.1:1234/v1".to_string()),
+        None,
+        None,
+        ConversationItem::text(
+            Role::User,
+            "<skill>\n<name>code-review</name>\nbody\n</skill>\n\nraw user message",
+        ),
+    );
+    let transcript_user_message = TranscriptUserMessage {
+        content: "raw user message".to_string(),
+        attachments: Vec::new(),
+        skill_bindings: Vec::new(),
+        custom_prompt_bindings: Vec::new(),
+    };
+    let transcript_replay_after_user = vec![TranscriptReplayItem::Message {
+        role: TranscriptReplayRole::Assistant,
+        content: "synthetic replay".to_string(),
+    }];
+
+    let request = conversation
+        .prepare_turn_with_options(
+            &turn,
+            PreparedTurnOptions::default()
+                .with_transcript_user_message(transcript_user_message.clone())
+                .with_transcript_replay_after_user(transcript_replay_after_user.clone()),
+        )
+        .expect("turn should prepare");
+    let persistence = request
+        .persistence_cloned()
+        .expect("persistence should be attached");
+
+    assert_eq!(
+        request.items().last().map(ConversationItem::text_content),
+        Some("<skill>\n<name>code-review</name>\nbody\n</skill>\n\nraw user message".to_string())
+    );
+    assert_eq!(
+        persistence
+            .current_user_items
+            .last()
+            .map(ConversationItem::text_content),
+        Some("<skill>\n<name>code-review</name>\nbody\n</skill>\n\nraw user message".to_string())
+    );
+    assert_eq!(
+        persistence
+            .current_user_items
+            .iter()
+            .map(ConversationItem::text_content)
+            .collect::<Vec<_>>(),
+        vec!["<skill>\n<name>code-review</name>\nbody\n</skill>\n\nraw user message"]
+    );
+    assert_eq!(persistence.transcript_user_message, transcript_user_message);
+    assert_eq!(
+        persistence.transcript_replay_after_user,
+        transcript_replay_after_user
+    );
+}
+
+#[test]
+fn prepare_turn_with_transcript_can_prepend_provider_visible_meta_items() {
+    let work_dir = PathBuf::from("/tmp/hunea-provider-conversation-prefix");
+    let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+    let mut conversation =
+        ProviderConversation::with_session_store(store, sample_header(&work_dir, "qwen3"))
+            .expect("persisted conversation should initialize");
+    let turn = ConversationTurnRequest::new(
+        "local",
+        ProviderKind::OpenAiCompatible,
+        "qwen3",
+        Some("http://127.0.0.1:1234/v1".to_string()),
+        None,
+        None,
+        ConversationItem::text(Role::User, "actual user message"),
+    );
+    let meta_item = ConversationItem::text(
+        Role::User,
+        "<system-reminder>\nEnvironment baseline\n</system-reminder>",
+    );
+
+    let request = conversation
+        .prepare_turn_with_options(
+            &turn,
+            PreparedTurnOptions::default()
+                .with_provider_prefix_items(vec![meta_item.clone()])
+                .with_transcript_user_message(TranscriptUserMessage {
+                    content: "actual user message".to_string(),
+                    attachments: Vec::new(),
+                    skill_bindings: Vec::new(),
+                    custom_prompt_bindings: Vec::new(),
+                }),
+        )
+        .expect("turn should prepare");
+    let persistence = request
+        .persistence_cloned()
+        .expect("persistence should be attached");
+
+    assert_eq!(
+        request
+            .items()
+            .iter()
+            .map(ConversationItem::text_content)
+            .collect::<Vec<_>>(),
+        vec![
+            "<system-reminder>\nEnvironment baseline\n</system-reminder>",
+            "actual user message"
+        ]
+    );
+    assert_eq!(
+        persistence
+            .current_user_items
+            .iter()
+            .map(ConversationItem::text_content)
+            .collect::<Vec<_>>(),
+        vec![
+            "<system-reminder>\nEnvironment baseline\n</system-reminder>",
+            "actual user message"
+        ]
+    );
+}
+
+#[test]
+fn prepare_turn_options_bind_transcript_prefix_and_dynamic_environment() {
+    let work_dir = PathBuf::from("/tmp/hunea-provider-conversation-options");
+    let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+    let mut conversation =
+        ProviderConversation::with_session_store(store, sample_header(&work_dir, "qwen3"))
+            .expect("persisted conversation should initialize");
+    let turn = ConversationTurnRequest::new(
+        "local",
+        ProviderKind::OpenAiCompatible,
+        "qwen3",
+        Some("http://127.0.0.1:1234/v1".to_string()),
+        None,
+        None,
+        ConversationItem::text(Role::User, "actual user message"),
+    );
+    let transcript_user_message = TranscriptUserMessage {
+        content: "actual user message".to_string(),
+        attachments: Vec::new(),
+        skill_bindings: Vec::new(),
+        custom_prompt_bindings: Vec::new(),
+    };
+    let transcript_replay_after_user = vec![TranscriptReplayItem::Message {
+        role: TranscriptReplayRole::Assistant,
+        content: "manual replay".to_string(),
+    }];
+    let observations = vec![DynamicEnvironmentObservation {
+        source_kind: DynamicEnvironmentSourceKind::Workdir,
+        fingerprint: "workspace".to_string(),
+        summary: "Workdir: /tmp/repo".to_string(),
+        details: None,
+    }];
+
+    let request = conversation
+        .prepare_turn_with_options(
+            &turn,
+            PreparedTurnOptions::default()
+                .with_provider_prefix_texts(vec!["<env>Workdir: /tmp/repo</env>".to_string()])
+                .with_transcript_user_message(transcript_user_message.clone())
+                .with_transcript_replay_after_user(transcript_replay_after_user.clone())
+                .with_dynamic_environment_observations(observations.clone()),
+        )
+        .expect("turn should prepare");
+    let persistence = request
+        .persistence_cloned()
+        .expect("persistence should be attached");
+
+    assert_eq!(
+        request
+            .items()
+            .iter()
+            .map(ConversationItem::text_content)
+            .collect::<Vec<_>>(),
+        vec!["<env>Workdir: /tmp/repo</env>", "actual user message"]
+    );
+    assert_eq!(persistence.transcript_user_message, transcript_user_message);
+    assert_eq!(
+        persistence.transcript_replay_after_user,
+        transcript_replay_after_user
+    );
+    assert_eq!(
+        persistence.config_snapshot.dynamic_environment_observations,
+        observations
+    );
+}
+
+#[test]
 fn persisted_conversation_loads_resolved_history_for_prepare_turn() {
     let work_dir = tempdir_path("resolved-history");
     let store = Arc::new(InMemorySessionStore::new());
@@ -320,6 +569,9 @@ fn persisted_conversation_restores_latest_system_prompt_snapshot() {
             provider_id: "local".to_string(),
             model: "qwen3".to_string(),
             system_prompt: Some("keep it sharp".to_string()),
+            prompt_prelude: None,
+            dynamic_environment_session_config: None,
+            dynamic_environment_observations: Vec::new(),
         },
     ))
     .expect("config snapshot should persist");
@@ -336,6 +588,106 @@ fn persisted_conversation_restores_latest_system_prompt_snapshot() {
     .expect("persisted conversation should load config");
 
     assert_eq!(session.system_prompt(), Some("keep it sharp"));
+}
+
+#[test]
+fn persisted_conversation_restores_prompt_prelude_snapshot() {
+    let work_dir = tempdir_path("restored-prelude");
+    let store = Arc::new(InMemorySessionStore::new());
+    let session_id = block_on_session(store.create_session(sample_header(&work_dir, "qwen3")))
+        .expect("session should be created");
+    let prompt_prelude = PromptPreludeSnapshot {
+        sections: vec![
+            PromptPreludeSection {
+                reference_id: "core-system".to_string(),
+                kind: PromptSourceKind::CoreSystemPrompt,
+                title: "Core system prompt".to_string(),
+                origin: Some(PromptSourceOrigin::Builtin),
+                body: "builtin core".to_string(),
+            },
+            PromptPreludeSection {
+                reference_id: "skill-discovery".to_string(),
+                kind: PromptSourceKind::SkillDiscovery,
+                title: "Skill discovery source".to_string(),
+                origin: Some(PromptSourceOrigin::Project),
+                body: "<available_skills></available_skills>".to_string(),
+            },
+        ],
+    };
+    block_on_session(store.append_config_change(
+        &session_id,
+        session_store::ConfigSnapshot {
+            provider_id: "local".to_string(),
+            model: "qwen3".to_string(),
+            system_prompt: Some("stale fallback".to_string()),
+            prompt_prelude: Some(prompt_prelude.clone()),
+            dynamic_environment_session_config: None,
+            dynamic_environment_observations: Vec::new(),
+        },
+    ))
+    .expect("config snapshot should persist");
+
+    let restored_state =
+        block_on_session(store.load_session(&session_id, None)).expect("session state should load");
+    let store_trait: Arc<dyn SessionStore> = store;
+    let session = ProviderConversation::with_resolved_session_store(
+        store_trait,
+        sample_header(&work_dir, "qwen3"),
+        Some(session_id),
+        &restored_state,
+    )
+    .expect("persisted conversation should load config");
+
+    assert_eq!(session.prompt_prelude(), Some(&prompt_prelude));
+    assert_eq!(
+        session.system_prompt(),
+        Some("builtin core\n\n<available_skills></available_skills>")
+    );
+}
+
+#[test]
+fn persisted_conversation_restores_dynamic_environment_session_config() {
+    let work_dir = tempdir_path("restored-dynamic-config");
+    let store = Arc::new(InMemorySessionStore::new());
+    let session_id = block_on_session(store.create_session(sample_header(&work_dir, "qwen3")))
+        .expect("session should be created");
+    let dynamic_environment_session_config = DynamicEnvironmentSessionConfig {
+        baseline_enabled: false,
+        changes_enabled: true,
+        source_selections: vec![DynamicEnvironmentSourceSelection {
+            snapshot_kind: DynamicEnvironmentSnapshotKind::Changes,
+            source_kind: DynamicEnvironmentSourceKind::Date,
+            enabled: true,
+        }],
+    };
+    block_on_session(store.append_config_change(
+        &session_id,
+        session_store::ConfigSnapshot {
+            provider_id: "local".to_string(),
+            model: "qwen3".to_string(),
+            system_prompt: None,
+            prompt_prelude: None,
+            dynamic_environment_session_config: Some(dynamic_environment_session_config.clone()),
+            dynamic_environment_observations: Vec::new(),
+        },
+    ))
+    .expect("config snapshot should persist");
+
+    let restored_state =
+        block_on_session(store.load_session(&session_id, None)).expect("session state should load");
+    let store_trait: Arc<dyn SessionStore> = store;
+    let session = ProviderConversation::with_resolved_session_store(
+        store_trait,
+        sample_header(&work_dir, "qwen3"),
+        Some(session_id),
+        &restored_state,
+    )
+    .expect("persisted conversation should load config");
+
+    assert_eq!(
+        session.dynamic_environment_session_config(),
+        Some(&dynamic_environment_session_config)
+    );
 }
 
 #[test]

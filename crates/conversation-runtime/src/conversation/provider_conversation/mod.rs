@@ -3,7 +3,13 @@
 use std::sync::Arc;
 
 use provider_protocol::{ConversationItem, Role};
-use runtime_domain::session::{ConversationTurnRequest, RuntimeTarget};
+use runtime_domain::{
+    dynamic_environment::{DynamicEnvironmentObservation, DynamicEnvironmentSessionConfig},
+    prompt_assembly::PromptPreludeSnapshot,
+    session::{
+        ConversationTurnRequest, RuntimeTarget, TranscriptReplayItem, TranscriptUserMessage,
+    },
+};
 use session_store::{
     ConfigSnapshot, ResolvedSessionState, SessionHeader, SessionId, SessionStore, SessionStoreError,
 };
@@ -42,6 +48,8 @@ pub struct PreparedConversationRequest {
     api_key: Option<ProviderApiKey>,
     api_key_env: Option<String>,
     items: Vec<ConversationItem>,
+    session_prompt_cache_key: Option<String>,
+    prompt_prelude: Option<PromptPreludeSnapshot>,
     persistence: Option<PreparedConversationPersistence>,
 }
 
@@ -55,6 +63,11 @@ impl std::fmt::Debug for PreparedConversationRequest {
             .field("api_key", &self.api_key)
             .field("api_key_env", &self.api_key_env)
             .field("items", &self.items)
+            .field(
+                "has_session_prompt_cache_key",
+                &self.session_prompt_cache_key.is_some(),
+            )
+            .field("has_prompt_prelude", &self.prompt_prelude.is_some())
             .field("has_persistence", &self.persistence.is_some())
             .finish()
     }
@@ -65,6 +78,8 @@ impl PreparedConversationRequest {
     pub(crate) fn from_turn(
         turn: &ConversationTurnRequest,
         items: Vec<ConversationItem>,
+        session_prompt_cache_key: Option<String>,
+        prompt_prelude: Option<PromptPreludeSnapshot>,
         persistence: Option<PreparedConversationPersistence>,
     ) -> Self {
         Self {
@@ -75,6 +90,8 @@ impl PreparedConversationRequest {
             api_key: turn.api_key().cloned(),
             api_key_env: turn.api_key_env().map(str::to_string),
             items,
+            session_prompt_cache_key,
+            prompt_prelude,
             persistence,
         }
     }
@@ -119,8 +136,70 @@ impl PreparedConversationRequest {
         &self.items
     }
 
+    /// `prompt_prelude` 返回本次请求绑定的 prompt prelude 快照。
+    pub fn prompt_prelude(&self) -> Option<&PromptPreludeSnapshot> {
+        self.prompt_prelude.as_ref()
+    }
+
     pub(crate) fn persistence_cloned(&self) -> Option<PreparedConversationPersistence> {
         self.persistence.clone()
+    }
+
+    /// `session_prompt_cache_key` 返回本次请求可用于 provider prompt cache 的稳定会话键。
+    pub fn session_prompt_cache_key(&self) -> Option<&str> {
+        self.session_prompt_cache_key.as_deref()
+    }
+}
+
+/// `PreparedTurnOptions` 收敛一次 turn 准备过程中可选的 provider/transcript 输入。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PreparedTurnOptions {
+    provider_prefix_items: Vec<ConversationItem>,
+    transcript_user_message: Option<TranscriptUserMessage>,
+    transcript_replay_after_user: Vec<TranscriptReplayItem>,
+    dynamic_environment_observations: Option<Vec<DynamicEnvironmentObservation>>,
+}
+
+impl PreparedTurnOptions {
+    /// `with_provider_prefix_items` 在真实用户消息前追加 provider-visible meta items。
+    #[must_use]
+    pub fn with_provider_prefix_items(mut self, items: Vec<ConversationItem>) -> Self {
+        self.provider_prefix_items = items;
+        self
+    }
+
+    /// `with_provider_prefix_texts` 以 user text item 形式追加 provider-visible meta texts。
+    #[must_use]
+    pub fn with_provider_prefix_texts(mut self, texts: Vec<String>) -> Self {
+        self.provider_prefix_items = texts
+            .into_iter()
+            .map(|text| ConversationItem::text(Role::User, text))
+            .collect();
+        self
+    }
+
+    /// `with_transcript_user_message` 绑定本轮 transcript-visible 用户消息。
+    #[must_use]
+    pub fn with_transcript_user_message(mut self, message: TranscriptUserMessage) -> Self {
+        self.transcript_user_message = Some(message);
+        self
+    }
+
+    /// `with_transcript_replay_after_user` 绑定用户消息后追加的 transcript replay items。
+    #[must_use]
+    pub fn with_transcript_replay_after_user(mut self, items: Vec<TranscriptReplayItem>) -> Self {
+        self.transcript_replay_after_user = items;
+        self
+    }
+
+    /// `with_dynamic_environment_observations` 绑定本轮 dynamic environment 观测结果。
+    #[must_use]
+    pub fn with_dynamic_environment_observations(
+        mut self,
+        observations: Vec<DynamicEnvironmentObservation>,
+    ) -> Self {
+        self.dynamic_environment_observations = Some(observations);
+        self
     }
 }
 
@@ -128,8 +207,14 @@ impl PreparedConversationRequest {
 #[derive(Default)]
 pub struct ProviderConversation {
     system_prompt: Option<String>,
+    prompt_prelude: Option<PromptPreludeSnapshot>,
+    dynamic_environment_session_config: Option<DynamicEnvironmentSessionConfig>,
+    dynamic_environment_observations: Vec<DynamicEnvironmentObservation>,
     persisted_history: Vec<PersistedConversationItem>,
-    pending_user_message: Option<ConversationItem>,
+    pending_user_items: Vec<ConversationItem>,
+    pending_dynamic_environment_observations: Option<Vec<DynamicEnvironmentObservation>>,
+    upstream_context_tokens: Option<usize>,
+    session_prompt_cache_key: Option<String>,
     persistence: Option<ProviderConversationPersistence>,
 }
 
@@ -186,13 +271,30 @@ impl ProviderConversation {
             .collect::<Vec<_>>();
 
         Self {
-            system_prompt: restored_state
+            system_prompt: restored_effective_system_prompt(restored_state),
+            prompt_prelude: restored_state
                 .latest_config
-                .clone()
-                .and_then(|config| config.system_prompt)
-                .and_then(normalize_system_prompt),
+                .as_ref()
+                .and_then(|config| config.prompt_prelude.clone()),
+            dynamic_environment_session_config: restored_state
+                .latest_config
+                .as_ref()
+                .and_then(|config| config.dynamic_environment_session_config.clone()),
+            dynamic_environment_observations: restored_state
+                .latest_config
+                .as_ref()
+                .map(|config| config.dynamic_environment_observations.clone())
+                .unwrap_or_default(),
             persisted_history,
-            pending_user_message: None,
+            pending_user_items: Vec::new(),
+            pending_dynamic_environment_observations: None,
+            upstream_context_tokens: None,
+            session_prompt_cache_key: Some(
+                session_id
+                    .as_ref()
+                    .unwrap_or(&header_template.session_id)
+                    .to_string(),
+            ),
             persistence: Some(ProviderConversationPersistence {
                 store,
                 session_id,
@@ -203,9 +305,19 @@ impl ProviderConversation {
 
     /// `clear` 清空当前会话。
     pub fn clear(&mut self) {
+        self.system_prompt = None;
+        self.prompt_prelude = None;
+        self.dynamic_environment_session_config = None;
+        self.dynamic_environment_observations.clear();
         self.persisted_history.clear();
-        self.pending_user_message = None;
+        self.pending_user_items.clear();
+        self.pending_dynamic_environment_observations = None;
+        self.upstream_context_tokens = None;
+        self.session_prompt_cache_key = None;
         if let Some(persistence) = self.persistence.as_mut() {
+            persistence.header_template.session_id = SessionId::new();
+            self.session_prompt_cache_key =
+                Some(persistence.header_template.session_id.to_string());
             persistence.session_id = None;
         }
     }
@@ -213,12 +325,62 @@ impl ProviderConversation {
     /// `set_system_prompt` 设置会话级 system prompt。
     pub fn set_system_prompt(&mut self, prompt: Option<String>) {
         self.system_prompt = prompt.and_then(normalize_system_prompt);
+        self.prompt_prelude = None;
+        self.upstream_context_tokens = None;
     }
 
     /// `system_prompt` 返回当前生效的 system prompt。
     #[must_use]
     pub fn system_prompt(&self) -> Option<&str> {
         self.system_prompt.as_deref()
+    }
+
+    /// `set_prompt_prelude` 设置当前 session 的已解析 prompt prelude。
+    pub fn set_prompt_prelude(&mut self, prompt_prelude: Option<PromptPreludeSnapshot>) {
+        self.system_prompt = prompt_prelude
+            .as_ref()
+            .and_then(PromptPreludeSnapshot::effective_system_prompt)
+            .and_then(normalize_system_prompt);
+        self.prompt_prelude = prompt_prelude;
+        self.upstream_context_tokens = None;
+    }
+
+    /// `prompt_prelude` 返回当前 session 绑定的 prompt prelude 快照。
+    #[must_use]
+    pub fn prompt_prelude(&self) -> Option<&PromptPreludeSnapshot> {
+        self.prompt_prelude.as_ref()
+    }
+
+    /// `set_dynamic_environment_session_config` 设置当前 session 绑定的动态环境配置。
+    pub fn set_dynamic_environment_session_config(
+        &mut self,
+        dynamic_environment_session_config: Option<DynamicEnvironmentSessionConfig>,
+    ) {
+        self.dynamic_environment_session_config = dynamic_environment_session_config;
+        self.upstream_context_tokens = None;
+    }
+
+    /// `dynamic_environment_session_config` 返回当前 session 绑定的动态环境配置。
+    #[must_use]
+    pub fn dynamic_environment_session_config(&self) -> Option<&DynamicEnvironmentSessionConfig> {
+        self.dynamic_environment_session_config.as_ref()
+    }
+
+    /// `dynamic_environment_observations` 返回最近已持久化的动态环境观测。
+    #[must_use]
+    pub fn dynamic_environment_observations(&self) -> &[DynamicEnvironmentObservation] {
+        &self.dynamic_environment_observations
+    }
+
+    /// `upstream_context_tokens` 返回最近一次 provider usage 给出的上下文总量。
+    #[must_use]
+    pub fn upstream_context_tokens(&self) -> Option<usize> {
+        self.upstream_context_tokens
+    }
+
+    /// `set_upstream_context_tokens` 记录最近一次成功 turn 的 provider token 总量。
+    pub fn set_upstream_context_tokens(&mut self, upstream_context_tokens: Option<usize>) {
+        self.upstream_context_tokens = upstream_context_tokens;
     }
 
     /// `context_budget_probe_items` 返回 `/context` 估算使用的只读会话快照。
@@ -231,7 +393,7 @@ impl ProviderConversation {
         let mut items = Vec::with_capacity(
             self.persisted_history.len()
                 + usize::from(self.system_prompt.is_some())
-                + usize::from(self.pending_user_message.is_some()),
+                + self.pending_user_items.len(),
         );
         if let Some(system_prompt) = self.system_prompt.as_deref() {
             items.push(ConversationItem::text(Role::System, system_prompt));
@@ -241,9 +403,7 @@ impl ProviderConversation {
                 .iter()
                 .map(|persisted_item| persisted_item.item.clone()),
         );
-        if let Some(pending) = self.pending_user_message.as_ref() {
-            items.push(pending.clone());
-        }
+        items.extend(self.pending_user_items.iter().cloned());
         Arc::from(items)
     }
 
@@ -268,16 +428,44 @@ impl ProviderConversation {
         &mut self,
         turn: &ConversationTurnRequest,
     ) -> Result<PreparedConversationRequest, ProviderConversationError> {
+        self.prepare_turn_with_options(turn, PreparedTurnOptions::default())
+    }
+
+    /// `prepare_turn_with_options` 接受一个用户 turn 和本轮可选上下文，并构造完整执行请求。
+    #[must_use = "prepared turn requests must be submitted or explicitly discarded"]
+    pub fn prepare_turn_with_options(
+        &mut self,
+        turn: &ConversationTurnRequest,
+        options: PreparedTurnOptions,
+    ) -> Result<PreparedConversationRequest, ProviderConversationError> {
         if turn.message().role() != Some(Role::User) {
             return Err(ProviderConversationError::NonUserTurnMessage);
         }
-        if self.pending_user_message.is_some() {
+        if !self.pending_user_items.is_empty() {
             return Err(ProviderConversationError::PendingTurnAlreadyActive);
         }
 
         let user_message = turn.message().clone();
-        self.pending_user_message = Some(user_message.clone());
+        let mut current_user_items = options.provider_prefix_items;
+        current_user_items.push(user_message.clone());
+        self.pending_user_items = current_user_items;
+        let next_dynamic_environment_observations = options
+            .dynamic_environment_observations
+            .unwrap_or_else(|| self.dynamic_environment_observations.clone());
+        self.pending_dynamic_environment_observations =
+            Some(next_dynamic_environment_observations.clone());
+        self.upstream_context_tokens = None;
+        let transcript_user_message = options
+            .transcript_user_message
+            .or_else(|| turn.transcript_user_message().cloned())
+            .unwrap_or_else(|| TranscriptUserMessage {
+                content: user_message.text_content(),
+                attachments: Vec::new(),
+                skill_bindings: Vec::new(),
+                custom_prompt_bindings: Vec::new(),
+            });
         let system_prompt = self.system_prompt.clone();
+        let prompt_prelude = self.prompt_prelude.clone();
         let persistence =
             self.persistence
                 .as_ref()
@@ -289,13 +477,23 @@ impl ProviderConversation {
                         provider_id: turn.provider_id().to_string(),
                         model: turn.model_id().to_string(),
                         system_prompt,
+                        prompt_prelude,
+                        dynamic_environment_session_config: self
+                            .dynamic_environment_session_config
+                            .clone(),
+                        dynamic_environment_observations: next_dynamic_environment_observations,
                     },
-                    current_user_message: user_message.clone(),
+                    current_user_items: self.pending_user_items.clone(),
+                    transcript_user_message,
+                    transcript_replay_after_user: options.transcript_replay_after_user,
                 });
 
+        let items = self.provider_items_with_pending_user_items(&self.pending_user_items);
         Ok(PreparedConversationRequest::from_turn(
             turn,
-            self.provider_items_with_pending_user(&user_message),
+            items,
+            self.session_prompt_cache_key.clone(),
+            self.prompt_prelude.clone(),
             persistence,
         ))
     }
@@ -304,6 +502,16 @@ impl ProviderConversation {
 fn normalize_system_prompt(prompt: String) -> Option<String> {
     let prompt = prompt.trim().to_string();
     (!prompt.is_empty()).then_some(prompt)
+}
+
+fn restored_effective_system_prompt(restored_state: &ResolvedSessionState) -> Option<String> {
+    let config = restored_state.latest_config.as_ref()?;
+    config
+        .prompt_prelude
+        .as_ref()
+        .and_then(PromptPreludeSnapshot::effective_system_prompt)
+        .or_else(|| config.system_prompt.clone())
+        .and_then(normalize_system_prompt)
 }
 
 #[cfg(test)]

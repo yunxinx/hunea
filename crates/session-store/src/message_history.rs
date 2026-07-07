@@ -18,33 +18,28 @@ pub(crate) fn record_message_history(
     }
 
     crate::metadata::with_connection(index_path, |conn| {
-        let transaction = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(sqlite_err)?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let last_text: Option<String> = transaction
             .query_row(
                 "SELECT text FROM message_history ORDER BY id DESC LIMIT 1",
                 [],
                 |row| row.get(0),
             )
-            .optional()
-            .map_err(sqlite_err)?;
+            .optional()?;
 
         if message_history_is_adjacent_duplicate(last_text.as_deref(), text) {
-            transaction.commit().map_err(sqlite_err)?;
+            transaction.commit()?;
             return Ok(());
         }
 
         let ts = crate::store::current_timestamp_ms()?;
-        transaction
-            .execute(
-                "INSERT INTO message_history (ts, text) VALUES (?1, ?2)",
-                params![ts, text],
-            )
-            .map_err(sqlite_err)?;
+        transaction.execute(
+            "INSERT INTO message_history (ts, text) VALUES (?1, ?2)",
+            params![ts, text],
+        )?;
 
         trim_message_history(&transaction, limit)?;
-        transaction.commit().map_err(sqlite_err)?;
+        transaction.commit()?;
         Ok(())
     })
 }
@@ -54,9 +49,8 @@ pub(crate) fn load_message_history_recent(
     limit: usize,
 ) -> Result<Vec<MessageHistoryEntry>, SessionStoreError> {
     crate::metadata::with_connection(index_path, |conn| {
-        let mut statement = conn
-            .prepare("SELECT ts, text FROM message_history ORDER BY id DESC LIMIT ?1")
-            .map_err(sqlite_err)?;
+        let mut statement =
+            conn.prepare("SELECT ts, text FROM message_history ORDER BY id DESC LIMIT ?1")?;
         let limit_param = i64::try_from(limit).map_err(|_| SessionStoreError::CorruptIndex {
             message: "message_history recent limit exceeds sqlite INTEGER range".to_string(),
         })?;
@@ -66,10 +60,8 @@ pub(crate) fn load_message_history_recent(
                     ts: row.get(0)?,
                     text: row.get(1)?,
                 })
-            })
-            .map_err(sqlite_err)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(sqlite_err)?;
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
         entries.reverse();
         Ok(entries)
     })
@@ -79,9 +71,8 @@ pub(crate) fn load_message_history_all(
     index_path: &std::path::Path,
 ) -> Result<Vec<MessageHistoryRow>, SessionStoreError> {
     crate::metadata::with_connection(index_path, |conn| {
-        let mut statement = conn
-            .prepare("SELECT id, ts, text FROM message_history ORDER BY id ASC")
-            .map_err(sqlite_err)?;
+        let mut statement =
+            conn.prepare("SELECT id, ts, text FROM message_history ORDER BY id ASC")?;
         statement
             .query_map([], |row| {
                 Ok(MessageHistoryRow {
@@ -89,15 +80,10 @@ pub(crate) fn load_message_history_all(
                     ts: row.get(1)?,
                     text: row.get(2)?,
                 })
-            })
-            .map_err(sqlite_err)?
+            })?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(sqlite_err)
+            .map_err(SessionStoreError::from)
     })
-}
-
-fn sqlite_err(source: rusqlite::Error) -> SessionStoreError {
-    SessionStoreError::SqliteError { source }
 }
 
 fn trim_message_history(conn: &Connection, limit: usize) -> Result<(), SessionStoreError> {
@@ -108,10 +94,9 @@ fn trim_message_history(conn: &Connection, limit: usize) -> Result<(), SessionSt
         "DELETE FROM message_history
          WHERE id NOT IN (
              SELECT id FROM message_history ORDER BY id DESC LIMIT ?1
-         )",
+        )",
         params![limit],
-    )
-    .map_err(sqlite_err)?;
+    )?;
     Ok(())
 }
 

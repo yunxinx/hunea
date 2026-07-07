@@ -81,6 +81,16 @@ impl AppRuntimeCoordinator {
         Ok(RuntimeCommandReceipt::Accepted)
     }
 
+    pub(super) fn check_prompt_assembly_missing_sources(
+        &mut self,
+    ) -> Result<RuntimeCommandReceipt, String> {
+        let store = self.session_store()?;
+        let header = self.session_header()?;
+        self.session_store_worker
+            .check_prompt_assembly_missing_sources(store, header.work_dir)?;
+        Ok(RuntimeCommandReceipt::Accepted)
+    }
+
     pub(super) fn load_message_history_picker_rows(
         &mut self,
         request_id: SessionLoadRequestId,

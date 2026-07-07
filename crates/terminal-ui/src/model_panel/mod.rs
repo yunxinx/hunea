@@ -2,7 +2,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
-    style::Modifier,
+    style::{Modifier, Style},
     text::{Line, Span},
 };
 
@@ -12,11 +12,13 @@ use runtime_domain::model_catalog::{
 
 use super::{
     AppEffect, Model,
+    display_width::display_width,
     inline_panel::{
         InlinePanelRenderResult, append_wrapped_inline_value, inline_panel_render_result,
         inline_panel_rule_line, inline_panel_visible_rows, wrap_inline_text,
     },
     overlay_input_result::OverlayInputResult,
+    search_highlight::{highlighted_substring_spans, search_match_style},
     text_search::CaseInsensitiveQuery,
     theme::{
         command_accent_text_style, primary_text_style, secondary_text_style, surface_text_style,
@@ -27,6 +29,11 @@ use super::{
 
 const MODEL_LIST_MAX_VISIBLE_ROWS: usize = 7;
 const MODEL_PANEL_VISIBLE_ROWS: usize = 19;
+
+struct HighlightedWrapStyle {
+    base: Style,
+    highlighted: Style,
+}
 
 /// `ModelPanelState` 保存沉浸式模型面板的导航状态。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -59,7 +66,7 @@ impl Model {
         self.model_panel.search_query.clear();
         self.sync_model_panel_to_selection();
         self.sync_command_panel_navigation();
-        self.sync_file_picker_state();
+        self.sync_composer_attached_picker_state();
         self.sync_external_editor_helper_after_draft_change(&old_value);
         self.sync_composer_height();
         self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
@@ -692,6 +699,7 @@ fn append_model_lines(
             provider,
             entry,
             index == model.model_panel.model_index,
+            model.model_panel.search_query.as_str(),
             width,
             lines,
         );
@@ -726,6 +734,7 @@ fn append_model_entry_lines(
     provider: &ModelProvider,
     entry: &ModelEntry,
     selected: bool,
+    search_query: &str,
     width: usize,
     lines: &mut Vec<Line<'static>>,
 ) {
@@ -742,23 +751,101 @@ fn append_model_entry_lines(
     } else {
         secondary_text_style(model.palette)
     };
+    let highlighted_style = search_match_style(style, model.palette.surface);
 
-    append_wrapped_inline_value(
+    append_highlighted_wrapped_inline_value(
         lines,
         width,
         marker,
         &entry.id,
-        style,
+        search_query,
+        HighlightedWrapStyle {
+            base: style,
+            highlighted: highlighted_style,
+        },
         secondary_text_style(model.palette),
     );
 
     if let Some(description) = &entry.description {
-        for line in wrap_inline_text(description, width.saturating_sub(4).max(1)) {
-            lines.push(Line::styled(
-                format!("    {line}"),
-                tertiary_text_style(model.palette),
-            ));
-        }
+        let description_style = tertiary_text_style(model.palette);
+        let highlighted_description_style =
+            search_match_style(description_style, model.palette.surface);
+        append_highlighted_wrapped_text(
+            lines,
+            width,
+            "    ",
+            description,
+            search_query,
+            HighlightedWrapStyle {
+                base: description_style,
+                highlighted: highlighted_description_style,
+            },
+        );
+    }
+}
+
+fn append_highlighted_wrapped_inline_value(
+    lines: &mut Vec<Line<'static>>,
+    width: usize,
+    prefix: &str,
+    value: &str,
+    query: &str,
+    value_style: HighlightedWrapStyle,
+    prefix_style: Style,
+) {
+    let prefix_width = display_width(prefix);
+    let available_width = width.saturating_sub(2 + prefix_width).max(1);
+    let wrapped = wrap_inline_text(value, available_width);
+    if wrapped.is_empty() {
+        lines.push(Line::styled(format!("  {prefix}"), prefix_style));
+        return;
+    }
+
+    let mut first_line = vec![
+        Span::raw("  "),
+        Span::styled(prefix.to_string(), prefix_style),
+    ];
+    first_line.extend(highlighted_substring_spans(
+        &wrapped[0],
+        query,
+        value_style.base,
+        value_style.highlighted,
+    ));
+    lines.push(Line::from(first_line));
+
+    let continuation_prefix = " ".repeat(2 + prefix_width);
+    for line in wrapped.iter().skip(1) {
+        let mut spans = vec![Span::raw(continuation_prefix.clone())];
+        spans.extend(highlighted_substring_spans(
+            line,
+            query,
+            value_style.base,
+            value_style.highlighted,
+        ));
+        lines.push(Line::from(spans));
+    }
+}
+
+fn append_highlighted_wrapped_text(
+    lines: &mut Vec<Line<'static>>,
+    width: usize,
+    prefix: &str,
+    value: &str,
+    query: &str,
+    value_style: HighlightedWrapStyle,
+) {
+    let prefix_width = display_width(prefix);
+    let available_width = width.saturating_sub(prefix_width).max(1);
+
+    for line in wrap_inline_text(value, available_width) {
+        let mut spans = vec![Span::raw(prefix.to_string())];
+        spans.extend(highlighted_substring_spans(
+            &line,
+            query,
+            value_style.base,
+            value_style.highlighted,
+        ));
+        lines.push(Line::from(spans));
     }
 }
 

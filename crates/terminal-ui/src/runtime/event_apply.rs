@@ -1,8 +1,12 @@
+use runtime_domain::prompt_assembly::{
+    PromptAssemblyDiscoveredSkill, PromptAssemblyExtraPromptCandidate,
+};
 use runtime_domain::session::{
     RuntimeEvent, RuntimePermissionOptionKind, RuntimePermissionRequest, RuntimeTarget,
     RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityStatus,
-    RuntimeToolActivityUpdate, RuntimeToolKind, SessionResumePayload, TranscriptReplayItem,
-    TranscriptReplayRole,
+    RuntimeToolActivityUpdate, RuntimeToolKind, SessionResumePayload,
+    TranscriptCustomPromptBinding, TranscriptReplayItem, TranscriptReplayRole,
+    TranscriptSkillBinding, TranscriptUserMessage,
 };
 
 use super::super::{
@@ -201,6 +205,18 @@ impl RuntimeEventApply for Model {
             RuntimeEvent::MessageHistoryStartupCacheLoadFailed { message } => {
                 self.show_toast(ToastSeverity::Error, message);
             }
+            RuntimeEvent::PromptAssemblyMissingSourcesChecked { missing_count } => {
+                if missing_count > 0 {
+                    let label = if missing_count == 1 {
+                        "1 prompt source is missing; open /prompt to repair it".to_string()
+                    } else {
+                        format!(
+                            "{missing_count} prompt sources are missing; open /prompt to repair them"
+                        )
+                    };
+                    self.show_toast(ToastSeverity::Error, label);
+                }
+            }
             RuntimeEvent::MessageHistoryPickerRowsLoaded { request_id, rows } => {
                 if self.message_history_picker_load_request_matches(request_id) {
                     self.apply_message_history_picker_rows(request_id, rows);
@@ -222,6 +238,20 @@ impl RuntimeEventApply for Model {
                 self.show_toast(
                     ToastSeverity::Error,
                     format!("Message history not saved: {message}"),
+                );
+            }
+            RuntimeEvent::PromptAssemblyUpdated { manager, notice } => {
+                self.prompt_assembly = manager;
+                self.sync_prompt_overlay_state();
+                if let Some(notice) = notice {
+                    self.pending_prompt_assembly_notice = Some(notice);
+                    self.present_pending_prompt_assembly_notice_if_ready();
+                }
+            }
+            RuntimeEvent::PromptAssemblyUpdateFailed { message, .. } => {
+                self.show_toast(
+                    ToastSeverity::Error,
+                    format!("Prompt assembly not updated: {message}"),
                 );
             }
             RuntimeEvent::SessionResumed { payload } => {
@@ -415,6 +445,8 @@ impl Model {
                 &mut transcript,
                 self.style_mode,
                 self.reasoning_display_mode,
+                &self.prompt_assembly.candidates.manual_skills,
+                &self.prompt_assembly.candidates.extra_prompts,
             );
         }
         for snapshot in terminal_snapshots.iter().cloned() {
@@ -445,6 +477,8 @@ trait TranscriptReplayItemSource {
         transcript: &mut crate::transcript::Transcript,
         style_mode: crate::style_mode::StyleMode,
         reasoning_display_mode: crate::ReasoningDisplayMode,
+        manual_skills: &[PromptAssemblyDiscoveredSkill],
+        extra_prompt_candidates: &[PromptAssemblyExtraPromptCandidate],
     );
 }
 
@@ -458,8 +492,17 @@ impl TranscriptReplayItemSource for TranscriptReplayItem {
         transcript: &mut crate::transcript::Transcript,
         style_mode: crate::style_mode::StyleMode,
         reasoning_display_mode: crate::ReasoningDisplayMode,
+        manual_skills: &[PromptAssemblyDiscoveredSkill],
+        extra_prompt_candidates: &[PromptAssemblyExtraPromptCandidate],
     ) {
-        append_transcript_replay_item(transcript, self, style_mode, reasoning_display_mode);
+        append_transcript_replay_item(
+            transcript,
+            self,
+            style_mode,
+            reasoning_display_mode,
+            manual_skills,
+            extra_prompt_candidates,
+        );
     }
 }
 
@@ -473,12 +516,16 @@ impl TranscriptReplayItemSource for &TranscriptReplayItem {
         transcript: &mut crate::transcript::Transcript,
         style_mode: crate::style_mode::StyleMode,
         reasoning_display_mode: crate::ReasoningDisplayMode,
+        manual_skills: &[PromptAssemblyDiscoveredSkill],
+        extra_prompt_candidates: &[PromptAssemblyExtraPromptCandidate],
     ) {
         append_transcript_replay_item(
             transcript,
             (*self).clone(),
             style_mode,
             reasoning_display_mode,
+            manual_skills,
+            extra_prompt_candidates,
         );
     }
 }
@@ -489,6 +536,7 @@ fn transcript_replay_item_terminal_snapshot(
     match item {
         TranscriptReplayItem::TerminalSnapshot { snapshot } => Some(snapshot),
         TranscriptReplayItem::Message { .. }
+        | TranscriptReplayItem::BoundUserMessage { .. }
         | TranscriptReplayItem::Reasoning { .. }
         | TranscriptReplayItem::ToolActivity { .. }
         | TranscriptReplayItem::ToolResult { .. }
@@ -501,6 +549,8 @@ fn append_transcript_replay_item(
     item: TranscriptReplayItem,
     style_mode: crate::style_mode::StyleMode,
     reasoning_display_mode: crate::ReasoningDisplayMode,
+    manual_skills: &[PromptAssemblyDiscoveredSkill],
+    extra_prompt_candidates: &[PromptAssemblyExtraPromptCandidate],
 ) {
     match item {
         TranscriptReplayItem::Message {
@@ -517,6 +567,21 @@ fn append_transcript_replay_item(
                 crate::Sender::Assistant,
                 content,
                 style_mode,
+            );
+        }
+        TranscriptReplayItem::BoundUserMessage { message } => {
+            let source_message = validated_transcript_user_source_message(
+                message,
+                manual_skills,
+                extra_prompt_candidates,
+            );
+            transcript.append_message_with_style_mode_and_source(
+                crate::Sender::User,
+                source_message
+                    .as_transcript_user_message()
+                    .display_content(),
+                style_mode,
+                Some(source_message),
             );
         }
         TranscriptReplayItem::Reasoning { content } => {
@@ -550,6 +615,72 @@ fn upsert_replay_terminal_snapshot(
     }
 
     snapshots.push(snapshot);
+}
+
+fn validated_transcript_user_source_message(
+    message: TranscriptUserMessage,
+    manual_skills: &[PromptAssemblyDiscoveredSkill],
+    extra_prompt_candidates: &[PromptAssemblyExtraPromptCandidate],
+) -> crate::composer::ComposerSourceMessage {
+    let valid_skill_bindings = message
+        .skill_bindings
+        .into_iter()
+        .filter(|binding| {
+            is_visible_binding_range_valid(binding, &message.content)
+                && manual_skills.iter().any(|skill| {
+                    skill.skill_name == binding.skill_name
+                        && skill.origin == binding.origin
+                        && skill.skill_path == std::path::Path::new(binding.skill_path.as_str())
+                })
+        })
+        .collect();
+    let valid_custom_prompt_bindings = message
+        .custom_prompt_bindings
+        .into_iter()
+        .filter(|binding| {
+            is_visible_custom_prompt_binding_range_valid(binding, &message.content)
+                && extra_prompt_candidates.iter().any(|prompt| {
+                    prompt.reference_id == binding.reference_id && prompt.origin == binding.origin
+                })
+        })
+        .collect();
+    crate::composer::ComposerSourceMessage::from_transcript_user_message(TranscriptUserMessage {
+        content: message.content,
+        attachments: message.attachments,
+        skill_bindings: valid_skill_bindings,
+        custom_prompt_bindings: valid_custom_prompt_bindings,
+    })
+}
+
+fn is_visible_binding_range_valid(binding: &TranscriptSkillBinding, content: &str) -> bool {
+    let total_chars = content.chars().count();
+    if binding.start_char >= binding.end_char || binding.end_char > total_chars {
+        return false;
+    }
+
+    let visible_text = content
+        .chars()
+        .skip(binding.start_char)
+        .take(binding.end_char - binding.start_char)
+        .collect::<String>();
+    visible_text == binding.visible_token_text()
+}
+
+fn is_visible_custom_prompt_binding_range_valid(
+    binding: &TranscriptCustomPromptBinding,
+    content: &str,
+) -> bool {
+    let total_chars = content.chars().count();
+    if binding.start_char >= binding.end_char || binding.end_char > total_chars {
+        return false;
+    }
+
+    let visible_text = content
+        .chars()
+        .skip(binding.start_char)
+        .take(binding.end_char - binding.start_char)
+        .collect::<String>();
+    visible_text == binding.visible_token_text()
 }
 
 fn split_error_description_and_json_body(message: &str) -> (String, Option<String>) {

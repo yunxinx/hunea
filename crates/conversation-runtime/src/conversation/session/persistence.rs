@@ -7,6 +7,7 @@ use provider_protocol::{ConversationItem, Role};
 use runtime_domain::session::{
     ConversationEvent, RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityStatus,
     RuntimeToolActivityUpdate, RuntimeToolKind, TranscriptReplayItem, TranscriptReplayRole,
+    TranscriptUserMessage,
 };
 use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -89,27 +90,23 @@ pub(super) enum SessionPersistenceError {
 
 pub(super) async fn run_session_persistence_actor(
     persistence: Option<PreparedConversationPersistence>,
-    mut receiver: tokio_mpsc::UnboundedReceiver<SessionPersistenceCommand>,
+    mut receiver: tokio_mpsc::Receiver<SessionPersistenceCommand>,
     sender: mpsc::Sender<ConversationWorkerEvent>,
-    cancellation: CancellationToken,
+    conversation_cancellation: CancellationToken,
 ) {
     let mut state = SessionPersistenceState::default();
     while let Some(command) = receiver.recv().await {
         let result = match command {
             SessionPersistenceCommand::ProviderTurnStarted => {
-                persist_turn_start(persistence.as_ref(), &sender, &cancellation, &mut state)
+                persist_turn_start(persistence.as_ref(), &sender, &mut state)
                     .await
                     .map_err(Arc::new)
             }
-            SessionPersistenceCommand::ProviderContextItem(item) => persist_context_item(
-                persistence.as_ref(),
-                &sender,
-                &cancellation,
-                item,
-                &mut state,
-            )
-            .await
-            .map_err(Arc::new),
+            SessionPersistenceCommand::ProviderContextItem(item) => {
+                persist_context_item(persistence.as_ref(), &sender, item, &mut state)
+                    .await
+                    .map_err(Arc::new)
+            }
             SessionPersistenceCommand::ToolActivityStarted(activity) => {
                 persist_tool_activity_started(persistence.as_ref(), activity, &mut state)
                     .await
@@ -143,11 +140,34 @@ pub(super) async fn run_session_persistence_actor(
 
         if let Err(error) = result {
             let message = error.to_string();
-            cancellation.cancel();
+            conversation_cancellation.cancel();
             let _ = sender.send(ConversationWorkerEvent::progress(
                 ConversationEvent::Failed { message },
             ));
+            cancel_pending_flushes(drain_pending_commands(&mut receiver), error);
             return;
+        }
+    }
+}
+
+fn drain_pending_commands(
+    receiver: &mut tokio_mpsc::Receiver<SessionPersistenceCommand>,
+) -> Vec<SessionPersistenceCommand> {
+    receiver.close();
+    let mut commands = Vec::new();
+    while let Ok(command) = receiver.try_recv() {
+        commands.push(command);
+    }
+    commands
+}
+
+fn cancel_pending_flushes(
+    commands: impl IntoIterator<Item = SessionPersistenceCommand>,
+    error: Arc<SessionPersistenceError>,
+) {
+    for command in commands {
+        if let SessionPersistenceCommand::Flush { ack } = command {
+            let _ = ack.send(Err(error.clone()));
         }
     }
 }
@@ -155,7 +175,6 @@ pub(super) async fn run_session_persistence_actor(
 pub(super) async fn persist_turn_start(
     persistence: Option<&PreparedConversationPersistence>,
     sender: &mpsc::Sender<ConversationWorkerEvent>,
-    _cancellation: &CancellationToken,
     state: &mut SessionPersistenceState,
 ) -> Result<(), SessionPersistenceError> {
     if state.has_persisted_turn_start {
@@ -175,12 +194,13 @@ pub(super) async fn persist_turn_start(
             .append_config_change(&session_id, persistence.config_snapshot.clone())
             .await
             .map_err(|source| SessionPersistenceError::PersistConfigChange { source })?;
-        let user_entry_id = persistence
+        let user_entry_ids = persistence
             .store
-            .append(&session_id, persistence.current_user_message.clone())
+            .append_many(&session_id, persistence.current_user_items.clone())
             .await
             .map_err(|source| SessionPersistenceError::PersistUserMessage { source })?;
-        (Some(session_id), Some(user_entry_id))
+        let user_entry_id = user_entry_ids.last().cloned();
+        (Some(session_id), user_entry_id)
     } else {
         (None, None)
     };
@@ -189,9 +209,19 @@ pub(super) async fn persist_turn_start(
         append_transcript_replay_items(
             persistence,
             session_id,
-            transcript_replay_items_from_context_item(&persistence.current_user_message, state),
+            transcript_replay_items_from_transcript_user_message(
+                &persistence.transcript_user_message,
+            ),
         )
         .await?;
+        if !persistence.transcript_replay_after_user.is_empty() {
+            append_transcript_replay_items(
+                persistence,
+                session_id,
+                persistence.transcript_replay_after_user.clone(),
+            )
+            .await?;
+        }
     }
 
     state.has_persisted_turn_start = true;
@@ -209,7 +239,6 @@ pub(super) async fn persist_turn_start(
 pub(super) async fn persist_context_item(
     persistence: Option<&PreparedConversationPersistence>,
     sender: &mpsc::Sender<ConversationWorkerEvent>,
-    _cancellation: &CancellationToken,
     item: ConversationItem,
     state: &mut SessionPersistenceState,
 ) -> Result<(), SessionPersistenceError> {
@@ -372,7 +401,7 @@ fn transcript_replay_items_from_context_item(
 ) -> Vec<TranscriptReplayItem> {
     match item {
         ConversationItem::Message { role, .. } => {
-            let content = item.text_content();
+            let content = item.summary_text_content();
             if content.trim().is_empty() {
                 return Vec::new();
             }
@@ -395,7 +424,7 @@ fn transcript_replay_items_from_context_item(
             if state.final_tool_activity_ids.contains(call_id) {
                 return Vec::new();
             }
-            let content = item.text_content();
+            let content = item.summary_text_content();
             if content.trim().is_empty() {
                 Vec::new()
             } else {
@@ -403,6 +432,25 @@ fn transcript_replay_items_from_context_item(
             }
         }
     }
+}
+
+fn transcript_replay_items_from_transcript_user_message(
+    message: &TranscriptUserMessage,
+) -> Vec<TranscriptReplayItem> {
+    if message.display_content().trim().is_empty() {
+        return Vec::new();
+    }
+
+    if !message.requires_bound_replay() {
+        return vec![TranscriptReplayItem::Message {
+            role: TranscriptReplayRole::User,
+            content: message.content.clone(),
+        }];
+    }
+
+    vec![TranscriptReplayItem::BoundUserMessage {
+        message: message.clone(),
+    }]
 }
 
 fn transcript_role_from_provider_role(role: Role) -> Option<TranscriptReplayRole> {
@@ -479,13 +527,34 @@ async fn flush_persistence(
 }
 
 pub(super) async fn flush_session_persistence(
-    sender: &tokio_mpsc::UnboundedSender<SessionPersistenceCommand>,
+    sender: &tokio_mpsc::Sender<SessionPersistenceCommand>,
 ) -> Result<(), Arc<SessionPersistenceError>> {
     let (ack_tx, ack_rx) = oneshot::channel();
     sender
         .send(SessionPersistenceCommand::Flush { ack: ack_tx })
+        .await
         .map_err(|_| Arc::new(SessionPersistenceError::WorkerStopped))?;
     ack_rx
         .await
         .map_err(|_| Arc::new(SessionPersistenceError::FlushAckDropped))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancel_pending_flushes_replies_to_waiting_acknowledgements() {
+        let (flush_ack, flush_result) = oneshot::channel();
+        let commands = vec![SessionPersistenceCommand::Flush { ack: flush_ack }];
+        let error = Arc::new(SessionPersistenceError::WorkerStopped);
+
+        cancel_pending_flushes(commands, error.clone());
+
+        let received = flush_result
+            .blocking_recv()
+            .expect("flush acknowledgement should be sent")
+            .expect_err("cancelled flush should receive the cancellation error");
+        assert!(Arc::ptr_eq(&received, &error));
+    }
 }

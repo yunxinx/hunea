@@ -48,15 +48,16 @@ pub fn runtime_tool_activity_update_from_result(
     let definition = tool_definitions.definition(&call.name);
     let parsed = ParsedArguments::from_call(call);
     let arguments = parsed.value();
-    let status = Some(if processed_error.is_some() || result.is_error {
+    let status = Some(if processed_error.is_some() || result.is_error() {
         RuntimeToolActivityStatus::Failed
     } else {
         RuntimeToolActivityStatus::Completed
     });
     let content = match processed_error {
-        Some(processed) => {
-            RuntimeToolActivityContent::Text(format!("Failed: {}", processed.display_reason))
-        }
+        Some(processed) => vec![RuntimeToolActivityContent::Text(format!(
+            "Failed: {}",
+            processed.display_reason
+        ))],
         None => runtime_tool_activity_content_for_result(arguments, result, definition),
     };
     let raw_input = processed_error
@@ -64,9 +65,9 @@ pub fn runtime_tool_activity_update_from_result(
         .then(|| RuntimeToolActivityRawValue::from(call.arguments.clone()));
     let raw_output = processed_error.is_none().then(|| {
         RuntimeToolActivityRawValue::tool_result_with_display_content(
-            result.content.clone(),
-            result.display_content.clone(),
-            result.details.clone(),
+            result.text_content(),
+            result.display_content().map(str::to_string),
+            result.details().cloned(),
         )
     });
 
@@ -75,7 +76,7 @@ pub fn runtime_tool_activity_update_from_result(
         title: Some(tool_title_for(&call.name, definition, arguments)),
         kind: Some(runtime_kind_for(definition)),
         status,
-        content: Some(vec![content]),
+        content: Some(content),
         locations: Some(tool_locations_for(arguments)),
         raw_input,
         raw_output,
@@ -86,29 +87,48 @@ fn runtime_tool_activity_content_for_result(
     arguments: &Value,
     result: &ToolResult,
     definition: Option<&HuneaToolDefinition>,
-) -> RuntimeToolActivityContent {
+) -> Vec<RuntimeToolActivityContent> {
     if matches!(
         runtime_kind_for(definition),
         RuntimeToolKind::Edit | RuntimeToolKind::Write
     ) && let Some(content) = diff_content_from_tool_result(arguments, result)
     {
-        return content;
+        return vec![content];
     }
 
-    RuntimeToolActivityContent::Text(
-        result
-            .display_content
-            .as_ref()
-            .unwrap_or(&result.content)
-            .clone(),
-    )
+    if let Some(display_content) = result.display_content() {
+        return vec![RuntimeToolActivityContent::Text(
+            display_content.to_string(),
+        )];
+    }
+
+    let content = result
+        .content()
+        .iter()
+        .map(|content| match content {
+            tool_runtime::ToolResultContent::Text(text) => {
+                RuntimeToolActivityContent::Text(text.clone())
+            }
+            tool_runtime::ToolResultContent::Image { mime_type, uri, .. } => {
+                RuntimeToolActivityContent::Image {
+                    mime_type: mime_type.clone(),
+                    uri: uri.clone(),
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+    if content.is_empty() {
+        vec![RuntimeToolActivityContent::Text(String::new())]
+    } else {
+        content
+    }
 }
 
 fn diff_content_from_tool_result(
     arguments: &Value,
     result: &ToolResult,
 ) -> Option<RuntimeToolActivityContent> {
-    let details = result.details.as_ref()?;
+    let details = result.details()?;
     let path = details
         .get("path")
         .and_then(Value::as_str)
@@ -312,8 +332,9 @@ mod tests {
         let mut registry = ToolRegistry::new();
         registry.insert(ToolDefinition::new("read").with_label("Read"));
         let call = ToolCall::new("call-1", "read", r#"{"path":"Cargo.toml"}"#);
-        let mut result = ToolResult::success("call-1", "content");
-        result.details = Some(serde_json::json!({ "kind": "text" }));
+        let result = ToolResult::success("call-1", "content").with_details(serde_json::json!({
+            "kind": "text"
+        }));
 
         let update = runtime_tool_activity_update_from_result(&call, &result, None, &registry);
 
@@ -330,6 +351,41 @@ mod tests {
             raw_output.tool_result_details(),
             Some(&serde_json::json!({ "kind": "text" }))
         );
+    }
+
+    #[test]
+    fn image_result_becomes_text_and_image_activity_content() {
+        let mut registry = ToolRegistry::new();
+        registry.insert(
+            ToolDefinition::new("view_image")
+                .with_label("View Image")
+                .with_kind(ToolKind::Read),
+        );
+        let call = ToolCall::new("call-1", "view_image", r#"{"path":"assets/a.png"}"#);
+        let result = ToolResult::success_content(
+            "call-1",
+            vec![
+                tool_runtime::ToolResultContent::Text("image loaded".to_string()),
+                tool_runtime::ToolResultContent::Image {
+                    data_base64: "iVBORw==".to_string(),
+                    mime_type: "image/png".to_string(),
+                    uri: Some("assets/a.png".to_string()),
+                    detail: None,
+                },
+            ],
+        );
+
+        let update = runtime_tool_activity_update_from_result(&call, &result, None, &registry);
+
+        assert!(matches!(
+            update.content.as_deref(),
+            Some([
+                RuntimeToolActivityContent::Text(text),
+                RuntimeToolActivityContent::Image { mime_type, uri },
+            ]) if text == "image loaded"
+                && mime_type == "image/png"
+                && uri.as_deref() == Some("assets/a.png")
+        ));
     }
 
     #[test]

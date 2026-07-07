@@ -1,6 +1,7 @@
 use std::{collections::HashMap, future::Future, path::PathBuf, pin::Pin};
 
 use provider_protocol::ConversationItem;
+use runtime_domain::prompt_assembly::persistence::{PromptAssemblyScope, PromptAssemblyScopeState};
 use runtime_domain::session::{
     MessageHistoryEntry, MessageHistoryRow, TranscriptReplayItem, append_message_history_entry,
     should_record_message_history_text,
@@ -16,8 +17,10 @@ use crate::{
 };
 
 use super::{
-    SessionStore, append_parent_id, current_timestamp_ms, derive_store_session_meta, entry_ids,
-    latest_non_leaf_id, requested_leaf_id, resolve_error, validate_append_kinds,
+    MessageHistoryStore, PromptAssemblyStore, SessionCatalogStore, SessionFlushStore,
+    SessionLifecycleStore, SessionStore, SessionTreeStore, append_parent_id, current_timestamp_ms,
+    derive_store_session_meta, entry_ids, latest_non_leaf_id, requested_leaf_id, resolve_error,
+    validate_append_kinds,
 };
 
 /// `InMemorySessionStore` 为运行时测试提供不落盘的 mock 实现。
@@ -27,6 +30,7 @@ use super::{
 pub struct InMemorySessionStore {
     sessions: RwLock<HashMap<SessionId, InMemorySession>>,
     message_history: RwLock<InMemoryMessageHistoryState>,
+    global_prompt_assembly: RwLock<PromptAssemblyScopeState>,
 }
 
 struct InMemorySession {
@@ -54,6 +58,9 @@ impl InMemorySessionStore {
         Self {
             sessions: RwLock::new(HashMap::new()),
             message_history: RwLock::new(InMemoryMessageHistoryState::default()),
+            global_prompt_assembly: RwLock::new(PromptAssemblyScopeState::new(
+                PromptAssemblyScope::Global,
+            )),
         }
     }
 
@@ -126,7 +133,7 @@ impl Default for InMemorySessionStore {
     }
 }
 
-impl SessionStore for InMemorySessionStore {
+impl SessionLifecycleStore for InMemorySessionStore {
     fn create_session<'a>(
         &'a self,
         header: SessionHeader,
@@ -278,7 +285,9 @@ impl SessionStore for InMemorySessionStore {
             resolve_state(&session.entries, requested_leaf_id).map_err(resolve_error)
         })
     }
+}
 
+impl SessionTreeStore for InMemorySessionStore {
     fn load_session_tree<'a>(
         &'a self,
         session_id: &'a SessionId,
@@ -356,7 +365,9 @@ impl SessionStore for InMemorySessionStore {
             session_branch_tree_snapshot(&session.entries).map_err(resolve_error)
         })
     }
+}
 
+impl SessionCatalogStore for InMemorySessionStore {
     fn list_sessions<'a>(
         &'a self,
         project_dir: &'a ProjectDir,
@@ -399,7 +410,9 @@ impl SessionStore for InMemorySessionStore {
             derive_store_session_meta(&session.entries, session.jsonl_path.clone())
         })
     }
+}
 
+impl SessionFlushStore for InMemorySessionStore {
     fn flush<'a>(
         &'a self,
         session_id: &'a SessionId,
@@ -420,7 +433,9 @@ impl SessionStore for InMemorySessionStore {
     ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
         Box::pin(async { Ok(()) })
     }
+}
 
+impl MessageHistoryStore for InMemorySessionStore {
     fn record_message_history<'a>(
         &'a self,
         text: &'a str,
@@ -466,6 +481,37 @@ impl SessionStore for InMemorySessionStore {
         })
     }
 }
+
+impl PromptAssemblyStore for InMemorySessionStore {
+    fn save_global_prompt_assembly_state<'a>(
+        &'a self,
+        state: &'a PromptAssemblyScopeState,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
+        Box::pin(async move {
+            if state.scope() != PromptAssemblyScope::Global {
+                return Err(SessionStoreError::ConfigurationError {
+                    message: format!(
+                        "global prompt assembly persistence only accepts global scope, got {}",
+                        state.scope().as_stored_value()
+                    ),
+                });
+            }
+
+            *self.global_prompt_assembly.write().await = state.clone();
+            Ok(())
+        })
+    }
+
+    fn load_global_prompt_assembly_state<'a>(
+        &'a self,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<PromptAssemblyScopeState, SessionStoreError>> + Send + 'a>,
+    > {
+        Box::pin(async move { Ok(self.global_prompt_assembly.read().await.clone()) })
+    }
+}
+
+impl SessionStore for InMemorySessionStore {}
 
 impl InMemoryMessageHistoryState {
     fn iter(&self) -> impl Iterator<Item = &InMemoryMessageHistoryEntry> {

@@ -215,7 +215,7 @@ mod tests {
     use crate::context_budget::summary::context_usage_summary;
     use runtime_domain::context_budget::{ContextTokenLimit, ContextWindowUsage};
 
-    fn limit(value: u32) -> ContextTokenLimit {
+    fn limit(value: usize) -> ContextTokenLimit {
         ContextTokenLimit::try_from(value).expect("fixture limit should be valid")
     }
 
@@ -235,7 +235,7 @@ mod tests {
                 used: 42_000,
             },
         );
-        assert_eq!(text, "qwen3 · 42k/256k tokens (16.4%)");
+        assert_eq!(text, "qwen3 · ~42k/256k tokens (16.4%)");
     }
 
     #[test]

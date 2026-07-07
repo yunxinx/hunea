@@ -22,8 +22,10 @@ use super::super::workspace_file::{
     workspace::resolve_workspace_path, workspace_access::local_workspace_access,
 };
 use super::{
+    error::SearchToolError,
     external_tool::{
-        ExternalCommand, ManagedSearchToolConfig, ManagedToolKind, resolve_external_command,
+        ExternalCommand, ExternalCommandPlan, ManagedSearchToolConfig, ManagedToolKind,
+        resolve_external_command_from_plan, resolve_external_command_plan,
     },
     search_fallback::{
         BoundedSortedPaths, SEARCH_MAX_OUTPUT_BYTES, TOOL_CALL_INTERRUPTED,
@@ -97,6 +99,7 @@ impl Tool for FindTool {
                 "additionalProperties": false
             }))
             .with_permission_policy(ToolPermissionPolicy::Always)
+            .with_prompt_guidelines("Prefer find over shell find.")
     }
 
     fn execute<'a>(
@@ -142,6 +145,14 @@ struct FindOutcome {
     backend: &'static str,
 }
 
+#[derive(Debug, Clone)]
+struct FindExecutionPlan {
+    root: PathBuf,
+    search_path: PathBuf,
+    arguments: NormalizedFindArguments,
+    external_command: ExternalCommandPlan,
+}
+
 async fn execute_find(
     root: PathBuf,
     managed_tools: ManagedSearchToolConfig,
@@ -151,51 +162,83 @@ async fn execute_find(
     if context.cancellation().is_cancelled() {
         return ToolResult::error(call.call_id, TOOL_CALL_INTERRUPTED);
     }
-    let arguments = match parse_arguments(call.arguments) {
-        Ok(arguments) => arguments,
-        Err(message) => return ToolResult::error(call.call_id, message),
+    let call_id = call.call_id;
+    let cancellation = context.cancellation().clone();
+    let plan = match task::spawn_blocking(move || {
+        build_find_execution_plan(root, managed_tools, call.arguments, &cancellation)
+    })
+    .await
+    {
+        Ok(Ok(plan)) => plan,
+        Ok(Err(error)) => return ToolResult::error(call_id, error.to_string()),
+        Err(error) => return join_error_result(call_id, error),
     };
-    let access = local_workspace_access();
-    let root = match access.as_ref().canonicalize(&root) {
-        Ok(root) => root,
-        Err(error) => {
-            return ToolResult::error(
-                call.call_id,
-                format!("workspace root is unavailable: {error}"),
-            );
-        }
-    };
-    let search_path =
-        match resolve_workspace_path(access.as_ref(), &root, &arguments.requested_path) {
-            Ok(path) => path,
-            Err(message) => return ToolResult::error(call.call_id, message),
-        };
+
+    let FindExecutionPlan {
+        root,
+        search_path,
+        arguments,
+        external_command,
+    } = plan;
 
     if let Some(command) =
-        resolve_external_command(ManagedToolKind::Fd, &managed_tools, &context).await
+        resolve_external_command_from_plan(ManagedToolKind::Fd, external_command, &context).await
         && let Ok(outcome) =
             run_external_find(&command, &root, &search_path, &arguments, &context).await
     {
-        return find_result(call.call_id, outcome);
+        return find_result(call_id, outcome);
     }
 
-    let call_id = call.call_id.clone();
+    let fallback_call_id = call_id.clone();
     let cancellation = context.cancellation().clone();
     match task::spawn_blocking(move || rust_find(&root, &search_path, &arguments, &cancellation))
         .await
     {
-        Ok(Ok(outcome)) => find_result(call.call_id, outcome),
-        Ok(Err(message)) => ToolResult::error(call.call_id, message),
-        Err(error) => join_error_result(call_id, error),
+        Ok(Ok(outcome)) => find_result(call_id, outcome),
+        Ok(Err(error)) => ToolResult::error(call_id, error.to_string()),
+        Err(error) => join_error_result(fallback_call_id, error),
     }
 }
 
-fn parse_arguments(value: serde_json::Value) -> Result<NormalizedFindArguments, String> {
-    let arguments = serde_json::from_value::<FindArguments>(value)
-        .map_err(|error| format!("find arguments are invalid: {error}"))?;
+fn build_find_execution_plan(
+    root: PathBuf,
+    managed_tools: ManagedSearchToolConfig,
+    arguments: serde_json::Value,
+    cancellation: &CancellationToken,
+) -> Result<FindExecutionPlan, SearchToolError> {
+    if cancellation.is_cancelled() {
+        return Err(SearchToolError::Interrupted);
+    }
+    let arguments = parse_arguments(arguments)?;
+    let access = local_workspace_access();
+    let root = match access.as_ref().canonicalize(&root) {
+        Ok(root) => root,
+        Err(source) => return Err(SearchToolError::WorkspaceRoot { path: root, source }),
+    };
+    let search_path =
+        match resolve_workspace_path(access.as_ref(), &root, &arguments.requested_path) {
+            Ok(path) => path,
+            Err(source) => return Err(SearchToolError::WorkspacePath { source }),
+        };
+
+    Ok(FindExecutionPlan {
+        root,
+        search_path,
+        arguments,
+        external_command: resolve_external_command_plan(ManagedToolKind::Fd, &managed_tools),
+    })
+}
+
+fn parse_arguments(value: serde_json::Value) -> Result<NormalizedFindArguments, SearchToolError> {
+    let arguments = serde_json::from_value::<FindArguments>(value).map_err(|source| {
+        SearchToolError::InvalidArguments {
+            tool: FIND_TOOL_NAME,
+            source,
+        }
+    })?;
     let pattern = arguments.pattern.trim();
     if pattern.is_empty() {
-        return Err("'pattern' is required".to_string());
+        return Err(SearchToolError::MissingPattern);
     }
     Ok(NormalizedFindArguments {
         pattern: pattern.to_string(),
@@ -213,7 +256,7 @@ async fn run_external_find(
     search_path: &Path,
     arguments: &NormalizedFindArguments,
     context: &ToolExecutionContext<'_>,
-) -> Result<FindOutcome, String> {
+) -> Result<FindOutcome, SearchToolError> {
     let mut args = vec![
         "--glob".to_string(),
         "--color=never".to_string(),
@@ -246,11 +289,11 @@ async fn run_external_find(
 
     let mut child = process
         .spawn()
-        .map_err(|error| format!("spawn external search tool failed: {error}"))?;
+        .map_err(|source| SearchToolError::ExternalSpawn { source })?;
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| "external find stdout is unavailable".to_string())?;
+        .ok_or(SearchToolError::ExternalStdoutUnavailable { tool: "find" })?;
     let stderr_task = child
         .stderr
         .take()
@@ -262,10 +305,13 @@ async fn run_external_find(
         let line = tokio::select! {
             _ = context.cancellation().cancelled() => {
                 let _ = child.start_kill();
-                return Err(TOOL_CALL_INTERRUPTED.to_string());
+                return Err(SearchToolError::Interrupted);
             }
             line = lines.next_line() => {
-                line.map_err(|error| format!("read external find output failed: {error}"))?
+                line.map_err(|source| SearchToolError::ExternalOutputRead {
+                    tool: "find",
+                    source,
+                })?
             }
         };
         let Some(line) = line else {
@@ -281,10 +327,16 @@ async fn run_external_find(
     let status = child
         .wait()
         .await
-        .map_err(|error| format!("wait for external find failed: {error}"))?;
+        .map_err(|source| SearchToolError::ExternalWait {
+            tool: "find",
+            source,
+        })?;
     let stderr = stderr_task_output(stderr_task).await;
     if !matches!(status.code(), Some(0)) {
-        return Err(format!("external find failed: {}", stderr.trim()));
+        return Err(SearchToolError::ExternalFailed {
+            tool: "find",
+            stderr: stderr.trim().to_string(),
+        });
     }
 
     let total_entries = collector.total_entries();
@@ -301,14 +353,14 @@ fn rust_find(
     search_path: &Path,
     arguments: &NormalizedFindArguments,
     cancellation: &CancellationToken,
-) -> Result<FindOutcome, String> {
+) -> Result<FindOutcome, SearchToolError> {
     let matcher = FindMatcher::new(arguments)?;
     let mut paths = BoundedSortedPaths::new(arguments.limit);
     for entry in build_workspace_walker(root, search_path, true) {
         if cancellation.is_cancelled() {
-            return Err(TOOL_CALL_INTERRUPTED.to_string());
+            return Err(SearchToolError::Interrupted);
         }
-        let entry = entry.map_err(|error| format!("walk workspace failed: {error}"))?;
+        let entry = entry.map_err(|source| SearchToolError::WalkWorkspace { source })?;
         let path = entry.path();
         if path == search_path {
             continue;
@@ -347,7 +399,7 @@ enum FindMatcher {
 }
 
 impl FindMatcher {
-    fn new(arguments: &NormalizedFindArguments) -> Result<Self, String> {
+    fn new(arguments: &NormalizedFindArguments) -> Result<Self, SearchToolError> {
         let primary = compile_glob(&arguments.pattern)?;
         let prefixed = if arguments.pattern.contains('/')
             && !arguments.pattern.starts_with('/')
@@ -429,7 +481,14 @@ fn find_result(call_id: String, outcome: FindOutcome) -> ToolResult {
 }
 
 fn join_error_result(call_id: String, error: JoinError) -> ToolResult {
-    ToolResult::error(call_id, format!("find task failed: {error}"))
+    ToolResult::error(
+        call_id,
+        SearchToolError::JoinTask {
+            operation: "find",
+            source: error,
+        }
+        .to_string(),
+    )
 }
 
 #[cfg(test)]
@@ -447,6 +506,64 @@ mod tests {
 
     use super::super::external_tool::ExternalToolBackend;
     use super::*;
+
+    #[test]
+    fn parse_arguments_preserves_find_deserialization_error() {
+        let result = parse_arguments(json!({
+            "pattern": 12,
+        }));
+
+        assert!(matches!(
+            result,
+            Err(SearchToolError::InvalidArguments { tool: "find", .. })
+        ));
+    }
+
+    #[test]
+    fn find_matcher_preserves_invalid_glob_pattern() {
+        let arguments = NormalizedFindArguments {
+            pattern: "[".to_string(),
+            requested_path: ".".to_string(),
+            limit: 10,
+        };
+
+        let result = FindMatcher::new(&arguments);
+
+        assert!(matches!(
+            result,
+            Err(SearchToolError::InvalidGlob { pattern, .. }) if pattern == "["
+        ));
+    }
+
+    #[test]
+    fn find_execution_plan_resolves_workspace_paths_before_async_execution() {
+        let root = temp_root("find-execution-plan-paths");
+        let source_dir = root.join("src");
+        fs::create_dir_all(&source_dir).expect("source directory should exist");
+        let cancellation = CancellationToken::new();
+
+        let plan = build_find_execution_plan(
+            root.clone(),
+            ManagedSearchToolConfig::default(),
+            json!({
+                "pattern": "*.rs",
+                "path": "src",
+            }),
+            &cancellation,
+        )
+        .expect("find execution plan should resolve workspace paths");
+
+        assert_eq!(
+            plan.root,
+            fs::canonicalize(&root).expect("root should canonicalize")
+        );
+        assert_eq!(
+            plan.search_path,
+            fs::canonicalize(&source_dir).expect("source dir should canonicalize")
+        );
+        assert_eq!(plan.arguments.pattern, "*.rs");
+        cleanup(&root);
+    }
 
     #[cfg(unix)]
     #[tokio::test]

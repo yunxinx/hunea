@@ -15,6 +15,8 @@ async fn conversation_worker_reports_interrupted_when_pre_cancelled() {
         &turn,
         vec![ConversationItem::text(Role::User, "hello")],
         None,
+        None,
+        None,
     );
     let executor = ToolExecutorRegistry::new();
     let cancellation = CancellationToken::new();

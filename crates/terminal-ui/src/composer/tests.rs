@@ -1,4 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::style::Color;
+use runtime_domain::{prompt_assembly::PromptSourceOrigin, session::TranscriptUserAttachment};
 
 use super::Composer;
 use crate::{StyleMode, theme::default_palette};
@@ -420,6 +422,153 @@ fn replace_current_at_token_keeps_surrounding_text_and_moves_cursor() {
     );
 }
 
+#[test]
+fn skill_binding_survives_edit_outside_bound_token() {
+    let mut composer = test_composer(80, 3, "$code");
+    assert!(composer.replace_current_skill_token(
+        "code-review",
+        std::path::Path::new("/tmp/code-review/SKILL.md"),
+        PromptSourceOrigin::Project,
+    ));
+
+    composer.insert_text(" please inspect this");
+
+    let source_message = composer.source_message();
+    assert_eq!(source_message.skill_bindings().len(), 1);
+    assert_eq!(source_message.skill_bindings()[0].skill_name, "code-review");
+}
+
+#[test]
+fn skill_binding_drops_immediately_after_manual_token_edit() {
+    let mut composer = test_composer(80, 3, "$code");
+    assert!(composer.replace_current_skill_token(
+        "code-review",
+        std::path::Path::new("/tmp/code-review/SKILL.md"),
+        PromptSourceOrigin::Project,
+    ));
+
+    composer.handle_key(KeyEvent::from(KeyCode::Left));
+    composer.handle_key(KeyEvent::from(KeyCode::Left));
+    composer.handle_key(KeyEvent::from(KeyCode::Char('x')));
+
+    let source_message = composer.source_message();
+    assert!(source_message.skill_bindings().is_empty());
+}
+
+#[test]
+fn bound_skill_token_renders_with_command_accent_before_submit() {
+    let mut composer = test_composer(80, 3, "$code");
+    assert!(composer.replace_current_skill_token(
+        "code-review",
+        std::path::Path::new("/tmp/code-review/SKILL.md"),
+        PromptSourceOrigin::Project,
+    ));
+
+    let palette = default_palette();
+    let document = composer.render_document(palette);
+    let skill_span = document
+        .lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find(|span| span.content.as_ref() == "$code-review")
+        .expect("bound skill token should render as a distinct span");
+
+    assert_eq!(skill_span.style.fg, Some(palette.command_accent));
+    assert_ne!(skill_span.style.fg, Some(Color::Reset));
+}
+
+#[test]
+fn bound_skill_token_keeps_same_background_as_live_cx_input() {
+    let mut composer = Composer::new(StyleMode::Cx);
+    composer.set_width(82);
+    composer.set_height(3);
+    composer.set_text_for_test("$code");
+    assert!(composer.replace_current_skill_token(
+        "code-review",
+        std::path::Path::new("/tmp/code-review/SKILL.md"),
+        PromptSourceOrigin::Project,
+    ));
+
+    let palette = default_palette();
+    let document = composer.render_document(palette);
+    let skill_span = document
+        .lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find(|span| span.content.as_ref() == "$code-review")
+        .expect("bound skill token should render as a distinct span");
+    let plain_text_span = document
+        .lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find(|span| span.content.as_ref() == " ")
+        .expect("composer should render trailing plain text/fill span");
+
+    assert_eq!(skill_span.style.fg, Some(palette.command_accent));
+    assert_eq!(
+        skill_span.style.bg, plain_text_span.style.bg,
+        "bound skill token should only change foreground color, not carve out a different background"
+    );
+}
+
+#[test]
+fn bound_custom_prompt_token_renders_from_sigil_on_later_logical_line() {
+    let mut composer = test_composer(80, 4, "啊啊\n#prompt");
+    assert!(composer.replace_current_custom_prompt_token("prompt-1", PromptSourceOrigin::Project));
+
+    let palette = default_palette();
+    let highlighted = highlighted_composer_contents(&composer, palette);
+
+    assert_eq!(highlighted, vec!["#prompt-1"]);
+}
+
+#[test]
+fn bound_skill_token_renders_from_sigil_after_blank_lines() {
+    let mut composer = test_composer(80, 4, "\n\n$code");
+    assert!(composer.replace_current_skill_token(
+        "code-review",
+        std::path::Path::new("/tmp/code-review/SKILL.md"),
+        PromptSourceOrigin::Project,
+    ));
+
+    let palette = default_palette();
+    let highlighted = highlighted_composer_contents(&composer, palette);
+
+    assert_eq!(highlighted, vec!["$code-review"]);
+}
+
+#[test]
+fn image_attachment_placeholder_renders_from_sigil_on_later_logical_line() {
+    let mut composer = test_composer(80, 4, "啊啊\n@assets/sample.png");
+    assert!(
+        composer.replace_current_at_token_with_image_attachment(sample_image_attachment(
+            "assets/sample.png"
+        ),)
+    );
+
+    let palette = default_palette();
+    let highlighted = highlighted_composer_contents(&composer, palette);
+
+    assert_eq!(composer.value(), "啊啊\n[Image #1] ");
+    assert_eq!(highlighted, vec!["[Image #1]"]);
+    assert_eq!(composer.source_message().attachments().len(), 1);
+}
+
+#[test]
+fn image_attachment_placeholder_renders_from_sigil_after_blank_lines() {
+    let mut composer = test_composer(80, 4, "\n\n@assets/sample.png");
+    assert!(
+        composer.replace_current_at_token_with_image_attachment(sample_image_attachment(
+            "assets/sample.png"
+        ),)
+    );
+
+    let palette = default_palette();
+    let highlighted = highlighted_composer_contents(&composer, palette);
+
+    assert_eq!(highlighted, vec!["[Image #1]"]);
+}
+
 fn test_composer(width: u16, height: u16, value: &str) -> Composer {
     let mut composer = Composer::new(StyleMode::Ms);
     // 测试里的 width 表达可编辑内容加 prompt 的旧视觉宽度；真实 frame 还要包含右侧留白。
@@ -429,6 +578,20 @@ fn test_composer(width: u16, height: u16, value: &str) -> Composer {
     composer
 }
 
+fn highlighted_composer_contents(
+    composer: &Composer,
+    palette: crate::theme::TerminalPalette,
+) -> Vec<String> {
+    composer
+        .render_document(palette)
+        .lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .filter(|span| span.style.fg == Some(palette.command_accent))
+        .map(|span| span.content.to_string())
+        .collect()
+}
+
 fn composer_with_cursor(mut composer: Composer, cursor: usize) -> Composer {
     let current = composer.value().chars().count();
     for _ in 0..current.saturating_sub(cursor) {
@@ -436,6 +599,10 @@ fn composer_with_cursor(mut composer: Composer, cursor: usize) -> Composer {
     }
 
     composer
+}
+
+fn sample_image_attachment(uri: &str) -> TranscriptUserAttachment {
+    TranscriptUserAttachment::local_image("iVBORw0KGgo=", "image/png", Some(uri.to_string()))
 }
 
 fn plain_lines(render: &super::render::RenderResult) -> Vec<String> {

@@ -1,15 +1,20 @@
 use super::*;
 
 use crate::{
+    composer::ComposerSourceMessage,
     display_width::line_display_width,
     selection::SelectableLineRange,
-    theme::{default_palette, secondary_text_style, surface_text_style},
+    theme::{command_accent_text_style, default_palette, secondary_text_style, surface_text_style},
     transcript::{
         CachedLineAnchors, CachedRenderBlock, prompt_text_wrap_call_count,
         reset_prompt_text_wrap_call_count,
     },
 };
 use ratatui::style::Modifier;
+use runtime_domain::{
+    prompt_assembly::PromptSourceOrigin,
+    session::{TranscriptSkillBinding, TranscriptUserAttachment},
+};
 use std::rc::Rc;
 
 #[test]
@@ -56,6 +61,78 @@ fn cx_user_render_adds_surface_padding_lines() {
     assert_eq!(lines[1].spans[1].style, surface_text_style(palette));
     assert_eq!(lines[1].spans[2].style, surface_text_style(palette));
     assert_eq!(lines[1].spans[3].style, surface_text_style(palette));
+}
+
+#[test]
+fn user_render_colors_entire_bound_skill_token_with_command_accent() {
+    let palette = default_palette();
+    let item = MessageItem::new_with_style_mode_and_source(
+        Sender::User,
+        "$code-review needs changes",
+        StyleMode::Cx,
+        Some(ComposerSourceMessage::user_text_with_bindings(
+            "$code-review needs changes",
+            vec![TranscriptSkillBinding {
+                skill_name: "code-review".to_string(),
+                origin: PromptSourceOrigin::Project,
+                skill_path: "/tmp/code-review/SKILL.md".to_string(),
+                start_char: 0,
+                end_char: 12,
+            }],
+            Vec::new(),
+        )),
+    );
+
+    let lines = item.render_lines(40, palette);
+    let user_line = &lines[1];
+    let accent_style = surface_text_style(palette).fg(palette.command_accent);
+
+    assert!(
+        user_line
+            .spans
+            .iter()
+            .any(|span| { span.content.as_ref() == "$code-review" && span.style == accent_style })
+    );
+    assert_eq!(
+        user_line
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref() == "$code-review")
+            .map(|span| span.style.fg),
+        Some(command_accent_text_style(palette).fg)
+    );
+}
+
+#[test]
+fn user_render_colors_image_placeholder_with_command_accent_on_later_line() {
+    let palette = default_palette();
+    let item = MessageItem::new_with_style_mode_and_source(
+        Sender::User,
+        "啊啊\n[Image #1] inspect",
+        StyleMode::Cx,
+        Some(
+            ComposerSourceMessage::user_text_with_bindings_and_attachments(
+                "啊啊\n[Image #1] inspect",
+                Vec::new(),
+                Vec::new(),
+                vec![TranscriptUserAttachment::local_image(
+                    "iVBORw0KGgo=",
+                    "image/png",
+                    Some("assets/sample.png".to_string()),
+                )],
+            ),
+        ),
+    );
+
+    let lines = item.render_lines(40, palette);
+    let highlighted = lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .filter(|span| span.style.fg == Some(palette.command_accent))
+        .map(|span| span.content.to_string())
+        .collect::<Vec<_>>();
+
+    assert_eq!(highlighted, vec!["[Image #1]"]);
 }
 
 #[test]

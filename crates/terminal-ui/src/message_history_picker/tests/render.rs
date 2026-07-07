@@ -1,4 +1,4 @@
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier};
 use runtime_domain::session::MessageHistoryRow;
 
 use crate::{
@@ -7,7 +7,7 @@ use crate::{
     theme::default_palette,
 };
 
-use super::common::{ready_picker_model, sample_rows};
+use super::common::{diverse_rows, ready_picker_model, sample_rows};
 
 #[test]
 fn message_history_picker_render_shows_chrome_hint_and_cursor_marker() {
@@ -131,5 +131,43 @@ fn message_history_picker_loading_body_uses_leading_padding() {
     assert!(
         rows.iter().any(|row| row.contains("  Loading message")),
         "loading state should match copy picker body padding: {rows:?}"
+    );
+}
+
+#[test]
+fn message_history_picker_highlights_matched_search_text() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.set_palette(default_palette(), true);
+    model.set_window(80, 12);
+    let request_id = model.open_message_history_picker_loading_at(10_000);
+    model.apply_message_history_picker_rows(request_id, diverse_rows());
+
+    model.update(crate::AppEvent::Key(crossterm::event::KeyEvent::from(
+        crossterm::event::KeyCode::Char('/'),
+    )));
+    model.update(crate::AppEvent::Key(crossterm::event::KeyEvent::from(
+        crossterm::event::KeyCode::Char('g'),
+    )));
+    model.update(crate::AppEvent::Key(crossterm::event::KeyEvent::from(
+        crossterm::event::KeyCode::Char('i'),
+    )));
+    model.update(crate::AppEvent::Key(crossterm::event::KeyEvent::from(
+        crossterm::event::KeyCode::Char('t'),
+    )));
+
+    let buffer = render_model_buffer(&mut model, 80, 12);
+    let rows = rendered_rows(&buffer);
+    let row_index = rows
+        .iter()
+        .position(|row| row.contains("git status"))
+        .expect("non-selected matching row should render");
+    let highlight_x = rows[row_index]
+        .find("git")
+        .expect("matched text should remain visible");
+    let highlight_cell = &buffer[(highlight_x as u16, row_index as u16)];
+
+    assert!(
+        highlight_cell.modifier.contains(Modifier::REVERSED),
+        "matched history text on zebra rows should switch to reversed highlight for contrast"
     );
 }

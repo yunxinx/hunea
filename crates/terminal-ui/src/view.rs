@@ -130,6 +130,7 @@ fn render_active_overlay(model: &mut Model, frame: &mut RenderFrame<'_>, area: R
         }
         // Transcript 覆盖层模式：全屏渲染对话历史，隐藏 composer 和各面板。
         ModalLayer::TranscriptOverlay => model.render_transcript_overlay(frame, area),
+        ModalLayer::PromptOverlay => model.render_prompt_overlay(frame, area),
         ModalLayer::SessionPreview => model.render_session_preview(frame, area),
         ModalLayer::SessionPicker => model.render_session_picker(frame, area),
         ModalLayer::CopyPicker => model.render_copy_picker(frame, area),

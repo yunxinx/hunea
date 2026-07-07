@@ -12,7 +12,12 @@ pub(super) use runtime_domain::session::{RuntimeToolActivity, RuntimeToolActivit
 use runtime_domain::{
     envinfo,
     model_catalog::{ModelCatalog, ModelSelection},
-    session::{RuntimeTerminalSnapshot, SessionLoadRequestId},
+    prompt_assembly::{
+        PromptAssemblyCandidateInventorySnapshot, PromptAssemblyCoreSystemSnapshot,
+        PromptAssemblyInput, PromptAssemblyManagerSnapshot, PromptAssemblyResolvedSnapshot,
+        PromptAssemblySourceInventorySnapshot, PromptPreludeSnapshot, resolve_prompt_assembly,
+    },
+    session::{PromptAssemblyUpdateNotice, RuntimeTerminalSnapshot, SessionLoadRequestId},
 };
 
 use super::{
@@ -20,6 +25,7 @@ use super::{
     composer::{Composer, PendingComposerCursorClick},
     context_budget::ContextBudgetState,
     copy_picker::CopyPickerState,
+    custom_prompt_picker::CustomPromptPickerState,
     entry_tree::{BRANCH_PICKER_LIST_ROWS_MAX, BRANCH_PICKER_LIST_ROWS_MIN},
     external_editor::ExternalEditorLaunch,
     file_picker::{FILE_PICKER_POPUP_MAX_HEIGHT, FILE_PICKER_POPUP_MIN_HEIGHT, FilePickerState},
@@ -29,6 +35,7 @@ use super::{
     model_panel::ModelPanelState,
     render_frame::RenderFrame,
     selection::project_wide_selection_styles,
+    skill_picker::SkillPickerState,
     startup_banner::StartupBannerEntranceState,
     status_line::StatusLineItem,
     status_phrases::StatusPhraseSelector,
@@ -77,9 +84,12 @@ pub struct Model {
     pub(super) entry_tree: Option<crate::entry_tree::EntryTreeState>,
     pub(super) context_budget: Option<ContextBudgetState>,
     pub(super) pending_context_budget_cancellation: bool,
+    pub(super) pending_prompt_assembly_commit: bool,
     pub(super) copy_picker: Option<CopyPickerState>,
     pub(super) message_history_picker:
         Option<crate::message_history_picker::MessageHistoryPickerState>,
+    pub(super) prompt_assembly: PromptAssemblyManagerSnapshot,
+    pub(super) prompt_overlay: Option<crate::prompt_overlay::PromptOverlayState>,
     pub(super) next_session_load_request_id: u64,
     pub(super) message_revisit: MessageRevisitState,
     pub(super) runtime_terminal_snapshots: Vec<RuntimeTerminalSnapshot>,
@@ -93,8 +103,12 @@ pub struct Model {
     pub(super) command_panel_selected: usize,
     pub(super) command_panel_scroll: usize,
     pub(super) file_picker: Option<FilePickerState>,
+    pub(super) skill_picker: Option<SkillPickerState>,
+    pub(super) custom_prompt_picker: Option<CustomPromptPickerState>,
     pub(super) file_search_cache: FileSearchCache,
     pub(super) dismissed_file_picker_token: Option<String>,
+    pub(super) dismissed_skill_picker_token: Option<String>,
+    pub(super) dismissed_custom_prompt_picker_token: Option<String>,
     pub(super) copy_on_mouse_selection_release: bool,
     pub(super) swap_enter_and_send: bool,
     pub(super) ctrl_c_clears_input: bool,
@@ -129,6 +143,7 @@ pub struct Model {
     pub(super) has_dark_background: bool,
     pub(super) notice_state: NoticeState,
     pub(super) toast_state: ToastState,
+    pub(super) pending_prompt_assembly_notice: Option<PromptAssemblyUpdateNotice>,
     pub(super) status_line_revision: usize,
     quitting: bool,
 }
@@ -176,6 +191,32 @@ impl Model {
         ));
         let git_branch = resolve_initial_git_branch(&status_line_items, &status_line_2_items);
         let current_dir = resolve_initial_current_dir(&status_line_items, &status_line_2_items);
+        let prompt_assembly =
+            options
+                .prompt_assembly
+                .unwrap_or_else(|| PromptAssemblyManagerSnapshot {
+                    resolution: PromptAssemblyResolvedSnapshot {
+                        assembly: resolve_prompt_assembly(&PromptAssemblyInput::default()),
+                        prelude: PromptPreludeSnapshot::default(),
+                    },
+                    sources: PromptAssemblySourceInventorySnapshot {
+                        managed: Vec::new(),
+                        preview: Vec::new(),
+                    },
+                    candidates: PromptAssemblyCandidateInventorySnapshot {
+                        extra_prompts: Vec::new(),
+                        discovered_skills: Vec::new(),
+                        manual_skills: Vec::new(),
+                        tools: Vec::new(),
+                        dynamic_environment: Vec::new(),
+                    },
+                    core_system: PromptAssemblyCoreSystemSnapshot {
+                        builtin_body: String::new(),
+                        global_override: None,
+                        project_override: None,
+                    },
+                    diagnostics: Vec::new(),
+                });
 
         Self {
             startup_banner_options,
@@ -198,8 +239,11 @@ impl Model {
             entry_tree: None,
             context_budget: None,
             pending_context_budget_cancellation: false,
+            pending_prompt_assembly_commit: false,
             copy_picker: None,
             message_history_picker: None,
+            prompt_assembly,
+            prompt_overlay: None,
             next_session_load_request_id: 1,
             message_revisit: MessageRevisitState::default(),
             runtime_terminal_snapshots: Vec::new(),
@@ -219,8 +263,12 @@ impl Model {
             command_panel_selected: 0,
             command_panel_scroll: 0,
             file_picker: None,
+            skill_picker: None,
+            custom_prompt_picker: None,
             file_search_cache: FileSearchCache::default(),
             dismissed_file_picker_token: None,
+            dismissed_skill_picker_token: None,
+            dismissed_custom_prompt_picker_token: None,
             copy_on_mouse_selection_release: options.copy_on_mouse_selection_release,
             swap_enter_and_send: options.swap_enter_and_send,
             ctrl_c_clears_input: options.ctrl_c_clears_input,
@@ -262,6 +310,7 @@ impl Model {
             has_dark_background: true,
             notice_state: NoticeState::default(),
             toast_state: ToastState::default(),
+            pending_prompt_assembly_notice: None,
             status_line_revision: 1,
             quitting: false,
         }
@@ -375,13 +424,14 @@ impl Model {
         self.sync_copy_picker_preview_width(width);
         self.sync_entry_tree_preview_width(width);
         self.sync_message_history_picker_preview_width(width);
+        self.sync_prompt_overlay_preview_width(width);
         self.composer.set_width(width);
         if width_changed {
             self.sync_transcript_render();
         }
         self.sync_tool_approval_preview_mode();
         self.sync_command_panel_navigation();
-        self.sync_file_picker_state();
+        self.sync_composer_attached_picker_state();
         self.sync_composer_height();
     }
 
@@ -450,7 +500,11 @@ impl Model {
         self.command_panel_selected = 0;
         self.command_panel_scroll = 0;
         self.file_picker = None;
+        self.skill_picker = None;
+        self.custom_prompt_picker = None;
         self.dismissed_file_picker_token = None;
+        self.dismissed_skill_picker_token = None;
+        self.dismissed_custom_prompt_picker_token = None;
         self.selection_runtime = SelectionRuntimeState::default();
         self.pending_composer_cursor_click = PendingComposerCursorClick::default();
         self.pending_reasoning_toggle_click = PendingReasoningToggleClick::default();

@@ -4,7 +4,7 @@ use crate::context_budget::ContextTokenLimit;
 use crate::model_catalog::{ModelCatalog, ModelSelection};
 use crate::model_family::classify_model_family;
 
-const DEFAULT_CONTEXT_LIMIT_TOKENS: u32 = 256_000;
+const DEFAULT_CONTEXT_LIMIT_TOKENS: usize = 256_000;
 const DEFAULT_CONTEXT_LIMIT: ContextTokenLimit =
     match ContextTokenLimit::new(DEFAULT_CONTEXT_LIMIT_TOKENS) {
         Some(limit) => limit,
@@ -81,7 +81,7 @@ mod tests {
     use crate::model_catalog::{ModelCatalog, ModelEntry, ModelProvider, ModelSource};
     use crate::provider::ProviderKind;
 
-    fn limit(value: u32) -> ContextTokenLimit {
+    fn limit(value: usize) -> ContextTokenLimit {
         ContextTokenLimit::try_from(value).expect("fixture limit should be valid")
     }
 

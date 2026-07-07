@@ -15,7 +15,8 @@ pub(crate) use provider_conversation::{
     PersistedConversationItem, PreparedConversationPersistence,
 };
 pub use provider_conversation::{
-    PreparedConversationRequest, ProviderConversation, ProviderConversationError,
+    PreparedConversationRequest, PreparedTurnOptions, ProviderConversation,
+    ProviderConversationError,
 };
 pub use response::ConversationResponse;
 pub(crate) use response::{ConversationCompletion, ConversationProgress};

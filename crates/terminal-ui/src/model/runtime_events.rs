@@ -290,6 +290,10 @@ impl Model {
     }
 
     pub(crate) fn append_system_message_from_runtime(&mut self, content: impl Into<String>) {
+        self.append_local_system_message(content);
+    }
+
+    pub(crate) fn append_local_system_message(&mut self, content: impl Into<String>) {
         let content = content.into();
         if content.is_empty() {
             return;
@@ -301,6 +305,26 @@ impl Model {
         self.sync_transcript_render();
         self.document_runtime.follow_bottom = true;
         self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+    }
+
+    pub(crate) fn present_pending_prompt_assembly_notice_if_ready(&mut self) {
+        if self.prompt_overlay_active() {
+            return;
+        }
+        let Some(notice) = self.pending_prompt_assembly_notice.take() else {
+            return;
+        };
+        match notice {
+            runtime_domain::session::PromptAssemblyUpdateNotice::CurrentEmptySessionUpdated => {
+                self.append_local_system_message("Prompt updated for current empty session.");
+            }
+            runtime_domain::session::PromptAssemblyUpdateNotice::NextNewSessionUpdated => {
+                self.show_toast(
+                    crate::toast::ToastSeverity::Info,
+                    "Prompt updated. Applies to next new session.",
+                );
+            }
+        }
     }
 
     pub(crate) fn append_work_duration_from_runtime(&mut self, duration: Duration) {

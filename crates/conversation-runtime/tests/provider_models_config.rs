@@ -18,7 +18,7 @@ default = "local/qwen3"
 enabled = true
 kind = "openai_compatible"
 display_name = "LM Studio"
-base_url = "http://192.168.1.71:1234/v1"
+base_url = "http://127.0.0.1:1234/v1"
 "#,
     )
     .expect("models config should be written");
@@ -89,6 +89,13 @@ display_name = "OpenAI"
 api_key_env = "OPENAI_API_KEY"
 models = ["gpt-4.1"]
 
+[providers.responses]
+enabled = true
+kind = "openai_responses"
+display_name = "Responses"
+base_url = "https://responses.example.com/v1"
+models = ["fast-responses-model"]
+
 [providers.anthropic]
 enabled = true
 kind = "anthropic"
@@ -123,6 +130,7 @@ models = ["gemini-2.5-pro"]
             ("anthropic", ProviderKind::Anthropic),
             ("gemini", ProviderKind::Gemini),
             ("openai", ProviderKind::OpenAi),
+            ("responses", ProviderKind::OpenAiResponses),
         ]
     );
 }
@@ -139,7 +147,7 @@ default = "local/qwen3"
 enabled = true
 kind = "openai_compatible"
 display_name = "LM Studio"
-base_url = "http://192.168.1.71:1234/v1"
+base_url = "http://127.0.0.1:1234/v1"
 "#,
     )
     .expect("models config should be written");
@@ -274,6 +282,42 @@ models = ["qwen3"]
     let selection = ModelSelection::new("local", "qwen3");
 
     assert_eq!(loaded.context_limit_for(&selection).get(), 128_000);
+}
+
+#[test]
+fn models_config_preserves_context_window_above_u32() {
+    if usize::BITS <= u32::BITS {
+        return;
+    }
+
+    let working_dir = temp_test_dir("large-context-window");
+    let large_context_window = u64::from(u32::MAX) + 1;
+    fs::write(
+        working_dir.join("models.toml"),
+        format!(
+            r#"
+default = "local/large-context"
+
+[defaults]
+context_window = {large_context_window}
+
+[providers.local]
+enabled = true
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:1234/v1"
+models = ["large-context"]
+"#
+        ),
+    )
+    .expect("models config should be written");
+
+    let loaded = load_from_paths(Some(&working_dir), None).expect("models config should load");
+    let selection = ModelSelection::new("local", "large-context");
+
+    assert_eq!(
+        loaded.context_limit_for(&selection).get(),
+        usize::try_from(large_context_window).expect("fixture limit should fit in usize")
+    );
 }
 
 #[test]

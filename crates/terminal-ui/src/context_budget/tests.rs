@@ -12,7 +12,7 @@ fn ready_model() -> Model {
     Model::new_with_options(StartupBannerOptions::default(), ModelOptions::default())
 }
 
-fn limit(value: u32) -> ContextTokenLimit {
+fn limit(value: usize) -> ContextTokenLimit {
     ContextTokenLimit::try_from(value).expect("fixture limit should be valid")
 }
 
@@ -37,7 +37,7 @@ fn context_overlay_header_shows_documented_absolute_limit() {
             used: 1_200,
         },
     );
-    assert_eq!(text, "local/qwen3 · 1.2k/256k tokens (0.5%)");
+    assert_eq!(text, "local/qwen3 · ~1.2k/256k tokens (0.5%)");
 }
 
 #[test]

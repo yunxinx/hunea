@@ -15,7 +15,7 @@ pub(crate) enum ModelFamily {
 }
 
 impl ModelFamily {
-    pub(crate) fn built_in_context_limit(self) -> Option<u32> {
+    pub(crate) fn built_in_context_limit(self) -> Option<usize> {
         match self {
             Self::OpenAiGpt4oMini | Self::OpenAiGpt4o => Some(128_000),
             Self::ClaudeSonnet4 | Self::ClaudeOpus4 => Some(200_000),

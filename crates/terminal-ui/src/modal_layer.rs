@@ -5,6 +5,7 @@ use crate::{Model, runner::TerminalMouseModePreference};
 pub(crate) enum ModalLayer {
     ToolApprovalFullscreenPreview,
     TranscriptOverlay,
+    PromptOverlay,
     SessionPreview,
     SessionPicker,
     CopyPicker,
@@ -18,6 +19,7 @@ impl ModalLayer {
         matches!(
             self,
             Self::SessionPreview
+                | Self::PromptOverlay
                 | Self::SessionPicker
                 | Self::CopyPicker
                 | Self::EntryTree
@@ -39,6 +41,9 @@ impl Model {
         }
         if self.transcript_overlay_active() {
             return Some(ModalLayer::TranscriptOverlay);
+        }
+        if self.prompt_overlay_active() {
+            return Some(ModalLayer::PromptOverlay);
         }
         if self.session_preview_active() {
             return Some(ModalLayer::SessionPreview);
@@ -91,7 +96,13 @@ impl Model {
             ModalLayer::MessageHistory if self.message_history_picker_preview_active() => {
                 Some(TerminalMouseModePreference::NativeWithAlternateScroll)
             }
-            ModalLayer::EntryTree | ModalLayer::CopyPicker | ModalLayer::MessageHistory => {
+            ModalLayer::PromptOverlay if self.prompt_overlay_preview_active() => {
+                Some(TerminalMouseModePreference::NativeWithAlternateScroll)
+            }
+            ModalLayer::EntryTree
+            | ModalLayer::CopyPicker
+            | ModalLayer::MessageHistory
+            | ModalLayer::PromptOverlay => {
                 Some(TerminalMouseModePreference::CaptureWithAlternateScroll)
             }
             ModalLayer::ToolApprovalFullscreenPreview
@@ -105,6 +116,7 @@ impl Model {
 
     pub(crate) fn close_fullscreen_modal_layers(&mut self) {
         self.close_transcript_overlay();
+        self.close_prompt_overlay();
         self.session_preview = None;
         self.session_picker = None;
         self.copy_picker = None;
@@ -298,6 +310,14 @@ mod tests {
         );
         assert!(model.modal_has_page_scroll_burst_coalescing());
 
+        model.open_prompt_overlay();
+        assert_eq!(model.top_modal_layer(), Some(ModalLayer::PromptOverlay));
+        assert_eq!(
+            model.modal_mouse_mode_preference(),
+            Some(TerminalMouseModePreference::CaptureWithAlternateScroll)
+        );
+        assert!(model.modal_has_page_scroll_burst_coalescing());
+
         model.open_transcript_overlay();
         assert_eq!(model.top_modal_layer(), Some(ModalLayer::TranscriptOverlay));
         assert_eq!(
@@ -328,6 +348,19 @@ mod tests {
             Some(TerminalMouseModePreference::CaptureWithAlternateScroll)
         );
         assert!(model.modal_has_page_scroll_burst_coalescing());
+    }
+
+    #[test]
+    fn prompt_overlay_preview_uses_native_with_alternate_scroll() {
+        let mut model = Model::new(StartupBannerOptions::default());
+        model.open_prompt_overlay();
+        model.open_prompt_overlay_plain_text_preview("Preview".to_string(), "body", None);
+
+        assert_eq!(model.top_modal_layer(), Some(ModalLayer::PromptOverlay));
+        assert_eq!(
+            model.modal_mouse_mode_preference(),
+            Some(TerminalMouseModePreference::NativeWithAlternateScroll)
+        );
     }
 
     fn open_fullscreen_tool_approval(model: &mut Model) {

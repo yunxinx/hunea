@@ -1,4 +1,5 @@
 mod grapheme;
+mod image_placeholder;
 mod layout;
 mod message;
 mod mouse;
@@ -10,6 +11,9 @@ mod viewport;
 mod tests;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use runtime_domain::session::{
+    TranscriptCustomPromptBinding, TranscriptSkillBinding, TranscriptUserAttachment,
+};
 
 use self::{
     grapheme::{
@@ -17,6 +21,7 @@ use self::{
         grapheme_target_left, grapheme_target_right, logical_column_for_visual_offset,
         measure_width,
     },
+    image_placeholder::ComposerImageAttachment,
     layout::{visual_line_count, visual_lines_for_text},
     render::{DocumentRenderResult, render_document},
     viewport::{calculate_cursor_visual_position, sync_viewport_offset_for_cursor},
@@ -24,7 +29,7 @@ use self::{
 use super::{style_mode::StyleMode, theme::TerminalPalette};
 use crate::terminal_text::sanitize_terminal_text;
 
-pub(crate) use self::message::{ComposerSourceMessage, source_message_from_composer_text};
+pub(crate) use self::message::ComposerSourceMessage;
 pub(crate) use self::mouse::{
     cursor_position_for_line_anchor_click, move_cursor_to_logical_position,
     selection_end_char_for_line_anchor, selection_start_char_for_line_anchor,
@@ -49,6 +54,9 @@ const WORD_SEPARATORS: &str = "`~!@#$%^&*()-=+[{]}\\|;:'\",.<>/?";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Composer {
     value: String,
+    skill_bindings: Vec<TranscriptSkillBinding>,
+    custom_prompt_bindings: Vec<TranscriptCustomPromptBinding>,
+    image_attachments: Vec<ComposerImageAttachment>,
     cursor: usize,
     width: u16,
     height: u16,
@@ -65,6 +73,9 @@ pub struct Composer {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ComposerSnapshot {
     value: String,
+    skill_bindings: Vec<TranscriptSkillBinding>,
+    custom_prompt_bindings: Vec<TranscriptCustomPromptBinding>,
+    image_attachments: Vec<ComposerImageAttachment>,
     cursor: usize,
 }
 
@@ -90,6 +101,9 @@ impl Composer {
     pub fn new_with_undo_limit(style_mode: StyleMode, undo_limit: usize) -> Self {
         Self {
             value: String::new(),
+            skill_bindings: Vec::new(),
+            custom_prompt_bindings: Vec::new(),
+            image_attachments: Vec::new(),
             cursor: 0,
             width: 1,
             height: 1,
@@ -136,12 +150,14 @@ impl Composer {
     pub fn clear(&mut self) {
         self.has_active_grapheme_undo_group = false;
         if self.value.is_empty() {
+            self.clear_structured_bindings();
             self.set_cursor(0);
             self.viewport_y = 0;
             return;
         }
 
         self.value.clear();
+        self.clear_structured_bindings();
         self.set_cursor(0);
         self.viewport_y = 0;
         self.undo_history.clear();
@@ -152,6 +168,7 @@ impl Composer {
     pub(crate) fn clear_for_edit(&mut self) {
         if self.value.is_empty() {
             self.finish_grapheme_undo_group();
+            self.clear_structured_bindings();
             self.set_cursor(0);
             self.viewport_y = 0;
             return;
@@ -160,6 +177,7 @@ impl Composer {
         self.finish_grapheme_undo_group();
         self.push_undo_snapshot();
         self.value.clear();
+        self.clear_structured_bindings();
         self.set_cursor(0);
         self.viewport_y = 0;
         self.bump_content_revision();
@@ -181,6 +199,35 @@ impl Composer {
         self.replace_text_and_move_to_end_with_undo_mode(value, ComposerReplaceUndoMode::Reset);
     }
 
+    /// `reset_source_message_and_move_to_end` 用完整源消息恢复草稿。
+    pub(crate) fn reset_source_message_and_move_to_end(&mut self, message: ComposerSourceMessage) {
+        let message = message.into_transcript_user_message();
+        let value = sanitized_owned_text(message.content);
+        let image_attachments = message
+            .attachments
+            .into_iter()
+            .enumerate()
+            .map(|(index, attachment)| ComposerImageAttachment::new(index + 1, attachment))
+            .collect::<Vec<_>>();
+        let changed = self.value != value
+            || self.skill_bindings != message.skill_bindings
+            || self.custom_prompt_bindings != message.custom_prompt_bindings
+            || self.image_attachments != image_attachments;
+
+        self.undo_history.clear();
+        self.has_active_grapheme_undo_group = false;
+        self.value = value;
+        self.skill_bindings = message.skill_bindings;
+        self.custom_prompt_bindings = message.custom_prompt_bindings;
+        self.image_attachments = image_attachments;
+        self.reconcile_structured_bindings();
+        if changed {
+            self.bump_content_revision();
+        }
+        self.set_cursor(total_chars(&self.value));
+        self.sync_viewport_to_cursor();
+    }
+
     fn replace_text_and_move_to_end_with_undo_mode(
         &mut self,
         value: impl Into<String>,
@@ -196,12 +243,16 @@ impl Composer {
             ComposerReplaceUndoMode::Reset => {
                 self.undo_history.clear();
                 self.has_active_grapheme_undo_group = false;
+                self.clear_structured_bindings();
             }
             ComposerReplaceUndoMode::Record => {}
         }
 
         if changed {
             self.value = value;
+            if matches!(undo_mode, ComposerReplaceUndoMode::Record) {
+                self.reconcile_structured_bindings();
+            }
             self.bump_content_revision();
         }
         self.set_cursor(total_chars(&self.value));
@@ -228,6 +279,7 @@ impl Composer {
         self.push_undo_snapshot();
         let byte_index = char_to_byte_index(&self.value, self.cursor);
         self.value.insert_str(byte_index, text);
+        self.reconcile_structured_bindings();
         self.set_cursor(self.cursor + total_chars(text));
         self.bump_content_revision();
         self.sync_viewport_to_cursor();
@@ -258,6 +310,7 @@ impl Composer {
         let byte_start = char_to_byte_index(&self.value, start);
         let byte_end = char_to_byte_index(&self.value, end);
         self.value.replace_range(byte_start..byte_end, replacement);
+        self.reconcile_structured_bindings();
         self.set_cursor(start + total_chars(replacement));
         self.bump_content_revision();
         self.sync_viewport_to_cursor();
@@ -306,20 +359,34 @@ impl Composer {
         self.finish_grapheme_undo_group();
     }
 
-    /// `current_at_token` 返回当前光标所在的 `@` 文件 token，不含前导 `@`。
-    pub(crate) fn current_at_token(&self) -> Option<String> {
-        self.current_prefixed_token('@').map(|token| token.query)
+    /// `source_message` 返回当前草稿对应的 transcript-visible 用户消息。
+    pub(crate) fn source_message(&self) -> ComposerSourceMessage {
+        ComposerSourceMessage::user_text_with_bindings_and_attachments(
+            self.value.clone(),
+            self.skill_bindings.clone(),
+            self.custom_prompt_bindings.clone(),
+            self.source_image_attachments(),
+        )
     }
 
-    /// `current_at_token_start_char` 返回当前 `@` token 起点的字符偏移。
-    pub(crate) fn current_at_token_start_char(&self) -> Option<usize> {
-        self.current_prefixed_token('@')
+    /// `current_prefixed_token_value` 返回当前前缀 token，不含 sigil。
+    pub(crate) fn current_prefixed_token_value(&self, prefix: char) -> Option<String> {
+        self.current_prefixed_token(prefix).map(|token| token.query)
+    }
+
+    /// `current_prefixed_token_start_char` 返回当前前缀 token 的起点字符偏移。
+    pub(crate) fn current_prefixed_token_start_char(&self, prefix: char) -> Option<usize> {
+        self.current_prefixed_token(prefix)
             .map(|token| token.start_char)
     }
 
-    /// `replace_current_at_token` 替换当前 `@` token，并把光标移动到替换文本末尾。
-    pub(crate) fn replace_current_at_token(&mut self, replacement: &str) -> bool {
-        let Some(token) = self.current_prefixed_token('@') else {
+    /// `replace_current_prefixed_token` 替换当前前缀 token，并把光标移动到替换文本末尾。
+    pub(crate) fn replace_current_prefixed_token(
+        &mut self,
+        prefix: char,
+        replacement: &str,
+    ) -> bool {
+        let Some(token) = self.current_prefixed_token(prefix) else {
             return false;
         };
 
@@ -335,10 +402,146 @@ impl Composer {
         self.finish_grapheme_undo_group();
         self.push_undo_snapshot();
         self.value.replace_range(byte_start..byte_end, replacement);
+        self.reconcile_structured_bindings();
         self.set_cursor(token.start_char + total_chars(replacement));
         self.bump_content_revision();
         self.sync_viewport_to_cursor();
         true
+    }
+
+    /// `current_at_token` 返回当前光标所在的 `@` 文件 token，不含前导 `@`。
+    pub(crate) fn current_at_token(&self) -> Option<String> {
+        self.current_prefixed_token_value('@')
+    }
+
+    /// `current_at_token_start_char` 返回当前 `@` token 起点的字符偏移。
+    pub(crate) fn current_at_token_start_char(&self) -> Option<usize> {
+        self.current_prefixed_token_start_char('@')
+    }
+
+    /// `replace_current_at_token` 替换当前 `@` token，并把光标移动到替换文本末尾。
+    pub(crate) fn replace_current_at_token(&mut self, replacement: &str) -> bool {
+        self.replace_current_prefixed_token('@', replacement)
+    }
+
+    /// `replace_current_at_token_with_image_attachment` 把当前 `@` token 替换成图片占位符。
+    pub(crate) fn replace_current_at_token_with_image_attachment(
+        &mut self,
+        attachment: TranscriptUserAttachment,
+    ) -> bool {
+        let placeholder =
+            runtime_domain::session::transcript_image_label_text(self.image_attachments.len() + 1);
+        let replacement = format!("{placeholder} ");
+        if !self.replace_current_prefixed_token('@', &replacement) {
+            return false;
+        }
+
+        self.image_attachments.push(ComposerImageAttachment::new(
+            self.image_attachments.len() + 1,
+            attachment,
+        ));
+        true
+    }
+
+    /// `current_skill_token` 返回当前光标所在的 `$skill` token，不含前导 `$`。
+    pub(crate) fn current_skill_token(&self) -> Option<String> {
+        self.current_prefixed_token_value('$')
+    }
+
+    /// `current_skill_token_start_char` 返回当前 `$skill` token 起点的字符偏移。
+    pub(crate) fn current_skill_token_start_char(&self) -> Option<usize> {
+        self.current_prefixed_token_start_char('$')
+    }
+
+    /// `current_custom_prompt_token` 返回当前光标所在的 `#prompt` token，不含前导 `#`。
+    pub(crate) fn current_custom_prompt_token(&self) -> Option<String> {
+        self.current_prefixed_token_value('#')
+    }
+
+    /// `current_custom_prompt_token_start_char` 返回当前 `#prompt` token 起点的字符偏移。
+    pub(crate) fn current_custom_prompt_token_start_char(&self) -> Option<usize> {
+        self.current_prefixed_token_start_char('#')
+    }
+
+    /// `replace_current_skill_token` 替换当前 `$` token，建立绑定，并把光标移动到替换文本末尾。
+    pub(crate) fn replace_current_skill_token(
+        &mut self,
+        skill_name: &str,
+        skill_path: &std::path::Path,
+        origin: runtime_domain::prompt_assembly::PromptSourceOrigin,
+    ) -> bool {
+        let Some(token) = self.current_prefixed_token('$') else {
+            return false;
+        };
+        let visible_token = format!("${skill_name}");
+        let replacement = format!("{visible_token} ");
+        if !self.replace_current_prefixed_token('$', &replacement) {
+            return false;
+        }
+
+        self.skill_bindings.retain(|binding| {
+            !(binding.start_char >= token.start_char && binding.end_char <= token.end_char)
+        });
+        self.skill_bindings.push(TranscriptSkillBinding {
+            skill_name: skill_name.to_string(),
+            origin,
+            skill_path: skill_path.display().to_string(),
+            start_char: token.start_char,
+            end_char: token.start_char + total_chars(&visible_token),
+        });
+        self.skill_bindings
+            .sort_by_key(|binding| binding.start_char);
+        true
+    }
+
+    /// `replace_current_custom_prompt_token` 替换当前 `#` token，建立绑定，并把光标移动到替换文本末尾。
+    pub(crate) fn replace_current_custom_prompt_token(
+        &mut self,
+        reference_id: &str,
+        origin: runtime_domain::prompt_assembly::PromptSourceOrigin,
+    ) -> bool {
+        let Some(token) = self.current_prefixed_token('#') else {
+            return false;
+        };
+        let visible_token = format!("#{reference_id}");
+        let replacement = format!("{visible_token} ");
+        if !self.replace_current_prefixed_token('#', &replacement) {
+            return false;
+        }
+
+        self.custom_prompt_bindings.retain(|binding| {
+            !(binding.start_char >= token.start_char && binding.end_char <= token.end_char)
+        });
+        self.custom_prompt_bindings
+            .push(TranscriptCustomPromptBinding {
+                reference_id: reference_id.to_string(),
+                origin,
+                start_char: token.start_char,
+                end_char: token.start_char + total_chars(&visible_token),
+            });
+        self.custom_prompt_bindings
+            .sort_by_key(|binding| binding.start_char);
+        true
+    }
+
+    pub(crate) fn current_skill_binding(&self) -> Option<TranscriptSkillBinding> {
+        let token = self.current_prefixed_token('$')?;
+        self.skill_bindings
+            .iter()
+            .find(|binding| {
+                binding.start_char == token.start_char && binding.end_char == token.end_char
+            })
+            .cloned()
+    }
+
+    pub(crate) fn current_custom_prompt_binding(&self) -> Option<TranscriptCustomPromptBinding> {
+        let token = self.current_prefixed_token('#')?;
+        self.custom_prompt_bindings
+            .iter()
+            .find(|binding| {
+                binding.start_char == token.start_char && binding.end_char == token.end_char
+            })
+            .cloned()
     }
 
     /// `handle_key` 处理输入编辑、导航与分页相关按键。
@@ -432,6 +635,10 @@ impl Composer {
 
     pub(crate) fn content_revision(&self) -> usize {
         self.content_revision
+    }
+
+    pub(crate) fn has_image_attachments(&self) -> bool {
+        !self.image_attachments.is_empty()
     }
 
     pub(crate) fn cursor_revision(&self) -> usize {
@@ -547,6 +754,7 @@ impl Composer {
         self.has_active_grapheme_undo_group = false;
         if self.value != value {
             self.value = value;
+            self.clear_structured_bindings();
             self.bump_content_revision();
         }
         self.set_cursor(total_chars(&self.value));
@@ -609,6 +817,7 @@ impl Composer {
     fn insert_char_without_undo(&mut self, character: char) {
         let byte_index = char_to_byte_index(&self.value, self.cursor);
         self.value.insert(byte_index, character);
+        self.reconcile_structured_bindings();
         self.set_cursor(self.cursor + 1);
         self.bump_content_revision();
     }
@@ -949,6 +1158,7 @@ impl Composer {
             query,
             start_char: start,
             end_char: end,
+            visible_text: chars[start..end].iter().collect(),
         })
     }
 
@@ -984,6 +1194,7 @@ impl Composer {
         let byte_start = char_to_byte_index(&self.value, start);
         let byte_end = char_to_byte_index(&self.value, end);
         self.value.drain(byte_start..byte_end);
+        self.reconcile_structured_bindings();
         self.set_cursor(start.min(total_chars(&self.value)));
         self.bump_content_revision();
     }
@@ -991,6 +1202,9 @@ impl Composer {
     fn push_undo_snapshot(&mut self) {
         let snapshot = ComposerSnapshot {
             value: self.value.clone(),
+            skill_bindings: self.skill_bindings.clone(),
+            custom_prompt_bindings: self.custom_prompt_bindings.clone(),
+            image_attachments: self.image_attachments.clone(),
             cursor: self.cursor,
         };
         if self.undo_history.last() == Some(&snapshot) {
@@ -1015,7 +1229,14 @@ impl Composer {
 
         if self.value != snapshot.value {
             self.value = snapshot.value;
+            self.skill_bindings = snapshot.skill_bindings;
+            self.custom_prompt_bindings = snapshot.custom_prompt_bindings;
+            self.image_attachments = snapshot.image_attachments;
             self.bump_content_revision();
+        } else {
+            self.skill_bindings = snapshot.skill_bindings;
+            self.custom_prompt_bindings = snapshot.custom_prompt_bindings;
+            self.image_attachments = snapshot.image_attachments;
         }
         self.set_cursor(snapshot.cursor.min(total_chars(&self.value)));
         self.sync_viewport_to_cursor();
@@ -1075,6 +1296,80 @@ impl Composer {
         self.cursor = cursor;
         self.cursor_revision = self.cursor_revision.saturating_add(1);
     }
+
+    fn clear_structured_bindings(&mut self) {
+        self.skill_bindings.clear();
+        self.custom_prompt_bindings.clear();
+        self.image_attachments.clear();
+    }
+
+    fn reconcile_structured_bindings(&mut self) {
+        self.reconcile_skill_bindings();
+        self.reconcile_custom_prompt_bindings();
+        self.reconcile_image_attachments();
+    }
+
+    pub(crate) fn reconcile_skill_bindings(&mut self) {
+        let tokens = prefixed_tokens_in_text(&self.value, '$');
+        self.skill_bindings = reconcile_bound_prefixed_tokens(
+            &self.skill_bindings,
+            &tokens,
+            |binding| (binding.start_char, binding.end_char),
+            TranscriptSkillBinding::visible_token_text,
+            |binding, token| {
+                binding.start_char = token.start_char;
+                binding.end_char = token.end_char;
+            },
+        );
+    }
+
+    fn reconcile_custom_prompt_bindings(&mut self) {
+        let tokens = prefixed_tokens_in_text(&self.value, '#');
+        self.custom_prompt_bindings = reconcile_bound_prefixed_tokens(
+            &self.custom_prompt_bindings,
+            &tokens,
+            |binding| (binding.start_char, binding.end_char),
+            TranscriptCustomPromptBinding::visible_token_text,
+            |binding, token| {
+                binding.start_char = token.start_char;
+                binding.end_char = token.end_char;
+            },
+        );
+    }
+
+    fn reconcile_image_attachments(&mut self) {
+        if self.image_attachments.is_empty() {
+            return;
+        }
+
+        let ranges = image_attachment_ranges_in_text(&self.value, &self.image_attachments);
+        self.image_attachments = ranges
+            .into_iter()
+            .map(|range| self.image_attachments[range.attachment_index].clone())
+            .collect();
+    }
+
+    fn source_image_attachments(&self) -> Vec<TranscriptUserAttachment> {
+        let mut ranges = image_attachment_ranges_in_text(&self.value, &self.image_attachments);
+        ranges.sort_unstable_by_key(|range| range.start_char);
+        ranges
+            .into_iter()
+            .map(|range| {
+                self.image_attachments[range.attachment_index]
+                    .attachment()
+                    .clone()
+            })
+            .collect()
+    }
+
+    pub(crate) fn image_attachment_highlight_ranges(&self) -> Vec<(usize, usize)> {
+        let mut ranges = image_attachment_ranges_in_text(&self.value, &self.image_attachments)
+            .into_iter()
+            .map(|range| (range.start_char, range.end_char))
+            .collect::<Vec<_>>();
+        ranges.sort_unstable_by_key(|(start, _)| *start);
+        ranges
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1082,6 +1377,7 @@ struct PrefixedToken {
     query: String,
     start_char: usize,
     end_char: usize,
+    visible_text: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1251,6 +1547,124 @@ fn visual_width_for_anchor_prefix(
 
 fn total_chars(value: &str) -> usize {
     value.chars().count()
+}
+
+fn prefixed_tokens_in_text(value: &str, prefix: char) -> Vec<PrefixedToken> {
+    let chars = value.chars().collect::<Vec<_>>();
+    let mut tokens = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        while index < chars.len() && chars[index].is_whitespace() {
+            index += 1;
+        }
+        if index >= chars.len() {
+            break;
+        }
+        let start = index;
+        while index < chars.len() && !chars[index].is_whitespace() {
+            index += 1;
+        }
+        let end = index;
+        if chars.get(start).copied() != Some(prefix) {
+            continue;
+        }
+        let visible_text = chars[start..end].iter().collect::<String>();
+        tokens.push(PrefixedToken {
+            query: chars[start + 1..end].iter().collect(),
+            start_char: start,
+            end_char: end,
+            visible_text,
+        });
+    }
+    tokens
+}
+
+fn reconcile_bound_prefixed_tokens<T: Clone>(
+    bindings: &[T],
+    tokens: &[PrefixedToken],
+    current_range: impl Fn(&T) -> (usize, usize),
+    expected_visible_text: impl Fn(&T) -> String,
+    mut update_range: impl FnMut(&mut T, &PrefixedToken),
+) -> Vec<T> {
+    if tokens.is_empty() {
+        return Vec::new();
+    }
+
+    let mut matched = vec![false; tokens.len()];
+    let mut next_bindings = Vec::new();
+    for binding in bindings {
+        let expected = expected_visible_text(binding);
+        let (start_char, end_char) = current_range(binding);
+        let preferred = tokens
+            .iter()
+            .enumerate()
+            .find(|(index, token)| {
+                !matched[*index]
+                    && token.start_char == start_char
+                    && token.end_char == end_char
+                    && token.visible_text == expected
+            })
+            .map(|(index, token)| (index, token.clone()))
+            .or_else(|| {
+                tokens
+                    .iter()
+                    .enumerate()
+                    .find(|(index, token)| !matched[*index] && token.visible_text == expected)
+                    .map(|(index, token)| (index, token.clone()))
+            });
+        let Some((index, token)) = preferred else {
+            continue;
+        };
+        matched[index] = true;
+        let mut binding = binding.clone();
+        update_range(&mut binding, &token);
+        next_bindings.push(binding);
+    }
+    next_bindings
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ImageAttachmentRange {
+    attachment_index: usize,
+    start_char: usize,
+    end_char: usize,
+}
+
+fn image_attachment_ranges_in_text(
+    value: &str,
+    attachments: &[ComposerImageAttachment],
+) -> Vec<ImageAttachmentRange> {
+    let mut used_byte_starts = Vec::<usize>::new();
+    let mut ranges = Vec::new();
+    for (attachment_index, attachment) in attachments.iter().enumerate() {
+        let Some((byte_start, placeholder)) =
+            first_unused_placeholder_match(value, attachment.placeholder(), &used_byte_starts)
+        else {
+            continue;
+        };
+        used_byte_starts.push(byte_start);
+        let start_char = byte_to_char_index(value, byte_start);
+        ranges.push(ImageAttachmentRange {
+            attachment_index,
+            start_char,
+            end_char: start_char + placeholder.chars().count(),
+        });
+    }
+    ranges
+}
+
+fn first_unused_placeholder_match<'a>(
+    value: &'a str,
+    placeholder: &'a str,
+    used_byte_starts: &[usize],
+) -> Option<(usize, &'a str)> {
+    value
+        .match_indices(placeholder)
+        .find(|(byte_start, _)| !used_byte_starts.contains(byte_start))
+}
+
+fn byte_to_char_index(value: &str, byte_index: usize) -> usize {
+    value[..byte_index.min(value.len())].chars().count()
 }
 
 fn prompt_width() -> u16 {

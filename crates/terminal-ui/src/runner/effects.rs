@@ -38,6 +38,7 @@ pub(super) fn apply_effect_if_needed(
     effect: Option<AppEffect>,
 ) -> Result<()> {
     dispatch_context_budget_cancellation_if_needed(model, runtime_coordinator);
+    dispatch_prompt_assembly_commit_if_needed(model, runtime_coordinator);
 
     let Some(effect) = effect else {
         return Ok(());
@@ -45,7 +46,8 @@ pub(super) fn apply_effect_if_needed(
 
     match effect {
         AppEffect::LaunchExternalEditor(launch) => {
-            run_external_editor_effect(terminal, model, launch)
+            let follow_up = run_external_editor_effect(terminal, model, launch)?;
+            apply_effect_if_needed(terminal, model, runtime_coordinator, external_io, follow_up)
         }
         AppEffect::CopySelection(text) => run_copy_selection_effect(model, external_io, text),
         AppEffect::ResetRuntimeSession => {
@@ -85,6 +87,30 @@ pub(super) fn apply_effect_if_needed(
         }
         AppEffect::OpenMessageHistory => {
             run_open_message_history_picker_effect(model, runtime_coordinator);
+            Ok(())
+        }
+        AppEffect::BeginPromptAssemblyEdit => {
+            match runtime_coordinator.begin_prompt_assembly_edit() {
+                Ok(snapshot) => {
+                    model.prompt_assembly = snapshot;
+                    model.sync_prompt_overlay_state();
+                }
+                Err(message) => {
+                    model.show_toast(ToastSeverity::Error, message);
+                    // begin 失败：从未成功进入 edit session，关 overlay 但不触发 commit。
+                    model.dismiss_prompt_overlay();
+                }
+            }
+            Ok(())
+        }
+        AppEffect::ApplyPromptAssemblyEditMutation { mutation } => {
+            match runtime_coordinator.apply_prompt_assembly_edit_mutation(mutation) {
+                Ok(snapshot) => {
+                    model.prompt_assembly = snapshot;
+                    model.sync_prompt_overlay_state();
+                }
+                Err(message) => model.show_toast(ToastSeverity::Error, message),
+            }
             Ok(())
         }
         AppEffect::OpenSessionPreview { session_id } => {
@@ -184,6 +210,19 @@ fn dispatch_context_budget_cancellation_if_needed(
     if let Err(message) =
         runtime_coordinator.dispatch_runtime_command(RuntimeCommand::CancelContextBudgetSnapshot)
     {
+        model.show_toast(ToastSeverity::Error, message);
+    }
+}
+
+fn dispatch_prompt_assembly_commit_if_needed(
+    model: &mut Model,
+    runtime_coordinator: &mut impl RuntimeCoordinator,
+) {
+    if !model.take_prompt_assembly_commit_request() {
+        return;
+    }
+
+    if let Err(message) = runtime_coordinator.commit_prompt_assembly_edit() {
         model.show_toast(ToastSeverity::Error, message);
     }
 }

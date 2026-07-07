@@ -3,9 +3,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{
-        Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget, Widget,
-    },
+    widgets::{Clear, Paragraph, Widget},
 };
 use runtime_domain::session::{
     SessionBranchTreeNode, SessionBranchTreePayload, SessionLoadRequestId, SessionTreeBranchChoice,

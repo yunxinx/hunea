@@ -268,7 +268,10 @@ fn switch_branch_is_blocked_while_provider_turn_is_running() {
     );
     let target = request.target();
     coordinator
-        .handle_runtime_command(RuntimeCommand::SubmitConversationTurn { target, request })
+        .handle_runtime_command(RuntimeCommand::SubmitConversationTurn {
+            target,
+            request: Box::new(request),
+        })
         .expect("conversation should start");
 
     let error = coordinator

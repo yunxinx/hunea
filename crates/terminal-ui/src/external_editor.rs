@@ -20,6 +20,14 @@ pub struct ExternalEditorLaunch {
 
 impl Model {
     pub(crate) fn prepare_external_editor_launch(&mut self) -> Option<ExternalEditorLaunch> {
+        let original_draft = self.composer_text().to_string();
+        self.prepare_external_editor_launch_for_content(&original_draft)
+    }
+
+    pub(crate) fn prepare_external_editor_launch_for_content(
+        &mut self,
+        original_draft: &str,
+    ) -> Option<ExternalEditorLaunch> {
         let editor = match envinfo::resolve_external_editor(&self.external_editor) {
             Ok(editor) => editor,
             Err(error) => {
@@ -31,7 +39,7 @@ impl Model {
             }
         };
 
-        let original_draft = self.composer_text().to_string();
+        let original_draft = original_draft.to_string();
         let draft_path = match write_external_editor_draft(&original_draft) {
             Ok(path) => path,
             Err(_) => {
@@ -49,6 +57,34 @@ impl Model {
             command: external_editor_command_with_draft(&command, &draft_path),
             draft_path,
             original_draft,
+        })
+    }
+
+    pub(crate) fn prepare_external_editor_launch_for_path(
+        &mut self,
+        draft_path: PathBuf,
+        original_draft: &str,
+    ) -> Option<ExternalEditorLaunch> {
+        let editor = match envinfo::resolve_external_editor(&self.external_editor) {
+            Ok(editor) => editor,
+            Err(error) => {
+                self.show_toast(
+                    ToastSeverity::Error,
+                    external_editor_unavailable_text(&error),
+                );
+                return None;
+            }
+        };
+
+        self.clear_status_notice();
+
+        let mut command = vec![editor.command.to_string_lossy().into_owned()];
+        command.extend(editor.args);
+
+        Some(ExternalEditorLaunch {
+            command: external_editor_command_with_draft(&command, &draft_path),
+            draft_path,
+            original_draft: original_draft.to_string(),
         })
     }
 
@@ -92,7 +128,7 @@ impl Model {
         }
 
         self.sync_command_panel_navigation();
-        self.sync_file_picker_state();
+        self.sync_composer_attached_picker_state();
         self.sync_external_editor_helper_after_draft_change(&old_value);
         self.sync_composer_height();
         self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);

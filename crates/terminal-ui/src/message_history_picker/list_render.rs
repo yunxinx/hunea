@@ -17,6 +17,7 @@ use crate::{
         relative_age_label_fixed_column,
     },
     render_frame::RenderFrame,
+    search_highlight::{highlighted_substring_spans, search_match_style},
     status_line::truncate_display_width_with_ellipsis,
     styled_text::render_line_with_full_width_background,
     theme::{
@@ -160,6 +161,7 @@ impl Model {
                     state.is_selected_visible_position(absolute_position),
                     absolute_position.is_multiple_of(2),
                     state.opened_at_ms,
+                    state.search_query(),
                 ));
             }
         }
@@ -175,6 +177,7 @@ impl Model {
         is_cursor: bool,
         is_even: bool,
         opened_at_ms: i64,
+        search_query: &str,
     ) -> Line<'static> {
         let timestamp = relative_age_label_fixed_column(
             opened_at_ms,
@@ -195,17 +198,22 @@ impl Model {
         } else {
             text_style
         };
-
-        Line::from(vec![
+        let summary = truncate_display_width_with_ellipsis(&row.text, text_width);
+        let highlighted_summary_style =
+            message_history_picker_match_style(self.palette, summary_style, is_cursor, is_even);
+        let mut spans = vec![
             Span::raw(MESSAGE_HISTORY_BODY_LEFT_PADDING),
             Span::styled(timestamp, tertiary_text_style(self.palette)),
             Span::raw(" "),
-            Span::styled(
-                truncate_display_width_with_ellipsis(&row.text, text_width),
-                summary_style,
-            ),
-        ])
-        .style(row_style)
+        ];
+        spans.extend(highlighted_substring_spans(
+            &summary,
+            search_query,
+            summary_style,
+            highlighted_summary_style,
+        ));
+
+        Line::from(spans).style(row_style)
     }
 }
 
@@ -236,6 +244,20 @@ fn message_history_picker_row_style(palette: TerminalPalette, is_even: bool) -> 
     } else {
         Style::new()
     }
+}
+
+fn message_history_picker_match_style(
+    palette: TerminalPalette,
+    base_style: Style,
+    is_cursor: bool,
+    is_even: bool,
+) -> Style {
+    // 斑马纹偶数行本身已经使用 surface 背景；继续叠同色背景会丢失可见对比。
+    if !is_cursor && is_even && palette.surface.is_some() {
+        return base_style.reversed();
+    }
+
+    search_match_style(base_style, palette.surface)
 }
 
 fn message_history_picker_list_footer_hint(width: u16) -> String {

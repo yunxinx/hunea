@@ -8,6 +8,7 @@ use std::{
 use tokio_util::sync::CancellationToken;
 
 use super::{
+    error::WorkspaceFileError,
     file_state::{
         TextFingerprint, WorkspaceFileSnapshot, WorkspaceReadState, text_fingerprint_from_reader,
     },
@@ -15,10 +16,6 @@ use super::{
 };
 use crate::{ToolPermissionFileSnapshot, ToolPermissionPreview};
 
-pub(crate) const TOOL_CALL_INTERRUPTED: &str = "Tool call interrupted";
-pub(crate) const FILE_NOT_READ_MESSAGE: &str =
-    "File has not been read yet. Read it first before writing to it.";
-pub(crate) const FILE_CHANGED_MESSAGE: &str = "File has been modified since read, either by the user or by a linter. Read it again before attempting to write it.";
 pub(crate) const FILE_PERMISSION_PREVIEW_MAX_TOTAL_BYTES: usize = 256 * 1024;
 pub(crate) const FILE_PERMISSION_PREVIEW_MAX_LINES: usize = 6_000;
 
@@ -78,22 +75,28 @@ pub(crate) fn existing_file_metadata(
     access: &dyn WorkspaceAccess,
     path: &Path,
     requested_path: &str,
-    tool_name: &str,
-) -> Result<Option<WorkspaceMetadata>, String> {
+    tool_name: &'static str,
+) -> Result<Option<WorkspaceMetadata>, WorkspaceFileError> {
     match access.metadata(path) {
         Ok(metadata) => {
             if metadata.is_dir {
-                return Err(format!(
-                    "'{requested_path}' is a directory, cannot {tool_name} a directory"
-                ));
+                return Err(WorkspaceFileError::DirectoryMutation {
+                    path: requested_path.to_string(),
+                    operation: tool_name,
+                });
             }
             if !metadata.is_file {
-                return Err(format!("'{requested_path}' is not a regular file"));
+                return Err(WorkspaceFileError::NotRegularFile {
+                    path: requested_path.to_string(),
+                });
             }
             Ok(Some(metadata))
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("stat failed for '{requested_path}': {error}")),
+        Err(source) => Err(WorkspaceFileError::Metadata {
+            path: requested_path.to_string(),
+            source,
+        }),
     }
 }
 
@@ -104,22 +107,22 @@ pub(crate) fn ensure_existing_file_was_read(
     path: &Path,
     _metadata: &WorkspaceMetadata,
     cancellation: &CancellationToken,
-) -> Result<(), String> {
+) -> Result<(), WorkspaceFileError> {
     if cancellation.is_cancelled() {
-        return Err(TOOL_CALL_INTERRUPTED.to_string());
+        return Err(WorkspaceFileError::Interrupted);
     }
 
     let snapshot = permission_snapshot
         .map(workspace_snapshot_from_permission_snapshot)
         .or_else(|| read_state.snapshot(path))
-        .ok_or(FILE_NOT_READ_MESSAGE)?;
+        .ok_or(WorkspaceFileError::FileNotRead)?;
     if !snapshot.is_complete {
-        return Err(FILE_NOT_READ_MESSAGE.to_string());
+        return Err(WorkspaceFileError::FileNotRead);
     }
 
     let fingerprint = current_file_fingerprint(access, path, cancellation)?;
     if fingerprint != snapshot.fingerprint {
-        return Err(FILE_CHANGED_MESSAGE.to_string());
+        return Err(WorkspaceFileError::FileChanged);
     }
 
     Ok(())
@@ -183,19 +186,23 @@ pub(crate) fn bounded_permission_preview(
 pub(crate) fn read_existing_text_file(
     access: &dyn WorkspaceAccess,
     path: &Path,
-) -> Result<String, String> {
+) -> Result<String, WorkspaceFileError> {
     let mut reader = access
         .open_reader(path)
-        .map_err(|error| format!("read failed for '{}': {error}", path.display()))?;
+        .map_err(|source| WorkspaceFileError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
     let mut bytes = Vec::new();
     reader
         .read_to_end(&mut bytes)
-        .map_err(|error| format!("read failed for '{}': {error}", path.display()))?;
-    String::from_utf8(bytes).map_err(|_| {
-        format!(
-            "read failed for '{}': file is not valid UTF-8 text",
-            path.display()
-        )
+        .map_err(|source| WorkspaceFileError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    String::from_utf8(bytes).map_err(|_| WorkspaceFileError::ReadRejected {
+        path: path.to_path_buf(),
+        detail: "file is not valid UTF-8 text".to_string(),
     })
 }
 
@@ -321,13 +328,75 @@ fn current_file_fingerprint(
     access: &dyn WorkspaceAccess,
     path: &Path,
     cancellation: &CancellationToken,
-) -> Result<TextFingerprint, String> {
+) -> Result<TextFingerprint, WorkspaceFileError> {
     if cancellation.is_cancelled() {
-        return Err(TOOL_CALL_INTERRUPTED.to_string());
+        return Err(WorkspaceFileError::Interrupted);
     }
     let mut reader = access
         .open_reader(path)
-        .map_err(|error| format!("read failed for '{}': {error}", path.display()))?;
-    text_fingerprint_from_reader(reader.as_mut())
-        .map_err(|error| format!("read failed for '{}': {error}", path.display()))
+        .map_err(|source| WorkspaceFileError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    text_fingerprint_from_reader(reader.as_mut()).map_err(|source| WorkspaceFileError::Read {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        io::{self, Read},
+        path::{Path, PathBuf},
+    };
+
+    use super::{
+        super::{
+            error::WorkspaceFileError,
+            workspace_access::{WorkspaceAccess, WorkspaceDirectoryEntry, WorkspaceMetadata},
+        },
+        read_existing_text_file,
+    };
+
+    struct FailingReadAccess;
+
+    impl WorkspaceAccess for FailingReadAccess {
+        fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+            Ok(path.to_path_buf())
+        }
+
+        fn metadata(&self, _path: &Path) -> io::Result<WorkspaceMetadata> {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "metadata is not used in this test",
+            ))
+        }
+
+        fn open_reader(&self, _path: &Path) -> io::Result<Box<dyn Read + Send>> {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "read is denied",
+            ))
+        }
+
+        fn read_dir(&self, _path: &Path) -> io::Result<Vec<WorkspaceDirectoryEntry>> {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "read_dir is not used in this test",
+            ))
+        }
+    }
+
+    #[test]
+    fn read_existing_text_file_preserves_read_source() {
+        let error = read_existing_text_file(&FailingReadAccess, Path::new("/workspace/secret.txt"))
+            .expect_err("read failure should be returned");
+
+        let WorkspaceFileError::Read { path, source } = error else {
+            panic!("read failure should retain the filesystem source error");
+        };
+        assert_eq!(path, PathBuf::from("/workspace/secret.txt"));
+        assert_eq!(source.kind(), io::ErrorKind::PermissionDenied);
+    }
 }

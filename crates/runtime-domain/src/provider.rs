@@ -5,6 +5,7 @@ use std::fmt;
 pub enum ProviderKind {
     #[default]
     OpenAiCompatible,
+    OpenAiResponses,
     OpenAi,
     Anthropic,
     Gemini,
@@ -30,6 +31,7 @@ impl ProviderKind {
     pub fn from_config_value(value: &str) -> Option<Self> {
         match value {
             "openai_compatible" => Some(Self::OpenAiCompatible),
+            "openai_responses" => Some(Self::OpenAiResponses),
             "openai" => Some(Self::OpenAi),
             "anthropic" => Some(Self::Anthropic),
             "gemini" => Some(Self::Gemini),
@@ -56,6 +58,7 @@ impl ProviderKind {
     pub fn as_config_value(self) -> &'static str {
         match self {
             Self::OpenAiCompatible => "openai_compatible",
+            Self::OpenAiResponses => "openai_responses",
             Self::OpenAi => "openai",
             Self::Anthropic => "anthropic",
             Self::Gemini => "gemini",
@@ -79,7 +82,7 @@ impl ProviderKind {
 
     /// `uses_openai_compatible_endpoint` 判断 provider 是否使用 OpenAI-compatible base URL。
     pub fn uses_openai_compatible_endpoint(self) -> bool {
-        matches!(self, Self::OpenAiCompatible)
+        matches!(self, Self::OpenAiCompatible | Self::OpenAiResponses)
     }
 }
 

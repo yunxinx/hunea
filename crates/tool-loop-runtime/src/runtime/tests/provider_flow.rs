@@ -42,6 +42,125 @@ async fn runtime_executes_tool_calls_and_continues_until_final_text() {
 }
 
 #[tokio::test]
+async fn runtime_preserves_structured_tool_result_images_in_provider_context() {
+    struct ImageToolResultProvider {
+        requests: Arc<Mutex<Vec<Vec<ConversationItem>>>>,
+    }
+
+    impl ProviderClient for ImageToolResultProvider {
+        fn stream_prompt<'a>(
+            &'a self,
+            request: &'a PromptRequest,
+            sink: &'a mut (dyn StreamEventSink + Send),
+        ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
+            Box::pin(async move {
+                self.requests
+                    .lock()
+                    .expect("request lock should not poison")
+                    .push(request.items.clone());
+                if has_tool_result(&request.items) {
+                    let response = text_completion(Role::Assistant, "done");
+                    sink.emit(StreamEvent::TurnCompleted(response.clone()));
+                    return Ok(response);
+                }
+
+                let call = ToolCall::new("call-image", "image_result", "{}");
+                let response = tool_call_completion(String::new(), vec![call]);
+                sink.emit(StreamEvent::TurnCompleted(response.clone()));
+                Ok(response)
+            })
+        }
+
+        fn list_models<'a>(
+            &'a self,
+        ) -> ProviderFuture<'a, Result<Vec<ModelDescriptor>, ProviderError>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities::chat_completions()
+        }
+    }
+
+    struct ImageResultTool;
+
+    impl Tool for ImageResultTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::new("image_result")
+                .with_label("Image Result")
+                .with_kind(ToolKind::Read)
+                .with_permission_policy(ToolPermissionPolicy::Always)
+        }
+
+        fn execute<'a>(
+            &'a self,
+            call: RuntimeToolCall,
+            _cancellation: &'a CancellationToken,
+        ) -> ToolExecutionFuture<'a> {
+            Box::pin(async move {
+                ToolResult::success_content(
+                    call.call_id,
+                    vec![
+                        tool_runtime::ToolResultContent::Text("image loaded".to_string()),
+                        tool_runtime::ToolResultContent::Image {
+                            data_base64: "iVBORw==".to_string(),
+                            mime_type: "image/png".to_string(),
+                            uri: Some("assets/a.png".to_string()),
+                            detail: None,
+                        },
+                    ],
+                )
+            })
+        }
+    }
+
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let provider = ImageToolResultProvider {
+        requests: Arc::clone(&requests),
+    };
+    let mut executor = ToolExecutorRegistry::new();
+    executor.insert(ImageResultTool);
+    let request = PromptRequest::new(
+        "gpt-4o",
+        vec![ConversationItem::text(Role::User, "view image")],
+    );
+    let cancellation = CancellationToken::new();
+
+    run_tool_loop(
+        &provider,
+        request,
+        executor,
+        &cancellation,
+        ToolLoopOptions::default(),
+        |_| {},
+    )
+    .await
+    .expect("runtime should complete");
+
+    let requests = requests.lock().expect("request lock should not poison");
+    let follow_up_items = requests.get(1).expect("follow-up request should exist");
+    let tool_result = follow_up_items
+        .iter()
+        .find(|item| matches!(item, ConversationItem::ToolResult { .. }))
+        .expect("tool result should be part of follow-up provider context");
+    let ConversationItem::ToolResult { content, .. } = tool_result else {
+        panic!("tool result should be part of follow-up provider context");
+    };
+    assert!(matches!(
+        &content[0],
+        ContentBlock::Text(text) if text == "image loaded"
+    ));
+    assert!(matches!(
+        &content[1],
+        ContentBlock::Image { data_base64, mime_type, uri, detail }
+            if data_base64 == "iVBORw=="
+                && mime_type == "image/png"
+                && uri.as_deref() == Some("assets/a.png")
+                && detail.is_none()
+    ));
+}
+
+#[tokio::test]
 async fn execute_tool_command_errors_preserve_raw_output_and_details() {
     let provider = FakeProvider {
         calls: Mutex::new(0),

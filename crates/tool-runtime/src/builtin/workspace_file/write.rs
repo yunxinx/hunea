@@ -11,11 +11,12 @@ use crate::{
 };
 
 use super::{
+    error::WorkspaceFileError,
     file_state::WorkspaceReadState,
     mutation::{
-        TOOL_CALL_INTERRUPTED, WorkspaceMutationQueue, bounded_permission_preview,
-        bounded_tool_result_details, ensure_existing_file_was_read, existing_file_metadata,
-        permission_file_snapshot, read_existing_text_file, record_written_text_snapshot,
+        WorkspaceMutationQueue, bounded_permission_preview, bounded_tool_result_details,
+        ensure_existing_file_was_read, existing_file_metadata, permission_file_snapshot,
+        read_existing_text_file, record_written_text_snapshot,
     },
     workspace::resolve_workspace_write_path,
     workspace_access::{SharedWorkspaceAccess, local_workspace_access},
@@ -88,6 +89,7 @@ impl Tool for WriteTool {
                 "additionalProperties": false
             }))
             .with_permission_policy(ToolPermissionPolicy::Ask)
+            .with_prompt_guidelines("Use write for new files or full rewrites.")
     }
 
     fn execute<'a>(
@@ -188,17 +190,21 @@ fn execute_write(
 ) -> ToolResult {
     let arguments = match serde_json::from_value::<WriteArguments>(call.arguments) {
         Ok(arguments) => arguments,
-        Err(error) => {
+        Err(source) => {
             return ToolResult::error(
                 call.call_id,
-                format!("write arguments are invalid: {error}"),
+                WorkspaceFileError::InvalidArguments {
+                    tool: "write",
+                    source,
+                }
+                .to_string(),
             );
         }
     };
 
     let path = match resolve_workspace_write_path(access.as_ref(), &root, &arguments.path) {
         Ok(path) => path,
-        Err(message) => return ToolResult::error(call.call_id, message),
+        Err(error) => return ToolResult::error(call.call_id, error.to_string()),
     };
 
     match write_text_file(WriteTextFileOptions {
@@ -233,7 +239,7 @@ fn execute_write(
             Some(old_text),
             new_text,
         )),
-        Err(message) => ToolResult::error(call.call_id, message),
+        Err(error) => ToolResult::error(call.call_id, error.to_string()),
     }
 }
 
@@ -283,7 +289,7 @@ struct WriteTextFileOptions<'a> {
     mutation_queue: &'a WorkspaceMutationQueue,
 }
 
-fn write_text_file(options: WriteTextFileOptions<'_>) -> Result<WriteOutcome, String> {
+fn write_text_file(options: WriteTextFileOptions<'_>) -> Result<WriteOutcome, WorkspaceFileError> {
     let WriteTextFileOptions {
         access,
         read_state,
@@ -296,7 +302,7 @@ fn write_text_file(options: WriteTextFileOptions<'_>) -> Result<WriteOutcome, St
     } = options;
 
     if cancellation.is_cancelled() {
-        return Err(TOOL_CALL_INTERRUPTED.to_string());
+        return Err(WorkspaceFileError::Interrupted);
     }
 
     let _mutation_guard = mutation_queue.lock_path(path);
@@ -317,19 +323,22 @@ fn write_text_file(options: WriteTextFileOptions<'_>) -> Result<WriteOutcome, St
         .transpose()?;
 
     if cancellation.is_cancelled() {
-        return Err(TOOL_CALL_INTERRUPTED.to_string());
+        return Err(WorkspaceFileError::Interrupted);
     }
     if let Some(parent) = path.parent() {
-        access.create_dir_all(parent).map_err(|error| {
-            format!(
-                "create parent directory failed for '{}': {error}",
-                parent.display()
-            )
+        access.create_dir_all(parent).map_err(|source| {
+            WorkspaceFileError::CreateParentDirectory {
+                path: parent.to_path_buf(),
+                source,
+            }
         })?;
     }
     access
         .write_text_file(path, content)
-        .map_err(|error| format!("write failed for '{}': {error}", path.display()))?;
+        .map_err(|source| WorkspaceFileError::Write {
+            path: path.to_path_buf(),
+            source,
+        })?;
     record_written_text_snapshot(access, read_state, path, content);
 
     if let Some(old_text) = old_text {
@@ -498,11 +507,11 @@ mod tests {
         let second_result = second.join().expect("edit thread should finish");
 
         assert!(
-            !first_result.is_error,
+            !first_result.is_error(),
             "write should succeed: {first_result:?}"
         );
         assert!(
-            !second_result.is_error,
+            !second_result.is_error(),
             "edit should succeed: {second_result:?}"
         );
         assert_eq!(

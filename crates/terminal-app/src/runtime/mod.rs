@@ -1,8 +1,10 @@
 mod context_budget_command;
 mod context_budget_worker;
 mod conversation_commands;
+mod dynamic_environment_worker;
 mod event_mapping;
 mod managed_search_authorization;
+mod prompt_assembly_commands;
 mod session_commands;
 mod session_tree_load;
 mod session_worker;
@@ -13,12 +15,15 @@ use conversation_runtime::{
     ConversationWorker, ModelRefreshWorker, ProviderConversation, models as provider_models,
 };
 use runtime_domain::{
+    dynamic_environment::DynamicEnvironmentSessionConfig,
     model_catalog::{ModelProviderRefreshEvent, ModelSelection, ProviderSyncRequest},
+    prompt_assembly::{PromptAssemblyManagerSnapshot, PromptPreludeSnapshot},
     request_policy::RuntimeRequestPolicy,
     session::{
-        ConversationEvent, RuntimeCommand, RuntimeCommandReceipt, RuntimeEvent, RuntimeTarget,
-        SessionBranchTreePayload, SessionPickerRow, SessionPreviewPayload, SessionResumePayload,
-        SessionTreePayload, SessionTreeRow,
+        ConversationEvent, ConversationTurnRequest, RuntimeCommand, RuntimeCommandReceipt,
+        RuntimeEvent, RuntimeTarget, RuntimeToolActivity, SessionBranchTreePayload,
+        SessionPickerRow, SessionPreviewPayload, SessionResumePayload, SessionTreePayload,
+        SessionTreeRow, TranscriptUserMessage,
     },
 };
 use session_store::{
@@ -26,10 +31,11 @@ use session_store::{
     SessionStore, SessionTreeSnapshot, SessionTreeSnapshotRow,
 };
 use terminal_ui::RuntimeCoordinator;
-use tool_runtime::{ToolExecutorRegistry, builtin::ManagedSearchToolConfig};
+use tool_runtime::{ToolDefinition, ToolExecutorRegistry, builtin::ManagedSearchToolConfig};
 
 use self::{
     context_budget_worker::ContextBudgetWorker,
+    dynamic_environment_worker::DynamicEnvironmentWorker,
     event_mapping::{
         runtime_event_from_conversation_event, should_defer_runtime_event_for_render_barrier,
     },
@@ -38,9 +44,26 @@ use self::{
     },
     session_worker::{SessionStoreWorker, SessionStoreWorkerEvent},
 };
+use crate::prompt_assembly::PromptAssemblyEditSession;
+
+/// `tool_definitions_for_managed_search` 在 coordinator 创建前收集内置工具定义，
+/// 供初始 prompt assembly 加载使用。
+pub(crate) fn tool_definitions_for_managed_search(
+    managed_search_tools: &ManagedSearchToolConfig,
+) -> Vec<ToolDefinition> {
+    tool_definitions_from_registry(&conversation_workspace_tools(managed_search_tools))
+}
+
+fn tool_definitions_from_registry(workspace_tools: &ToolExecutorRegistry) -> Vec<ToolDefinition> {
+    workspace_tools
+        .definitions()
+        .definitions()
+        .cloned()
+        .collect()
+}
 
 /// `AppRuntimeOptions` 保存 app 层对话运行时所需的配置。
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct AppRuntimeOptions {
     pub(crate) loaded_models: provider_models::LoadedModelCatalog,
     pub(crate) runtime_request_policy: RuntimeRequestPolicy,
@@ -48,6 +71,11 @@ pub(crate) struct AppRuntimeOptions {
     pub(crate) managed_search_authorization_config_path: Option<PathBuf>,
     pub(crate) session_store: Option<Arc<dyn SessionStore>>,
     pub(crate) session_header_template: Option<SessionHeader>,
+    pub(crate) prompt_assembly_manager: Option<PromptAssemblyManagerSnapshot>,
+    pub(crate) initial_prompt_prelude: Option<PromptPreludeSnapshot>,
+    pub(crate) initial_dynamic_environment_session_config: Option<DynamicEnvironmentSessionConfig>,
+    pub(crate) dynamic_environment_observer:
+        Arc<dyn crate::dynamic_environment::DynamicEnvironmentObserver>,
 }
 
 /// `AppRuntimeCoordinator` 负责把 TUI runtime command 连接到对话运行时。
@@ -57,33 +85,62 @@ pub(crate) struct AppRuntimeCoordinator {
     provider_conversation: ProviderConversation,
     model_refresh: ModelRefreshWorker,
     workspace_tools: ToolExecutorRegistry,
+    prompt_assembly_tool_definitions: Vec<ToolDefinition>,
     session_store_worker: SessionStoreWorker,
     context_budget_worker: ContextBudgetWorker,
+    dynamic_environment_worker: DynamicEnvironmentWorker,
+    pending_conversation_turn: Option<PendingConversationTurn>,
     pending_runtime_events: Vec<RuntimeEvent>,
+    manual_skill_activity_sequence: usize,
+    prompt_assembly_edit_session: Option<PromptAssemblyEditSession>,
+}
+
+struct PendingConversationTurn {
+    target: RuntimeTarget,
+    activity_label: String,
+    provider_request: ConversationTurnRequest,
+    transcript_user_message: TranscriptUserMessage,
+    manual_skill_activities: Vec<RuntimeToolActivity>,
+}
+
+impl Default for AppRuntimeOptions {
+    fn default() -> Self {
+        Self {
+            loaded_models: provider_models::LoadedModelCatalog::default(),
+            runtime_request_policy: RuntimeRequestPolicy::default(),
+            managed_search_tools: ManagedSearchToolConfig::default(),
+            managed_search_authorization_config_path: None,
+            session_store: None,
+            session_header_template: None,
+            prompt_assembly_manager: None,
+            initial_prompt_prelude: None,
+            initial_dynamic_environment_session_config: None,
+            dynamic_environment_observer:
+                crate::dynamic_environment::default_dynamic_environment_observer(),
+        }
+    }
 }
 
 impl AppRuntimeCoordinator {
     pub(crate) fn new(options: AppRuntimeOptions) -> Result<Self, String> {
         let workspace_tools = conversation_workspace_tools(&options.managed_search_tools);
-        let provider_conversation = match (
-            options.session_store.clone(),
-            options.session_header_template.clone(),
-        ) {
-            (Some(store), Some(header_template)) => {
-                ProviderConversation::with_session_store(store, header_template)
-                    .map_err(|error| error.to_string())?
-            }
-            _ => ProviderConversation::default(),
-        };
+        let prompt_assembly_tool_definitions = tool_definitions_from_registry(&workspace_tools);
+        let provider_conversation = fresh_provider_conversation(&options)?;
+        let dynamic_environment_observer = Arc::clone(&options.dynamic_environment_observer);
         Ok(Self {
             options,
             conversation_worker: ConversationWorker::default(),
             provider_conversation,
             model_refresh: ModelRefreshWorker::default(),
             workspace_tools,
+            prompt_assembly_tool_definitions,
             session_store_worker: SessionStoreWorker::new(),
             context_budget_worker: ContextBudgetWorker::new().map_err(|error| error.to_string())?,
+            dynamic_environment_worker: DynamicEnvironmentWorker::new(dynamic_environment_observer),
+            pending_conversation_turn: None,
             pending_runtime_events: Vec::new(),
+            manual_skill_activity_sequence: 0,
+            prompt_assembly_edit_session: None,
         })
     }
 
@@ -93,7 +150,7 @@ impl AppRuntimeCoordinator {
     ) -> Result<RuntimeCommandReceipt, String> {
         match command {
             RuntimeCommand::SubmitConversationTurn { target, request } => {
-                self.start_conversation_turn(target, request)
+                self.start_conversation_turn(target, *request)
             }
             RuntimeCommand::TruncateConversation {
                 retained_user_turns,
@@ -137,6 +194,9 @@ impl AppRuntimeCoordinator {
             RuntimeCommand::LoadMessageHistoryStartupCache => {
                 self.load_message_history_startup_cache()
             }
+            RuntimeCommand::CheckPromptAssemblyMissingSources => {
+                self.check_prompt_assembly_missing_sources()
+            }
             RuntimeCommand::LoadMessageHistoryPickerRows { request_id } => {
                 self.load_message_history_picker_rows(request_id)
             }
@@ -147,12 +207,15 @@ impl AppRuntimeCoordinator {
             } => self.record_message_history(entry_id, text, limit),
             RuntimeCommand::Reset => {
                 self.conversation_worker.reset_after_clear();
-                self.provider_conversation.clear();
+                self.provider_conversation = fresh_provider_conversation(&self.options)?;
                 self.model_refresh.reset_after_clear();
                 self.context_budget_worker.cancel_pending();
                 self.workspace_tools =
                     conversation_workspace_tools(&self.options.managed_search_tools);
+                self.refresh_prompt_assembly_tool_definitions();
                 self.pending_runtime_events.clear();
+                self.manual_skill_activity_sequence = 0;
+                self.prompt_assembly_edit_session = None;
                 Ok(RuntimeCommandReceipt::Accepted)
             }
         }
@@ -183,9 +246,19 @@ impl AppRuntimeCoordinator {
         Ok(())
     }
 
+    fn prompt_assembly_tool_definitions(&self) -> &[ToolDefinition] {
+        &self.prompt_assembly_tool_definitions
+    }
+
+    fn refresh_prompt_assembly_tool_definitions(&mut self) {
+        self.prompt_assembly_tool_definitions =
+            tool_definitions_from_registry(&self.workspace_tools);
+    }
+
     pub(crate) fn shutdown(&mut self) -> Result<(), String> {
         self.conversation_worker.reset_after_clear();
         self.context_budget_worker.shutdown()?;
+        self.dynamic_environment_worker.shutdown();
         if let Some(store) = self.options.session_store.as_ref() {
             self.session_store_worker.flush_all(store.clone())?;
         }
@@ -314,13 +387,23 @@ impl RuntimeCoordinator for AppRuntimeCoordinator {
         let mut events = Vec::new();
         self.drain_context_budget_events_into(&mut events);
         self.drain_session_store_events_into(&mut events);
+        self.drain_dynamic_environment_events_into(&mut events);
         loop {
             let target = self.conversation_worker.current_target().cloned();
             let Some(event) = self.conversation_worker.try_recv_event() else {
                 self.reconcile_conversation_updates();
                 break;
             };
+            let upstream_context_tokens = if matches!(event, ConversationEvent::Finished { .. }) {
+                self.conversation_worker.take_upstream_context_tokens()
+            } else {
+                None
+            };
             self.reconcile_conversation_updates();
+            if upstream_context_tokens.is_some() {
+                self.provider_conversation
+                    .set_upstream_context_tokens(upstream_context_tokens);
+            }
             if let ConversationEvent::ManagedSearchToolAuthorization { tool } = event {
                 if let Some(event) = persist_managed_search_tool_authorization(
                     &mut self.options,
@@ -329,6 +412,8 @@ impl RuntimeCoordinator for AppRuntimeCoordinator {
                     target.clone(),
                 ) {
                     events.push(event);
+                } else {
+                    self.refresh_prompt_assembly_tool_definitions();
                 }
                 continue;
             }
@@ -358,6 +443,8 @@ impl RuntimeCoordinator for AppRuntimeCoordinator {
             || self.model_refresh.is_running()
             || self.session_store_worker.has_pending_work()
             || self.context_budget_worker.has_pending_work()
+            || self.dynamic_environment_worker.has_pending_work()
+            || self.pending_conversation_turn.is_some()
     }
 
     fn dispatch_runtime_command(
@@ -383,6 +470,23 @@ impl RuntimeCoordinator for AppRuntimeCoordinator {
 
         self.model_refresh.start(request);
         Ok(())
+    }
+
+    fn begin_prompt_assembly_edit(
+        &mut self,
+    ) -> Result<runtime_domain::prompt_assembly::PromptAssemblyManagerSnapshot, String> {
+        self.begin_prompt_assembly_edit_impl()
+    }
+
+    fn apply_prompt_assembly_edit_mutation(
+        &mut self,
+        mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation,
+    ) -> Result<runtime_domain::prompt_assembly::PromptAssemblyManagerSnapshot, String> {
+        self.apply_prompt_assembly_edit_mutation_impl(mutation)
+    }
+
+    fn commit_prompt_assembly_edit(&mut self) -> Result<(), String> {
+        self.commit_prompt_assembly_edit_impl()
     }
 }
 
@@ -454,13 +558,37 @@ impl AppRuntimeCoordinator {
         tool: runtime_domain::session::ManagedSearchTool,
         target: Option<RuntimeTarget>,
     ) -> Option<RuntimeEvent> {
-        persist_managed_search_tool_authorization(
+        let event = persist_managed_search_tool_authorization(
             &mut self.options,
             &mut self.workspace_tools,
             tool,
             target,
-        )
+        );
+        if event.is_none() {
+            self.refresh_prompt_assembly_tool_definitions();
+        }
+        event
     }
+}
+
+fn fresh_provider_conversation(
+    options: &AppRuntimeOptions,
+) -> Result<ProviderConversation, String> {
+    let mut provider_conversation = match (
+        options.session_store.clone(),
+        options.session_header_template.clone(),
+    ) {
+        (Some(store), Some(header_template)) => {
+            ProviderConversation::with_session_store(store, header_template)
+                .map_err(|error| error.to_string())?
+        }
+        _ => ProviderConversation::default(),
+    };
+    provider_conversation.set_prompt_prelude(options.initial_prompt_prelude.clone());
+    provider_conversation.set_dynamic_environment_session_config(
+        options.initial_dynamic_environment_session_config.clone(),
+    );
+    Ok(provider_conversation)
 }
 
 fn ensure_conversation_target(

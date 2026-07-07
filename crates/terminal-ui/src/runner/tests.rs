@@ -66,7 +66,7 @@ fn ready_model() -> Model {
     model
 }
 
-fn context_limit(value: u32) -> ContextTokenLimit {
+fn context_limit(value: usize) -> ContextTokenLimit {
     ContextTokenLimit::try_from(value).expect("fixture limit should be valid")
 }
 
@@ -91,6 +91,7 @@ impl RuntimeCoordinator for TestRuntimeCoordinator {
                 command,
                 RuntimeCommand::RecordMessageHistory { .. }
                     | RuntimeCommand::LoadMessageHistoryStartupCache
+                    | RuntimeCommand::CheckPromptAssemblyMissingSources
             ) {
                 self.next_runtime_error = Some(message);
             } else {
@@ -121,7 +122,7 @@ impl RuntimeCoordinator for TestRuntimeCoordinator {
 
                 let activity_label = request.model_id().to_string();
                 self.conversation_running = true;
-                self.conversation_request = Some(request);
+                self.conversation_request = Some(*request);
                 Ok(RuntimeCommandReceipt::ConversationStarted { activity_label })
             }
             RuntimeCommand::Interrupt { target } => {
@@ -146,6 +147,7 @@ impl RuntimeCoordinator for TestRuntimeCoordinator {
             | RuntimeCommand::SwitchBranch { .. }
             | RuntimeCommand::SelectEntryRewind { .. }
             | RuntimeCommand::LoadMessageHistoryStartupCache
+            | RuntimeCommand::CheckPromptAssemblyMissingSources
             | RuntimeCommand::LoadMessageHistoryPickerRows { .. }
             | RuntimeCommand::RecordMessageHistory { .. } => Ok(RuntimeCommandReceipt::Accepted),
             RuntimeCommand::LoadContextBudgetSnapshot { request_id, .. } => {

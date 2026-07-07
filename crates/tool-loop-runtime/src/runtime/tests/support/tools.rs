@@ -20,12 +20,10 @@ impl Tool for WriteLikeTool {
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("written")
                 .to_string();
-            let mut result = ToolResult::success(call.call_id, "written");
-            result.details = Some(serde_json::json!({
+            ToolResult::success(call.call_id, "written").with_details(serde_json::json!({
                 "path": "temp.md",
                 "new_text": new_text,
-            }));
-            result
+            }))
         })
     }
 }
@@ -100,9 +98,11 @@ impl Tool for ConditionalTerminatingTool {
                 .get("terminate")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
-            let mut result = ToolResult::success(call.call_id.clone(), call.call_id);
-            result.terminate = should_terminate;
-            result
+            if should_terminate {
+                ToolResult::terminate(call.call_id.clone(), call.call_id)
+            } else {
+                ToolResult::success(call.call_id.clone(), call.call_id)
+            }
         })
     }
 }
@@ -122,11 +122,7 @@ impl Tool for TerminatingTool {
         call: RuntimeToolCall,
         _cancellation: &'a CancellationToken,
     ) -> ToolExecutionFuture<'a> {
-        Box::pin(async move {
-            let mut result = ToolResult::success(call.call_id, "terminate here");
-            result.terminate = true;
-            result
-        })
+        Box::pin(async move { ToolResult::terminate(call.call_id, "terminate here") })
     }
 }
 
@@ -367,17 +363,15 @@ impl Tool for FailingExecuteTool {
         _cancellation: &'a CancellationToken,
     ) -> ToolExecutionFuture<'a> {
         Box::pin(async move {
-            let mut result =
-                ToolResult::error(call.call_id, "before failure\n\nCommand exited with code 7");
-            result.details = Some(serde_json::json!({
+            ToolResult::error(call.call_id, "before failure\n\nCommand exited with code 7")
+                .with_details(serde_json::json!({
                 "execution_kind": "command",
                 "exit_code": 7,
                 "duration_ms": 250,
                 "timed_out": false,
                 "cancelled": false
-            }));
-            result.display_content = Some("before failure".to_string());
-            result
+            }))
+                .with_display_content("before failure")
         })
     }
 }

@@ -9,8 +9,11 @@ mod load_request;
 mod message_history;
 mod metrics;
 mod permission;
-mod recovery;
+mod resume;
+mod session_picker;
 mod target;
+mod transcript_replay;
+mod tree;
 
 pub use activity::{
     RuntimeTerminalExitStatus, RuntimeTerminalSnapshot, RuntimeToolActivity,
@@ -24,7 +27,7 @@ pub use conversation::{
     ConversationEvent, ConversationRequest, ConversationResponse, ConversationTurnRequest,
     ManagedSearchTool, ProviderRequest, ProviderRequestMetrics,
 };
-pub use event::RuntimeEvent;
+pub use event::{PromptAssemblyCommandFailureKind, PromptAssemblyUpdateNotice, RuntimeEvent};
 pub use identity::{RuntimeAgentCapabilities, RuntimeIdentity, RuntimePromptCapabilities};
 pub use load_request::SessionLoadRequestId;
 pub use message_history::{
@@ -38,9 +41,15 @@ pub use metrics::RuntimeRequestMetrics;
 pub use permission::{
     RuntimePermissionOption, RuntimePermissionOptionKind, RuntimePermissionRequest,
 };
-pub use recovery::{
-    SessionBranchSummary, SessionBranchTreeNode, SessionBranchTreePayload, SessionPickerRow,
-    SessionPreviewPayload, SessionResumePayload, SessionTreeBranchChoice, SessionTreePayload,
-    SessionTreeRow, SessionTreeRowKind, TranscriptReplayItem, TranscriptReplayRole,
-};
+pub use resume::{SessionPreviewPayload, SessionResumePayload};
+pub use session_picker::SessionPickerRow;
 pub use target::{ProviderTarget, RuntimeTarget};
+pub use transcript_replay::{
+    TranscriptCustomPromptBinding, TranscriptReplayItem, TranscriptReplayRole,
+    TranscriptSkillBinding, TranscriptUserAttachment, TranscriptUserMessage,
+    transcript_image_label_ranges, transcript_image_label_text,
+};
+pub use tree::{
+    SessionBranchSummary, SessionBranchTreeNode, SessionBranchTreePayload, SessionTreeBranchChoice,
+    SessionTreePayload, SessionTreeRow, SessionTreeRowKind,
+};

@@ -9,11 +9,15 @@ use std::{
 };
 
 use provider_protocol::ConversationItem;
-use runtime_domain::session::{MessageHistoryEntry, MessageHistoryRow, TranscriptReplayItem};
+use runtime_domain::{
+    prompt_assembly::persistence::PromptAssemblyScopeState,
+    session::{MessageHistoryEntry, MessageHistoryRow, TranscriptReplayItem},
+};
 use session_store::{
-    ConfigSnapshot, InMemorySessionStore, ProjectDir, ResolvedSessionState, SessionHeader,
-    SessionId, SessionListOptions, SessionMeta, SessionStore, SessionStoreError,
-    SessionTreeSnapshot,
+    ConfigSnapshot, InMemorySessionStore, MessageHistoryStore, ProjectDir, PromptAssemblyStore,
+    ResolvedSessionState, SessionCatalogStore, SessionFlushStore, SessionHeader, SessionId,
+    SessionLifecycleStore, SessionListOptions, SessionMeta, SessionStore, SessionStoreError,
+    SessionTreeSnapshot, SessionTreeStore,
 };
 
 pub(super) struct LoadCountingSessionStore {
@@ -25,6 +29,8 @@ pub(super) struct DelayedListSessionStore {
     inner: Arc<InMemorySessionStore>,
     list_started: Mutex<Option<mpsc::Sender<()>>>,
     list_release: Mutex<Option<mpsc::Receiver<()>>>,
+    prompt_assembly_started: Mutex<Option<mpsc::Sender<()>>>,
+    prompt_assembly_release: Mutex<Option<mpsc::Receiver<()>>>,
 }
 
 pub(super) struct FailingSessionStore {
@@ -37,6 +43,8 @@ pub(super) enum FailingSessionStoreLoad {
     SessionTree,
     BranchTree,
     BranchPreview,
+    PromptAssemblyLoad,
+    PromptAssemblySave,
 }
 
 impl FailingSessionStore {
@@ -58,11 +66,27 @@ impl DelayedListSessionStore {
             inner,
             list_started: Mutex::new(Some(list_started)),
             list_release: Mutex::new(Some(list_release)),
+            prompt_assembly_started: Mutex::new(None),
+            prompt_assembly_release: Mutex::new(None),
+        }
+    }
+
+    pub(super) fn new_with_prompt_assembly_delay(
+        inner: Arc<InMemorySessionStore>,
+        prompt_assembly_started: mpsc::Sender<()>,
+        prompt_assembly_release: mpsc::Receiver<()>,
+    ) -> Self {
+        Self {
+            inner,
+            list_started: Mutex::new(None),
+            list_release: Mutex::new(None),
+            prompt_assembly_started: Mutex::new(Some(prompt_assembly_started)),
+            prompt_assembly_release: Mutex::new(Some(prompt_assembly_release)),
         }
     }
 }
 
-impl SessionStore for FailingSessionStore {
+impl SessionLifecycleStore for FailingSessionStore {
     fn create_session<'a>(
         &'a self,
         header: SessionHeader,
@@ -127,7 +151,9 @@ impl SessionStore for FailingSessionStore {
     {
         self.inner.load_session(session_id, leaf_id)
     }
+}
 
+impl SessionTreeStore for FailingSessionStore {
     fn load_session_tree<'a>(
         &'a self,
         session_id: &'a SessionId,
@@ -188,7 +214,9 @@ impl SessionStore for FailingSessionStore {
         }
         self.inner.load_session_branch_tree(session_id)
     }
+}
 
+impl SessionCatalogStore for FailingSessionStore {
     fn list_sessions<'a>(
         &'a self,
         project_dir: &'a ProjectDir,
@@ -204,7 +232,9 @@ impl SessionStore for FailingSessionStore {
     ) -> Pin<Box<dyn Future<Output = Result<SessionMeta, SessionStoreError>> + Send + 'a>> {
         self.inner.get_session_meta(session_id)
     }
+}
 
+impl SessionFlushStore for FailingSessionStore {
     fn flush<'a>(
         &'a self,
         session_id: &'a SessionId,
@@ -217,7 +247,9 @@ impl SessionStore for FailingSessionStore {
     ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
         self.inner.flush_all()
     }
+}
 
+impl MessageHistoryStore for FailingSessionStore {
     fn record_message_history<'a>(
         &'a self,
         text: &'a str,
@@ -243,7 +275,40 @@ impl SessionStore for FailingSessionStore {
     }
 }
 
-impl SessionStore for DelayedListSessionStore {
+impl PromptAssemblyStore for FailingSessionStore {
+    fn save_global_prompt_assembly_state<'a>(
+        &'a self,
+        state: &'a PromptAssemblyScopeState,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
+        if self.failed_load == FailingSessionStoreLoad::PromptAssemblySave {
+            return Box::pin(async {
+                Err(SessionStoreError::CorruptIndex {
+                    message: "injected prompt assembly save failure".to_string(),
+                })
+            });
+        }
+        self.inner.save_global_prompt_assembly_state(state)
+    }
+
+    fn load_global_prompt_assembly_state<'a>(
+        &'a self,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<PromptAssemblyScopeState, SessionStoreError>> + Send + 'a>,
+    > {
+        if self.failed_load == FailingSessionStoreLoad::PromptAssemblyLoad {
+            return Box::pin(async {
+                Err(SessionStoreError::CorruptIndex {
+                    message: "injected prompt assembly load failure".to_string(),
+                })
+            });
+        }
+        self.inner.load_global_prompt_assembly_state()
+    }
+}
+
+impl SessionStore for FailingSessionStore {}
+
+impl SessionLifecycleStore for DelayedListSessionStore {
     fn create_session<'a>(
         &'a self,
         header: SessionHeader,
@@ -308,7 +373,9 @@ impl SessionStore for DelayedListSessionStore {
     {
         self.inner.load_session(session_id, leaf_id)
     }
+}
 
+impl SessionTreeStore for DelayedListSessionStore {
     fn load_session_tree<'a>(
         &'a self,
         session_id: &'a SessionId,
@@ -348,7 +415,9 @@ impl SessionStore for DelayedListSessionStore {
     > {
         self.inner.load_session_branch_tree(session_id)
     }
+}
 
+impl SessionCatalogStore for DelayedListSessionStore {
     fn list_sessions<'a>(
         &'a self,
         project_dir: &'a ProjectDir,
@@ -381,7 +450,9 @@ impl SessionStore for DelayedListSessionStore {
     ) -> Pin<Box<dyn Future<Output = Result<SessionMeta, SessionStoreError>> + Send + 'a>> {
         self.inner.get_session_meta(session_id)
     }
+}
 
+impl SessionFlushStore for DelayedListSessionStore {
     fn flush<'a>(
         &'a self,
         session_id: &'a SessionId,
@@ -394,7 +465,9 @@ impl SessionStore for DelayedListSessionStore {
     ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
         self.inner.flush_all()
     }
+}
 
+impl MessageHistoryStore for DelayedListSessionStore {
     fn record_message_history<'a>(
         &'a self,
         text: &'a str,
@@ -420,6 +493,44 @@ impl SessionStore for DelayedListSessionStore {
     }
 }
 
+impl PromptAssemblyStore for DelayedListSessionStore {
+    fn save_global_prompt_assembly_state<'a>(
+        &'a self,
+        state: &'a PromptAssemblyScopeState,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
+        self.inner.save_global_prompt_assembly_state(state)
+    }
+
+    fn load_global_prompt_assembly_state<'a>(
+        &'a self,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<PromptAssemblyScopeState, SessionStoreError>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            let started = self
+                .prompt_assembly_started
+                .lock()
+                .expect("prompt_assembly_started mutex should not be poisoned")
+                .take();
+            if let Some(started) = started {
+                let _ = started.send(());
+                let release = self
+                    .prompt_assembly_release
+                    .lock()
+                    .expect("prompt_assembly_release mutex should not be poisoned")
+                    .take()
+                    .expect("test should provide a prompt assembly release signal");
+                release
+                    .recv()
+                    .expect("test should release delayed prompt assembly load");
+            }
+            self.inner.load_global_prompt_assembly_state().await
+        })
+    }
+}
+
+impl SessionStore for DelayedListSessionStore {}
+
 impl LoadCountingSessionStore {
     pub(super) fn new(inner: Arc<InMemorySessionStore>) -> Self {
         Self {
@@ -433,7 +544,7 @@ impl LoadCountingSessionStore {
     }
 }
 
-impl SessionStore for LoadCountingSessionStore {
+impl SessionLifecycleStore for LoadCountingSessionStore {
     fn create_session<'a>(
         &'a self,
         header: SessionHeader,
@@ -499,7 +610,9 @@ impl SessionStore for LoadCountingSessionStore {
         self.load_session_calls.fetch_add(1, Ordering::SeqCst);
         self.inner.load_session(session_id, leaf_id)
     }
+}
 
+impl SessionTreeStore for LoadCountingSessionStore {
     fn load_session_tree<'a>(
         &'a self,
         session_id: &'a SessionId,
@@ -539,7 +652,9 @@ impl SessionStore for LoadCountingSessionStore {
     > {
         self.inner.load_session_branch_tree(session_id)
     }
+}
 
+impl SessionCatalogStore for LoadCountingSessionStore {
     fn list_sessions<'a>(
         &'a self,
         project_dir: &'a ProjectDir,
@@ -555,7 +670,9 @@ impl SessionStore for LoadCountingSessionStore {
     ) -> Pin<Box<dyn Future<Output = Result<SessionMeta, SessionStoreError>> + Send + 'a>> {
         self.inner.get_session_meta(session_id)
     }
+}
 
+impl SessionFlushStore for LoadCountingSessionStore {
     fn flush<'a>(
         &'a self,
         session_id: &'a SessionId,
@@ -568,7 +685,9 @@ impl SessionStore for LoadCountingSessionStore {
     ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
         self.inner.flush_all()
     }
+}
 
+impl MessageHistoryStore for LoadCountingSessionStore {
     fn record_message_history<'a>(
         &'a self,
         text: &'a str,
@@ -594,6 +713,25 @@ impl SessionStore for LoadCountingSessionStore {
     }
 }
 
+impl PromptAssemblyStore for LoadCountingSessionStore {
+    fn save_global_prompt_assembly_state<'a>(
+        &'a self,
+        state: &'a PromptAssemblyScopeState,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
+        self.inner.save_global_prompt_assembly_state(state)
+    }
+
+    fn load_global_prompt_assembly_state<'a>(
+        &'a self,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<PromptAssemblyScopeState, SessionStoreError>> + Send + 'a>,
+    > {
+        self.inner.load_global_prompt_assembly_state()
+    }
+}
+
+impl SessionStore for LoadCountingSessionStore {}
+
 pub(super) struct CommittedLoadFailsAfterSetLeafStore {
     inner: Arc<InMemorySessionStore>,
     fail_committed_load: AtomicBool,
@@ -608,7 +746,7 @@ impl CommittedLoadFailsAfterSetLeafStore {
     }
 }
 
-impl SessionStore for CommittedLoadFailsAfterSetLeafStore {
+impl SessionLifecycleStore for CommittedLoadFailsAfterSetLeafStore {
     fn create_session<'a>(
         &'a self,
         header: SessionHeader,
@@ -684,7 +822,9 @@ impl SessionStore for CommittedLoadFailsAfterSetLeafStore {
         }
         self.inner.load_session(session_id, leaf_id)
     }
+}
 
+impl SessionTreeStore for CommittedLoadFailsAfterSetLeafStore {
     fn load_session_tree<'a>(
         &'a self,
         session_id: &'a SessionId,
@@ -724,7 +864,9 @@ impl SessionStore for CommittedLoadFailsAfterSetLeafStore {
     > {
         self.inner.load_session_branch_tree(session_id)
     }
+}
 
+impl SessionCatalogStore for CommittedLoadFailsAfterSetLeafStore {
     fn list_sessions<'a>(
         &'a self,
         project_dir: &'a ProjectDir,
@@ -740,7 +882,9 @@ impl SessionStore for CommittedLoadFailsAfterSetLeafStore {
     ) -> Pin<Box<dyn Future<Output = Result<SessionMeta, SessionStoreError>> + Send + 'a>> {
         self.inner.get_session_meta(session_id)
     }
+}
 
+impl SessionFlushStore for CommittedLoadFailsAfterSetLeafStore {
     fn flush<'a>(
         &'a self,
         session_id: &'a SessionId,
@@ -753,7 +897,9 @@ impl SessionStore for CommittedLoadFailsAfterSetLeafStore {
     ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
         self.inner.flush_all()
     }
+}
 
+impl MessageHistoryStore for CommittedLoadFailsAfterSetLeafStore {
     fn record_message_history<'a>(
         &'a self,
         text: &'a str,
@@ -778,3 +924,22 @@ impl SessionStore for CommittedLoadFailsAfterSetLeafStore {
         self.inner.load_message_history_all()
     }
 }
+
+impl PromptAssemblyStore for CommittedLoadFailsAfterSetLeafStore {
+    fn save_global_prompt_assembly_state<'a>(
+        &'a self,
+        state: &'a PromptAssemblyScopeState,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
+        self.inner.save_global_prompt_assembly_state(state)
+    }
+
+    fn load_global_prompt_assembly_state<'a>(
+        &'a self,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<PromptAssemblyScopeState, SessionStoreError>> + Send + 'a>,
+    > {
+        self.inner.load_global_prompt_assembly_state()
+    }
+}
+
+impl SessionStore for CommittedLoadFailsAfterSetLeafStore {}

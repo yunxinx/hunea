@@ -7,6 +7,7 @@ use ratatui::{
     style::Style,
     text::{Line, Span},
 };
+use runtime_domain::session::{TranscriptCustomPromptBinding, TranscriptSkillBinding};
 
 use super::{
     Composer,
@@ -69,6 +70,10 @@ struct StyledVisualRenderOptions<'a> {
     prompt_width: usize,
     prompt_style: ratatui::style::Style,
     text_style: ratatui::style::Style,
+    highlighted_text_style: ratatui::style::Style,
+    skill_bindings: &'a [TranscriptSkillBinding],
+    custom_prompt_bindings: &'a [TranscriptCustomPromptBinding],
+    image_attachment_ranges: &'a [(usize, usize)],
     content_width: usize,
     frame_fill_width: usize,
     fill_style: Style,
@@ -128,7 +133,6 @@ pub(crate) fn render_document(
     let mut fill_style = Style::default();
     let mut frame_fill_width = 0;
     let frame_decoration = frame_decoration_lines(frame_mode, palette, frame_width);
-
     if matches!(frame_mode, FrameDecorationMode::Surface) && palette.surface.is_some() {
         frame_fill_width = frame_width;
         fill_style = surface_text_style(palette);
@@ -136,6 +140,7 @@ pub(crate) fn render_document(
         text_style = apply_optional_background(text_style, palette);
         placeholder_style = apply_optional_background(placeholder_style, palette);
     }
+    let highlighted_text_style = text_style.fg(palette.command_accent);
 
     if composer.value().is_empty() {
         let placeholder_line = first_placeholder_visual_line(
@@ -162,6 +167,10 @@ pub(crate) fn render_document(
                 prompt_width,
                 prompt_style,
                 text_style: placeholder_style,
+                highlighted_text_style: placeholder_style,
+                skill_bindings: &[],
+                custom_prompt_bindings: &[],
+                image_attachment_ranges: &[],
                 content_width: composer.content_width(),
                 frame_fill_width,
                 fill_style,
@@ -193,6 +202,7 @@ pub(crate) fn render_document(
 
     let visual_lines =
         visual_lines_for_text(composer.value(), composer.content_width(), prompt_width);
+    let image_attachment_ranges = composer.image_attachment_highlight_ranges();
     let (row, column) = composer.cursor_position();
     let (cursor_y, cursor_visual_x) =
         calculate_cursor_visual_position(&visual_lines, row, column, prompt_width);
@@ -224,6 +234,10 @@ pub(crate) fn render_document(
                 prompt_width,
                 prompt_style,
                 text_style,
+                highlighted_text_style,
+                skill_bindings: &composer.skill_bindings,
+                custom_prompt_bindings: &composer.custom_prompt_bindings,
+                image_attachment_ranges: &image_attachment_ranges,
                 content_width: composer.content_width(),
                 frame_fill_width,
                 fill_style,
@@ -299,6 +313,7 @@ fn first_placeholder_visual_line(text: &str, width: usize, line_prefix_width: us
         .unwrap_or(VisualLine {
             text: String::new(),
             logical_line: 0,
+            logical_line_start_char: 0,
             visible_start_char: 0,
             end_char: 0,
             column_offsets: Vec::new(),
@@ -326,12 +341,112 @@ fn render_visual_lines(
             let fill_width = options
                 .frame_fill_width
                 .saturating_sub(options.prompt_width + measure_width(&line_text));
-            Line::default().spans([
-                Span::styled(line_prefix, options.prompt_style),
-                Span::styled(line_text, options.text_style),
-                Span::styled(" ".repeat(fill_width), options.fill_style),
-            ])
+            let mut spans = vec![Span::styled(line_prefix, options.prompt_style)];
+            let absolute_visible_start_char =
+                line.logical_line_start_char + line.visible_start_char;
+            spans.extend(styled_composer_content_spans(
+                &line_text,
+                absolute_visible_start_char,
+                options.text_style,
+                options.highlighted_text_style,
+                options.skill_bindings,
+                options.custom_prompt_bindings,
+                options.image_attachment_ranges,
+            ));
+            spans.push(Span::styled(" ".repeat(fill_width), options.fill_style));
+            Line::from(spans)
         })
+        .collect()
+}
+
+fn styled_composer_content_spans(
+    text: &str,
+    visible_start_char: usize,
+    text_style: Style,
+    highlighted_text_style: Style,
+    skill_bindings: &[TranscriptSkillBinding],
+    custom_prompt_bindings: &[TranscriptCustomPromptBinding],
+    image_attachment_ranges: &[(usize, usize)],
+) -> Vec<Span<'static>> {
+    if text.is_empty() {
+        return vec![Span::styled(String::new(), text_style)];
+    }
+    let binding_ranges = visible_binding_ranges(
+        skill_bindings,
+        custom_prompt_bindings,
+        image_attachment_ranges,
+        visible_start_char,
+        text,
+    );
+    if binding_ranges.is_empty() {
+        return vec![Span::styled(text.to_string(), text_style)];
+    }
+
+    let mut spans = Vec::new();
+    let mut cursor = 0usize;
+
+    for (relative_start, relative_end) in binding_ranges {
+        if cursor < relative_start {
+            spans.push(Span::styled(
+                slice_char_range(text, cursor, relative_start),
+                text_style,
+            ));
+        }
+        spans.push(Span::styled(
+            slice_char_range(text, relative_start, relative_end),
+            highlighted_text_style,
+        ));
+        cursor = relative_end;
+    }
+
+    let line_char_len = text.chars().count();
+    if cursor < line_char_len {
+        spans.push(Span::styled(
+            slice_char_range(text, cursor, line_char_len),
+            text_style,
+        ));
+    }
+
+    if spans.is_empty() {
+        spans.push(Span::styled(text.to_string(), text_style));
+    }
+    spans
+}
+
+fn visible_binding_ranges(
+    skill_bindings: &[TranscriptSkillBinding],
+    custom_prompt_bindings: &[TranscriptCustomPromptBinding],
+    image_attachment_ranges: &[(usize, usize)],
+    visible_start_char: usize,
+    text: &str,
+) -> Vec<(usize, usize)> {
+    let visible_end_char = visible_start_char + text.chars().count();
+    let mut ranges = skill_bindings
+        .iter()
+        .map(|binding| (binding.start_char, binding.end_char))
+        .chain(
+            custom_prompt_bindings
+                .iter()
+                .map(|binding| (binding.start_char, binding.end_char)),
+        )
+        .chain(image_attachment_ranges.iter().copied())
+        .filter_map(|(start_char, end_char)| {
+            let overlap_start = start_char.max(visible_start_char);
+            let overlap_end = end_char.min(visible_end_char);
+            (overlap_start < overlap_end).then_some((
+                overlap_start - visible_start_char,
+                overlap_end - visible_start_char,
+            ))
+        })
+        .collect::<Vec<_>>();
+    ranges.sort_unstable_by_key(|(start, _)| *start);
+    ranges
+}
+
+fn slice_char_range(text: &str, start: usize, end: usize) -> String {
+    text.chars()
+        .skip(start)
+        .take(end.saturating_sub(start))
         .collect()
 }
 

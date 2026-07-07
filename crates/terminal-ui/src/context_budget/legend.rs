@@ -129,6 +129,7 @@ fn legend_symbol(kind: ContextBudgetCategoryKind) -> &'static str {
     match kind {
         ContextBudgetCategoryKind::FreeSpace => LEGEND_FREE_SYMBOL,
         ContextBudgetCategoryKind::SystemPrompt
+        | ContextBudgetCategoryKind::SkillDiscovery
         | ContextBudgetCategoryKind::ToolDefinitions
         | ContextBudgetCategoryKind::Messages => LEGEND_SWATCH_SYMBOL,
     }
@@ -140,7 +141,7 @@ fn legend_detail_text(
 ) -> String {
     let percent = share_of_total_percent(entry.estimated_tokens, total_tokens);
     format!(
-        "{} tokens ({})",
+        "~{} tokens ({})",
         format_compact_tokens(entry.estimated_tokens),
         format_percent(percent),
     )
@@ -163,7 +164,7 @@ mod tests {
         ContextBudgetSnapshot, ContextSegment, ContextTokenLimit, ContextWindowUsage, SegmentKind,
     };
 
-    fn limit(value: u32) -> ContextTokenLimit {
+    fn limit(value: usize) -> ContextTokenLimit {
         ContextTokenLimit::try_from(value).expect("fixture limit should be valid")
     }
 
@@ -186,6 +187,17 @@ mod tests {
 
         assert_eq!(lines.len(), 4);
         assert!(lines.iter().all(|line| line.width() == 24));
+    }
+
+    #[test]
+    fn legend_detail_marks_category_tokens_as_approximate() {
+        let entry = super::super::summary::ContextBudgetLegendEntry {
+            kind: ContextBudgetCategoryKind::SystemPrompt,
+            label: "System prompt".to_string(),
+            estimated_tokens: 2_700,
+        };
+
+        assert_eq!(legend_detail_text(&entry, 256_000), "~2.7k tokens (1.1%)");
     }
 
     fn segment(kind: SegmentKind, estimated_tokens: usize) -> ContextSegment {

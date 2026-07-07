@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, MutexGuard,
         atomic::{AtomicUsize, Ordering},
         mpsc,
     },
@@ -99,26 +99,16 @@ impl ConversationPermissionBroker {
         request_id: &str,
         option_id: Option<String>,
     ) -> Result<(), String> {
-        let sender = self
-            .pending
-            .lock()
-            .expect("conversation permission lock should not be poisoned")
-            .remove(request_id)
-            .ok_or_else(|| {
-                format!("Conversation permission request is not pending: {request_id}")
-            })?;
+        let sender = self.pending_guard().remove(request_id).ok_or_else(|| {
+            format!("Conversation permission request is not pending: {request_id}")
+        })?;
         sender.send(option_id).map_err(|_| {
             format!("Conversation permission request is no longer waiting: {request_id}")
         })
     }
 
     pub(crate) fn cancel_all(&self) {
-        let pending = std::mem::take(
-            &mut *self
-                .pending
-                .lock()
-                .expect("conversation permission lock should not be poisoned"),
-        );
+        let pending = std::mem::take(&mut *self.pending_guard());
         for (_, sender) in pending {
             let _ = sender.send(None);
         }
@@ -130,17 +120,18 @@ impl ConversationPermissionBroker {
     }
 
     fn register(&self, request_id: String, sender: PermissionResponseSender) {
-        self.pending
-            .lock()
-            .expect("conversation permission lock should not be poisoned")
-            .insert(request_id, sender);
+        self.pending_guard().insert(request_id, sender);
     }
 
     fn remove(&self, request_id: &str) {
-        self.pending
-            .lock()
-            .expect("conversation permission lock should not be poisoned")
-            .remove(request_id);
+        self.pending_guard().remove(request_id);
+    }
+
+    fn pending_guard(&self) -> MutexGuard<'_, HashMap<String, PermissionResponseSender>> {
+        match self.pending.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
     }
 }
 
@@ -331,6 +322,34 @@ mod tests {
         assert_eq!(
             decision.await.expect("permission task should finish"),
             ToolPermissionDecision::Allow
+        );
+    }
+
+    #[test]
+    fn conversation_permission_response_recovers_from_poisoned_pending_lock() {
+        let broker = ConversationPermissionBroker::default();
+        let request_id = broker.next_request_id();
+        let (response_sender, mut response_receiver) = oneshot::channel();
+        broker.register(request_id.clone(), response_sender);
+
+        let poison_broker = broker.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poison_broker
+                .pending
+                .lock()
+                .expect("test should acquire the pending lock before poisoning");
+            panic!("poison pending lock");
+        })
+        .join();
+
+        broker
+            .respond_permission(&request_id, Some(ALLOW_ONCE_OPTION_ID.to_string()))
+            .expect("poisoned lock should not prevent responding to pending permission");
+        assert_eq!(
+            response_receiver
+                .try_recv()
+                .expect("permission response should be delivered"),
+            Some(ALLOW_ONCE_OPTION_ID.to_string())
         );
     }
 

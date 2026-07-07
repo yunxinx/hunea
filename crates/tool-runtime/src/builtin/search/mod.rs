@@ -1,3 +1,4 @@
+pub(super) mod error;
 pub(super) mod external_tool;
 pub(super) mod find;
 pub(super) mod grep;

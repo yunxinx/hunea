@@ -1,8 +1,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{
-    AppEffect, Model, Sender, overlay_input_result::OverlayInputResult, toast::ToastSeverity,
-    transcript::TranscriptItem,
+    AppEffect, Model, Sender, composer::ComposerSourceMessage,
+    overlay_input_result::OverlayInputResult, toast::ToastSeverity, transcript::TranscriptItem,
 };
 
 #[cfg(test)]
@@ -20,7 +20,7 @@ pub(crate) struct MessageRevisitState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MessageRevisitSelection {
     item_index: usize,
-    prefill: String,
+    source_message: ComposerSourceMessage,
     retained_user_turns: usize,
 }
 
@@ -198,7 +198,9 @@ impl Model {
             TranscriptItem::Message(message) if message.sender() == Sender::User => {
                 Some(MessageRevisitSelection {
                     item_index,
-                    prefill: message.source_content().to_string(),
+                    source_message: message.source_message().cloned().unwrap_or_else(|| {
+                        ComposerSourceMessage::user_text(message.source_content())
+                    }),
                     retained_user_turns: self
                         .message_revisit_user_message_indices()
                         .into_iter()
@@ -234,9 +236,9 @@ impl Model {
         self.refresh_status_line_after_transcript_change();
         self.sync_transcript_render();
         self.composer_mut()
-            .reset_text_and_move_to_end(selection.prefill);
+            .reset_source_message_and_move_to_end(selection.source_message);
         self.sync_command_panel_navigation();
-        self.sync_file_picker_state();
+        self.sync_composer_attached_picker_state();
         self.sync_external_editor_helper_after_draft_change(&old_value);
         self.sync_composer_height();
         self.document_runtime.follow_bottom = true;

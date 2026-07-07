@@ -1,6 +1,6 @@
 use provider_protocol::{
-    ToolCall as AiToolCall, ToolCallArgumentsError, ToolDefinition as AiToolDefinition,
-    ToolResult as AiToolResult,
+    ContentBlock, ToolCall as AiToolCall, ToolCallArgumentsError,
+    ToolDefinition as AiToolDefinition, ToolResult as AiToolResult,
 };
 use runtime_domain::session::{
     ManagedSearchTool, RuntimeTerminalExitStatus, RuntimeTerminalSnapshot,
@@ -33,7 +33,9 @@ pub(super) fn interrupted_tool_execution(call: &AiToolCall) -> ToolExecution {
         provider_result: AiToolResult::error(
             call.call_id.clone(),
             call.name.clone(),
-            processed_error.assistant_message.clone(),
+            vec![ContentBlock::Text(
+                processed_error.assistant_message.clone(),
+            )],
             None,
         ),
         processed_error: Some(processed_error),
@@ -53,7 +55,7 @@ fn invalid_arguments_tool_execution(
         provider_result: AiToolResult::error(
             call.call_id.clone(),
             call.name.clone(),
-            message,
+            vec![ContentBlock::Text(message)],
             None,
         ),
         processed_error: None,
@@ -88,7 +90,7 @@ pub(super) async fn execute_tool_call(
         }
     };
 
-    let processed_error = (raw_result.is_error
+    let processed_error = (raw_result.is_error()
         && !is_command_execution_error(
             &raw_result,
             context.tool_definitions.definition(&call.name),
@@ -96,25 +98,25 @@ pub(super) async fn execute_tool_call(
     .then(|| {
         context
             .error_formatter
-            .format_tool_error(&call.name, &raw_result.content)
+            .format_tool_error(&call.name, &raw_result.text_content())
     });
     let provider_content = processed_error
         .as_ref()
-        .map(|processed| processed.assistant_message.clone())
-        .unwrap_or_else(|| raw_result.content.clone());
-    let provider_result = if raw_result.is_error {
+        .map(|processed| vec![ContentBlock::Text(processed.assistant_message.clone())])
+        .unwrap_or_else(|| provider_content_from_tool_result(&raw_result));
+    let provider_result = if raw_result.is_error() {
         AiToolResult::error(
             call.call_id.clone(),
             call.name.clone(),
             provider_content,
-            raw_result.details.clone(),
+            raw_result.details().cloned(),
         )
     } else {
         AiToolResult::success(
             call.call_id.clone(),
             call.name.clone(),
             provider_content,
-            raw_result.details.clone(),
+            raw_result.details().cloned(),
         )
     };
 
@@ -125,6 +127,36 @@ pub(super) async fn execute_tool_call(
     }
 }
 
+fn provider_content_from_tool_result(result: &ToolResult) -> Vec<ContentBlock> {
+    result
+        .content()
+        .iter()
+        .map(|content| match content {
+            tool_runtime::ToolResultContent::Text(text) => ContentBlock::Text(text.clone()),
+            tool_runtime::ToolResultContent::Image {
+                data_base64,
+                mime_type,
+                uri,
+                detail,
+            } => ContentBlock::Image {
+                data_base64: data_base64.clone(),
+                mime_type: mime_type.clone(),
+                uri: uri.clone(),
+                detail: provider_image_detail(*detail),
+            },
+        })
+        .collect()
+}
+
+fn provider_image_detail(
+    detail: Option<tool_runtime::ToolImageDetail>,
+) -> Option<provider_protocol::ImageDetail> {
+    detail.map(|detail| match detail {
+        tool_runtime::ToolImageDetail::High => provider_protocol::ImageDetail::High,
+        tool_runtime::ToolImageDetail::Original => provider_protocol::ImageDetail::Original,
+    })
+}
+
 fn is_command_execution_error(
     result: &ToolResult,
     definition: Option<&tool_runtime::ToolDefinition>,
@@ -133,7 +165,7 @@ fn is_command_execution_error(
         return false;
     }
 
-    let Some(details) = result.details.as_ref() else {
+    let Some(details) = result.details() else {
         return false;
     };
     details
@@ -361,15 +393,15 @@ mod tests {
 
         let execution = invalid_arguments_tool_execution(&call, error);
 
-        assert!(execution.raw_result.is_error);
+        assert!(execution.raw_result.is_error());
         assert!(execution.processed_error.is_none());
         assert!(
             execution
                 .raw_result
-                .content
+                .text_content()
                 .contains("Invalid tool call arguments")
         );
-        assert!(execution.raw_result.content.contains("bash"));
+        assert!(execution.raw_result.text_content().contains("bash"));
         assert!(execution.provider_result.is_error);
         assert_eq!(execution.provider_result.call_id, "call-1");
         assert_eq!(execution.provider_result.name, "bash");

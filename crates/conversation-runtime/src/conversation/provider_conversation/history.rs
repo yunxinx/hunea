@@ -16,7 +16,9 @@ impl ProviderConversation {
         &mut self,
         retained_user_turns: usize,
     ) -> Result<Option<(SessionId, String)>, ProviderConversationError> {
-        self.pending_user_message = None;
+        self.pending_user_items.clear();
+        self.pending_dynamic_environment_observations = None;
+        self.upstream_context_tokens = None;
         let mut user_turn_count = 0usize;
         let mut truncate_index = self.persisted_history.len();
         for (index, item) in self.persisted_history.iter().enumerate() {
@@ -77,20 +79,33 @@ impl ProviderConversation {
         if let Some(session_id) = session_id {
             self.set_session_id(session_id);
         }
-        let Some(user_message) = self.pending_user_message.take() else {
+        if self.pending_user_items.is_empty() {
             return false;
-        };
-        self.persisted_history.push(PersistedConversationItem {
-            entry_id,
-            item: user_message,
-        });
+        }
+        let mut pending_items = std::mem::take(&mut self.pending_user_items);
+        let last_index = pending_items.len().saturating_sub(1);
+        for (index, item) in pending_items.drain(..).enumerate() {
+            self.persisted_history.push(PersistedConversationItem {
+                entry_id: (index == last_index).then(|| entry_id.clone()).flatten(),
+                item,
+            });
+        }
+        if let Some(observations) = self.pending_dynamic_environment_observations.take() {
+            self.dynamic_environment_observations = observations;
+        }
         true
     }
 
     /// `rollback_pending_user` 丢弃尚未开始发送给 provider 的当前用户消息。
     #[must_use]
     pub fn rollback_pending_user(&mut self) -> bool {
-        self.pending_user_message.take().is_some()
+        let had_pending = !self.pending_user_items.is_empty();
+        if had_pending {
+            self.pending_user_items.clear();
+            self.pending_dynamic_environment_observations = None;
+            self.upstream_context_tokens = None;
+        }
+        had_pending
     }
 
     /// `commit_turn_items` 把 runtime 生成的 provider-visible 对话项写回会话历史。
@@ -98,8 +113,13 @@ impl ProviderConversation {
         &mut self,
         items: impl IntoIterator<Item = PersistedConversationItem>,
     ) {
+        let mut committed_any = false;
         for item in items {
             self.persisted_history.push(item);
+            committed_any = true;
+        }
+        if committed_any {
+            self.upstream_context_tokens = None;
         }
     }
 
@@ -112,6 +132,7 @@ impl ProviderConversation {
         if items.is_empty() {
             return Ok(());
         }
+        self.upstream_context_tokens = None;
 
         self.commit_turn_items(items.into_iter().map(|item| PersistedConversationItem {
             entry_id: None,
@@ -131,12 +152,12 @@ impl ProviderConversation {
         items
     }
 
-    pub(super) fn provider_items_with_pending_user(
+    pub(super) fn provider_items_with_pending_user_items(
         &self,
-        user_message: &ConversationItem,
+        user_items: &[ConversationItem],
     ) -> Vec<ConversationItem> {
         let mut items = self.provider_items();
-        items.push(user_message.clone());
+        items.extend(user_items.iter().cloned());
         items
     }
 }

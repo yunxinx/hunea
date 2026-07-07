@@ -18,7 +18,7 @@ use crate::{
     ToolPermissionPolicy, ToolPermissionRequest, ToolProgress,
 };
 
-use super::search_fallback::TOOL_CALL_INTERRUPTED;
+use super::error::SearchToolError;
 
 const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 const DOWNLOAD_REQUEST_SUFFIX: &str = "-managed-download";
@@ -131,6 +131,14 @@ pub(crate) struct ExternalCommand {
     pub(crate) backend: ExternalToolBackend,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ExternalCommandPlan {
+    Ready(ExternalCommand),
+    AskManagedRebuild,
+    InstallManaged,
+    AskManagedDownload,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ManagedToolManifest {
     asset_name: &'static str,
@@ -168,39 +176,59 @@ struct ManagedInstallPaths {
     stable_entry: PathBuf,
 }
 
-pub(crate) async fn resolve_external_command(
+pub(crate) fn resolve_external_command_plan(
     tool: ManagedToolKind,
     config: &ManagedSearchToolConfig,
-    context: &ToolExecutionContext<'_>,
-) -> Option<ExternalCommand> {
+) -> ExternalCommandPlan {
     if let Some(path) = find_system_binary(tool) {
-        return Some(ExternalCommand {
+        return ExternalCommandPlan::Ready(ExternalCommand {
             path,
             backend: ExternalToolBackend::SystemPath,
         });
     }
     if let Some(path) = find_bundled_binary(tool) {
-        return Some(ExternalCommand {
+        return ExternalCommandPlan::Ready(ExternalCommand {
             path,
             backend: ExternalToolBackend::Bundled,
         });
     }
     if config.allows(tool) && managed_cache_needs_rebuild(tool) {
-        if !confirm_managed_rebuild(tool, context).await {
-            return None;
-        }
-        return install_managed_command(tool, context).await;
+        return ExternalCommandPlan::AskManagedRebuild;
     }
     if let Some(path) = usable_managed_entry(tool) {
-        return Some(ExternalCommand {
+        return ExternalCommandPlan::Ready(ExternalCommand {
             path,
             backend: ExternalToolBackend::Managed,
         });
     }
-    if !config.allows(tool) && !confirm_managed_download(tool, context).await {
-        return None;
+    if config.allows(tool) {
+        ExternalCommandPlan::InstallManaged
+    } else {
+        ExternalCommandPlan::AskManagedDownload
     }
-    install_managed_command(tool, context).await
+}
+
+pub(crate) async fn resolve_external_command_from_plan(
+    tool: ManagedToolKind,
+    plan: ExternalCommandPlan,
+    context: &ToolExecutionContext<'_>,
+) -> Option<ExternalCommand> {
+    match plan {
+        ExternalCommandPlan::Ready(command) => Some(command),
+        ExternalCommandPlan::AskManagedRebuild => {
+            if !confirm_managed_rebuild(tool, context).await {
+                return None;
+            }
+            install_managed_command(tool, context).await
+        }
+        ExternalCommandPlan::InstallManaged => install_managed_command(tool, context).await,
+        ExternalCommandPlan::AskManagedDownload => {
+            if !confirm_managed_download(tool, context).await {
+                return None;
+            }
+            install_managed_command(tool, context).await
+        }
+    }
 }
 
 async fn install_managed_command(
@@ -217,10 +245,10 @@ async fn install_managed_command(
                 backend: ExternalToolBackend::Managed,
             })
         }
-        Err(message) => {
+        Err(error) => {
             context.emit(ToolProgress::SystemMessage {
                 message: format!(
-                    "{} managed install failed; using Rust fallback. {message}",
+                    "{} managed install failed; using Rust fallback. {error}",
                     tool.display_name()
                 ),
             });
@@ -351,15 +379,19 @@ fn permission_definition(name: String, label: String) -> ToolDefinition {
 async fn install_managed_tool(
     tool: ManagedToolKind,
     context: &ToolExecutionContext<'_>,
-) -> Result<PathBuf, String> {
+) -> Result<PathBuf, SearchToolError> {
     ensure_not_cancelled(context.cancellation())?;
-    let manifest = tool
-        .manifest()
-        .ok_or_else(|| format!("no managed {} asset for this platform", tool.display_name()))?;
-    let stable_entry = managed_entry_path(tool)
-        .ok_or_else(|| format!("managed {} directory is unavailable", tool.display_name()))?;
-    let version_binary = managed_version_binary_path(tool)
-        .ok_or_else(|| format!("managed {} directory is unavailable", tool.display_name()))?;
+    let manifest = tool.manifest().ok_or(SearchToolError::NoManagedAsset {
+        tool: tool.display_name(),
+    })?;
+    let stable_entry =
+        managed_entry_path(tool).ok_or(SearchToolError::ManagedDirectoryUnavailable {
+            tool: tool.display_name(),
+        })?;
+    let version_binary =
+        managed_version_binary_path(tool).ok_or(SearchToolError::ManagedDirectoryUnavailable {
+            tool: tool.display_name(),
+        })?;
     if is_executable_file(&stable_entry) {
         return Ok(stable_entry);
     }
@@ -371,16 +403,24 @@ async fn install_managed_tool(
             update_stable_entry(&version_binary, &stable_entry_for_update, &cancellation)
         })
         .await
-        .map_err(|error| format!("managed entry update task failed: {error}"))??;
+        .map_err(|source| SearchToolError::JoinTask {
+            operation: "managed entry update",
+            source,
+        })??;
         return Ok(stable_entry);
     }
 
-    let app_root = app_managed_root()
-        .ok_or_else(|| format!("managed {} directory is unavailable", tool.display_name()))?;
+    let app_root = app_managed_root().ok_or(SearchToolError::ManagedDirectoryUnavailable {
+        tool: tool.display_name(),
+    })?;
     let temp_root = app_root.join("tmp");
     tokio::fs::create_dir_all(&temp_root)
         .await
-        .map_err(|error| format!("create managed tools temp directory failed: {error}"))?;
+        .map_err(|source| SearchToolError::PathIo {
+            operation: "create managed tools temp directory",
+            path: temp_root.clone(),
+            source,
+        })?;
     let unique = format!(
         "{}-{}-{}",
         tool.binary_name(),
@@ -391,8 +431,11 @@ async fn install_managed_tool(
         archive_path: temp_root.join(format!("{unique}.archive")),
         extract_dir: temp_root.join(format!("{unique}.extract")),
         version_temp_dir: temp_root.join(format!("{unique}.version")),
-        final_version_dir: managed_version_dir(tool)
-            .ok_or_else(|| format!("managed {} directory is unavailable", tool.display_name()))?,
+        final_version_dir: managed_version_dir(tool).ok_or(
+            SearchToolError::ManagedDirectoryUnavailable {
+                tool: tool.display_name(),
+            },
+        )?,
         version_binary,
         stable_entry,
     };
@@ -418,7 +461,10 @@ async fn install_managed_tool(
             )
         })
         .await
-        .map_err(|error| format!("managed install task failed: {error}"))??;
+        .map_err(|source| SearchToolError::JoinTask {
+            operation: "managed install",
+            source,
+        })??;
         emit_install_message(context, format!("{} is ready", tool.display_name()));
         Ok(stable_entry)
     }
@@ -436,49 +482,62 @@ async fn download_archive(
     url: &str,
     destination: &Path,
     cancellation: &CancellationToken,
-) -> Result<(), String> {
+) -> Result<(), SearchToolError> {
     ensure_not_cancelled(cancellation)?;
-    let parsed = Url::parse(url).map_err(|error| format!("invalid managed tool URL: {error}"))?;
+    let parsed =
+        Url::parse(url).map_err(|source| SearchToolError::InvalidManagedToolUrl { source })?;
     if parsed.host_str() != Some("github.com") {
-        return Err(format!(
-            "managed tool URL is not an official GitHub URL: {url}"
-        ));
+        return Err(SearchToolError::UnofficialManagedToolUrl {
+            url: url.to_string(),
+        });
     }
 
     let response = tokio::select! {
-        _ = cancellation.cancelled() => return Err(TOOL_CALL_INTERRUPTED.to_string()),
+        _ = cancellation.cancelled() => return Err(SearchToolError::Interrupted),
         response = reqwest::Client::new()
             .get(url)
             .timeout(DOWNLOAD_TIMEOUT)
-            .send() => response.map_err(|error| format!("download failed: {error}"))?,
+            .send() => response.map_err(|source| SearchToolError::Download { source })?,
     };
     let response = response
         .error_for_status()
-        .map_err(|error| format!("download failed: {error}"))?;
+        .map_err(|source| SearchToolError::Download { source })?;
     let mut response = response;
     let mut file = tokio::fs::File::create(destination)
         .await
-        .map_err(|error| format!("create download file failed: {error}"))?;
+        .map_err(|source| SearchToolError::PathIo {
+            operation: "create download file",
+            path: destination.to_path_buf(),
+            source,
+        })?;
 
     loop {
         let chunk = tokio::select! {
-            _ = cancellation.cancelled() => return Err(TOOL_CALL_INTERRUPTED.to_string()),
+            _ = cancellation.cancelled() => return Err(SearchToolError::Interrupted),
             chunk = response.chunk() => chunk
-                .map_err(|error| format!("read download body failed: {error}"))?,
+                .map_err(|source| SearchToolError::ReadDownloadBody { source })?,
         };
         let Some(chunk) = chunk else {
             break;
         };
         tokio::select! {
-            _ = cancellation.cancelled() => return Err(TOOL_CALL_INTERRUPTED.to_string()),
+            _ = cancellation.cancelled() => return Err(SearchToolError::Interrupted),
             write = file.write_all(&chunk) => {
-                write.map_err(|error| format!("write download failed: {error}"))?;
+                write.map_err(|source| SearchToolError::PathIo {
+                    operation: "write download",
+                    path: destination.to_path_buf(),
+                    source,
+                })?;
             }
         }
     }
     tokio::select! {
-        _ = cancellation.cancelled() => Err(TOOL_CALL_INTERRUPTED.to_string()),
-        sync = file.sync_all() => sync.map_err(|error| format!("sync download failed: {error}")),
+        _ = cancellation.cancelled() => Err(SearchToolError::Interrupted),
+        sync = file.sync_all() => sync.map_err(|source| SearchToolError::PathIo {
+            operation: "sync download",
+            path: destination.to_path_buf(),
+            source,
+        }),
     }
 }
 
@@ -488,12 +547,15 @@ fn install_archive_blocking(
     archive_kind: ArchiveKind,
     executable_file_name: &str,
     cancellation: CancellationToken,
-) -> Result<PathBuf, String> {
+) -> Result<PathBuf, SearchToolError> {
     ensure_not_cancelled(&cancellation)?;
     verify_sha256(&paths.archive_path, expected_sha256, &cancellation)?;
     ensure_not_cancelled(&cancellation)?;
-    fs::create_dir_all(&paths.extract_dir)
-        .map_err(|error| format!("create extraction directory failed: {error}"))?;
+    fs::create_dir_all(&paths.extract_dir).map_err(|source| SearchToolError::PathIo {
+        operation: "create extraction directory",
+        path: paths.extract_dir.clone(),
+        source,
+    })?;
     extract_archive(
         &paths.archive_path,
         &paths.extract_dir,
@@ -503,8 +565,11 @@ fn install_archive_blocking(
     let extracted_binary =
         find_extracted_binary(&paths.extract_dir, executable_file_name, &cancellation)?;
     ensure_not_cancelled(&cancellation)?;
-    fs::create_dir_all(&paths.version_temp_dir)
-        .map_err(|error| format!("create version temp directory failed: {error}"))?;
+    fs::create_dir_all(&paths.version_temp_dir).map_err(|source| SearchToolError::PathIo {
+        operation: "create version temp directory",
+        path: paths.version_temp_dir.clone(),
+        source,
+    })?;
     let temp_binary = paths.version_temp_dir.join(executable_file_name);
     copy_file_with_cancellation(&extracted_binary, &temp_binary, &cancellation)?;
     make_executable(&temp_binary)?;
@@ -513,11 +578,19 @@ fn install_archive_blocking(
         let _ = fs::remove_dir_all(&paths.final_version_dir);
     }
     if let Some(parent) = paths.final_version_dir.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("create managed version directory failed: {error}"))?;
+        fs::create_dir_all(parent).map_err(|source| SearchToolError::PathIo {
+            operation: "create managed version directory",
+            path: parent.to_path_buf(),
+            source,
+        })?;
     }
-    fs::rename(&paths.version_temp_dir, &paths.final_version_dir)
-        .map_err(|error| format!("publish managed version directory failed: {error}"))?;
+    fs::rename(&paths.version_temp_dir, &paths.final_version_dir).map_err(|source| {
+        SearchToolError::PathIo {
+            operation: "publish managed version directory",
+            path: paths.final_version_dir.clone(),
+            source,
+        }
+    })?;
     update_stable_entry(&paths.version_binary, &paths.stable_entry, &cancellation)?;
     Ok(paths.stable_entry)
 }
@@ -526,16 +599,23 @@ fn verify_sha256(
     path: &Path,
     expected: &str,
     cancellation: &CancellationToken,
-) -> Result<(), String> {
-    let mut file = fs::File::open(path)
-        .map_err(|error| format!("read archive for checksum failed: {error}"))?;
+) -> Result<(), SearchToolError> {
+    let mut file = fs::File::open(path).map_err(|source| SearchToolError::PathIo {
+        operation: "read archive for checksum",
+        path: path.to_path_buf(),
+        source,
+    })?;
     let mut hasher = Sha256::new();
     let mut buffer = [0; 64 * 1024];
     loop {
         ensure_not_cancelled(cancellation)?;
         let read = file
             .read(&mut buffer)
-            .map_err(|error| format!("read archive for checksum failed: {error}"))?;
+            .map_err(|source| SearchToolError::PathIo {
+                operation: "read archive for checksum",
+                path: path.to_path_buf(),
+                source,
+            })?;
         if read == 0 {
             break;
         }
@@ -546,9 +626,10 @@ fn verify_sha256(
         return Ok(());
     }
     let _ = fs::remove_file(path);
-    Err(format!(
-        "checksum mismatch for managed tool archive: expected {expected}, got {actual}"
-    ))
+    Err(SearchToolError::ChecksumMismatch {
+        expected: expected.to_string(),
+        actual,
+    })
 }
 
 fn extract_archive(
@@ -556,7 +637,7 @@ fn extract_archive(
     destination: &Path,
     archive_kind: ArchiveKind,
     cancellation: &CancellationToken,
-) -> Result<(), String> {
+) -> Result<(), SearchToolError> {
     match archive_kind {
         ArchiveKind::TarGz => extract_tar_gz_archive(archive_path, destination, cancellation),
         ArchiveKind::Zip => extract_zip_archive(archive_path, destination, cancellation),
@@ -567,22 +648,37 @@ fn extract_tar_gz_archive(
     archive_path: &Path,
     destination: &Path,
     cancellation: &CancellationToken,
-) -> Result<(), String> {
-    let archive = fs::File::open(archive_path)
-        .map_err(|error| format!("open tar archive failed: {error}"))?;
+) -> Result<(), SearchToolError> {
+    let archive = fs::File::open(archive_path).map_err(|source| SearchToolError::PathIo {
+        operation: "open tar archive",
+        path: archive_path.to_path_buf(),
+        source,
+    })?;
     let decoder = GzDecoder::new(archive);
     let mut archive = tar::Archive::new(decoder);
     let entries = archive
         .entries()
-        .map_err(|error| format!("read tar archive failed: {error}"))?;
+        .map_err(|source| SearchToolError::PathIo {
+            operation: "read tar archive",
+            path: archive_path.to_path_buf(),
+            source,
+        })?;
     for entry in entries {
         ensure_not_cancelled(cancellation)?;
-        let mut entry = entry.map_err(|error| format!("read tar entry failed: {error}"))?;
+        let mut entry = entry.map_err(|source| SearchToolError::PathIo {
+            operation: "read tar entry",
+            path: archive_path.to_path_buf(),
+            source,
+        })?;
         let unpacked = entry
             .unpack_in(destination)
-            .map_err(|error| format!("extract tar archive failed: {error}"))?;
+            .map_err(|source| SearchToolError::PathIo {
+                operation: "extract tar archive",
+                path: destination.to_path_buf(),
+                source,
+            })?;
         if !unpacked {
-            return Err("tar archive contains a path outside the extraction directory".to_string());
+            return Err(SearchToolError::TarPathOutsideExtraction);
         }
     }
     Ok(())
@@ -592,33 +688,45 @@ fn extract_zip_archive(
     archive_path: &Path,
     destination: &Path,
     cancellation: &CancellationToken,
-) -> Result<(), String> {
-    let archive = fs::File::open(archive_path)
-        .map_err(|error| format!("open zip archive failed: {error}"))?;
+) -> Result<(), SearchToolError> {
+    let archive = fs::File::open(archive_path).map_err(|source| SearchToolError::PathIo {
+        operation: "open zip archive",
+        path: archive_path.to_path_buf(),
+        source,
+    })?;
     let mut archive =
-        zip::ZipArchive::new(archive).map_err(|error| format!("read zip failed: {error}"))?;
+        zip::ZipArchive::new(archive).map_err(|source| SearchToolError::ReadZip { source })?;
     for index in 0..archive.len() {
         ensure_not_cancelled(cancellation)?;
         let mut entry = archive
             .by_index(index)
-            .map_err(|error| format!("read zip entry failed: {error}"))?;
+            .map_err(|source| SearchToolError::ReadZipEntry { source })?;
         let Some(relative_path) = entry.enclosed_name() else {
-            return Err("zip archive contains a path outside the extraction directory".to_string());
+            return Err(SearchToolError::ZipPathOutsideExtraction);
         };
         let output_path = destination.join(relative_path);
         if entry.is_dir() {
-            fs::create_dir_all(&output_path)
-                .map_err(|error| format!("create zip directory failed: {error}"))?;
+            fs::create_dir_all(&output_path).map_err(|source| SearchToolError::PathIo {
+                operation: "create zip directory",
+                path: output_path,
+                source,
+            })?;
             continue;
         }
         if let Some(parent) = output_path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("create zip parent directory failed: {error}"))?;
+            fs::create_dir_all(parent).map_err(|source| SearchToolError::PathIo {
+                operation: "create zip parent directory",
+                path: parent.to_path_buf(),
+                source,
+            })?;
         }
-        let mut output = fs::File::create(&output_path)
-            .map_err(|error| format!("create zip output file failed: {error}"))?;
-        copy_reader_with_cancellation(&mut entry, &mut output, cancellation)
-            .map_err(|error| format!("extract zip entry failed: {error}"))?;
+        let mut output =
+            fs::File::create(&output_path).map_err(|source| SearchToolError::PathIo {
+                operation: "create zip output file",
+                path: output_path.clone(),
+                source,
+            })?;
+        copy_reader_with_cancellation(&mut entry, &mut output, cancellation)?;
     }
     Ok(())
 }
@@ -627,20 +735,29 @@ fn find_extracted_binary(
     root: &Path,
     file_name: &str,
     cancellation: &CancellationToken,
-) -> Result<PathBuf, String> {
+) -> Result<PathBuf, SearchToolError> {
     let mut stack = vec![root.to_path_buf()];
     while let Some(directory) = stack.pop() {
         ensure_not_cancelled(cancellation)?;
-        for entry in fs::read_dir(&directory)
-            .map_err(|error| format!("read extracted archive directory failed: {error}"))?
-        {
+        for entry in fs::read_dir(&directory).map_err(|source| SearchToolError::PathIo {
+            operation: "read extracted archive directory",
+            path: directory.clone(),
+            source,
+        })? {
             ensure_not_cancelled(cancellation)?;
-            let entry =
-                entry.map_err(|error| format!("read extracted archive entry failed: {error}"))?;
+            let entry = entry.map_err(|source| SearchToolError::PathIo {
+                operation: "read extracted archive entry",
+                path: directory.clone(),
+                source,
+            })?;
             let path = entry.path();
             let file_type = entry
                 .file_type()
-                .map_err(|error| format!("read extracted archive file type failed: {error}"))?;
+                .map_err(|source| SearchToolError::PathIo {
+                    operation: "read extracted archive file type",
+                    path: path.clone(),
+                    source,
+                })?;
             if file_type.is_dir() {
                 stack.push(path);
             } else if entry.file_name().to_string_lossy() == file_name {
@@ -648,26 +765,34 @@ fn find_extracted_binary(
             }
         }
     }
-    Err(format!("archive did not contain {file_name}"))
+    Err(SearchToolError::MissingExtractedBinary {
+        file_name: file_name.to_string(),
+    })
 }
 
 fn update_stable_entry(
     source: &Path,
     stable_entry: &Path,
     cancellation: &CancellationToken,
-) -> Result<(), String> {
+) -> Result<(), SearchToolError> {
     ensure_not_cancelled(cancellation)?;
     if let Some(parent) = stable_entry.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("create managed bin directory failed: {error}"))?;
+        fs::create_dir_all(parent).map_err(|source| SearchToolError::PathIo {
+            operation: "create managed bin directory",
+            path: parent.to_path_buf(),
+            source,
+        })?;
     }
     let temp_entry = stable_entry.with_extension(format!("tmp-{}", unix_millis()));
     let result = (|| {
         copy_file_with_cancellation(source, &temp_entry, cancellation)?;
         make_executable(&temp_entry)?;
         ensure_not_cancelled(cancellation)?;
-        fs::rename(&temp_entry, stable_entry)
-            .map_err(|error| format!("publish managed entry failed: {error}"))
+        fs::rename(&temp_entry, stable_entry).map_err(|source| SearchToolError::PathIo {
+            operation: "publish managed entry",
+            path: stable_entry.to_path_buf(),
+            source,
+        })
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temp_entry);
@@ -679,31 +804,45 @@ fn copy_file_with_cancellation(
     source: &Path,
     destination: &Path,
     cancellation: &CancellationToken,
-) -> Result<(), String> {
-    let mut source =
-        fs::File::open(source).map_err(|error| format!("open source file failed: {error}"))?;
-    let mut destination = fs::File::create(destination)
-        .map_err(|error| format!("create destination file failed: {error}"))?;
-    copy_reader_with_cancellation(&mut source, &mut destination, cancellation)
+) -> Result<(), SearchToolError> {
+    let mut source_file =
+        fs::File::open(source).map_err(|source_error| SearchToolError::PathIo {
+            operation: "open source file",
+            path: source.to_path_buf(),
+            source: source_error,
+        })?;
+    let mut destination =
+        fs::File::create(destination).map_err(|source| SearchToolError::PathIo {
+            operation: "create destination file",
+            path: destination.to_path_buf(),
+            source,
+        })?;
+    copy_reader_with_cancellation(&mut source_file, &mut destination, cancellation)
 }
 
 fn copy_reader_with_cancellation(
     reader: &mut impl Read,
     writer: &mut impl Write,
     cancellation: &CancellationToken,
-) -> Result<(), String> {
+) -> Result<(), SearchToolError> {
     let mut buffer = [0; 64 * 1024];
     loop {
         ensure_not_cancelled(cancellation)?;
         let read = reader
             .read(&mut buffer)
-            .map_err(|error| format!("read file failed: {error}"))?;
+            .map_err(|source| SearchToolError::Io {
+                operation: "read file",
+                source,
+            })?;
         if read == 0 {
             return Ok(());
         }
         writer
             .write_all(&buffer[..read])
-            .map_err(|error| format!("write file failed: {error}"))?;
+            .map_err(|source| SearchToolError::Io {
+                operation: "write file",
+                source,
+            })?;
     }
 }
 
@@ -713,9 +852,9 @@ async fn cleanup_install_paths(paths: &ManagedInstallPaths) {
     let _ = tokio::fs::remove_dir_all(&paths.version_temp_dir).await;
 }
 
-fn ensure_not_cancelled(cancellation: &CancellationToken) -> Result<(), String> {
+fn ensure_not_cancelled(cancellation: &CancellationToken) -> Result<(), SearchToolError> {
     if cancellation.is_cancelled() {
-        Err(TOOL_CALL_INTERRUPTED.to_string())
+        Err(SearchToolError::Interrupted)
     } else {
         Ok(())
     }
@@ -772,16 +911,23 @@ fn is_executable_file(path: &Path) -> bool {
     }
 }
 
-fn make_executable(path: &Path) -> Result<(), String> {
+fn make_executable(path: &Path) -> Result<(), SearchToolError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let mut permissions = fs::metadata(path)
-            .map_err(|error| format!("stat managed binary failed: {error}"))?
+            .map_err(|source| SearchToolError::PathIo {
+                operation: "stat managed binary",
+                path: path.to_path_buf(),
+                source,
+            })?
             .permissions();
         permissions.set_mode(0o755);
-        fs::set_permissions(path, permissions)
-            .map_err(|error| format!("set managed binary permissions failed: {error}"))?;
+        fs::set_permissions(path, permissions).map_err(|source| SearchToolError::PathIo {
+            operation: "set managed binary permissions",
+            path: path.to_path_buf(),
+            source,
+        })?;
     }
     #[cfg(not(unix))]
     {
@@ -906,7 +1052,6 @@ mod tests {
 
     use tokio_util::sync::CancellationToken;
 
-    use super::super::search_fallback::TOOL_CALL_INTERRUPTED;
     use super::*;
 
     #[tokio::test]
@@ -923,7 +1068,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(result, Err(TOOL_CALL_INTERRUPTED.to_string()));
+        assert!(matches!(result, Err(SearchToolError::Interrupted)));
         assert!(!archive_path.exists());
         cleanup(&root);
     }

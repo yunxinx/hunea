@@ -11,9 +11,12 @@ pub mod tool;
 pub use client::{ProviderClient, ProviderFuture, StreamEventSink};
 pub use error::ProviderError;
 pub use message::{
-    ContentBlock, ConversationItem, ConversationItemValidationError, Role, visible_text_from_blocks,
+    ContentBlock, ConversationItem, ConversationItemValidationError, ImageDetail, Role,
+    summary_text_from_blocks, visible_text_from_blocks,
 };
 pub use model::{ModelDescriptor, ProviderCapabilities};
-pub use prompt::{FinishReason, PromptCompletion, PromptOptions, PromptRequest, TokenUsage};
+pub use prompt::{
+    FinishReason, PromptCacheRetention, PromptCompletion, PromptOptions, PromptRequest, TokenUsage,
+};
 pub use stream::StreamEvent;
 pub use tool::{ToolCall, ToolCallArgumentsError, ToolDefinition, ToolResult};

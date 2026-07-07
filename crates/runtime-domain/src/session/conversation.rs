@@ -1,12 +1,12 @@
 use crate::provider::{ProviderApiKey, ProviderKind};
 
-use provider_protocol::{ConversationItem, Role};
+use provider_protocol::{ContentBlock, ConversationItem, Role};
 
 use std::time::Duration;
 
 use super::{
     RuntimePermissionRequest, RuntimeTarget, RuntimeTerminalSnapshot, RuntimeToolActivity,
-    RuntimeToolActivityUpdate,
+    RuntimeToolActivityUpdate, TranscriptUserMessage,
 };
 
 /// `ConversationRequest` 描述一次完整的对话执行请求。
@@ -63,6 +63,7 @@ pub struct ConversationTurnRequest {
     api_key: Option<ProviderApiKey>,
     api_key_env: Option<String>,
     message: ConversationItem,
+    transcript_user_message: Option<TranscriptUserMessage>,
 }
 
 impl ConversationTurnRequest {
@@ -84,6 +85,7 @@ impl ConversationTurnRequest {
             api_key,
             api_key_env,
             message,
+            transcript_user_message: None,
         }
     }
 
@@ -97,6 +99,33 @@ impl ConversationTurnRequest {
         api_key_env: Option<String>,
         text: impl Into<String>,
     ) -> Self {
+        let text = text.into();
+        let content = if text.is_empty() {
+            Vec::new()
+        } else {
+            vec![ContentBlock::Text(text)]
+        };
+        Self::new_user_content(
+            provider_id,
+            provider_kind,
+            model_id,
+            base_url,
+            api_key,
+            api_key_env,
+            content,
+        )
+    }
+
+    /// `new_user_content` 从结构化用户内容创建一次对话轮次提交请求。
+    pub fn new_user_content(
+        provider_id: impl Into<String>,
+        provider_kind: ProviderKind,
+        model_id: impl Into<String>,
+        base_url: Option<String>,
+        api_key: Option<ProviderApiKey>,
+        api_key_env: Option<String>,
+        content: Vec<ContentBlock>,
+    ) -> Self {
         Self::new(
             provider_id,
             provider_kind,
@@ -104,8 +133,31 @@ impl ConversationTurnRequest {
             base_url,
             api_key,
             api_key_env,
-            ConversationItem::text(Role::User, text),
+            ConversationItem::user(content),
         )
+    }
+
+    /// `new_user_source_message` 从 transcript-visible 用户消息创建一次对话轮次提交请求。
+    pub fn new_user_source_message(
+        provider_id: impl Into<String>,
+        provider_kind: ProviderKind,
+        model_id: impl Into<String>,
+        base_url: Option<String>,
+        api_key: Option<ProviderApiKey>,
+        api_key_env: Option<String>,
+        message: TranscriptUserMessage,
+    ) -> Self {
+        let mut request = Self::new(
+            provider_id,
+            provider_kind,
+            model_id,
+            base_url,
+            api_key,
+            api_key_env,
+            message.provider_message(),
+        );
+        request.transcript_user_message = Some(message);
+        request
     }
 
     /// `target` 返回该 turn 对应的统一 runtime 目标。
@@ -157,6 +209,11 @@ impl ConversationTurnRequest {
     pub fn message_text(&self) -> String {
         self.message.text_content()
     }
+
+    /// `transcript_user_message` 返回 transcript-visible 用户消息。
+    pub fn transcript_user_message(&self) -> Option<&TranscriptUserMessage> {
+        self.transcript_user_message.as_ref()
+    }
 }
 
 /// `ProviderRequest` 保存向上游 provider 发起请求所需的模型参数。
@@ -191,6 +248,57 @@ impl ProviderRequest {
             api_key_env,
             items,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use provider_protocol::ContentBlock;
+
+    use crate::provider::ProviderKind;
+
+    use crate::session::TranscriptUserAttachment;
+
+    use super::{ConversationTurnRequest, TranscriptUserMessage};
+
+    #[test]
+    fn user_source_message_builds_structured_provider_content() {
+        let request = ConversationTurnRequest::new_user_source_message(
+            "openai",
+            ProviderKind::OpenAi,
+            "gpt-4o",
+            None,
+            None,
+            None,
+            TranscriptUserMessage {
+                content: "inspect this".to_string(),
+                attachments: vec![TranscriptUserAttachment::Image {
+                    data_base64: "iVBORw==".to_string(),
+                    mime_type: "image/png".to_string(),
+                    uri: Some("assets/a.png".to_string()),
+                    detail: None,
+                }],
+                skill_bindings: Vec::new(),
+                custom_prompt_bindings: Vec::new(),
+            },
+        );
+
+        let provider_protocol::ConversationItem::Message { content, .. } = request.message() else {
+            panic!("turn request should carry a user message");
+        };
+
+        assert!(matches!(
+            &content[0],
+            ContentBlock::Text(text) if text == "inspect this"
+        ));
+        assert!(matches!(
+            &content[1],
+            ContentBlock::Image { data_base64, mime_type, uri, detail }
+                if data_base64 == "iVBORw=="
+                    && mime_type == "image/png"
+                    && uri.as_deref() == Some("assets/a.png")
+                    && detail.is_none()
+        ));
     }
 }
 
@@ -275,10 +383,9 @@ fn trim_outer_blank_lines(content: &str) -> String {
     let Some(start) = lines.iter().position(|line| !line.trim().is_empty()) else {
         return String::new();
     };
-    let end = lines
-        .iter()
-        .rposition(|line| !line.trim().is_empty())
-        .expect("start exists when at least one non-blank line exists");
+    let Some(end) = lines.iter().rposition(|line| !line.trim().is_empty()) else {
+        return String::new();
+    };
 
     lines[start..=end].join("\n")
 }

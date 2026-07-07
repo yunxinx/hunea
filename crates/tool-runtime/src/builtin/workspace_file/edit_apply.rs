@@ -17,11 +17,42 @@ pub(super) struct EditApplication {
     pub(super) replacements: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum EditApplicationError {
+    #[error("edits[{index}].old_string must not be empty")]
+    EmptyOldString { index: usize },
+    #[error(
+        "String to replace not found in file for edits[{edit_index}].old_string.\nString: {old_string}"
+    )]
+    NotFound {
+        edit_index: usize,
+        old_string: String,
+    },
+    #[error(
+        "Found {occurrences} matches of edits[{edit_index}].old_string. Each old_string must be unique. Provide more context.\nString: {old_string}"
+    )]
+    Duplicate {
+        edit_index: usize,
+        old_string: String,
+        occurrences: usize,
+    },
+    #[error(
+        "edits[{previous_edit_index}] and edits[{current_edit_index}] overlap in {path}. Merge them into one edit or target disjoint regions."
+    )]
+    Overlap {
+        previous_edit_index: usize,
+        current_edit_index: usize,
+        path: String,
+    },
+    #[error("No changes made to {path}.")]
+    NoChanges { path: String },
+}
+
 pub(super) fn apply_edit(
     original: &str,
     request: &EditRequest,
     requested_path: &str,
-) -> Result<EditApplication, String> {
+) -> Result<EditApplication, EditApplicationError> {
     let (bom, content_without_bom) = strip_utf8_bom(original);
     let line_ending = detect_line_ending(content_without_bom);
     let normalized_content = normalize_line_endings(content_without_bom);
@@ -86,10 +117,10 @@ fn apply_unique_edits_to_normalized_content(
     content: &str,
     edits: &[NormalizedTextEdit],
     requested_path: &str,
-) -> Result<AppliedNormalizedContent, String> {
+) -> Result<AppliedNormalizedContent, EditApplicationError> {
     for (index, edit) in edits.iter().enumerate() {
         if edit.old_string.is_empty() {
-            return Err(empty_old_string_error(index));
+            return Err(EditApplicationError::EmptyOldString { index });
         }
     }
 
@@ -106,12 +137,19 @@ fn apply_unique_edits_to_normalized_content(
     let mut matched_edits = Vec::with_capacity(edits.len());
     for (index, edit) in edits.iter().enumerate() {
         let Some(match_result) = find_text(&base_content, &edit.old_string) else {
-            return Err(not_found_error(&edit.old_string, index));
+            return Err(EditApplicationError::NotFound {
+                edit_index: index,
+                old_string: edit.old_string.clone(),
+            });
         };
 
         let occurrences = count_replacement_occurrences(&base_content, &edit.old_string);
         if occurrences > 1 {
-            return Err(duplicate_error(&edit.old_string, index, occurrences));
+            return Err(EditApplicationError::Duplicate {
+                edit_index: index,
+                old_string: edit.old_string.clone(),
+                occurrences,
+            });
         }
 
         matched_edits.push(MatchedTextEdit {
@@ -127,10 +165,11 @@ fn apply_unique_edits_to_normalized_content(
         let previous = &pair[0];
         let current = &pair[1];
         if previous.match_index + previous.match_len > current.match_index {
-            return Err(format!(
-                "edits[{}] and edits[{}] overlap in {requested_path}. Merge them into one edit or target disjoint regions.",
-                previous.edit_index, current.edit_index
-            ));
+            return Err(EditApplicationError::Overlap {
+                previous_edit_index: previous.edit_index,
+                current_edit_index: current.edit_index,
+                path: requested_path.to_string(),
+            });
         }
     }
 
@@ -143,7 +182,9 @@ fn apply_unique_edits_to_normalized_content(
     }
 
     if updated == base_content {
-        return Err(format!("No changes made to {requested_path}."));
+        return Err(EditApplicationError::NoChanges {
+            path: requested_path.to_string(),
+        });
     }
 
     Ok(AppliedNormalizedContent {
@@ -202,22 +243,6 @@ fn count_replacement_occurrences(content: &str, needle: &str) -> usize {
     }
 }
 
-fn empty_old_string_error(index: usize) -> String {
-    format!("edits[{index}].old_string must not be empty")
-}
-
-fn not_found_error(old_string: &str, edit_index: usize) -> String {
-    format!(
-        "String to replace not found in file for edits[{edit_index}].old_string.\nString: {old_string}"
-    )
-}
-
-fn duplicate_error(old_string: &str, edit_index: usize, occurrences: usize) -> String {
-    format!(
-        "Found {occurrences} matches of edits[{edit_index}].old_string. Each old_string must be unique. Provide more context.\nString: {old_string}"
-    )
-}
-
 fn normalize_for_fuzzy_match(text: &str) -> String {
     let normalized = text.nfkc().collect::<String>();
     normalized
@@ -268,5 +293,32 @@ fn restore_line_endings(text: &str, line_ending: LineEnding) -> String {
     match line_ending {
         LineEnding::Lf => text.to_string(),
         LineEnding::CrLf => text.replace('\n', "\r\n"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EditApplicationError, EditRequest, TextEdit, apply_edit};
+
+    #[test]
+    fn apply_edit_reports_duplicate_matches_as_structured_error() {
+        let request = EditRequest {
+            edits: vec![TextEdit {
+                old_string: "same".to_string(),
+                new_string: "different".to_string(),
+            }],
+        };
+
+        let error =
+            apply_edit("same\nsame\n", &request, "notes.txt").expect_err("match is ambiguous");
+
+        assert!(matches!(
+            error,
+            EditApplicationError::Duplicate {
+                edit_index: 0,
+                occurrences: 2,
+                ref old_string,
+            } if old_string == "same"
+        ));
     }
 }

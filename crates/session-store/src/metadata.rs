@@ -125,6 +125,31 @@ impl MetadataIndex {
             .await
     }
 
+    pub(crate) async fn save_global_prompt_assembly_state(
+        &self,
+        state: &runtime_domain::prompt_assembly::persistence::PromptAssemblyScopeState,
+    ) -> Result<(), SessionStoreError> {
+        let index_path = (*self.index_path).clone();
+        let state = state.clone();
+        spawn_index_task(move || {
+            crate::prompt_assembly::save_global_prompt_assembly_state(&index_path, &state)
+        })
+        .await
+    }
+
+    pub(crate) async fn load_global_prompt_assembly_state(
+        &self,
+    ) -> Result<
+        runtime_domain::prompt_assembly::persistence::PromptAssemblyScopeState,
+        SessionStoreError,
+    > {
+        let index_path = (*self.index_path).clone();
+        spawn_index_task(move || {
+            crate::prompt_assembly::load_global_prompt_assembly_state(&index_path)
+        })
+        .await
+    }
+
     async fn run_blocking<T>(
         &self,
         operation: impl FnOnce(PathBuf, PathBuf) -> Result<T, SessionStoreError> + Send + 'static,
@@ -179,20 +204,16 @@ pub(crate) fn with_connection<T>(
         fs::create_dir_all(parent_dir).map_err(io_error)?;
     }
 
-    let mut conn = Connection::open(index_path).map_err(sqlite_error)?;
-    conn.busy_timeout(SQLITE_BUSY_TIMEOUT)
-        .map_err(sqlite_error)?;
+    let mut conn = Connection::open(index_path)?;
+    conn.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
     enable_wal_mode(&conn)?;
 
     operation(&mut conn)
 }
 
 fn enable_wal_mode(conn: &Connection) -> Result<(), SessionStoreError> {
-    conn.pragma_update(None, "journal_mode", "WAL")
-        .map_err(sqlite_error)?;
-    let journal_mode: String = conn
-        .query_row("PRAGMA journal_mode;", [], |row| row.get(0))
-        .map_err(sqlite_error)?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    let journal_mode: String = conn.query_row("PRAGMA journal_mode;", [], |row| row.get(0))?;
     if !journal_mode.eq_ignore_ascii_case("wal") {
         return Err(SessionStoreError::CorruptIndex {
             message: format!("sqlite journal_mode is `{journal_mode}`, expected `wal`"),
@@ -242,9 +263,66 @@ fn initialize_database_schema(conn: &Connection) -> Result<(), SessionStoreError
             ts INTEGER NOT NULL,
             text TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS prompt_assembly_entries (
+            scope TEXT NOT NULL,
+            reference_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            title TEXT NOT NULL,
+            enabled INTEGER NOT NULL,
+            requested_order INTEGER,
+            PRIMARY KEY (scope, reference_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS prompt_assembly_extra_prompts (
+            scope TEXT NOT NULL,
+            reference_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL,
+            PRIMARY KEY (scope, reference_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS prompt_assembly_core_overrides (
+            scope TEXT PRIMARY KEY,
+            body TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS prompt_assembly_skill_discovery_overrides (
+            scope TEXT PRIMARY KEY,
+            body TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS prompt_assembly_skill_discovery_skills (
+            scope TEXT NOT NULL,
+            skill_name TEXT NOT NULL,
+            enabled INTEGER NOT NULL,
+            requested_order INTEGER,
+            PRIMARY KEY (scope, skill_name)
+        );
+
+        CREATE TABLE IF NOT EXISTS prompt_assembly_tool_guideline_overrides (
+            scope TEXT PRIMARY KEY,
+            body TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS prompt_assembly_tool_selections (
+            scope TEXT NOT NULL,
+            tool_name TEXT NOT NULL,
+            enabled INTEGER NOT NULL,
+            requested_order INTEGER,
+            PRIMARY KEY (scope, tool_name)
+        );
+
+        CREATE TABLE IF NOT EXISTS prompt_assembly_dynamic_environment_sources (
+            scope TEXT NOT NULL,
+            snapshot_kind TEXT NOT NULL,
+            source_kind TEXT NOT NULL,
+            enabled INTEGER NOT NULL,
+            PRIMARY KEY (scope, snapshot_kind, source_kind)
+        );
         ",
     )
-    .map_err(sqlite_error)
+    .map_err(SessionStoreError::from)
 }
 
 fn upsert_session_row(conn: &Connection, meta: &SessionMeta) -> Result<(), SessionStoreError> {
@@ -297,8 +375,7 @@ fn upsert_session_row(conn: &Connection, meta: &SessionMeta) -> Result<(), Sessi
             meta.project_dir.as_path().to_string_lossy(),
             meta.jsonl_path.to_string_lossy(),
         ],
-    )
-    .map_err(sqlite_error)?;
+    )?;
 
     Ok(())
 }
@@ -338,8 +415,7 @@ fn get_session_meta_row(
             params![session_id],
             row_to_session_meta,
         )
-        .optional()
-        .map_err(sqlite_error)?;
+        .optional()?;
 
     meta.ok_or(SessionStoreError::SessionNotFound {
         session_id: requested_session_id,
@@ -350,9 +426,8 @@ fn list_session_rows(
     conn: &Connection,
     project_dir: &str,
 ) -> Result<Vec<SessionMeta>, SessionStoreError> {
-    let mut statement = conn
-        .prepare(
-            "
+    let mut statement = conn.prepare(
+        "
             SELECT
                 sessions.session_id,
                 sessions.project_dir,
@@ -374,15 +449,12 @@ fn list_session_rows(
             WHERE sessions.project_dir = ?1
             ORDER BY updated_at DESC, created_at DESC, sessions.session_id DESC
             ",
-        )
-        .map_err(sqlite_error)?;
-    let rows = statement
-        .query_map(params![project_dir], row_to_session_meta)
-        .map_err(sqlite_error)?;
+    )?;
+    let rows = statement.query_map(params![project_dir], row_to_session_meta)?;
 
     let mut sessions = Vec::new();
     for row in rows {
-        sessions.push(row.map_err(sqlite_error)?);
+        sessions.push(row?);
     }
 
     Ok(sessions)
@@ -440,10 +512,6 @@ fn row_to_session_meta(row: &rusqlite::Row<'_>) -> Result<SessionMeta, rusqlite:
 
 fn io_error(source: std::io::Error) -> SessionStoreError {
     SessionStoreError::IoError { source }
-}
-
-fn sqlite_error(source: rusqlite::Error) -> SessionStoreError {
-    SessionStoreError::SqliteError { source }
 }
 
 fn is_sqlite_busy_error(error: &SessionStoreError) -> bool {

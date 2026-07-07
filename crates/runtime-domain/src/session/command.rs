@@ -5,7 +5,7 @@ use super::{ConversationTurnRequest, MessageHistoryEntryId, RuntimeTarget, Sessi
 pub enum RuntimeCommand {
     SubmitConversationTurn {
         target: RuntimeTarget,
-        request: ConversationTurnRequest,
+        request: Box<ConversationTurnRequest>,
     },
     TruncateConversation {
         retained_user_turns: usize,
@@ -51,6 +51,7 @@ pub enum RuntimeCommand {
         entry_id: String,
     },
     LoadMessageHistoryStartupCache,
+    CheckPromptAssemblyMissingSources,
     LoadMessageHistoryPickerRows {
         request_id: SessionLoadRequestId,
     },
@@ -67,7 +68,7 @@ impl RuntimeCommand {
     pub fn submit_conversation_turn(request: ConversationTurnRequest) -> Self {
         Self::SubmitConversationTurn {
             target: request.target(),
-            request,
+            request: Box::new(request),
         }
     }
 
@@ -122,6 +123,7 @@ impl RuntimeCommand {
             | Self::SwitchBranch { .. }
             | Self::SelectEntryRewind { .. }
             | Self::LoadMessageHistoryStartupCache
+            | Self::CheckPromptAssemblyMissingSources
             | Self::LoadMessageHistoryPickerRows { .. }
             | Self::RecordMessageHistory { .. }
             | Self::Reset => None,

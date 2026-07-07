@@ -19,14 +19,14 @@ pub(super) use runtime_domain::{
     },
 };
 pub(super) use session_store::{
-    LocalSessionStore, ProjectDir, SessionHeader, SessionId, SessionListOptions, SessionStore,
-    SessionStoreError,
+    LocalSessionStore, ProjectDir, SessionCatalogStore, SessionHeader, SessionId,
+    SessionLifecycleStore, SessionListOptions, SessionStore, SessionStoreError, SessionTreeStore,
 };
 pub(super) use tokio::sync::mpsc as tokio_mpsc;
 pub(super) use tokio_util::sync::CancellationToken;
 pub(super) use tool_runtime::ToolExecutorRegistry;
 
-pub(super) use super::super::persistence::SessionPersistenceError;
+pub(super) use super::super::persistence::{SessionPersistenceCommand, SessionPersistenceError};
 pub(super) use super::super::{
     ConversationDelta, ConversationEvent, ConversationPermissionBroker, ConversationTimeoutPause,
     ConversationWorker, ConversationWorkerEvent, ProviderContextRepairLedger,
@@ -36,8 +36,8 @@ pub(super) use super::super::{
     run_conversation_worker, run_session_persistence_actor, run_with_soft_timeout,
 };
 pub(super) use crate::{
-    ConversationResponse, PreparedConversationRequest, ProviderConversation, ProviderKind,
-    conversation::PersistedConversationItem,
+    ConversationResponse, PreparedConversationRequest, PreparedTurnOptions, ProviderConversation,
+    ProviderKind, conversation::PersistedConversationItem,
 };
 
 pub(super) fn run_store<T>(

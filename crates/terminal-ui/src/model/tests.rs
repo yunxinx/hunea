@@ -12,10 +12,17 @@ use crate::{
     toast::ToastSeverity,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::style::Modifier;
 use runtime_domain::model_catalog::{
     ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource,
 };
 use runtime_domain::phrases::StatusPhraseOrder;
+use runtime_domain::prompt_assembly::PromptSourceOrigin;
+use runtime_domain::prompt_assembly::persistence::PromptAssemblyScope;
+use runtime_domain::prompt_assembly::{
+    PromptAssemblyDiscoveredSkill, PromptAssemblyExtraPromptCandidate,
+    PromptAssemblyManagerSnapshot, PromptAssemblySelectionState,
+};
 use runtime_domain::provider::ProviderKind;
 use std::path::{Path, PathBuf};
 
@@ -549,6 +556,288 @@ fn at_file_picker_opens_and_tab_completes_common_prefix() {
 }
 
 #[test]
+fn dollar_skill_picker_opens_and_enter_inserts_bound_skill_token() {
+    let mut model = skill_picker_model();
+
+    type_text(&mut model, "$co");
+
+    assert!(model.skill_picker_active());
+    assert!(
+        model
+            .current_skill_picker_render_result()
+            .plain_lines
+            .iter()
+            .any(|line| line.contains("Code Review"))
+    );
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    assert_eq!(effect, None);
+    assert_eq!(model.composer_text(), "$code-review ");
+    assert!(!model.skill_picker_active());
+    let source_message = model.composer.source_message();
+    assert_eq!(source_message.skill_bindings().len(), 1);
+    assert_eq!(source_message.skill_bindings()[0].skill_name, "code-review");
+}
+
+#[test]
+fn hash_custom_prompt_picker_opens_and_enter_inserts_bound_prompt_token() {
+    let mut model = custom_prompt_picker_model();
+
+    type_text(&mut model, "#rev");
+
+    assert!(model.has_current_floating_layer());
+    let floating_rows = rendered_rows_for_model(&mut model, 40, 8);
+    assert!(
+        floating_rows
+            .iter()
+            .any(|row| row.contains("Review Rules") || row.contains("review-rules")),
+        "custom prompt picker should render matching prompt rows: {floating_rows:?}"
+    );
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    assert_eq!(effect, None);
+    assert_eq!(model.composer_text(), "#review-rules ");
+    let source_message = model.composer.source_message();
+    assert_eq!(source_message.custom_prompt_bindings().len(), 1);
+    assert_eq!(
+        source_message.custom_prompt_bindings()[0].reference_id,
+        "review-rules"
+    );
+}
+
+#[test]
+fn custom_prompt_picker_reserves_description_column_like_skill_picker() {
+    let mut model = custom_prompt_picker_model();
+    model.set_window(24, 8);
+
+    type_text(&mut model, "#");
+
+    let lines = model
+        .current_custom_prompt_picker_render_result()
+        .plain_lines;
+    let release_line = lines
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .nth(1)
+        .expect("release checklist row should render");
+
+    assert_eq!(
+        release_line.rfind("... (global)"),
+        Some(12),
+        "custom prompt picker should keep the description column aligned with the skill picker: {release_line:?}"
+    );
+}
+
+#[test]
+fn custom_prompt_picker_renders_body_summary_with_scope_suffix() {
+    let mut model = custom_prompt_picker_model();
+    model.set_window(80, 8);
+
+    type_text(&mut model, "#rev");
+
+    let lines = model
+        .current_custom_prompt_picker_render_result()
+        .plain_lines;
+    let review_line = lines
+        .iter()
+        .find(|line| line.contains("Review Rules"))
+        .expect("review rules row should render");
+
+    assert!(
+        review_line.contains("Review every diff for regressions and missing tests."),
+        "custom prompt picker should show prompt content and scope in the description column: {review_line:?}"
+    );
+    assert!(
+        review_line.trim_end().ends_with("(project)"),
+        "custom prompt picker should pin the scope suffix at the row end: {review_line:?}"
+    );
+    assert!(
+        !review_line.contains("#review-rules"),
+        "custom prompt picker description should not fall back to the reference id when prompt content exists: {review_line:?}"
+    );
+}
+
+#[test]
+fn custom_prompt_picker_does_not_render_reference_id_when_prompt_has_only_title() {
+    let mut model = custom_prompt_picker_model();
+    model.prompt_assembly.candidates.extra_prompts[0].reference_id = "new-prompt-1".to_string();
+    model.prompt_assembly.candidates.extra_prompts[0].title = "测试用的".to_string();
+    model.prompt_assembly.candidates.extra_prompts[0].body = "# 测试用的\n".to_string();
+    model.set_window(80, 8);
+
+    type_text(&mut model, "#new");
+
+    let lines = model
+        .current_custom_prompt_picker_render_result()
+        .plain_lines;
+    let prompt_line = lines
+        .iter()
+        .find(|line| line.contains("测试用的"))
+        .expect("title-only prompt row should render");
+
+    assert!(
+        !prompt_line.contains("#new-prompt-1"),
+        "custom prompt picker should not fall back to the reference id when the prompt body only has a title: {prompt_line:?}"
+    );
+    assert!(
+        prompt_line.trim_end().ends_with("(project)"),
+        "custom prompt picker should still show the scope suffix for title-only prompts: {prompt_line:?}"
+    );
+}
+
+#[test]
+fn custom_prompt_picker_keeps_scope_suffix_visible_at_row_end_when_content_is_long() {
+    let mut model = custom_prompt_picker_model();
+    model.prompt_assembly.candidates.extra_prompts[0].body =
+        "This is a deliberately long custom prompt body that should be clipped before the scope suffix disappears.\n".to_string();
+    model.set_window(36, 8);
+
+    type_text(&mut model, "#rev");
+
+    let lines = model
+        .current_custom_prompt_picker_render_result()
+        .plain_lines;
+    let review_line = lines
+        .iter()
+        .find(|line| line.contains("Review Rules"))
+        .expect("review rules row should render");
+
+    assert!(
+        review_line.trim_end().ends_with("(project)"),
+        "custom prompt picker should keep the scope suffix fixed at the row end when body content is long: {review_line:?}"
+    );
+}
+
+#[test]
+fn moving_cursor_back_onto_bound_skill_token_reopens_skill_picker() {
+    let mut model = skill_picker_model();
+
+    type_text(&mut model, "$co");
+    let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+    type_text(&mut model, "later");
+    assert!(!model.skill_picker_active());
+
+    for _ in 0.."later ".chars().count() {
+        let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Left)));
+    }
+
+    assert!(model.skill_picker_active());
+    assert!(
+        model
+            .current_skill_picker_render_result()
+            .plain_lines
+            .iter()
+            .any(|line| line.contains("Code Review"))
+    );
+}
+
+#[test]
+fn skill_picker_renders_title_and_description_in_separate_columns() {
+    let mut model = skill_picker_model();
+
+    type_text(&mut model, "$");
+
+    let lines = model.current_skill_picker_render_result().plain_lines;
+    let skill_line = lines
+        .iter()
+        .find(|line| line.contains("Code Review"))
+        .expect("skill picker should render matching row");
+
+    assert!(skill_line.contains("Review code"));
+    assert!(!skill_line.contains("[Skill]"));
+    assert!(!skill_line.contains("$code-review - Review code"));
+}
+
+#[test]
+fn skill_picker_keeps_description_column_aligned_across_rows() {
+    let mut model = skill_picker_model();
+
+    type_text(&mut model, "$");
+
+    let lines = model.current_skill_picker_render_result().plain_lines;
+    let code_review_line = lines
+        .iter()
+        .find(|line| line.contains("Code Review"))
+        .expect("code review row should render");
+    let brainstorming_line = lines
+        .iter()
+        .find(|line| line.contains("Brainstorming"))
+        .expect("brainstorming row should render");
+
+    let code_review_description_column = code_review_line
+        .find("Review code")
+        .expect("code review description should render");
+    let brainstorming_description_column = brainstorming_line
+        .find("Explore intent")
+        .expect("brainstorming description should render");
+
+    assert_eq!(
+        code_review_description_column, brainstorming_description_column,
+        "description column should start at the same visual position across rows"
+    );
+}
+
+#[test]
+fn skill_picker_highlights_matched_description_text() {
+    let mut model = skill_picker_model();
+    model.set_window(80, 8);
+    model.set_palette(default_palette(), true);
+
+    type_text(&mut model, "$inspect");
+
+    let rendered = model.current_skill_picker_render_result();
+    let skill_line = rendered
+        .lines
+        .iter()
+        .find(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.content.contains("inspect") || span.content.contains("Inspect"))
+        })
+        .expect("matching skill line should render");
+
+    let highlighted_span = skill_line
+        .spans
+        .iter()
+        .find(|span| span.content.to_ascii_lowercase().contains("inspect"))
+        .expect("matched description span should render separately");
+
+    assert!(
+        highlighted_span.style.bg == default_palette().surface
+            || highlighted_span
+                .style
+                .add_modifier
+                .contains(Modifier::REVERSED),
+        "matched description text should use background-like highlight: {:?}",
+        highlighted_span.style
+    );
+}
+
+#[test]
+fn skill_picker_popup_scrollbar_thumb_reaches_bottom_on_last_page() {
+    let mut model = overflowing_skill_picker_model();
+
+    type_text(&mut model, "$");
+    for _ in 0..9 {
+        let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Down)));
+    }
+
+    let rows = rendered_rows_for_model(&mut model, 40, 8);
+    let last_visible_skill_row = rows
+        .iter()
+        .rposition(|row| row.contains("Skill "))
+        .expect("skill picker should render visible skill rows");
+
+    assert_eq!(
+        rendered_segment(&rows[last_visible_skill_row], 39, 1),
+        "█",
+        "skill picker scrollbar thumb should reach the bottom row on the last page: {rows:?}"
+    );
+}
+
+#[test]
 fn fullscreen_modal_closes_composer_file_picker_state() {
     let root = TempFileTree::new("fullscreen-closes-file-picker");
     root.write_file("src/lib.rs");
@@ -599,6 +888,41 @@ fn file_picker_render_shifts_to_the_completed_directory_prefix() {
     assert!(
         !lines.iter().any(|line| line.contains("src/dir1/dir2")),
         "picker rows should not waste popup width on the already inserted prefix: {lines:?}"
+    );
+}
+
+#[test]
+fn file_picker_highlights_matched_path_fragment() {
+    let root = TempFileTree::new("file-picker-highlight");
+    root.write_file("src/lib.rs");
+    root.write_file("src/main.rs");
+
+    let mut model = file_picker_model(root.path());
+    model.set_palette(default_palette(), true);
+    type_text(&mut model, "@src/li");
+
+    let rendered = model.current_file_picker_render_result();
+    let file_line_index = rendered
+        .plain_lines
+        .iter()
+        .position(|line| line.contains("lib.rs"))
+        .expect("matching file row should render");
+    let file_line = &rendered.lines[file_line_index];
+
+    let highlighted_span = file_line
+        .spans
+        .iter()
+        .find(|span| span.content == "li")
+        .expect("matched path fragment should render separately");
+
+    assert!(
+        highlighted_span.style.bg == default_palette().surface
+            || highlighted_span
+                .style
+                .add_modifier
+                .contains(Modifier::REVERSED),
+        "matched path fragment should use background-like highlight: {:?}",
+        highlighted_span.style
     );
 }
 
@@ -679,6 +1003,43 @@ fn file_picker_popup_renders_vertical_scrollbar_for_overflowing_results() {
 }
 
 #[test]
+fn file_picker_popup_scrollbar_thumb_reaches_bottom_on_last_page() {
+    let root = TempFileTree::new("popup-scrollbar-last-page");
+    for index in 0..10 {
+        root.write_file(&format!("src/file_{index:02}.rs"));
+    }
+
+    let mut model = Model::new_with_options(
+        StartupBannerOptions::default(),
+        ModelOptions {
+            style_mode: StyleMode::Ms,
+            file_picker_popup_height: 5,
+            ..ModelOptions::default()
+        },
+    );
+    model.transcript_mut().clear();
+    model.current_dir = root.path().display().to_string();
+    model.set_window(40, 10);
+    model.set_palette(default_palette(), true);
+    type_text(&mut model, "@s");
+    for _ in 0..9 {
+        let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Down)));
+    }
+
+    let rows = rendered_rows_for_model(&mut model, 40, 10);
+    let last_visible_file_row = rows
+        .iter()
+        .rposition(|row| row.contains("src/file_"))
+        .expect("file picker should render visible file rows");
+
+    assert_eq!(
+        rendered_segment(&rows[last_visible_file_row], 39, 1),
+        "█",
+        "file picker scrollbar thumb should reach the bottom row on the last page: {rows:?}"
+    );
+}
+
+#[test]
 fn at_file_picker_enter_inserts_selected_path_with_prefix_and_space() {
     let root = TempFileTree::new("enter-selected");
     root.write_file("src/lib.rs");
@@ -692,6 +1053,61 @@ fn at_file_picker_enter_inserts_selected_path_with_prefix_and_space() {
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
 
     assert_eq!(model.composer_text(), "@src/lib.rs ");
+    assert!(!model.file_picker_active());
+}
+
+#[test]
+fn at_file_picker_enter_inserts_image_placeholder_and_attachment() {
+    let root = TempFileTree::new("enter-selected-image");
+    root.write_file_with_content("assets/sample.png", valid_png_header());
+    root.write_file("src/main.rs");
+
+    let mut model = conversation_test_model();
+    model.current_dir = root.path().display().to_string();
+    type_text(&mut model, "@assets/s");
+
+    assert!(model.file_picker_active());
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    let source_message = model.composer.source_message();
+    assert_eq!(model.composer_text(), "[Image #1] ");
+    assert_eq!(source_message.attachments().len(), 1);
+    assert!(!model.file_picker_active());
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+    let Some(AppEffect::SendConversationTurn {
+        request,
+        record_message_history,
+    }) = effect
+    else {
+        panic!("expected conversation turn effect");
+    };
+    assert!(record_message_history.is_none());
+    assert_eq!(
+        request
+            .transcript_user_message()
+            .map(|message| message.attachments.len()),
+        Some(1)
+    );
+}
+
+#[test]
+fn at_file_picker_enter_on_exact_image_path_inserts_attachment_instead_of_submitting() {
+    let root = TempFileTree::new("enter-exact-image");
+    root.write_file_with_content("assets/sample.png", valid_png_header());
+
+    let mut model = file_picker_model(root.path());
+    type_text(&mut model, "@assets/sample.png");
+
+    assert!(model.file_picker_active());
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    let source_message = model.composer.source_message();
+    assert!(effect.is_none());
+    assert_eq!(model.composer_text(), "[Image #1] ");
+    assert_eq!(source_message.attachments().len(), 1);
     assert!(!model.file_picker_active());
 }
 
@@ -2745,6 +3161,103 @@ fn file_picker_model(root: &Path) -> Model {
     model
 }
 
+fn skill_picker_model() -> Model {
+    skill_picker_model_with_manual_skills(
+        vec![
+            PromptAssemblyDiscoveredSkill {
+                skill_name: "code-review".to_string(),
+                title: "Code Review".to_string(),
+                description: "Review code and inspect regressions".to_string(),
+                origin: PromptSourceOrigin::Project,
+                selection_scope: PromptAssemblyScope::Project,
+                skill_path: "/tmp/code-review/SKILL.md".into(),
+                body: "# Code Review".to_string(),
+                selection: PromptAssemblySelectionState::from_parts(true, false, None),
+            },
+            PromptAssemblyDiscoveredSkill {
+                skill_name: "brainstorming".to_string(),
+                title: "Brainstorming".to_string(),
+                description: "Explore intent, requirements, and design before implementation"
+                    .to_string(),
+                origin: PromptSourceOrigin::Builtin,
+                selection_scope: PromptAssemblyScope::Project,
+                skill_path: "/tmp/brainstorming/SKILL.md".into(),
+                body: "# Brainstorming".to_string(),
+                selection: PromptAssemblySelectionState::from_parts(true, false, None),
+            },
+        ],
+        8,
+    )
+}
+
+fn overflowing_skill_picker_model() -> Model {
+    let skills = (0..10)
+        .map(|index| PromptAssemblyDiscoveredSkill {
+            skill_name: format!("skill-{index:02}"),
+            title: format!("Skill {index:02}"),
+            description: format!("Skill description {index:02}"),
+            origin: PromptSourceOrigin::Project,
+            selection_scope: PromptAssemblyScope::Project,
+            skill_path: format!("/tmp/skill-{index:02}/SKILL.md").into(),
+            body: format!("# Skill {index:02}"),
+            selection: PromptAssemblySelectionState::from_parts(true, false, None),
+        })
+        .collect();
+    skill_picker_model_with_manual_skills(skills, 5)
+}
+
+fn skill_picker_model_with_manual_skills(
+    manual_skills: Vec<PromptAssemblyDiscoveredSkill>,
+    file_picker_popup_height: u16,
+) -> Model {
+    let mut prompt_assembly = PromptAssemblyManagerSnapshot::default();
+    prompt_assembly.candidates.manual_skills = manual_skills;
+    let mut model = Model::new_with_options(
+        StartupBannerOptions::default(),
+        ModelOptions {
+            file_picker_popup_height,
+            prompt_assembly: Some(prompt_assembly),
+            ..ModelOptions::default()
+        },
+    );
+    model.transcript_mut().clear();
+    model.set_window(40, 8);
+    model.set_palette(default_palette(), true);
+    model
+}
+
+fn custom_prompt_picker_model() -> Model {
+    let mut prompt_assembly = PromptAssemblyManagerSnapshot::default();
+    prompt_assembly.candidates.extra_prompts = vec![
+        PromptAssemblyExtraPromptCandidate {
+            reference_id: "review-rules".to_string(),
+            title: "Review Rules".to_string(),
+            origin: PromptSourceOrigin::Project,
+            body: "Review every diff for regressions and missing tests.".to_string(),
+            selected: false,
+        },
+        PromptAssemblyExtraPromptCandidate {
+            reference_id: "release-checklist".to_string(),
+            title: "Release Checklist".to_string(),
+            origin: PromptSourceOrigin::Global,
+            body: "Verify changelog, version, and rollout notes.".to_string(),
+            selected: false,
+        },
+    ];
+    let mut model = Model::new_with_options(
+        StartupBannerOptions::default(),
+        ModelOptions {
+            file_picker_popup_height: 8,
+            prompt_assembly: Some(prompt_assembly),
+            ..ModelOptions::default()
+        },
+    );
+    model.transcript_mut().clear();
+    model.set_window(40, 8);
+    model.set_palette(default_palette(), true);
+    model
+}
+
 fn file_picker_test_model_catalog() -> ModelCatalog {
     ModelCatalog::new(vec![ModelProvider::new(
         "local",
@@ -2810,4 +3323,8 @@ impl Drop for TempFileTree {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.path);
     }
+}
+
+fn valid_png_header() -> &'static [u8] {
+    &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]
 }

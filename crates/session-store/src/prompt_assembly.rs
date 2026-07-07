@@ -1,0 +1,700 @@
+//! 全局 prompt assembly 持久化（`index.sqlite` 的 prompt assembly 表）。
+
+use std::path::Path;
+
+use runtime_domain::{
+    dynamic_environment::{DynamicEnvironmentSnapshotKind, DynamicEnvironmentSourceKind},
+    prompt_assembly::{
+        PromptSourceKind,
+        persistence::{
+            PersistedPromptAssemblyEntry, PersistedSkillDiscoverySkillEntry,
+            PersistedToolSelectionEntry, PromptAssemblyScope, PromptAssemblyScopeState,
+            StoredPromptBody, sort_prompt_assembly_entries, sort_skill_discovery_skill_entries,
+            sort_tool_selection_entries,
+        },
+    },
+};
+use rusqlite::{OptionalExtension, TransactionBehavior, params};
+
+use crate::SessionStoreError;
+
+pub(crate) fn save_global_prompt_assembly_state(
+    index_path: &Path,
+    state: &PromptAssemblyScopeState,
+) -> Result<(), SessionStoreError> {
+    if state.scope() != PromptAssemblyScope::Global {
+        return Err(SessionStoreError::ConfigurationError {
+            message: format!(
+                "global prompt assembly persistence only accepts global scope, got {}",
+                state.scope().as_stored_value()
+            ),
+        });
+    }
+
+    crate::metadata::with_connection(index_path, |conn| {
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let scope = PromptAssemblyScope::Global.as_stored_value();
+
+        transaction.execute(
+            "DELETE FROM prompt_assembly_entries WHERE scope = ?1",
+            params![scope],
+        )?;
+        transaction.execute(
+            "DELETE FROM prompt_assembly_extra_prompts WHERE scope = ?1",
+            params![scope],
+        )?;
+        transaction.execute(
+            "DELETE FROM prompt_assembly_core_overrides WHERE scope = ?1",
+            params![scope],
+        )?;
+        transaction.execute(
+            "DELETE FROM prompt_assembly_skill_discovery_overrides WHERE scope = ?1",
+            params![scope],
+        )?;
+        transaction.execute(
+            "DELETE FROM prompt_assembly_skill_discovery_skills WHERE scope = ?1",
+            params![scope],
+        )?;
+        transaction.execute(
+            "DELETE FROM prompt_assembly_tool_guideline_overrides WHERE scope = ?1",
+            params![scope],
+        )?;
+        transaction.execute(
+            "DELETE FROM prompt_assembly_tool_selections WHERE scope = ?1",
+            params![scope],
+        )?;
+        transaction.execute(
+            "DELETE FROM prompt_assembly_dynamic_environment_sources WHERE scope = ?1",
+            params![scope],
+        )?;
+
+        let mut entries = state.entries().to_vec();
+        sort_prompt_assembly_entries(&mut entries);
+        for entry in entries {
+            transaction.execute(
+                "INSERT INTO prompt_assembly_entries (
+                        scope,
+                        reference_id,
+                        kind,
+                        title,
+                        enabled,
+                        requested_order
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    scope,
+                    entry.reference_id,
+                    prompt_source_kind_value(entry.kind),
+                    entry.title,
+                    entry.enabled,
+                    entry.requested_order.map(i64::from),
+                ],
+            )?;
+        }
+
+        for prompt in state.extra_prompts() {
+            transaction.execute(
+                "INSERT INTO prompt_assembly_extra_prompts (
+                        scope,
+                        reference_id,
+                        title,
+                        body
+                    ) VALUES (?1, ?2, ?3, ?4)",
+                params![scope, prompt.reference_id, prompt.title, prompt.body],
+            )?;
+        }
+
+        if let Some(body) = state.core_system_override() {
+            transaction.execute(
+                "INSERT INTO prompt_assembly_core_overrides (scope, body) VALUES (?1, ?2)",
+                params![scope, body],
+            )?;
+        }
+
+        if let Some(body) = state.skill_discovery_override() {
+            transaction
+                .execute(
+                    "INSERT INTO prompt_assembly_skill_discovery_overrides (scope, body) VALUES (?1, ?2)",
+                    params![scope, body],
+                )
+                ?;
+        }
+
+        let mut skill_discovery_skills = state.skill_discovery_skills().to_vec();
+        sort_skill_discovery_skill_entries(&mut skill_discovery_skills);
+        for skill in skill_discovery_skills {
+            transaction.execute(
+                "INSERT INTO prompt_assembly_skill_discovery_skills (
+                        scope,
+                        skill_name,
+                        enabled,
+                        requested_order
+                    ) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    scope,
+                    skill.skill_name,
+                    skill.enabled,
+                    skill.requested_order.map(i64::from),
+                ],
+            )?;
+        }
+
+        if let Some(body) = state.tool_guidelines_override() {
+            transaction
+                .execute(
+                    "INSERT INTO prompt_assembly_tool_guideline_overrides (scope, body) VALUES (?1, ?2)",
+                    params![scope, body],
+                )
+                ?;
+        }
+
+        let mut tool_selections = state.tool_selections().to_vec();
+        sort_tool_selection_entries(&mut tool_selections);
+        for tool in tool_selections {
+            transaction.execute(
+                "INSERT INTO prompt_assembly_tool_selections (
+                        scope,
+                        tool_name,
+                        enabled,
+                        requested_order
+                    ) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    scope,
+                    tool.tool_name,
+                    tool.enabled,
+                    tool.requested_order.map(i64::from),
+                ],
+            )?;
+        }
+
+        for source in state.dynamic_environment_sources() {
+            transaction.execute(
+                "INSERT INTO prompt_assembly_dynamic_environment_sources (
+                        scope,
+                        snapshot_kind,
+                        source_kind,
+                        enabled
+                    ) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    scope,
+                    dynamic_environment_snapshot_kind_value(source.snapshot_kind),
+                    dynamic_environment_source_kind_value(source.source_kind),
+                    source.enabled,
+                ],
+            )?;
+        }
+
+        transaction.commit()?;
+        Ok(())
+    })
+}
+
+pub(crate) fn load_global_prompt_assembly_state(
+    index_path: &Path,
+) -> Result<PromptAssemblyScopeState, SessionStoreError> {
+    crate::metadata::with_connection(index_path, |conn| {
+        let scope = PromptAssemblyScope::Global.as_stored_value();
+        let mut entries_statement = conn.prepare(
+            "SELECT reference_id, kind, title, enabled, requested_order
+                 FROM prompt_assembly_entries
+                 WHERE scope = ?1
+                 ORDER BY
+                    CASE WHEN requested_order IS NULL THEN 1 ELSE 0 END,
+                    requested_order ASC,
+                    reference_id ASC",
+        )?;
+        let mut entries = entries_statement
+            .query_map(params![scope], |row| {
+                let kind = parse_prompt_source_kind(&row.get::<_, String>(1)?)?;
+                let requested_order = row
+                    .get::<_, Option<i64>>(4)?
+                    .map(|value| {
+                        u16::try_from(value)
+                            .map_err(|_| stored_requested_order_out_of_range(4, value))
+                    })
+                    .transpose()?;
+                Ok(PersistedPromptAssemblyEntry {
+                    reference_id: row.get(0)?,
+                    kind,
+                    title: row.get(2)?,
+                    enabled: row.get(3)?,
+                    requested_order,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        sort_prompt_assembly_entries(&mut entries);
+
+        let mut prompts_statement = conn.prepare(
+            "SELECT reference_id, title, body
+                 FROM prompt_assembly_extra_prompts
+                 WHERE scope = ?1
+                 ORDER BY reference_id ASC",
+        )?;
+        let extra_prompts = prompts_statement
+            .query_map(params![scope], |row| {
+                Ok(StoredPromptBody {
+                    reference_id: row.get(0)?,
+                    title: row.get(1)?,
+                    body: row.get(2)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let core_system_override = conn
+            .query_row(
+                "SELECT body FROM prompt_assembly_core_overrides WHERE scope = ?1",
+                params![scope],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let skill_discovery_override = conn
+            .query_row(
+                "SELECT body FROM prompt_assembly_skill_discovery_overrides WHERE scope = ?1",
+                params![scope],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let mut discovery_skills_statement = conn.prepare(
+            "SELECT skill_name, enabled, requested_order
+                 FROM prompt_assembly_skill_discovery_skills
+                 WHERE scope = ?1
+                 ORDER BY
+                    CASE WHEN requested_order IS NULL THEN 1 ELSE 0 END,
+                    requested_order ASC,
+                    skill_name ASC",
+        )?;
+        let mut skill_discovery_skills = discovery_skills_statement
+            .query_map(params![scope], |row| {
+                let requested_order = row
+                    .get::<_, Option<i64>>(2)?
+                    .map(|value| {
+                        u16::try_from(value)
+                            .map_err(|_| stored_requested_order_out_of_range(2, value))
+                    })
+                    .transpose()?;
+                Ok(PersistedSkillDiscoverySkillEntry {
+                    skill_name: row.get(0)?,
+                    enabled: row.get(1)?,
+                    requested_order,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        sort_skill_discovery_skill_entries(&mut skill_discovery_skills);
+
+        let tool_guidelines_override = conn
+            .query_row(
+                "SELECT body FROM prompt_assembly_tool_guideline_overrides WHERE scope = ?1",
+                params![scope],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let mut tool_selections_statement = conn.prepare(
+            "SELECT tool_name, enabled, requested_order
+                 FROM prompt_assembly_tool_selections
+                 WHERE scope = ?1
+                 ORDER BY
+                    CASE WHEN requested_order IS NULL THEN 1 ELSE 0 END,
+                    requested_order ASC,
+                    tool_name ASC",
+        )?;
+        let mut tool_selections = tool_selections_statement
+            .query_map(params![scope], |row| {
+                let requested_order = row
+                    .get::<_, Option<i64>>(2)?
+                    .map(|value| {
+                        u16::try_from(value)
+                            .map_err(|_| stored_requested_order_out_of_range(2, value))
+                    })
+                    .transpose()?;
+                Ok(PersistedToolSelectionEntry {
+                    tool_name: row.get(0)?,
+                    enabled: row.get(1)?,
+                    requested_order,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        sort_tool_selection_entries(&mut tool_selections);
+
+        let mut dynamic_environment_statement = conn.prepare(
+            "SELECT snapshot_kind, source_kind, enabled
+                 FROM prompt_assembly_dynamic_environment_sources
+                 WHERE scope = ?1
+                 ORDER BY snapshot_kind ASC, source_kind ASC",
+        )?;
+        let dynamic_environment_sources = dynamic_environment_statement
+            .query_map(params![scope], |row| {
+                Ok(
+                    runtime_domain::dynamic_environment::DynamicEnvironmentSourceSelection {
+                        snapshot_kind: parse_dynamic_environment_snapshot_kind(
+                            &row.get::<_, String>(0)?,
+                        )?,
+                        source_kind: parse_dynamic_environment_source_kind(
+                            &row.get::<_, String>(1)?,
+                        )?,
+                        enabled: row.get(2)?,
+                    },
+                )
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut state = PromptAssemblyScopeState::new(PromptAssemblyScope::Global);
+        state.set_core_system_override(core_system_override);
+        state.set_skill_discovery_override(skill_discovery_override);
+        state.set_tool_guidelines_override(tool_guidelines_override);
+        state.set_entries(entries);
+        state.set_skill_discovery_skills(skill_discovery_skills);
+        state.set_tool_selections(tool_selections);
+        state.set_dynamic_environment_sources(dynamic_environment_sources);
+        state.set_extra_prompts(extra_prompts);
+        Ok(state)
+    })
+}
+
+fn prompt_source_kind_value(kind: PromptSourceKind) -> &'static str {
+    match kind {
+        PromptSourceKind::CoreSystemPrompt => "core_system_prompt",
+        PromptSourceKind::InstructionsFile => "instructions_file",
+        PromptSourceKind::ExtraPrompt => "extra_prompt",
+        PromptSourceKind::SkillDiscovery => "skill_discovery",
+        PromptSourceKind::LongLivedSkill => "long_lived_skill",
+        PromptSourceKind::ToolGuidelines => "tool_guidelines",
+        PromptSourceKind::DynamicEnvironmentBaseline => "dynamic_environment_baseline",
+        PromptSourceKind::DynamicEnvironmentChanges => "dynamic_environment_changes",
+    }
+}
+
+fn parse_prompt_source_kind(value: &str) -> Result<PromptSourceKind, rusqlite::Error> {
+    match value {
+        "core_system_prompt" => Ok(PromptSourceKind::CoreSystemPrompt),
+        "instructions_file" => Ok(PromptSourceKind::InstructionsFile),
+        "extra_prompt" => Ok(PromptSourceKind::ExtraPrompt),
+        "skill_discovery" => Ok(PromptSourceKind::SkillDiscovery),
+        "long_lived_skill" => Ok(PromptSourceKind::LongLivedSkill),
+        "tool_guidelines" => Ok(PromptSourceKind::ToolGuidelines),
+        "dynamic_environment_baseline" => Ok(PromptSourceKind::DynamicEnvironmentBaseline),
+        "dynamic_environment_changes" => Ok(PromptSourceKind::DynamicEnvironmentChanges),
+        _ => Err(unknown_stored_enum_value(1, "kind", value)),
+    }
+}
+
+fn dynamic_environment_snapshot_kind_value(kind: DynamicEnvironmentSnapshotKind) -> &'static str {
+    match kind {
+        DynamicEnvironmentSnapshotKind::Baseline => "baseline",
+        DynamicEnvironmentSnapshotKind::Changes => "changes",
+    }
+}
+
+fn parse_dynamic_environment_snapshot_kind(
+    value: &str,
+) -> Result<DynamicEnvironmentSnapshotKind, rusqlite::Error> {
+    match value {
+        "baseline" => Ok(DynamicEnvironmentSnapshotKind::Baseline),
+        "changes" => Ok(DynamicEnvironmentSnapshotKind::Changes),
+        _ => Err(unknown_stored_enum_value(0, "snapshot_kind", value)),
+    }
+}
+
+fn dynamic_environment_source_kind_value(kind: DynamicEnvironmentSourceKind) -> &'static str {
+    match kind {
+        DynamicEnvironmentSourceKind::GitReference => "git_reference",
+        DynamicEnvironmentSourceKind::GitWorkingTree => "git_working_tree",
+        DynamicEnvironmentSourceKind::Date => "date",
+        DynamicEnvironmentSourceKind::Workdir => "workdir",
+    }
+}
+
+fn parse_dynamic_environment_source_kind(
+    value: &str,
+) -> Result<DynamicEnvironmentSourceKind, rusqlite::Error> {
+    match value {
+        "git_reference" => Ok(DynamicEnvironmentSourceKind::GitReference),
+        "git_working_tree" => Ok(DynamicEnvironmentSourceKind::GitWorkingTree),
+        "date" => Ok(DynamicEnvironmentSourceKind::Date),
+        "workdir" => Ok(DynamicEnvironmentSourceKind::Workdir),
+        _ => Err(unknown_stored_enum_value(1, "source_kind", value)),
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("unknown {column} value `{value}`")]
+struct UnknownStoredEnumValue {
+    column: &'static str,
+    value: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{column} value {value} exceeds u16 range")]
+struct StoredRequestedOrderOutOfRange {
+    column: &'static str,
+    value: i64,
+}
+
+fn unknown_stored_enum_value(index: usize, column: &'static str, value: &str) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        index,
+        rusqlite::types::Type::Text,
+        Box::new(UnknownStoredEnumValue {
+            column,
+            value: value.to_string(),
+        }),
+    )
+}
+
+fn stored_requested_order_out_of_range(index: usize, value: i64) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        index,
+        rusqlite::types::Type::Integer,
+        Box::new(StoredRequestedOrderOutOfRange {
+            column: "requested_order",
+            value,
+        }),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use runtime_domain::prompt_assembly::{
+        PromptAssemblyInput, PromptSourceInactiveReason, PromptSourceOrigin, PromptSourceStatus,
+        resolve_prompt_assembly,
+    };
+    use tempfile::tempdir;
+
+    use super::*;
+
+    fn sample_global_state() -> PromptAssemblyScopeState {
+        let mut state = PromptAssemblyScopeState::new(PromptAssemblyScope::Global);
+        state.set_core_system_override(Some("global core override".to_string()));
+        state.set_entries(vec![
+            PersistedPromptAssemblyEntry {
+                reference_id: "skill-discovery".to_string(),
+                kind: PromptSourceKind::SkillDiscovery,
+                title: "Skill discovery source".to_string(),
+                enabled: true,
+                requested_order: Some(5),
+            },
+            PersistedPromptAssemblyEntry {
+                reference_id: "shared-rules".to_string(),
+                kind: PromptSourceKind::ExtraPrompt,
+                title: "shared-rules".to_string(),
+                enabled: true,
+                requested_order: Some(10),
+            },
+        ]);
+        state.set_extra_prompts(vec![StoredPromptBody {
+            reference_id: "shared-rules".to_string(),
+            title: "shared-rules".to_string(),
+            body: "global rules".to_string(),
+        }]);
+        state
+    }
+
+    #[tokio::test]
+    async fn global_prompt_assembly_roundtrip_persists_entries_bodies_and_core_override() {
+        let root = tempdir().expect("tempdir should exist");
+        let store = crate::LocalSessionStore::open_in(root.path().to_path_buf())
+            .await
+            .expect("local session store should open");
+        let state = sample_global_state();
+
+        crate::store::PromptAssemblyStore::save_global_prompt_assembly_state(&store, &state)
+            .await
+            .expect("global prompt assembly should save");
+        let loaded = crate::store::PromptAssemblyStore::load_global_prompt_assembly_state(&store)
+            .await
+            .expect("global prompt assembly should load");
+
+        assert_eq!(loaded, state);
+    }
+
+    #[tokio::test]
+    async fn global_prompt_assembly_roundtrip_uses_domain_natural_sorting() {
+        let root = tempdir().expect("tempdir should exist");
+        let store = crate::LocalSessionStore::open_in(root.path().to_path_buf())
+            .await
+            .expect("local session store should open");
+        let mut state = PromptAssemblyScopeState::new(PromptAssemblyScope::Global);
+        state.set_entries(vec![
+            PersistedPromptAssemblyEntry {
+                reference_id: "prompt-10".to_string(),
+                kind: PromptSourceKind::ExtraPrompt,
+                title: "Prompt 10".to_string(),
+                enabled: true,
+                requested_order: None,
+            },
+            PersistedPromptAssemblyEntry {
+                reference_id: "prompt-2".to_string(),
+                kind: PromptSourceKind::ExtraPrompt,
+                title: "Prompt 2".to_string(),
+                enabled: true,
+                requested_order: None,
+            },
+        ]);
+        state.set_skill_discovery_skills(vec![
+            PersistedSkillDiscoverySkillEntry {
+                skill_name: "skill-10".to_string(),
+                enabled: true,
+                requested_order: None,
+            },
+            PersistedSkillDiscoverySkillEntry {
+                skill_name: "skill-2".to_string(),
+                enabled: true,
+                requested_order: None,
+            },
+        ]);
+        state.set_tool_selections(vec![
+            PersistedToolSelectionEntry {
+                tool_name: "tool-10".to_string(),
+                enabled: true,
+                requested_order: None,
+            },
+            PersistedToolSelectionEntry {
+                tool_name: "tool-2".to_string(),
+                enabled: true,
+                requested_order: None,
+            },
+        ]);
+
+        crate::store::PromptAssemblyStore::save_global_prompt_assembly_state(&store, &state)
+            .await
+            .expect("global prompt assembly should save");
+        let loaded = crate::store::PromptAssemblyStore::load_global_prompt_assembly_state(&store)
+            .await
+            .expect("global prompt assembly should load");
+
+        assert_eq!(
+            loaded
+                .entries()
+                .iter()
+                .map(|entry| entry.reference_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["prompt-2", "prompt-10"]
+        );
+        assert_eq!(
+            loaded
+                .skill_discovery_skills()
+                .iter()
+                .map(|entry| entry.skill_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["skill-2", "skill-10"]
+        );
+        assert_eq!(
+            loaded
+                .tool_selections()
+                .iter()
+                .map(|entry| entry.tool_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["tool-2", "tool-10"]
+        );
+    }
+
+    #[test]
+    fn prompt_source_kind_decode_uses_domain_error_source() {
+        let error = parse_prompt_source_kind("unknown_kind")
+            .expect_err("unknown prompt source kind should fail");
+        let rusqlite::Error::FromSqlConversionFailure(_, _, source) = error else {
+            panic!("unknown kind should be reported as a sqlite conversion failure");
+        };
+        let source = source
+            .downcast_ref::<UnknownStoredEnumValue>()
+            .expect("conversion failure should retain the domain decode error");
+
+        assert_eq!(source.column, "kind");
+        assert_eq!(source.value, "unknown_kind");
+    }
+
+    #[tokio::test]
+    async fn loaded_project_scope_can_override_loaded_global_scope_at_resolution_time() {
+        let root = tempdir().expect("tempdir should exist");
+        let work_dir = root.path().join("repo");
+        std::fs::create_dir_all(&work_dir).expect("work dir should exist");
+        let store = crate::LocalSessionStore::open_in(root.path().join("hunea"))
+            .await
+            .expect("local session store should open");
+
+        let global_state = sample_global_state();
+        crate::store::PromptAssemblyStore::save_global_prompt_assembly_state(&store, &global_state)
+            .await
+            .expect("global prompt assembly should save");
+        let loaded_global =
+            crate::store::PromptAssemblyStore::load_global_prompt_assembly_state(&store)
+                .await
+                .expect("global prompt assembly should load");
+
+        let mut project_state =
+            runtime_domain::prompt_assembly::persistence::PromptAssemblyScopeState::new(
+                PromptAssemblyScope::Project,
+            );
+        project_state.set_core_system_override(Some("project core override".to_string()));
+        project_state.set_entries(vec![PersistedPromptAssemblyEntry {
+            reference_id: "shared-rules".to_string(),
+            kind: PromptSourceKind::ExtraPrompt,
+            title: "shared-rules".to_string(),
+            enabled: true,
+            requested_order: Some(10),
+        }]);
+        project_state.set_extra_prompts(vec![StoredPromptBody {
+            reference_id: "shared-rules".to_string(),
+            title: "shared-rules".to_string(),
+            body: "project rules".to_string(),
+        }]);
+        runtime_domain::prompt_assembly::persistence::save_project_prompt_assembly_state(
+            &work_dir,
+            &project_state,
+        )
+        .expect("project prompt assembly should save");
+        let loaded_project =
+            runtime_domain::prompt_assembly::persistence::load_project_prompt_assembly_state(
+                &work_dir,
+            )
+            .expect("project prompt assembly should load");
+
+        let input = PromptAssemblyInput {
+            core_system: runtime_domain::prompt_assembly::CoreSystemPromptInput {
+                global_override_present: loaded_global.core_system_override().is_some(),
+                project_override_present: loaded_project.core_system_override().is_some(),
+            },
+            candidates: vec![
+                runtime_domain::prompt_assembly::PromptSourceCandidate {
+                    reference_id: "shared-rules".to_string(),
+                    kind: PromptSourceKind::ExtraPrompt,
+                    title: "shared-rules".to_string(),
+                    origin: Some(PromptSourceOrigin::Global),
+                    collision_key: Some("shared-rules".to_string()),
+                    state: runtime_domain::prompt_assembly::PromptSourceCandidateState::Enabled,
+                    requested_order: Some(10),
+                },
+                runtime_domain::prompt_assembly::PromptSourceCandidate {
+                    reference_id: "shared-rules".to_string(),
+                    kind: PromptSourceKind::ExtraPrompt,
+                    title: "shared-rules".to_string(),
+                    origin: Some(PromptSourceOrigin::Project),
+                    collision_key: Some("shared-rules".to_string()),
+                    state: runtime_domain::prompt_assembly::PromptSourceCandidateState::Enabled,
+                    requested_order: Some(10),
+                },
+            ],
+        };
+
+        let snapshot = resolve_prompt_assembly(&input);
+
+        assert_eq!(
+            snapshot.active_sources[0].origin,
+            Some(PromptSourceOrigin::Project)
+        );
+        assert!(
+            snapshot.inactive_sources.iter().any(|source| {
+                source.reference_id == "shared-rules"
+                    && matches!(
+                        source.status,
+                        PromptSourceStatus::Inactive {
+                            reason: PromptSourceInactiveReason::Shadowed,
+                        }
+                    )
+                    && source.origin == Some(PromptSourceOrigin::Global)
+            }),
+            "loaded global state should stay present but be shadowed by project state"
+        );
+    }
+}

@@ -1,5 +1,5 @@
 use provider_protocol::{
-    ContentBlock, ProviderError, ToolCall, ToolDefinition, visible_text_from_blocks,
+    ContentBlock, ImageDetail, ProviderError, ToolCall, ToolDefinition, visible_text_from_blocks,
 };
 use serde_json::{Map, Value, json};
 
@@ -7,6 +7,12 @@ use serde_json::{Map, Value, json};
 pub(super) struct AssistantProjection {
     pub(super) full_message: Value,
     pub(super) fragment_message: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ToolResultMessageProjection {
+    pub(super) tool_message: Value,
+    pub(super) image_parts: Vec<Value>,
 }
 
 pub(super) fn non_assistant_visible_text(blocks: &[ContentBlock]) -> Result<String, ProviderError> {
@@ -32,15 +38,42 @@ pub(super) fn user_message_value(content: &[ContentBlock]) -> Result<Value, Prov
     }))
 }
 
-pub(super) fn tool_result_message_value(
+pub(super) fn tool_result_message_projection(
     call_id: &str,
     content: &[ContentBlock],
-) -> Result<Value, ProviderError> {
-    Ok(json!({
+) -> Result<ToolResultMessageProjection, ProviderError> {
+    let text = non_assistant_visible_text(content)?;
+    let image_parts = content
+        .iter()
+        .filter_map(tool_result_image_content_part)
+        .collect::<Vec<_>>();
+    let tool_content = if text.is_empty() && !image_parts.is_empty() {
+        "(see attached image)".to_string()
+    } else {
+        text
+    };
+    let tool_message = json!({
         "role": "tool",
         "tool_call_id": call_id,
-        "content": non_assistant_visible_text(content)?,
-    }))
+        "content": tool_content,
+    });
+    Ok(ToolResultMessageProjection {
+        tool_message,
+        image_parts,
+    })
+}
+
+pub(super) fn tool_result_image_attachment_message(image_parts: Vec<Value>) -> Value {
+    let mut user_content = Vec::with_capacity(image_parts.len() + 1);
+    user_content.push(json!({
+        "type": "text",
+        "text": "Attached image(s) from tool result:",
+    }));
+    user_content.extend(image_parts);
+    json!({
+        "role": "user",
+        "content": user_content,
+    })
 }
 
 pub(super) fn assistant_projection(
@@ -136,11 +169,13 @@ fn openai_user_content_part(block: &ContentBlock) -> Result<Option<Value>, Provi
         ContentBlock::Image {
             data_base64,
             mime_type,
+            detail,
             ..
-        } => Ok(Some(json!({
-            "type": "image_url",
-            "image_url": { "url": data_uri(mime_type, data_base64) },
-        }))),
+        } => Ok(Some(openai_image_url_content_part(
+            mime_type,
+            data_base64,
+            *detail,
+        ))),
         ContentBlock::Audio {
             data_base64,
             mime_type,
@@ -183,6 +218,52 @@ fn openai_user_content_part(block: &ContentBlock) -> Result<Option<Value>, Provi
         ContentBlock::ToolCall(_) => Err(ProviderError::Protocol(
             "tool call content is only valid on assistant messages".to_string(),
         )),
+    }
+}
+
+fn tool_result_image_content_part(block: &ContentBlock) -> Option<Value> {
+    let ContentBlock::Image {
+        data_base64,
+        mime_type,
+        detail,
+        ..
+    } = block
+    else {
+        return None;
+    };
+    Some(openai_image_url_content_part(
+        mime_type,
+        data_base64,
+        *detail,
+    ))
+}
+
+fn openai_image_url_content_part(
+    mime_type: &str,
+    data_base64: &str,
+    detail: Option<ImageDetail>,
+) -> Value {
+    let mut image_url = Map::new();
+    image_url.insert(
+        "url".to_string(),
+        Value::String(data_uri(mime_type, data_base64)),
+    );
+    if let Some(detail) = chat_image_detail(detail) {
+        image_url.insert("detail".to_string(), Value::String(detail.to_string()));
+    }
+
+    json!({
+        "type": "image_url",
+        "image_url": image_url,
+    })
+}
+
+fn chat_image_detail(detail: Option<ImageDetail>) -> Option<&'static str> {
+    match detail? {
+        ImageDetail::Auto => Some("auto"),
+        ImageDetail::Low => Some("low"),
+        ImageDetail::High => Some("high"),
+        ImageDetail::Original => None,
     }
 }
 

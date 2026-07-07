@@ -10,20 +10,24 @@ use runtime_domain::{envinfo, phrases};
 use session_store::{LocalSessionStore, SessionHeader, SessionId, SessionStore};
 use terminal_ui::{self, StartupBannerOptions};
 
+mod dynamic_environment;
 mod options_mapping;
+mod prompt_assembly;
 mod replay;
 mod runtime;
+mod session_store_bridge;
 
 use options_mapping::{
     model_options_from_app_config_and_models, model_options_from_config_and_models,
     runtime_options_from_app_config_and_models,
 };
+use prompt_assembly::{PromptAssemblyWorkspace, dynamic_environment_session_config_from_manager};
 use replay::write_terminal_replay_on_exit;
 pub use replay::{
     write_terminal_replay, write_terminal_replay_preserving_ansi,
     write_terminal_replay_with_context,
 };
-use runtime::{AppRuntimeCoordinator, AppRuntimeOptions};
+use runtime::{AppRuntimeCoordinator, AppRuntimeOptions, tool_definitions_for_managed_search};
 
 #[cfg(test)]
 use app_config::appconfig::{
@@ -71,18 +75,20 @@ pub fn run_with_writer<W: Write>(
 ) -> Result<()> {
     let loaded_models = provider_models::load().wrap_err("failed to load model config")?;
     let loaded_phrases = phrases::load().wrap_err("failed to load phrase config")?;
+    let mut model_options =
+        model_options_from_config_and_models(tui_config, &loaded_models, &loaded_phrases);
     let mut runtime_options = AppRuntimeOptions {
         loaded_models: loaded_models.clone(),
         ..AppRuntimeOptions::default()
     };
-    attach_default_session_persistence(&mut runtime_options, &loaded_models)
+    attach_default_session_persistence(&mut runtime_options, &mut model_options, &loaded_models)
         .wrap_err("failed to initialize session persistence")?;
     let mut runtime_coordinator = AppRuntimeCoordinator::new(runtime_options)
         .map_err(color_eyre::eyre::Report::msg)
         .wrap_err("failed to initialize app runtime coordinator")?;
     let model = terminal_ui::run_with_runtime_coordinator(
         StartupBannerOptions::default(),
-        model_options_from_config_and_models(tui_config, &loaded_models, &loaded_phrases),
+        model_options,
         &mut runtime_coordinator,
     )
     .wrap_err("failed to run tui application")?;
@@ -101,15 +107,17 @@ pub fn run_with_config_writer<W: Write>(
 ) -> Result<()> {
     let loaded_models = provider_models::load().wrap_err("failed to load model config")?;
     let loaded_phrases = phrases::load().wrap_err("failed to load phrase config")?;
+    let mut model_options =
+        model_options_from_app_config_and_models(config, &loaded_models, &loaded_phrases);
     let mut runtime_options = runtime_options_from_app_config_and_models(config, &loaded_models);
-    attach_default_session_persistence(&mut runtime_options, &loaded_models)
+    attach_default_session_persistence(&mut runtime_options, &mut model_options, &loaded_models)
         .wrap_err("failed to initialize session persistence")?;
     let mut runtime_coordinator = AppRuntimeCoordinator::new(runtime_options)
         .map_err(color_eyre::eyre::Report::msg)
         .wrap_err("failed to initialize app runtime coordinator")?;
     let model = terminal_ui::run_with_runtime_coordinator(
         StartupBannerOptions::default(),
-        model_options_from_app_config_and_models(config, &loaded_models, &loaded_phrases),
+        model_options,
         &mut runtime_coordinator,
     )
     .wrap_err("failed to run tui application")?;
@@ -122,6 +130,7 @@ pub fn run_with_config_writer<W: Write>(
 
 fn attach_default_session_persistence(
     options: &mut AppRuntimeOptions,
+    model_options: &mut terminal_ui::ModelOptions,
     loaded_models: &provider_models::LoadedModelCatalog,
 ) -> Result<()> {
     let store = open_local_session_store()?;
@@ -133,26 +142,34 @@ fn attach_default_session_persistence(
         .map(|selection| selection.model_id.clone())
         .unwrap_or_default();
 
-    options.session_store = Some(store);
-    options.session_header_template = Some(SessionHeader {
+    let session_header = SessionHeader {
         session_id: SessionId::new(),
-        work_dir,
+        work_dir: work_dir.clone(),
         session_name: None,
         initial_model,
         git_head,
         cli_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-    });
+    };
+    options.session_store = Some(Arc::clone(&store));
+    options.session_header_template = Some(session_header);
+    let tool_definitions = tool_definitions_for_managed_search(&options.managed_search_tools);
+    let loaded_prompt_assembly =
+        PromptAssemblyWorkspace::new(work_dir.as_path(), &tool_definitions).load_manager(store)?;
+    model_options.prompt_assembly = Some(loaded_prompt_assembly.clone());
+    options.initial_prompt_prelude = Some(loaded_prompt_assembly.resolution.prelude.clone());
+    options.initial_dynamic_environment_session_config = Some(
+        dynamic_environment_session_config_from_manager(&loaded_prompt_assembly),
+    );
+    options.prompt_assembly_manager = Some(loaded_prompt_assembly);
     Ok(())
 }
 
 fn open_local_session_store() -> Result<Arc<dyn SessionStore>> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .wrap_err("start session store runtime")?;
-    let store = runtime
-        .block_on(LocalSessionStore::open())
-        .wrap_err("open local session store")?;
+    let store = session_store_bridge::run_session_store_future(
+        LocalSessionStore::open,
+        "start session store runtime",
+    )?
+    .wrap_err("open local session store")?;
     Ok(Arc::new(store))
 }
 

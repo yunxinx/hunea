@@ -49,6 +49,7 @@ use persistence::{
 };
 
 const TIMEOUT_REPAIR_GRACE: Duration = Duration::from_secs(2);
+const SESSION_PERSISTENCE_QUEUE_CAPACITY: usize = 256;
 const TOOL_EXECUTION_INTERRUPTED: &str = "Tool execution interrupted";
 const TOOL_EXECUTION_TIMED_OUT: &str = "Tool execution timed out";
 
@@ -59,6 +60,7 @@ enum ConversationWorkerEvent {
     Finished {
         response: runtime_domain::session::ConversationResponse,
         metrics: Option<crate::ProviderRequestMetrics>,
+        upstream_context_tokens: Option<usize>,
     },
 }
 
@@ -78,6 +80,7 @@ pub struct ConversationWorker {
     pending_session_id: Option<SessionId>,
     pending_user_entry_id: Option<String>,
     session_items: Vec<PersistedConversationItem>,
+    upstream_context_tokens: Option<usize>,
 }
 
 impl ConversationWorker {
@@ -124,6 +127,7 @@ impl ConversationWorker {
         self.pending_session_id = None;
         self.pending_user_entry_id = None;
         self.session_items.clear();
+        self.upstream_context_tokens = None;
     }
 
     pub fn is_running(&self) -> bool {
@@ -142,6 +146,7 @@ impl ConversationWorker {
         self.pending_session_id = None;
         self.pending_user_entry_id = None;
         self.session_items.clear();
+        self.upstream_context_tokens = None;
     }
 
     pub fn interrupt(&mut self) -> bool {
@@ -183,6 +188,10 @@ impl ConversationWorker {
     pub fn take_session_items(&mut self) -> Vec<PersistedConversationItem> {
         std::mem::take(&mut self.session_items)
     }
+
+    pub fn take_upstream_context_tokens(&mut self) -> Option<usize> {
+        self.upstream_context_tokens.take()
+    }
 }
 
 async fn run_conversation_worker(
@@ -196,7 +205,8 @@ async fn run_conversation_worker(
     let provider_context_items_started = Arc::new(AtomicBool::new(false));
     let provider_context_repair_ledger =
         Arc::new(Mutex::new(ProviderContextRepairLedger::default()));
-    let (session_sender, session_receiver) = tokio_mpsc::unbounded_channel();
+    let (session_sender, session_receiver) =
+        tokio_mpsc::channel(SESSION_PERSISTENCE_QUEUE_CAPACITY);
     let session_actor_cancellation = cancellation.clone();
     let session_actor = tokio::spawn(run_session_persistence_actor(
         request.persistence_cloned(),
@@ -204,12 +214,24 @@ async fn run_conversation_worker(
         sender.clone(),
         session_actor_cancellation,
     ));
+    if cancellation.is_cancelled() {
+        let _ = sender.send(ConversationWorkerEvent::progress(
+            ConversationEvent::Interrupted,
+        ));
+        drop(session_sender);
+        let _ = session_actor.await;
+        return;
+    }
+    let _ = session_sender
+        .send(SessionPersistenceCommand::ProviderTurnStarted)
+        .await;
     for attempt in 0..=request_policy.attempts() {
         let progress_sender = sender.clone();
         let progress_session_sender = session_sender.clone();
         let attempt_provider_context_items_started = Arc::clone(&provider_context_items_started);
         let attempt_provider_context_repair_ledger = Arc::clone(&provider_context_repair_ledger);
         let attempt_cancellation = cancellation.child_token();
+        let progress_attempt_cancellation = attempt_cancellation.clone();
         let timeout_pause = ConversationTimeoutPause::default();
         let permission_handler: SharedToolPermissionHandler =
             std::sync::Arc::new(permission_broker.handler(
@@ -229,22 +251,26 @@ async fn run_conversation_worker(
                 request_policy.tool_max_turns(),
                 Some(permission_handler),
                 move |progress| match progress {
-                    crate::conversation::ConversationProgress::ProviderTurnStarted => {
-                        let _ = progress_session_sender
-                            .send(SessionPersistenceCommand::ProviderTurnStarted);
-                    }
+                    crate::conversation::ConversationProgress::ProviderTurnStarted => {}
                     crate::conversation::ConversationProgress::ProviderContextItem { item } => {
                         attempt_provider_context_items_started.store(true, Ordering::Relaxed);
                         attempt_provider_context_repair_ledger
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner())
                             .observe(&item);
-                        let _ = progress_session_sender
-                            .send(SessionPersistenceCommand::ProviderContextItem(item));
+                        try_send_session_persistence(
+                            &progress_session_sender,
+                            SessionPersistenceCommand::ProviderContextItem(item),
+                            &progress_attempt_cancellation,
+                            &progress_sender,
+                        );
                     }
                     crate::conversation::ConversationProgress::ToolActivityStarted { activity } => {
-                        let _ = progress_session_sender.send(
+                        try_send_session_persistence(
+                            &progress_session_sender,
                             SessionPersistenceCommand::ToolActivityStarted(activity.clone()),
+                            &progress_attempt_cancellation,
+                            &progress_sender,
                         );
                         if let Some(event) = conversation_worker_event_from_progress(
                             crate::conversation::ConversationProgress::ToolActivityStarted {
@@ -255,8 +281,11 @@ async fn run_conversation_worker(
                         }
                     }
                     crate::conversation::ConversationProgress::ToolActivityUpdated { update } => {
-                        let _ = progress_session_sender.send(
+                        try_send_session_persistence(
+                            &progress_session_sender,
                             SessionPersistenceCommand::ToolActivityUpdated(update.clone()),
+                            &progress_attempt_cancellation,
+                            &progress_sender,
                         );
                         if let Some(event) = conversation_worker_event_from_progress(
                             crate::conversation::ConversationProgress::ToolActivityUpdated {
@@ -267,8 +296,11 @@ async fn run_conversation_worker(
                         }
                     }
                     crate::conversation::ConversationProgress::TerminalUpdated { snapshot } => {
-                        let _ = progress_session_sender.send(
+                        try_send_session_persistence(
+                            &progress_session_sender,
                             SessionPersistenceCommand::TerminalSnapshot(snapshot.clone()),
+                            &progress_attempt_cancellation,
+                            &progress_sender,
                         );
                         if let Some(event) = conversation_worker_event_from_progress(
                             crate::conversation::ConversationProgress::TerminalUpdated { snapshot },
@@ -313,6 +345,8 @@ async fn run_conversation_worker(
                     provider_context_repair_ledger.as_ref(),
                     &session_sender,
                     TOOL_EXECUTION_TIMED_OUT,
+                    &cancellation,
+                    &sender,
                 );
                 send_terminal_after_session_persistence(
                     &session_sender,
@@ -345,6 +379,7 @@ async fn run_conversation_worker(
                 let _ = sender.send(ConversationWorkerEvent::Finished {
                     response: completion.response,
                     metrics: completion.metrics,
+                    upstream_context_tokens: completion.upstream_context_tokens,
                 });
                 drop(session_sender);
                 let _ = session_actor.await;
@@ -356,6 +391,8 @@ async fn run_conversation_worker(
                     provider_context_repair_ledger.as_ref(),
                     &session_sender,
                     TOOL_EXECUTION_INTERRUPTED,
+                    &cancellation,
+                    &sender,
                 );
                 send_terminal_after_session_persistence(
                     &session_sender,
@@ -373,6 +410,8 @@ async fn run_conversation_worker(
                     provider_context_repair_ledger.as_ref(),
                     &session_sender,
                     TOOL_EXECUTION_INTERRUPTED,
+                    &cancellation,
+                    &sender,
                 );
                 send_terminal_after_session_persistence(
                     &session_sender,
@@ -408,6 +447,8 @@ async fn run_conversation_worker(
                     provider_context_repair_ledger.as_ref(),
                     &session_sender,
                     TOOL_EXECUTION_INTERRUPTED,
+                    &cancellation,
+                    &sender,
                 );
                 send_terminal_after_session_persistence(
                     &session_sender,
@@ -429,7 +470,7 @@ async fn run_conversation_worker(
 }
 
 async fn send_terminal_after_session_persistence(
-    session_sender: &tokio_mpsc::UnboundedSender<SessionPersistenceCommand>,
+    session_sender: &tokio_mpsc::Sender<SessionPersistenceCommand>,
     sender: &mpsc::Sender<ConversationWorkerEvent>,
     terminal_event: ConversationEvent,
 ) {
@@ -444,11 +485,20 @@ async fn send_terminal_after_session_persistence(
 
 fn send_repair_items(
     ledger: &Mutex<ProviderContextRepairLedger>,
-    sender: &tokio_mpsc::UnboundedSender<SessionPersistenceCommand>,
+    sender: &tokio_mpsc::Sender<SessionPersistenceCommand>,
     content: &'static str,
+    conversation_cancellation: &CancellationToken,
+    progress_sender: &mpsc::Sender<ConversationWorkerEvent>,
 ) {
     for item in take_provider_context_repair_items(ledger, content) {
-        let _ = sender.send(SessionPersistenceCommand::ProviderContextItem(item));
+        if !try_send_session_persistence(
+            sender,
+            SessionPersistenceCommand::ProviderContextItem(item),
+            conversation_cancellation,
+            progress_sender,
+        ) {
+            break;
+        }
     }
 }
 
@@ -456,7 +506,7 @@ async fn retry_conversation_after_attempt(
     attempt: usize,
     request_policy: &RuntimeRequestPolicy,
     cancellation: &CancellationToken,
-    session_sender: &tokio_mpsc::UnboundedSender<SessionPersistenceCommand>,
+    session_sender: &tokio_mpsc::Sender<SessionPersistenceCommand>,
     sender: &mpsc::Sender<ConversationWorkerEvent>,
 ) -> bool {
     let retry = attempt + 1;
@@ -475,6 +525,35 @@ async fn retry_conversation_after_attempt(
             true
         }
         _ = tokio::time::sleep(request_policy.delay_for_retry(retry)) => false,
+    }
+}
+
+fn try_send_session_persistence(
+    sender: &tokio_mpsc::Sender<SessionPersistenceCommand>,
+    command: SessionPersistenceCommand,
+    conversation_cancellation: &CancellationToken,
+    progress_sender: &mpsc::Sender<ConversationWorkerEvent>,
+) -> bool {
+    match sender.try_send(command) {
+        Ok(()) => true,
+        Err(tokio_mpsc::error::TrySendError::Full(_)) => {
+            conversation_cancellation.cancel();
+            let _ = progress_sender.send(ConversationWorkerEvent::progress(
+                ConversationEvent::Failed {
+                    message: "conversation session persistence queue is full".to_string(),
+                },
+            ));
+            false
+        }
+        Err(tokio_mpsc::error::TrySendError::Closed(_)) => {
+            conversation_cancellation.cancel();
+            let _ = progress_sender.send(ConversationWorkerEvent::progress(
+                ConversationEvent::Failed {
+                    message: "conversation session persistence worker stopped".to_string(),
+                },
+            ));
+            false
+        }
     }
 }
 

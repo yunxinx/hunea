@@ -1,6 +1,7 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use provider_protocol::ConversationItem;
+use runtime_domain::prompt_assembly::persistence::PromptAssemblyScopeState;
 use runtime_domain::session::TranscriptReplayItem;
 
 use crate::{
@@ -12,13 +13,15 @@ use crate::{
 };
 
 use super::super::{
-    SessionStore, current_timestamp_ms, latest_non_leaf_id, requested_leaf_id, resolve_error,
+    MessageHistoryStore, PromptAssemblyStore, SessionCatalogStore, SessionFlushStore,
+    SessionLifecycleStore, SessionStore, SessionTreeStore, current_timestamp_ms,
+    latest_non_leaf_id, requested_leaf_id, resolve_error,
 };
 use super::{
     LocalSessionHandle, LocalSessionStore, evict_idle_recorders, flush_handle, session_jsonl_path,
 };
 
-impl SessionStore for LocalSessionStore {
+impl SessionLifecycleStore for LocalSessionStore {
     fn create_session<'a>(
         &'a self,
         header: SessionHeader,
@@ -189,7 +192,9 @@ impl SessionStore for LocalSessionStore {
             resolve_state(&state.entries, requested_leaf_id).map_err(resolve_error)
         })
     }
+}
 
+impl SessionTreeStore for LocalSessionStore {
     fn load_session_tree<'a>(
         &'a self,
         session_id: &'a SessionId,
@@ -247,7 +252,9 @@ impl SessionStore for LocalSessionStore {
             session_branch_tree_snapshot(&state.entries).map_err(resolve_error)
         })
     }
+}
 
+impl SessionCatalogStore for LocalSessionStore {
     fn list_sessions<'a>(
         &'a self,
         project_dir: &'a ProjectDir,
@@ -270,7 +277,9 @@ impl SessionStore for LocalSessionStore {
             self.index.get_session_meta(&session_id.to_string()).await
         })
     }
+}
 
+impl SessionFlushStore for LocalSessionStore {
     fn flush<'a>(
         &'a self,
         session_id: &'a SessionId,
@@ -307,7 +316,9 @@ impl SessionStore for LocalSessionStore {
             Ok(())
         })
     }
+}
 
+impl MessageHistoryStore for LocalSessionStore {
     fn record_message_history<'a>(
         &'a self,
         text: &'a str,
@@ -349,3 +360,22 @@ impl SessionStore for LocalSessionStore {
         Box::pin(async move { self.index.load_message_history_all().await })
     }
 }
+
+impl PromptAssemblyStore for LocalSessionStore {
+    fn save_global_prompt_assembly_state<'a>(
+        &'a self,
+        state: &'a PromptAssemblyScopeState,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
+        Box::pin(async move { self.index.save_global_prompt_assembly_state(state).await })
+    }
+
+    fn load_global_prompt_assembly_state<'a>(
+        &'a self,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<PromptAssemblyScopeState, SessionStoreError>> + Send + 'a>,
+    > {
+        Box::pin(async move { self.index.load_global_prompt_assembly_state().await })
+    }
+}
+
+impl SessionStore for LocalSessionStore {}

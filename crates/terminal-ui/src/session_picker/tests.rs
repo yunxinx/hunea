@@ -1,5 +1,8 @@
 use crossterm::event::{KeyCode, KeyEvent};
-use ratatui::{buffer::Buffer, style::Color};
+use ratatui::{
+    buffer::Buffer,
+    style::{Color, Modifier},
+};
 use runtime_domain::session::{
     RuntimeEvent, SessionPickerRow, SessionPreviewPayload, TranscriptReplayItem,
     TranscriptReplayRole,
@@ -759,6 +762,36 @@ fn session_picker_uses_prompt_block_and_search_label_color() {
     let search_buffer = render_model_buffer(&mut model, 60, 12);
     assert_text_cells_use_color(&search_buffer, "Search:", default_palette().command_accent);
     assert_text_cells_use_color(&search_buffer, "5", default_palette().main);
+}
+
+#[test]
+fn session_picker_highlights_matched_search_text_in_visible_row() {
+    let mut model = ready_model();
+    model.set_palette(default_palette(), true);
+    model.open_session_picker_loading();
+    model.apply_session_picker_rows((0..6).map(numbered_picker_row).collect());
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('/'))));
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('5'))));
+
+    let buffer = render_model_buffer(&mut model, 60, 12);
+    let rows = rendered_rows(&buffer);
+    let row_index = rows
+        .iter()
+        .position(|row| row.contains("first 5"))
+        .expect("matching row should render");
+    let highlight_start = rows[row_index]
+        .find("first 5")
+        .map(|start| start + "first ".len())
+        .expect("matched character should remain visible");
+    let highlight_x = rows[row_index][..highlight_start].chars().count();
+    let highlight_cell = &buffer[(highlight_x as u16, row_index as u16)];
+
+    assert!(
+        highlight_cell.bg == default_palette().surface.unwrap()
+            || highlight_cell.modifier.contains(Modifier::REVERSED),
+        "matched session text should use background-like highlight"
+    );
 }
 
 #[test]

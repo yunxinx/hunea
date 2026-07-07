@@ -1,6 +1,6 @@
 //! Tool loop runtime 的 provider streaming 与工具轮次编排入口。
 
-use provider_protocol::{ContentBlock, ConversationItem, PromptRequest, ProviderClient};
+use provider_protocol::{ConversationItem, PromptRequest, ProviderClient};
 use tokio_util::sync::CancellationToken;
 use tool_runtime::ToolExecutorRegistry;
 
@@ -128,12 +128,10 @@ where
             );
             let tool_result_item = ConversationItem::tool_result(
                 execution.provider_result.call_id.clone(),
-                vec![ContentBlock::Text(
-                    execution.provider_result.content.clone(),
-                )],
+                execution.provider_result.content.clone(),
                 execution.provider_result.is_error,
             );
-            tool_result_batch.push((tool_result_item, execution.raw_result.terminate));
+            tool_result_batch.push((tool_result_item, execution.raw_result.terminates()));
         }
 
         let should_terminate_after_batch = tool_result_batch
@@ -148,12 +146,7 @@ where
                 );
                 continue;
             }
-            let provider_result_content = tool_result_item.text_content();
-            state.observe_tool_result_input(
-                &provider_result_content,
-                clock.now(),
-                &mut on_progress,
-            );
+            state.observe_tool_result_input(&tool_result_item, clock.now(), &mut on_progress);
             request.items.push(tool_result_item.clone());
             append_provider_context_item(tool_result_item, &mut appended_items, &mut on_progress);
         }

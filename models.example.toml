@@ -16,6 +16,19 @@
 # Hunea 会将最后选择的模型以 `provider/model` 格式写回此处。
 default = ""
 
+# Context 上限（tokens）配置
+#
+# hunea 按以下优先级解析每个模型的 context 上限，用于 /context 面板预算条渲染：
+#   1. providers.<id>.model_profiles.<model>.context_window（最具体，见下方 local 示例）
+#   2. defaults.context_window（全局默认）
+#   3. built-in：按模型家族自动匹配，例如 gpt-4o / gpt-4o-mini 为 128000，
+#      claude-sonnet-4 / claude-opus-4 为 200000；其余未识别模型回退到 256000。
+# 三者均未配置时使用 built-in。下面两项均为可选，按需启用。
+#
+# 全局默认上限；未在 model_profiles 中显式覆盖的模型都会命中。
+# [defaults]
+# context_window = 128000
+
 [providers.local]
 enabled = true
 kind = "openai_compatible"
@@ -27,6 +40,12 @@ base_url = "http://127.0.0.1:1234/v1"
 # api_key = "local-secret"
 # api_key_env = "LOCAL_OPENAI_API_KEY"
 models = ["qwen3", "deepseek-r1-distill"]
+
+# 单模型 context 上限覆盖，优先级高于 [defaults] 与 built-in。
+# 适合本地模型用非标准上下文长度（例如 32k 量化的 qwen3）时显式标注，
+# 避免 /context 面板按默认值渲染出与实际不符的预算条。
+# [providers.local.model_profiles.qwen3]
+# context_window = 32768
 
 [providers.deepseek]
 enabled = true

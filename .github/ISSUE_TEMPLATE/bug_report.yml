@@ -1,0 +1,92 @@
+name: Bug 报告 / Bug report
+description: 报告一个可以复现的问题 / Report a reproducible problem
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Please search existing issues first; adding context to an existing issue is often better than opening a duplicate.
+
+        感谢你报告问题。提交前请先搜索已有 issues；如果已有相近问题，在原 issue 里补充信息通常比重复提交更有帮助。
+
+        Please remove API keys, tokens, private keys, full private conversations, and sensitive workspace content before posting.
+
+        请先移除 API key、token、私钥、完整私人对话和敏感工作区内容。
+
+  - type: checkboxes
+    id: before_posting
+    attributes:
+      label: Before posting / 提交前确认
+      description: These checks help keep issues easier to triage. 这些确认项可以让问题更容易被处理。
+      options:
+        - label: I searched existing issues and did not find the same or a very similar problem. / 我已经搜索过已有 issues，没有发现相同或非常接近的问题。
+          required: true
+        - label: I removed secrets and sensitive information. / 我已经移除密钥和敏感信息。
+          required: true
+
+  - type: textarea
+    id: story
+    attributes:
+      label: What happened? / 发生了什么？
+      description: A short description is enough. 简短说明即可。
+      placeholder: |
+        I was trying to ...
+        I expected ...
+        Instead ...
+
+        我想要 ...
+        我以为会 ...
+        但实际 ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How can we reproduce it? / 如何复现？
+      description: Please write the steps as if someone is following along on a fresh terminal. 请尽量写成别人可以跟着操作的步骤。
+      placeholder: |
+        1. Run `hunea`
+        2. Open ...
+        3. Press ...
+        4. See ...
+
+        1. 运行 `hunea`
+        2. 打开 ...
+        3. 按下 ...
+        4. 看到 ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment / 环境
+      description: Version, install method, operating system, terminal, and shell. If you are not sure, write what you know. 版本、安装方式、操作系统、终端和 shell；不确定的部分可以留空。
+      placeholder: |
+        Hunea: 0.10.1-alpha.2
+        Install: npm / GitHub Release / source build
+        OS: macOS 15 / Ubuntu 24.04 / Windows 11
+        Terminal: iTerm2 / Ghostty / Windows Terminal
+        Shell: zsh / bash / PowerShell
+    validations:
+      required: true
+
+  - type: textarea
+    id: tui_context
+    attributes:
+      label: TUI context, if relevant / 如果和 TUI 有关
+      description: TUI means the terminal user interface. Window size, theme, key path, or a screenshot can help. TUI 指终端里的用户界面；窗口大小、主题、按键路径或截图会有帮助。
+      placeholder: "Window around 120x40; dark terminal theme; key path: ... / 窗口约 120x40；深色终端主题；按键路径是 ..."
+    validations:
+      required: false
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else? / 其他补充
+      description: Logs, screenshots, minimal config, or things you already tried. Please redact sensitive content. 可以补充日志、截图、最小配置或已经尝试过的排查方式。请注意脱敏。
+    validations:
+      required: false

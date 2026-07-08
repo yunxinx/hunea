@@ -44,6 +44,7 @@ github-attestations = true
 anyhow = "1"
 arboard = "3.6.1"
 base64 = "0.22.1"
+base16ct = { version = "1.0.0", features = ["alloc"] }
 color-eyre = "0.6.5"
 criterion = { version = "0.8.2", features = ["html_reports"] }
 crossterm = "0.29.0"

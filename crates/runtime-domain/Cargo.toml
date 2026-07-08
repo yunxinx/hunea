@@ -6,6 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+base16ct.workspace = true
 directories.workspace = true
 provider-protocol.workspace = true
 serde = { workspace = true }

@@ -50,10 +50,23 @@ jobs:
 
       - name: Install Zig
         if: matrix.zigbuild
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.15.2
-          use-cache: false
+        shell: bash
+        env:
+          ZIG_VERSION: 0.15.2
+          ZIG_SHA256: 02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
+        run: |
+          set -euo pipefail
+          archive="zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          url="https://ziglang.org/download/${ZIG_VERSION}/${archive}"
+          install_dir="${RUNNER_TEMP}/zig"
+
+          curl -fsSLo "${RUNNER_TEMP}/${archive}" "${url}"
+          echo "${ZIG_SHA256}  ${RUNNER_TEMP}/${archive}" | sha256sum --check
+
+          mkdir -p "${install_dir}"
+          tar -xJf "${RUNNER_TEMP}/${archive}" --strip-components=1 -C "${install_dir}"
+          echo "${install_dir}" >> "${GITHUB_PATH}"
+          "${install_dir}/zig" version
 
       - name: Install cargo-zigbuild
         if: matrix.zigbuild

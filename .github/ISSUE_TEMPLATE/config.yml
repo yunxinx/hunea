@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全漏洞 / Security vulnerability
+    url: https://github.com/yunxinx/hunea/security/advisories/new
+    about: 请不要公开披露安全漏洞。Please report vulnerabilities privately through GitHub Security Advisory.
+  - name: 使用文档 / User documentation
+    url: https://github.com/yunxinx/hunea#readme
+    about: 独立文档站尚未发布前，请先参考 README 和示例配置文件。Before the documentation site is available, please start with the README and example config files.

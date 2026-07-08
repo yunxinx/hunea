@@ -1,0 +1,82 @@
+name: 功能建议 / Feature request
+description: 提出一个具体的功能或体验改进建议 / Suggest a concrete improvement
+title: "feat: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for sharing an idea. Hunea is currently owner-led, especially around TUI experience. A clear use case helps the maintainer judge whether the idea fits the project.
+
+        感谢你的建议。Hunea 目前主要由维护者推进产品方向，尤其是 TUI 体验。清楚的使用场景会帮助维护者判断这个想法是否适合项目。
+
+        Please search existing issues first. If a similar idea already exists, adding your use case there is usually more helpful.
+
+        提交前请先搜索已有 issues。如果已有相近建议，在原 issue 里补充你的使用场景通常更有帮助。
+
+  - type: checkboxes
+    id: before_posting
+    attributes:
+      label: Before posting / 提交前确认
+      options:
+        - label: I searched existing issues and did not find the same or a very similar suggestion. / 我已经搜索过已有 issues，没有发现相同或非常接近的建议。
+          required: true
+        - label: This suggestion is tied to a concrete use case, not only a feature name. / 这个建议有具体使用场景，而不只是一个功能名。
+          required: true
+
+  - type: textarea
+    id: story
+    attributes:
+      label: Use case / 使用场景
+      description: Tell the story in your own words. Non-technical wording is welcome. 请用自己的话描述场景；不需要写技术方案。
+      placeholder: |
+        When I use Hunea to ...
+        I often need to ...
+        The difficult part is ...
+
+        当我用 Hunea ...
+        我经常需要 ...
+        现在不顺手的地方是 ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: preferred
+    attributes:
+      label: What would feel better? / 你希望怎么改？
+      description: You can describe the ideal behavior, interaction, or rough UI. 可以描述理想行为、交互方式或大致界面。
+      placeholder: |
+        Ideally, Hunea would ...
+
+        理想情况下，Hunea 可以 ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Acceptable alternatives / 可以接受的替代方案
+      description: If your first idea is not a good fit, what else would still solve the problem? 如果首选方案不合适，还有没有其他可接受的解决方式？
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: impact
+    attributes:
+      label: Possible impact / 可能影响的范围
+      description: It is fine if you are unsure. 不确定也没关系，按你的理解勾选。
+      options:
+        - label: TUI layout, navigation, key bindings, or visual hierarchy. TUI means the terminal user interface. / TUI 布局、导航、快捷键或视觉层级。TUI 指终端里的用户界面。
+        - label: Prompt flow, tool-call flow, or agent behavior. / prompt 流程、工具调用流程或 agent 行为。
+        - label: Provider configuration or provider behavior. Provider means the model service Hunea connects to. / provider 配置或 provider 行为。Provider 指 Hunea 连接的大模型服务。
+        - label: Installation, release, or upgrade flow. / 安装、发布或升级流程。
+        - label: Documentation or examples. / 文档或示例。
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else? / 其他补充
+      description: Screenshots, sketches, references, or extra background are welcome. 可以补充截图、草图、参考项目或更多背景。
+    validations:
+      required: false

@@ -24,6 +24,37 @@ fn non_prefix_subsequence_query_matches_command_name() {
 }
 
 #[test]
+fn command_panel_ranks_contiguous_subsequence_above_spread_subsequence() {
+    // /se 在 /resend 中是连续子串（score 0），在 /resume 中是离散子序列（score 2），
+    // 连续匹配应排在前面。
+    let names = base_command_panel_items_for_query("se")
+        .into_iter()
+        .map(|item| item.name)
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["/resend", "/resume"]);
+}
+
+#[test]
+fn command_panel_ranks_exact_match_above_prefix_match() {
+    // "exit" 精确匹配 /exit（score -1100），应排在所有其他命令前面。
+    let names = base_command_panel_items_for_query("exit")
+        .into_iter()
+        .map(|item| item.name)
+        .collect::<Vec<_>>();
+    assert_eq!(names.first(), Some(&"/exit".to_string()));
+}
+
+#[test]
+fn command_panel_match_score_uses_alias_when_primary_does_not_match() {
+    // /qu 不匹配 /exit 的主名 "exit"，但匹配别名 "quit" 的前缀。
+    let names = base_command_panel_items_for_query("qu")
+        .into_iter()
+        .map(|item| item.name)
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["/exit"]);
+}
+
+#[test]
 fn current_status_notice_still_renders_below_command_panel() {
     let mut model = Model::new_with_options(
         StartupBannerOptions::default(),

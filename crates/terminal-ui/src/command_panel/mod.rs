@@ -9,7 +9,9 @@ use super::{
     AppEffect, EscRewindMode, Model, debug,
     display_width::display_width,
     overlay_input_result::OverlayInputResult,
-    search_highlight::{highlighted_subsequence_spans, search_match_style},
+    search_highlight::{
+        highlighted_subsequence_spans, search_match_style, subsequence_match_score,
+    },
     selection::SelectableLineRange,
     status_line::{
         status_line_gap_before, status_line_pair_height, truncate_display_width_with_ellipsis,
@@ -461,17 +463,8 @@ impl Model {
     }
 
     fn filter_command_panel_items(&self, query: &str) -> Vec<CommandPanelItem> {
-        let items =
-            filter_base_command_panel_items("", self.debug_commands_enabled, self.esc_rewind_mode);
-
-        if query.is_empty() {
-            return items;
-        }
-
-        items
-            .into_iter()
-            .filter(|item| command_panel_item_matches_query(item, query))
-            .collect()
+        let items = all_command_panel_items(self.debug_commands_enabled, self.esc_rewind_mode);
+        rank_command_panel_items(items, query)
     }
 }
 
@@ -482,9 +475,7 @@ fn command_panel_query(value: &str) -> Option<String> {
     }
 
     let query = raw_command_panel_query(value)?;
-    if !filter_base_command_panel_items(&query, false, EscRewindMode::Coarse).is_empty()
-        || query.chars().count() == 1
-    {
+    if !base_command_panel_items_for_query(&query).is_empty() || query.chars().count() == 1 {
         return Some(query);
     }
 
@@ -518,8 +509,8 @@ fn raw_command_panel_query(value: &str) -> Option<String> {
     Some(raw_query.to_lowercase())
 }
 
-fn filter_base_command_panel_items(
-    query: &str,
+/// 返回当前可用的全部命令面板条目，按定义顺序排列。
+fn all_command_panel_items(
     debug_commands_enabled: bool,
     esc_rewind_mode: EscRewindMode,
 ) -> Vec<CommandPanelItem> {
@@ -592,55 +583,61 @@ fn filter_base_command_panel_items(
         action: CommandPanelAction::Clear,
     });
 
-    if query.is_empty() {
-        return items;
-    }
-
     items
-        .into_iter()
-        .filter(|item| command_panel_item_matches_query(item, query))
-        .collect()
 }
 
 #[cfg(test)]
 fn base_command_panel_items_for_query(query: &str) -> Vec<CommandPanelItem> {
-    filter_base_command_panel_items(query, false, EscRewindMode::Coarse)
+    let items = all_command_panel_items(false, EscRewindMode::Coarse);
+    rank_command_panel_items(items, query)
 }
 
 fn command_panel_completion_text(item: &CommandPanelItem) -> String {
     item.name.clone()
 }
 
-fn command_panel_item_matches_query(item: &CommandPanelItem, query: &str) -> bool {
-    let primary = item.name.trim_start_matches('/').to_lowercase();
-    if normalized_text_matches_subsequence_query(&primary, query) {
-        return true;
-    }
+/// 计算命令条目相对查询的匹配分数。lower is better。
+///
+/// 命令名与别名都参与匹配，取最佳分数；都不匹配时返回 `None`。
+fn command_panel_item_match_score(item: &CommandPanelItem, query: &str) -> Option<i32> {
+    let primary = item.name.trim_start_matches('/');
+    let primary_score = subsequence_match_score(primary, query);
 
-    item.aliases.iter().any(|alias| {
-        let alias_name = alias.trim_start_matches('/').to_lowercase();
-        normalized_text_matches_subsequence_query(&alias_name, query)
-    })
+    let best_alias_score = item
+        .aliases
+        .iter()
+        .filter_map(|alias| subsequence_match_score(alias.trim_start_matches('/'), query))
+        .min();
+
+    // 用 iterator chain 而非 Option::min：后者把 None 当作最小值，
+    // 会在别名缺席时把 primary 的 Some 分数也吞成 None。
+    primary_score.into_iter().chain(best_alias_score).min()
 }
 
-fn normalized_text_matches_subsequence_query(text: &str, query: &str) -> bool {
-    let mut query_chars = query.chars();
-    let Some(mut expected) = query_chars.next() else {
-        return true;
-    };
-
-    for character in text.chars() {
-        if character != expected {
-            continue;
-        }
-
-        let Some(next_expected) = query_chars.next() else {
-            return true;
-        };
-        expected = next_expected;
+/// 按 (score, 原始定义顺序) 对命令条目打分排序。
+///
+/// lower score 排前面；同分时保持 items 中的原始顺序。
+/// 空 query 直接原样返回（命令面板展开全部命令）。
+fn rank_command_panel_items(items: Vec<CommandPanelItem>, query: &str) -> Vec<CommandPanelItem> {
+    if query.is_empty() {
+        return items;
     }
 
-    false
+    let mut scored = items
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            command_panel_item_match_score(&item, query).map(|score| (score, index, item))
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by(
+        |(left_score, left_index, _), (right_score, right_index, _)| {
+            left_score
+                .cmp(right_score)
+                .then_with(|| left_index.cmp(right_index))
+        },
+    );
+    scored.into_iter().map(|(_, _, item)| item).collect()
 }
 
 fn pad_display_width_right(text: &str, width: usize) -> String {

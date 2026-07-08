@@ -1,4 +1,4 @@
-//! 跨列表复用的搜索命中文本高亮。
+//! 跨列表复用的搜索匹配辅助：命中文本高亮与子序列匹配打分。
 
 use ratatui::{
     style::{Color, Style},
@@ -80,6 +80,54 @@ pub(crate) fn highlighted_substring_or_subsequence_spans(
     }
 
     highlighted_subsequence_spans(text, trimmed_query, base_style, highlighted_style)
+}
+
+/// 大小写不敏感的子序列匹配分数。lower is better。
+///
+/// 算法参考 codex-rs `fuzzy_match`：贪心子序列匹配后，以匹配窗口大小作为
+/// 基础分数（连续匹配优于离散），首个匹配字符在位置 0 时给前缀奖励，
+/// needle 完整覆盖 text 时给完全匹配奖励。
+///
+/// 返回 `None` 表示不匹配；空 needle 返回 `Some(0)`。
+pub(crate) fn subsequence_match_score(text: &str, query: &str) -> Option<i32> {
+    let trimmed_query = query.trim();
+    if trimmed_query.is_empty() {
+        return Some(0);
+    }
+
+    let indices = find_case_insensitive_subsequence_indices(text, trimmed_query)?;
+
+    // 复用高亮路径的同一匹配结果计算分数，确保打分与高亮一致。
+    // dedup 处理 Unicode lowercase expansion（如 İ → i̇）导致多个 lowered char
+    // 映射回同一 original index 的情况。
+    let mut sorted_indices = indices;
+    sorted_indices.sort_unstable();
+    sorted_indices.dedup();
+
+    let first = *sorted_indices.first()?;
+    let last = *sorted_indices.last()?;
+    let needle_len = trimmed_query.chars().count() as i32;
+    let first_pos = first as i32;
+    let last_pos = last as i32;
+    let window = (last_pos - first_pos + 1) - needle_len;
+    let mut score = window.max(0);
+
+    if first_pos == 0 {
+        score -= 100;
+    }
+
+    let text_char_count = text.chars().count() as i32;
+    // 三个条件合起来等价于 text 与 query 大小写不敏感地完全相等：
+    // 首字符命中位置 0（前缀）、末字符命中到 text 尾、去重后命中的索引数
+    // 等于 text 字符数（贪心子序列下意味着每个字符都被命中一次）。
+    if first_pos == 0
+        && last_pos + 1 == text_char_count
+        && sorted_indices.len() as i32 == text_char_count
+    {
+        score -= 1000;
+    }
+
+    Some(score)
 }
 
 fn highlighted_char_ranges_spans(
@@ -258,5 +306,59 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["/", "m", "o", "d", "els"]
         );
+    }
+
+    #[test]
+    fn score_prefers_contiguous_match_over_spread() {
+        // "resend" 含连续 "se"（window=0），"resume" 含离散 "se"（window=2）
+        let resend = subsequence_match_score("resend", "se").expect("resend matches se");
+        let resume = subsequence_match_score("resume", "se").expect("resume matches se");
+        assert!(resend < resume);
+        assert_eq!(resend, 0);
+        assert_eq!(resume, 2);
+    }
+
+    #[test]
+    fn score_rewards_prefix_match() {
+        // 前缀匹配（first=0）获得 -100 奖励
+        let prefix = subsequence_match_score("resume", "re").expect("prefix match");
+        let non_prefix = subsequence_match_score("resume", "su").expect("non-prefix match");
+        assert!(prefix < non_prefix);
+        assert_eq!(prefix, -100);
+        assert_eq!(non_prefix, 0);
+    }
+
+    #[test]
+    fn score_rewards_exact_match() {
+        // 完全匹配获得额外 -1000 奖励
+        let exact = subsequence_match_score("resume", "resume").expect("exact match");
+        let prefix = subsequence_match_score("resume", "resum").expect("prefix match");
+        assert!(exact < prefix);
+        assert_eq!(exact, -100 - 1000);
+    }
+
+    #[test]
+    fn score_case_insensitive() {
+        let lower = subsequence_match_score("Resume", "resume").expect("case-insensitive exact");
+        assert_eq!(lower, -100 - 1000);
+    }
+
+    #[test]
+    fn score_returns_none_when_no_match() {
+        assert!(subsequence_match_score("resume", "xyz").is_none());
+    }
+
+    #[test]
+    fn score_empty_query_returns_zero() {
+        assert_eq!(subsequence_match_score("resume", ""), Some(0));
+        assert_eq!(subsequence_match_score("resume", "   "), Some(0));
+    }
+
+    #[test]
+    fn score_handles_unicode_lowercase_expansion() {
+        // "İ" lowercase 展开为 "i\u{307}"，两形式语义等价，应判为完全匹配
+        // （前缀奖励 -100 + 完全匹配奖励 -1000）
+        let score = subsequence_match_score("İ", "i\u{307}").expect("unicode expansion match");
+        assert_eq!(score, -100 - 1000);
     }
 }

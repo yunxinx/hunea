@@ -74,7 +74,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 yaml_serde = "0.10.4"
 semver = "1.0.28"
-sha2 = "0.10"
+sha2 = "0.11"
 syntect = { version = "5", default-features = false, features = ["parsing"] }
 tar = "0.4"
 tachyonfx = { version = "0.25.0", default-features = false, features = ["std", "std-duration"] }

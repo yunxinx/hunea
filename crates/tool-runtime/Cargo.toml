@@ -6,6 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+base16ct.workspace = true
 base64.workspace = true
 directories.workspace = true
 flate2.workspace = true

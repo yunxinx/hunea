@@ -621,7 +621,8 @@ fn verify_sha256(
         }
         hasher.update(&buffer[..read]);
     }
-    let actual = format!("{:x}", hasher.finalize());
+    let digest = hasher.finalize();
+    let actual = base16ct::lower::encode_string(&digest);
     if actual == expected {
         return Ok(());
     }

@@ -44,6 +44,7 @@ github-attestations = true
 anyhow = "1"
 arboard = "3.6.1"
 base64 = "0.22.1"
+base16ct = { version = "1.0.0", features = ["alloc"] }
 color-eyre = "0.6.5"
 criterion = { version = "0.8.2", features = ["html_reports"] }
 crossterm = "0.29.0"
@@ -74,7 +75,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 yaml_serde = "0.10.4"
 semver = "1.0.28"
-sha2 = "0.10"
+sha2 = "0.11"
 syntect = { version = "5", default-features = false, features = ["parsing"] }
 tar = "0.4"
 tachyonfx = { version = "0.25.0", default-features = false, features = ["std", "std-duration"] }

@@ -228,7 +228,7 @@ pub fn git_working_tree_observation(status_porcelain: &str) -> DynamicEnvironmen
 #[must_use]
 pub fn stable_sha256(value: &str) -> String {
     let digest = Sha256::digest(value.as_bytes());
-    format!("{digest:x}")
+    base16ct::lower::encode_string(&digest)
 }
 
 fn git_status_summary(status_porcelain: &str) -> String {
@@ -406,6 +406,14 @@ mod tests {
             .expect("dirty status should include details");
         assert!(details.len() > 2000);
         assert!(details.contains("truncated because git status exceeds 2000 characters"));
+    }
+
+    #[test]
+    fn stable_sha256_returns_lowercase_hex_digest() {
+        assert_eq!(
+            stable_sha256("hunea"),
+            "96115696dc702703534f83696df67f6854419754ee88e0cc2c8189145d3754d8"
+        );
     }
 
     fn observation(

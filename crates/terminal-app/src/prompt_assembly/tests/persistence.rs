@@ -3,6 +3,7 @@ use super::*;
 #[test]
 fn load_initial_prompt_prelude_reads_global_and_project_state() {
     let work_dir = temp_dir("load");
+    write_project_skill(&work_dir, "repo-bootstrap");
     let global_store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
     let project_state = scope_state! {
         scope: PromptAssemblyScope::Project,
@@ -60,6 +61,7 @@ fn load_initial_prompt_prelude_reads_global_and_project_state() {
 #[test]
 fn prompt_assembly_workspace_reads_snapshot_and_prelude() {
     let work_dir = temp_dir("load-snapshot");
+    write_project_skill(&work_dir, "repo-bootstrap");
     let global_store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

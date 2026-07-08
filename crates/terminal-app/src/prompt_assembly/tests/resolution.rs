@@ -101,6 +101,7 @@ fn resolve_initial_prompt_prelude_places_instruction_files_between_core_and_extr
     let project_root = outside_root.join("repo");
     let nested_dir = project_root.join("workspace").join("crate");
     fs::create_dir_all(&nested_dir).expect("nested dir should exist");
+    write_project_skill(&nested_dir, "repo-bootstrap");
     fs::write(project_root.join(".git"), "gitdir: mock\n").expect("git marker should write");
     fs::write(project_root.join("AGENTS.md"), "root instructions\n")
         .expect("root instructions should write");

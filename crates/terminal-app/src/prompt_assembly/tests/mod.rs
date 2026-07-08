@@ -54,6 +54,18 @@ fn temp_dir(label: &str) -> PathBuf {
     dir
 }
 
+fn write_project_skill(work_dir: &Path, skill_name: &str) {
+    let skill_dir = work_dir.join(".agents").join("skills").join(skill_name);
+    fs::create_dir_all(&skill_dir).expect("skill dir should exist");
+    fs::write(
+        skill_dir.join(SKILL_FILE_NAME),
+        format!(
+            "---\nname: {skill_name}\ndescription: Test skill\ndisable-model-invocation: false\n---\n# {skill_name}\n\nUse this skill.\n"
+        ),
+    )
+    .expect("skill file should exist");
+}
+
 fn builtin_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition::new("bash")

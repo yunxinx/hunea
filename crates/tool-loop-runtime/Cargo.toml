@@ -3,6 +3,7 @@ name = "tool-loop-runtime"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [dependencies]
 provider-protocol.workspace = true

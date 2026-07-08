@@ -1,0 +1,127 @@
+name: release-dry-run
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: Version to stage in npm packages
+        required: true
+        default: 0.10.0
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+            zigbuild: true
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-latest
+            zigbuild: true
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            zigbuild: false
+          - target: aarch64-apple-darwin
+            runner: macos-15
+            zigbuild: false
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            zigbuild: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Zig
+        if: matrix.zigbuild
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+          use-cache: false
+
+      - name: Install cargo-zigbuild
+        if: matrix.zigbuild
+        run: cargo install --locked cargo-zigbuild --version 0.23.0
+
+      - name: Build Linux musl binary
+        if: matrix.zigbuild
+        run: cargo zigbuild --release --target "${{ matrix.target }}" --bin hunea
+
+      - name: Build native binary
+        if: ${{ !matrix.zigbuild }}
+        run: cargo build --release --target "${{ matrix.target }}" --bin hunea
+
+      - name: Package binary archive
+        run: >
+          python scripts/release/package_binary.py
+          --target "${{ matrix.target }}"
+          --release-dir "target/${{ matrix.target }}/release"
+          --output-dir "dist/release"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: hunea-${{ matrix.target }}
+          path: dist/release/*
+          if-no-files-found: error
+
+  package:
+    name: Package release assets
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist/release
+          pattern: hunea-*
+          merge-multiple: true
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Write checksums
+        run: |
+          set -euo pipefail
+          find dist/release -type f \( -name '*.tar.gz' -o -name '*.zip' \) -print |
+            sort |
+            while IFS= read -r archive; do
+              sha256sum "$archive" | awk -v name="$(basename "$archive")" '{ print $1 "  " name }'
+            done > dist/release/hunea_SHA256SUMS
+          cat dist/release/hunea_SHA256SUMS
+
+      - name: Stage npm packages
+        run: >
+          python scripts/release/stage_npm_packages.py
+          --release-version "${{ inputs.release_version }}"
+          --artifacts-dir dist/release
+          --output-dir dist/npm
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: hunea-release-dry-run
+          path: |
+            dist/release/*
+            dist/npm/*
+          if-no-files-found: error

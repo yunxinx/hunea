@@ -3,10 +3,20 @@ name = "terminal-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
+description.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [[bin]]
 name = "hunea"
 path = "src/main.rs"
+
+[package.metadata.dist]
+dist = true
 
 [dependencies]
 color-eyre.workspace = true

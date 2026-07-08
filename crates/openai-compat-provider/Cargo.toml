@@ -3,6 +3,7 @@ name = "openai-compat-provider"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [dependencies]
 futures-util.workspace = true

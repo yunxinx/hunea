@@ -19,6 +19,26 @@ resolver = "3"
 version = "0.10.0"
 edition = "2024"
 license = "Apache-2.0"
+description = "A terminal-based AI assistant client built with Rust and Ratatui."
+repository = "https://github.com/yunxinx/hunea"
+homepage = "https://github.com/yunxinx/hunea"
+readme = "README.md"
+keywords = ["ai", "assistant", "terminal", "tui", "ratatui"]
+categories = ["command-line-utilities"]
+
+[workspace.metadata.dist]
+cargo-dist-version = "0.32.0"
+ci = ["github"]
+installers = ["shell", "powershell"]
+targets = [
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+packages = ["terminal-cli"]
+github-attestations = true
 
 [workspace.dependencies]
 anyhow = "1"

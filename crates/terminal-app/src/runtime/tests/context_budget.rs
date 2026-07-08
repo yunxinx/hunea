@@ -507,7 +507,7 @@ fn latest_context_budget_request_supersedes_stale_work() {
         .expect("second context budget snapshot command should be accepted");
 
     let mut loaded_request_ids = Vec::new();
-    for _ in 0..100 {
+    for _ in 0..500 {
         for event in RuntimeCoordinator::drain_runtime_events(&mut coordinator) {
             if let RuntimeEvent::ContextBudgetSnapshotLoaded { request_id, .. } = event {
                 loaded_request_ids.push(request_id);

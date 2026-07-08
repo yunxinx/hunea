@@ -101,6 +101,6 @@ fn workspace_root() -> &'static Path {
 fn dependency_section(manifest: &str) -> &str {
     manifest
         .split_once("[dependencies]")
-        .and_then(|(_, rest)| rest.split_once("\n[").map(|(section, _)| section))
+        .map(|(_, rest)| rest.split_once("\n[").map_or(rest, |(section, _)| section))
         .expect("Cargo.toml should contain a dependencies section")
 }

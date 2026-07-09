@@ -1,5 +1,11 @@
 use super::*;
 
+fn test_config_dir(work_dir: &std::path::Path) -> std::path::PathBuf {
+    let dir = work_dir.join(".hunea");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
 #[test]
 fn load_instructions_file_reports_non_utf8_read_errors() {
     let root = temp_dir("instructions-invalid-utf8");
@@ -50,6 +56,7 @@ fn manager_snapshot_reports_invalid_skill_files_as_diagnostics() {
 
     let snapshot = resolve_prompt_assembly_manager_snapshot(
         &work_dir,
+        &test_config_dir(&work_dir),
         &PromptAssemblyScopeState::new(PromptAssemblyScope::Global),
         &PromptAssemblyScopeState::new(PromptAssemblyScope::Project),
         &[],
@@ -188,6 +195,7 @@ fn manager_snapshot_keeps_project_and_global_skill_duplicates_for_overlay() {
 
     let snapshot = resolve_prompt_assembly_manager_snapshot_with_global_skill_root(
         &work_dir,
+        &test_config_dir(&work_dir),
         &PromptAssemblyScopeState::new(PromptAssemblyScope::Global),
         &PromptAssemblyScopeState::new(PromptAssemblyScope::Project),
         Some(global_skill_root.as_path()),
@@ -237,6 +245,7 @@ fn discovered_skill_inventory_keeps_manual_only_skills_visible() {
 
     let snapshot = resolve_prompt_assembly_manager_snapshot_with_global_skill_root(
         &work_dir,
+        &test_config_dir(&work_dir),
         &PromptAssemblyScopeState::new(PromptAssemblyScope::Global),
         &PromptAssemblyScopeState::new(PromptAssemblyScope::Project),
         Some(&global_skill_root),
@@ -296,6 +305,7 @@ fn manager_snapshot_skill_inventory_uses_dense_selected_order() {
 
     let snapshot = resolve_prompt_assembly_manager_snapshot_with_global_skill_root(
         &work_dir,
+        &test_config_dir(&work_dir),
         &scope_state! {
             scope: PromptAssemblyScope::Global,
             core_system_override: None,
@@ -345,6 +355,7 @@ fn manager_snapshot_tool_inventory_filters_unguided_tools_and_uses_dense_selecte
 
     let snapshot = resolve_prompt_assembly_manager_snapshot(
         &work_dir,
+        &test_config_dir(&work_dir),
         &scope_state! {
             scope: PromptAssemblyScope::Global,
             core_system_override: None,
@@ -407,6 +418,7 @@ fn manager_snapshot_discovered_skills_carry_effective_selection_scope() {
 
     let snapshot = resolve_prompt_assembly_manager_snapshot_with_global_skill_root(
         &work_dir,
+        &test_config_dir(&work_dir),
         &PromptAssemblyScopeState::new(PromptAssemblyScope::Global),
         &PromptAssemblyScopeState::new(PromptAssemblyScope::Project),
         Some(global_skill_root.as_path()),
@@ -427,6 +439,7 @@ fn manager_snapshot_includes_default_dynamic_environment_sources() {
     let work_dir = temp_dir("dynamic-defaults");
     let snapshot = resolve_prompt_assembly_manager_snapshot(
         &work_dir,
+        &test_config_dir(&work_dir),
         &PromptAssemblyScopeState::new(PromptAssemblyScope::Global),
         &PromptAssemblyScopeState::new(PromptAssemblyScope::Project),
         &[],

@@ -87,7 +87,11 @@ impl AppRuntimeCoordinator {
         let store = self.session_store()?;
         let header = self.session_header()?;
         self.session_store_worker
-            .check_prompt_assembly_missing_sources(store, header.work_dir)?;
+            .check_prompt_assembly_missing_sources(
+                store,
+                header.work_dir,
+                self.options.hunea_config_dir.clone(),
+            )?;
         Ok(RuntimeCommandReceipt::Accepted)
     }
 

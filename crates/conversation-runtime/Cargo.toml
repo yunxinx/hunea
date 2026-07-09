@@ -6,7 +6,6 @@ license.workspace = true
 publish = false
 
 [dependencies]
-directories.workspace = true
 tool-loop-runtime.workspace = true
 provider-protocol.workspace = true
 openai-compat-provider.workspace = true
@@ -21,3 +20,6 @@ tokio.workspace = true
 tokio-util.workspace = true
 toml.workspace = true
 toml_edit.workspace = true
+
+[dev-dependencies]
+libc.workspace = true

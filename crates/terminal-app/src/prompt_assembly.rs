@@ -12,7 +12,6 @@ use runtime_domain::dynamic_environment::{
     build_dynamic_environment_snapshot, default_dynamic_environment_selections,
     enabled_dynamic_environment_sources,
 };
-use runtime_domain::paths::hunea_config_dir;
 use runtime_domain::prompt_assembly::persistence::{
     PersistedPromptAssemblyEntry, PersistedSkillDiscoverySkillEntry, PersistedToolSelectionEntry,
     PromptAssemblyScope, PromptAssemblyScopeState, StoredPromptBody,
@@ -203,6 +202,7 @@ impl PromptAssemblyMissingSourcesCheck {
 fn load_prompt_assembly_manager_snapshot(
     store: Arc<dyn SessionStore>,
     work_dir: &Path,
+    config_dir: &Path,
     tool_definitions: &[ToolDefinition],
 ) -> Result<PromptAssemblyManagerSnapshot> {
     let global_state = run_session_store_future(
@@ -214,6 +214,7 @@ fn load_prompt_assembly_manager_snapshot(
         .wrap_err("load project prompt assembly state")?;
     Ok(resolve_prompt_assembly_manager_snapshot(
         work_dir,
+        config_dir,
         &global_state,
         &project_state,
         tool_definitions,
@@ -224,12 +225,14 @@ fn load_prompt_assembly_manager_snapshot(
 fn apply_prompt_assembly_mutation(
     store: Arc<dyn SessionStore>,
     work_dir: &Path,
+    config_dir: &Path,
     mutation: PromptAssemblyMutation,
     tool_definitions: &[ToolDefinition],
 ) -> Result<PromptAssemblyManagerSnapshot> {
     let mut session = PromptAssemblyEditSession::load(
         Arc::clone(&store),
         work_dir.to_path_buf(),
+        config_dir.to_path_buf(),
         tool_definitions.to_vec(),
     )?;
     let snapshot = session.apply_mutation(mutation)?;
@@ -239,12 +242,14 @@ fn apply_prompt_assembly_mutation(
 
 pub(crate) fn check_prompt_assembly_missing_sources_from_states(
     work_dir: &Path,
+    config_dir: &Path,
     global_state: &PromptAssemblyScopeState,
     project_state: &PromptAssemblyScopeState,
     tool_definitions: &[ToolDefinition],
 ) -> PromptAssemblyMissingSourcesCheck {
     let manager = resolve_prompt_assembly_manager_snapshot(
         work_dir,
+        config_dir,
         global_state,
         project_state,
         tool_definitions,

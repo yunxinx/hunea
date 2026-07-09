@@ -6,12 +6,13 @@ use std::{
 use app_config::appconfig::{self, Config, TuiConfig};
 use color_eyre::eyre::{Result, WrapErr};
 use conversation_runtime::models as provider_models;
-use runtime_domain::{envinfo, phrases};
+use runtime_domain::{envinfo, paths::DataDirResolution, phrases};
 use session_store::{LocalSessionStore, SessionHeader, SessionId, SessionStore};
 use terminal_ui::{self, StartupBannerOptions};
 
 mod dynamic_environment;
 mod options_mapping;
+mod precheck;
 mod prompt_assembly;
 mod replay;
 mod runtime;
@@ -49,40 +50,126 @@ pub enum AppRunError {
 }
 
 /// `run` 负责组装并启动交互式 TUI 应用。
+///
+/// 启动顺序：`precheck`（目录可访问性 / 便携模式）→ `load_with_resolution`
+/// （文件级 merge，Read 错误降级为 warning）→ 主 TUI。
+/// `working_dir` 来自预检结果，避免启动链上再次 `current_dir()` 产生分叉语义。
 pub fn run() -> Result<()> {
-    let config = appconfig::load().wrap_err("failed to load app config")?;
-    run_loaded_config(&config)
+    let precheck_result = precheck::run()?;
+    if precheck_result.should_exit {
+        return Ok(());
+    }
+    let (config, warnings) = appconfig::load_with_resolution(
+        precheck_result.working_dir.as_deref(),
+        &precheck_result.data_dir_resolution,
+    )
+    .wrap_err("failed to load app config")?;
+    for warning in &warnings {
+        eprintln!("warning: {warning}");
+    }
+    run_loaded_config(
+        &config,
+        &precheck_result.data_dir_resolution,
+        precheck_result.working_dir.as_deref(),
+    )
 }
 
 /// `run_for_cli` 为二进制入口保留配置错误的类型信息。
+///
+/// 预检错误归入 `Runtime`，配置 decode/validation 错误归入 `Config`。
 pub fn run_for_cli() -> std::result::Result<(), AppRunError> {
-    let config = appconfig::load().map_err(AppRunError::Config)?;
-    run_loaded_config(&config).map_err(AppRunError::Runtime)
+    let precheck_result = precheck::run().map_err(AppRunError::Runtime)?;
+    if precheck_result.should_exit {
+        return Ok(());
+    }
+    let (config, warnings) = appconfig::load_with_resolution(
+        precheck_result.working_dir.as_deref(),
+        &precheck_result.data_dir_resolution,
+    )
+    .map_err(AppRunError::Config)?;
+    for warning in &warnings {
+        eprintln!("warning: {warning}");
+    }
+    run_loaded_config(
+        &config,
+        &precheck_result.data_dir_resolution,
+        precheck_result.working_dir.as_deref(),
+    )
+    .map_err(AppRunError::Runtime)
 }
 
-fn run_loaded_config(config: &Config) -> Result<()> {
+fn run_loaded_config(
+    config: &Config,
+    data_dir_resolution: &DataDirResolution,
+    working_dir: Option<&std::path::Path>,
+) -> Result<()> {
     let stdout = io::stdout();
     let preserve_ansi = stdout.is_terminal();
     let mut handle = stdout.lock();
-    run_with_config_writer(&mut handle, preserve_ansi, config)
+    run_with_config_writer(
+        &mut handle,
+        preserve_ansi,
+        config,
+        data_dir_resolution,
+        working_dir,
+    )
+}
+
+/// 按 resolution 加载 models.toml + phrases.toml，并把可降级错误打到 stderr。
+///
+/// 与 `appconfig::load_with_resolution` 同一路径决议与错误分层：
+/// 文件 Read 失败不 fatal，目录问题已在预检阶段处理。
+fn load_models_and_phrases(
+    working_dir: Option<&std::path::Path>,
+    data_dir_resolution: &DataDirResolution,
+) -> Result<(
+    provider_models::LoadedModelCatalog,
+    phrases::LoadedStatusPhrases,
+)> {
+    let (loaded_models, model_warnings) =
+        provider_models::load_with_resolution(working_dir, data_dir_resolution)
+            .wrap_err("failed to load model config")?;
+    let (loaded_phrases, phrase_warnings) =
+        phrases::load_with_resolution(working_dir, data_dir_resolution)
+            .wrap_err("failed to load phrase config")?;
+    // 可降级错误暂 stderr；主 TUI toast 接入是后续任务。
+    for warning in model_warnings {
+        eprintln!("warning: {warning}");
+    }
+    for warning in phrase_warnings {
+        eprintln!("warning: {warning}");
+    }
+    Ok((loaded_models, loaded_phrases))
 }
 
 /// `run_with_writer` 允许调用方注入退出 AltScreen 后的 terminal replay 输出目标。
+///
+/// 调用方需提供预检阶段决定的 `data_dir_resolution`，session store、models.toml、
+/// phrases.toml 均按此解析加载。
 pub fn run_with_writer<W: Write>(
     writer: &mut W,
     preserve_ansi: bool,
     tui_config: &TuiConfig,
+    data_dir_resolution: &DataDirResolution,
+    working_dir: Option<&std::path::Path>,
 ) -> Result<()> {
-    let loaded_models = provider_models::load().wrap_err("failed to load model config")?;
-    let loaded_phrases = phrases::load().wrap_err("failed to load phrase config")?;
+    let (loaded_models, loaded_phrases) =
+        load_models_and_phrases(working_dir, data_dir_resolution)?;
     let mut model_options =
         model_options_from_config_and_models(tui_config, &loaded_models, &loaded_phrases);
     let mut runtime_options = AppRuntimeOptions {
         loaded_models: loaded_models.clone(),
+        hunea_config_dir: data_dir_resolution.config_dir().to_path_buf(),
         ..AppRuntimeOptions::default()
     };
-    attach_default_session_persistence(&mut runtime_options, &mut model_options, &loaded_models)
-        .wrap_err("failed to initialize session persistence")?;
+    attach_default_session_persistence(
+        &mut runtime_options,
+        &mut model_options,
+        &loaded_models,
+        data_dir_resolution,
+        working_dir,
+    )
+    .wrap_err("failed to initialize session persistence")?;
     let mut runtime_coordinator = AppRuntimeCoordinator::new(runtime_options)
         .map_err(color_eyre::eyre::Report::msg)
         .wrap_err("failed to initialize app runtime coordinator")?;
@@ -100,18 +187,30 @@ pub fn run_with_writer<W: Write>(
 }
 
 /// `run_with_config_writer` 使用完整配置启动 TUI。
+///
+/// `data_dir_resolution` 决定 session store、models.toml、phrases.toml 以及受管搜索
+/// 授权写入位置（全局 or 工作区便携）。
 pub fn run_with_config_writer<W: Write>(
     writer: &mut W,
     preserve_ansi: bool,
     config: &Config,
+    data_dir_resolution: &DataDirResolution,
+    working_dir: Option<&std::path::Path>,
 ) -> Result<()> {
-    let loaded_models = provider_models::load().wrap_err("failed to load model config")?;
-    let loaded_phrases = phrases::load().wrap_err("failed to load phrase config")?;
+    let (loaded_models, loaded_phrases) =
+        load_models_and_phrases(working_dir, data_dir_resolution)?;
     let mut model_options =
         model_options_from_app_config_and_models(config, &loaded_models, &loaded_phrases);
-    let mut runtime_options = runtime_options_from_app_config_and_models(config, &loaded_models);
-    attach_default_session_persistence(&mut runtime_options, &mut model_options, &loaded_models)
-        .wrap_err("failed to initialize session persistence")?;
+    let mut runtime_options =
+        runtime_options_from_app_config_and_models(config, &loaded_models, data_dir_resolution);
+    attach_default_session_persistence(
+        &mut runtime_options,
+        &mut model_options,
+        &loaded_models,
+        data_dir_resolution,
+        working_dir,
+    )
+    .wrap_err("failed to initialize session persistence")?;
     let mut runtime_coordinator = AppRuntimeCoordinator::new(runtime_options)
         .map_err(color_eyre::eyre::Report::msg)
         .wrap_err("failed to initialize app runtime coordinator")?;
@@ -132,9 +231,16 @@ fn attach_default_session_persistence(
     options: &mut AppRuntimeOptions,
     model_options: &mut terminal_ui::ModelOptions,
     loaded_models: &provider_models::LoadedModelCatalog,
+    data_dir_resolution: &DataDirResolution,
+    working_dir: Option<&std::path::Path>,
 ) -> Result<()> {
-    let store = open_local_session_store()?;
-    let work_dir = std::env::current_dir().wrap_err("resolve current working directory")?;
+    options.hunea_config_dir = data_dir_resolution.config_dir().to_path_buf();
+    let store = open_local_session_store(data_dir_resolution)?;
+    // SessionHeader.work_dir 是必填字段。cwd 不可用时用 "." 占位，
+    // 避免为稀有路径把整个启动打成 fatal；真实路径语义在该场景本就不可恢复。
+    let work_dir = working_dir
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
     let git_head = envinfo::git_head();
     let initial_model = loaded_models
         .selected_model
@@ -153,8 +259,12 @@ fn attach_default_session_persistence(
     options.session_store = Some(Arc::clone(&store));
     options.session_header_template = Some(session_header);
     let tool_definitions = tool_definitions_for_managed_search(&options.managed_search_tools);
+    // work_dir = 项目目录（找项目 AGENTS.md）；config_dir = 数据目录（找全局 AGENTS.md）。
+    // 便携模式下二者都落在工作区 `.hunea/` 一侧，但语义仍要分开传，避免全局模式找错位置。
+    let config_dir = data_dir_resolution.config_dir();
     let loaded_prompt_assembly =
-        PromptAssemblyWorkspace::new(work_dir.as_path(), &tool_definitions).load_manager(store)?;
+        PromptAssemblyWorkspace::new(work_dir.as_path(), config_dir, &tool_definitions)
+            .load_manager(store)?;
     model_options.prompt_assembly = Some(loaded_prompt_assembly.clone());
     options.initial_prompt_prelude = Some(loaded_prompt_assembly.resolution.prelude.clone());
     options.initial_dynamic_environment_session_config = Some(
@@ -164,9 +274,12 @@ fn attach_default_session_persistence(
     Ok(())
 }
 
-fn open_local_session_store() -> Result<Arc<dyn SessionStore>> {
+fn open_local_session_store(
+    data_dir_resolution: &DataDirResolution,
+) -> Result<Arc<dyn SessionStore>> {
+    let hunea_dir = data_dir_resolution.data_dir().to_path_buf();
     let store = session_store_bridge::run_session_store_future(
-        LocalSessionStore::open,
+        move || LocalSessionStore::open_in(hunea_dir),
         "start session store runtime",
     )?
     .wrap_err("open local session store")?;

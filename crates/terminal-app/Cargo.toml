@@ -13,6 +13,8 @@ conversation-runtime.workspace = true
 session-store.workspace = true
 tool-runtime.workspace = true
 terminal-ui.workspace = true
+crossterm.workspace = true
+ratatui.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 thiserror.workspace = true
@@ -21,5 +23,5 @@ serde_json.workspace = true
 yaml_serde.workspace = true
 
 [dev-dependencies]
-crossterm.workspace = true
+libc.workspace = true
 provider-protocol.workspace = true

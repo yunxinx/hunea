@@ -4,14 +4,12 @@ mod file_config;
 mod load;
 mod managed_search_authorization;
 mod merge;
-mod paths;
 mod types;
 mod validate;
 
 pub use error::AppConfigError;
-pub use load::{load, load_from_paths};
+pub use load::{load_from_paths, load_with_resolution};
 pub use managed_search_authorization::persist_managed_search_tool_authorization_to_path;
-pub use paths::{config_dir, user_config_file_path};
 pub use types::{
     BRANCH_PICKER_LIST_ROWS_DEFAULT, BRANCH_PICKER_LIST_ROWS_MAX, BRANCH_PICKER_LIST_ROWS_MIN,
     COMPOSER_UNDO_DEFAULT_LIMIT, COMPOSER_UNDO_MAX_LIMIT, COMPOSER_UNDO_MIN_LIMIT, Config,

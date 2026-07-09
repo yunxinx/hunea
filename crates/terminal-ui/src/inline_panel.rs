@@ -1,5 +1,5 @@
 use ratatui::{
-    style::{Modifier, Style},
+    style::Style,
     text::{Line, Span},
 };
 use unicode_segmentation::UnicodeSegmentation;
@@ -9,7 +9,7 @@ use super::{
     display_width::{display_width, grapheme_width},
     selection::{SelectableLineRange, selectable_range_for_plain_line},
     styled_text::line_to_plain_text,
-    theme::{TerminalPalette, accent_text_style},
+    theme::TerminalPalette,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -21,10 +21,7 @@ pub(crate) struct InlinePanelRenderResult {
 }
 
 pub(crate) fn inline_panel_rule_line(width: usize, palette: TerminalPalette) -> Line<'static> {
-    Line::styled(
-        "━".repeat(width.max(1)),
-        accent_text_style(palette).add_modifier(Modifier::BOLD),
-    )
+    super::theme::accent_rule_line(width, palette)
 }
 
 pub(crate) fn inline_panel_visible_rows(model: &Model, fallback_rows: usize) -> usize {

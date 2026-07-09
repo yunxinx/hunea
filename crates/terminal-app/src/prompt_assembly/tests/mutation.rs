@@ -1,4 +1,11 @@
 use super::*;
+use std::path::{Path, PathBuf};
+
+fn test_config_dir(work_dir: &Path) -> PathBuf {
+    let dir = work_dir.join(".hunea");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
 
 #[test]
 fn disabling_default_tool_guidelines_materializes_builtin_entry_in_global_state() {
@@ -8,6 +15,7 @@ fn disabling_default_tool_guidelines_materializes_builtin_entry_in_global_state(
     apply_prompt_assembly_mutation(
         store.clone(),
         &work_dir,
+        &test_config_dir(&work_dir),
         PromptAssemblyMutation::scoped(
             PromptAssemblyScope::Global,
             PromptAssemblyScopedMutationKind::SetPromptSourceEnabled {
@@ -43,6 +51,7 @@ fn disabling_default_dynamic_environment_changes_keeps_baseline_visible() {
     let disabled_snapshot = apply_prompt_assembly_mutation(
         store.clone(),
         &work_dir,
+        &test_config_dir(&work_dir),
         PromptAssemblyMutation::scoped(
             PromptAssemblyScope::Global,
             PromptAssemblyScopedMutationKind::SetPromptSourceEnabled {
@@ -98,6 +107,7 @@ fn dynamic_environment_prompt_source_stays_visible_after_disable_and_can_be_rest
     let disabled_snapshot = apply_prompt_assembly_mutation(
         store.clone(),
         &work_dir,
+        &test_config_dir(&work_dir),
         PromptAssemblyMutation::scoped(
             PromptAssemblyScope::Global,
             PromptAssemblyScopedMutationKind::SetPromptSourceEnabled {
@@ -120,6 +130,7 @@ fn dynamic_environment_prompt_source_stays_visible_after_disable_and_can_be_rest
     let restored_snapshot = apply_prompt_assembly_mutation(
         store,
         &work_dir,
+        &test_config_dir(&work_dir),
         PromptAssemblyMutation::scoped(
             PromptAssemblyScope::Global,
             PromptAssemblyScopedMutationKind::SetPromptSourceEnabled {
@@ -144,6 +155,7 @@ fn moving_default_dynamic_environment_source_reorders_managed_list() {
     let snapshot = apply_prompt_assembly_mutation(
         store,
         &work_dir,
+        &test_config_dir(&work_dir),
         PromptAssemblyMutation::scoped(
             PromptAssemblyScope::Global,
             PromptAssemblyScopedMutationKind::MoveActiveSource {
@@ -182,6 +194,7 @@ fn moving_default_instruction_file_materializes_and_reorders_project_entry() {
     let snapshot = apply_prompt_assembly_mutation(
         store,
         &work_dir,
+        &test_config_dir(&work_dir),
         PromptAssemblyMutation::scoped(
             PromptAssemblyScope::Project,
             PromptAssemblyScopedMutationKind::MoveActiveSource {
@@ -240,6 +253,7 @@ fn save_skill_discovery_override_rebuilds_generated_block_and_preserves_appended
     apply_prompt_assembly_mutation(
         store.clone(),
         &work_dir,
+        &test_config_dir(&work_dir),
         PromptAssemblyMutation::SaveEditorTarget {
             target: PromptAssemblyEditorTarget::SkillDiscovery {
                 scope: PromptAssemblyScope::Project,
@@ -250,7 +264,7 @@ fn save_skill_discovery_override_rebuilds_generated_block_and_preserves_appended
     )
     .expect("save should succeed");
 
-    let loaded = PromptAssemblyWorkspace::new(&work_dir, &[])
+    let loaded = PromptAssemblyWorkspace::new(&work_dir, &test_config_dir(&work_dir), &[])
         .load_manager(store)
         .expect("snapshot should load");
     let skill_discovery = loaded
@@ -296,6 +310,7 @@ fn save_skill_discovery_override_follows_effective_scope() {
     apply_prompt_assembly_mutation(
         store,
         &work_dir,
+        &test_config_dir(&work_dir),
         PromptAssemblyMutation::SaveEditorTarget {
             target: PromptAssemblyEditorTarget::SkillDiscovery {
                 scope: PromptAssemblyScope::Global,
@@ -365,6 +380,7 @@ fn selecting_discovered_skill_persists_requested_order_from_one() {
     apply_prompt_assembly_mutation(
         store,
         &work_dir,
+        &test_config_dir(&work_dir),
         PromptAssemblyMutation::scoped(
             PromptAssemblyScope::Project,
             PromptAssemblyScopedMutationKind::SetDiscoveredSkillSelected {
@@ -409,6 +425,7 @@ fn moving_default_discovered_skill_materializes_dense_project_order() {
     apply_prompt_assembly_mutation(
         store,
         &work_dir,
+        &test_config_dir(&work_dir),
         PromptAssemblyMutation::scoped(
             PromptAssemblyScope::Project,
             PromptAssemblyScopedMutationKind::MoveDiscoveredSkill {
@@ -463,6 +480,7 @@ fn resetting_discovered_skill_order_restores_default_discovery_order() {
 
     let default_snapshot = resolve_prompt_assembly_manager_snapshot(
         &work_dir,
+        &test_config_dir(&work_dir),
         &PromptAssemblyScopeState::new(PromptAssemblyScope::Global),
         &PromptAssemblyScopeState::new(PromptAssemblyScope::Project),
         &[],
@@ -507,6 +525,7 @@ fn resetting_discovered_skill_order_restores_default_discovery_order() {
     apply_prompt_assembly_mutation(
         store,
         &work_dir,
+        &test_config_dir(&work_dir),
         PromptAssemblyMutation::scoped(
             PromptAssemblyScope::Project,
             PromptAssemblyScopedMutationKind::ResetDiscoveredSkillOrder,
@@ -562,6 +581,7 @@ fn moving_default_tool_materializes_dense_global_order() {
     apply_prompt_assembly_mutation(
         store.clone(),
         &work_dir,
+        &test_config_dir(&work_dir),
         PromptAssemblyMutation::scoped(
             PromptAssemblyScope::Global,
             PromptAssemblyScopedMutationKind::MoveTool {
@@ -603,6 +623,7 @@ fn moving_tool_ignores_unguided_registry_entries_when_materializing_order() {
     apply_prompt_assembly_mutation(
         store.clone(),
         &work_dir,
+        &test_config_dir(&work_dir),
         PromptAssemblyMutation::scoped(
             PromptAssemblyScope::Global,
             PromptAssemblyScopedMutationKind::MoveTool {
@@ -644,6 +665,7 @@ fn disabling_skill_discovery_materializes_disabled_entry_in_selected_scope() {
     apply_prompt_assembly_mutation(
         store,
         &work_dir,
+        &test_config_dir(&work_dir),
         PromptAssemblyMutation::scoped(
             PromptAssemblyScope::Project,
             PromptAssemblyScopedMutationKind::SetPromptSourceEnabled {
@@ -682,6 +704,7 @@ fn activate_long_lived_skill_persists_reference_and_expands_in_prelude() {
     let snapshot = apply_prompt_assembly_mutation(
         store.clone(),
         &work_dir,
+        &test_config_dir(&work_dir),
         PromptAssemblyMutation::scoped(
             PromptAssemblyScope::Project,
             PromptAssemblyScopedMutationKind::ActivateLongLivedSkill {
@@ -798,6 +821,7 @@ fn move_active_source_reorders_non_core_entries() {
     let snapshot = apply_prompt_assembly_mutation(
         store.clone(),
         &work_dir,
+        &test_config_dir(&work_dir),
         PromptAssemblyMutation::scoped(
             PromptAssemblyScope::Project,
             PromptAssemblyScopedMutationKind::MoveActiveSource {
@@ -887,6 +911,7 @@ fn removing_project_active_extra_prompt_preserves_it_as_inactive_candidate() {
     let snapshot = apply_prompt_assembly_mutation(
         store,
         &work_dir,
+        &test_config_dir(&work_dir),
         PromptAssemblyMutation::scoped(
             PromptAssemblyScope::Project,
             PromptAssemblyScopedMutationKind::RemovePromptSource {
@@ -925,6 +950,7 @@ fn create_extra_prompt_keeps_supplied_legacy_default_body_verbatim() {
     let snapshot = apply_prompt_assembly_mutation(
         store,
         &work_dir,
+        &test_config_dir(&work_dir),
         PromptAssemblyMutation::scoped(
             PromptAssemblyScope::Project,
             PromptAssemblyScopedMutationKind::CreateExtraPrompt {

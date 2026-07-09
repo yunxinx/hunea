@@ -1,77 +1,109 @@
-use std::{
-    env, io,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
+
+use runtime_domain::paths::{CONFIG_FILE_NAME, DataDirResolution, WORKSPACE_HUNEA_DIRNAME};
 
 use super::{
     error::AppConfigError,
-    merge::merge_config_file,
-    paths::config_dir,
+    merge::{ConfigFileLoadOutcome, merge_config_file},
     types::{Config, UserInputStyle},
 };
-
-/// `load` 按“用户级配置 -> 当前目录覆盖”的顺序加载配置。
-pub fn load() -> Result<Config, AppConfigError> {
-    load_with_lookups(env::current_dir, config_dir)
-}
 
 /// `load_from_paths` 使用给定目录快照加载配置，便于测试与非标准启动入口复用。
 pub fn load_from_paths(
     working_dir: Option<&Path>,
     user_config_dir: Option<&Path>,
 ) -> Result<Config, AppConfigError> {
-    load_from_base_config(
+    let (config, _warnings) = load_from_base_config(
         Config::default_config(),
         working_dir.map(Path::to_path_buf),
         user_config_dir.map(Path::to_path_buf),
-    )
+    )?;
+    Ok(config)
 }
 
-fn load_with_lookups(
-    get_working_dir: impl FnOnce() -> io::Result<PathBuf>,
-    get_user_config_dir: impl FnOnce() -> Option<PathBuf>,
-) -> Result<Config, AppConfigError> {
+/// `load_with_resolution` 使用预检阶段决定的数据目录解析结果加载配置。
+///
+/// 全局模式下读全局 config + 工作区 config 覆盖；
+/// 便携模式下只读工作区 config，不读全局（因全局可能不可访问）。
+///
+/// `working_dir` 为 `None` 时：不叠加工作区 config，并将默认 `user_input_style`
+/// 设为 `Ms`（与历史 cwd 不可用行为一致；后续文件 merge 仍可覆盖）。
+///
+/// 返回加载后的 config 与收集到的可降级错误（如配置文件读取权限错误）。
+/// 文件级 Read 错误永不 fatal——项目有内置默认配置；目录可访问性由预检负责。
+pub fn load_with_resolution(
+    working_dir: Option<&Path>,
+    resolution: &DataDirResolution,
+) -> Result<(Config, Vec<AppConfigError>), AppConfigError> {
     let mut config = Config::default_config();
-    let working_dir = match get_working_dir() {
-        Ok(path) => Some(path),
-        Err(_) => {
-            config.tui.user_input_style = UserInputStyle::Ms;
-            None
-        }
-    };
-
-    load_from_base_config(config, working_dir, get_user_config_dir())
+    // cwd 不可用时先落到最朴素主题（无 frame 依赖），避免默认 Cx 在残缺环境下渲染异常；
+    // 若全局 config.toml 显式配置了 style，后续 merge 仍可覆盖此默认。
+    if working_dir.is_none() {
+        config.tui.user_input_style = UserInputStyle::Ms;
+    }
+    let config_paths = resolution.layered_config_file_paths(working_dir, CONFIG_FILE_NAME);
+    let warnings = load_from_config_paths(&mut config, config_paths)?;
+    Ok((config, warnings))
 }
 
 fn load_from_base_config(
     mut config: Config,
     working_dir: Option<PathBuf>,
     user_config_dir: Option<PathBuf>,
-) -> Result<Config, AppConfigError> {
+) -> Result<(Config, Vec<AppConfigError>), AppConfigError> {
     let mut config_paths = Vec::with_capacity(2);
     if let Some(path) = user_config_dir {
-        config_paths.push(path.join("config.toml"));
+        config_paths.push(path.join(CONFIG_FILE_NAME));
     }
     if let Some(path) = working_dir.as_ref() {
-        config_paths.push(path.join(".hunea").join("config.toml"));
+        config_paths.push(path.join(WORKSPACE_HUNEA_DIRNAME).join(CONFIG_FILE_NAME));
     }
 
+    let warnings = load_from_config_paths(&mut config, config_paths)?;
+    Ok((config, warnings))
+}
+
+/// `load_from_config_paths` 按顺序合并多个配置文件，收集可降级错误。
+///
+/// 错误分层（与预检职责分工）：
+/// - **Decode/Validation** → `Err` fatal：用户写错了配置，必须修
+/// - **Read（权限/IO，非 NotFound）** → warning：环境问题，继续尝试下一源
+/// - **NotFound** → Skipped：文件可选，用默认值即可
+///
+/// 全部源都 Read 失败时**不** fatal：`Config::default_config()` 已是完整可用配置。
+/// “目录能不能用”由预检（`Accessibility` + 便携模式）决定，不在文件加载层重复判死。
+fn load_from_config_paths(
+    config: &mut Config,
+    config_paths: Vec<PathBuf>,
+) -> Result<Vec<AppConfigError>, AppConfigError> {
+    let mut warnings = Vec::new();
     let mut reasoning_content_display_configured = false;
     for path in config_paths {
-        config = merge_config_file(config, &path, &mut reasoning_content_display_configured)?;
+        match merge_config_file(config, &path, &mut reasoning_content_display_configured)? {
+            ConfigFileLoadOutcome::Loaded | ConfigFileLoadOutcome::Skipped => {}
+            ConfigFileLoadOutcome::Downgradable(err) => warnings.push(err),
+        }
     }
-
-    Ok(config)
+    Ok(warnings)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{load_from_paths, load_with_lookups};
-    use crate::appconfig::UserInputStyle;
+    use super::{load_from_paths, load_with_resolution};
+    use crate::appconfig::{AppConfigError, UserInputStyle};
+    use runtime_domain::paths::DataDirResolution;
     use std::{
-        fs, io,
+        fs,
         path::{Path, PathBuf},
     };
+
+    /// chmod 0o000 对 root 无效，权限相关测试在 root 下会假绿，故跳过。
+    /// 仅测试内联，不进公共 API。
+    #[cfg(unix)]
+    fn process_euid_is_root() -> bool {
+        // SAFETY: geteuid 无参数、无内存副作用。
+        unsafe { libc::geteuid() == 0 }
+    }
 
     #[test]
     fn load_defaults_to_cx_when_no_config_exists() {
@@ -152,31 +184,178 @@ mod tests {
     }
 
     #[test]
-    fn load_falls_back_to_ms_when_working_directory_lookup_fails() {
-        let config = load_with_lookups(
-            || Err(io::Error::other("working directory unavailable")),
-            || None,
-        )
-        .expect("missing working dir should fall back to ms");
+    fn load_with_resolution_global_reads_global_then_workspace() {
+        let working_dir = temp_test_dir("resolution-global-working");
+        let global_dir = temp_test_dir("resolution-global-config");
+        write_config(
+            &global_dir.join("config.toml"),
+            "[tui]\nuser_input_style = \"ms\"\n",
+        );
+        write_config(
+            &working_dir.join(".hunea").join("config.toml"),
+            "[tui]\nuser_input_style = \"cx\"\n",
+        );
 
-        assert_eq!(config.tui.user_input_style, UserInputStyle::Ms);
+        let resolution = DataDirResolution::Global(global_dir);
+        let (config, warnings) = load_with_resolution(Some(&working_dir), &resolution)
+            .expect("global resolution should load");
+
+        assert_eq!(config.tui.user_input_style, UserInputStyle::Cx);
+        assert!(warnings.is_empty(), "no warnings expected: {warnings:?}");
     }
 
     #[test]
-    fn load_still_uses_user_config_when_working_directory_lookup_fails() {
-        let user_config_dir = temp_test_dir("load-user-config-after-cwd-failure");
+    fn load_with_resolution_portable_reads_only_workspace() {
+        let working_dir = temp_test_dir("resolution-portable-working");
+        let global_dir = temp_test_dir("resolution-portable-config");
         write_config(
-            &user_config_dir.join("config.toml"),
+            &global_dir.join("config.toml"),
+            "[tui]\nuser_input_style = \"ms\"\n",
+        );
+        write_config(
+            &working_dir.join(".hunea").join("config.toml"),
             "[tui]\nuser_input_style = \"cc\"\n",
         );
 
-        let config = load_with_lookups(
-            || Err(io::Error::other("working directory unavailable")),
-            || Some(user_config_dir.clone()),
-        )
-        .expect("user config should still be used");
+        let resolution = DataDirResolution::Portable(working_dir.join(".hunea"));
+        let (config, warnings) = load_with_resolution(Some(&working_dir), &resolution)
+            .expect("portable resolution should load");
 
         assert_eq!(config.tui.user_input_style, UserInputStyle::Cc);
+        assert!(warnings.is_empty(), "no warnings expected: {warnings:?}");
+    }
+
+    #[test]
+    fn load_with_resolution_portable_without_workspace_config_uses_defaults() {
+        let working_dir = temp_test_dir("resolution-portable-defaults");
+
+        let resolution = DataDirResolution::Portable(working_dir.join(".hunea"));
+        let (config, warnings) = load_with_resolution(Some(&working_dir), &resolution)
+            .expect("portable resolution with no config should use defaults");
+
+        assert_eq!(config.tui.user_input_style, UserInputStyle::Cx);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn load_with_resolution_without_working_dir_uses_ms_default_and_global_only() {
+        let global_dir = temp_test_dir("resolution-no-cwd-config");
+        write_config(
+            &global_dir.join("config.toml"),
+            "[tui]\nuser_input_style = \"cc\"\n",
+        );
+
+        let resolution = DataDirResolution::Global(global_dir);
+        let (config, warnings) =
+            load_with_resolution(None, &resolution).expect("global-only load should work");
+
+        // 全局文件覆盖 Ms 默认
+        assert_eq!(config.tui.user_input_style, UserInputStyle::Cc);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn load_with_resolution_without_working_dir_and_no_files_keeps_ms() {
+        let global_dir = temp_test_dir("resolution-no-cwd-empty");
+        let resolution = DataDirResolution::Global(global_dir);
+        let (config, warnings) =
+            load_with_resolution(None, &resolution).expect("defaults should load");
+
+        assert_eq!(config.tui.user_input_style, UserInputStyle::Ms);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn load_with_resolution_decode_error_still_fatal() {
+        let working_dir = temp_test_dir("resolution-decode-fatal");
+        write_config(&working_dir.join(".hunea").join("config.toml"), "[tui\n");
+
+        let resolution = DataDirResolution::Portable(working_dir.join(".hunea"));
+        let error = load_with_resolution(Some(&working_dir), &resolution)
+            .expect_err("decode error should be fatal");
+
+        assert!(
+            error.to_string().contains("decode config file"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_with_resolution_global_permission_error_downgrades_and_continues() {
+        if process_euid_is_root() {
+            eprintln!("skipping permission test under root");
+            return;
+        }
+
+        let working_dir = temp_test_dir("resolution-perm-working");
+        let global_dir = temp_test_dir("resolution-perm-config");
+        write_config(
+            &global_dir.join("config.toml"),
+            "[tui]\nuser_input_style = \"ms\"\n",
+        );
+        write_config(
+            &working_dir.join(".hunea").join("config.toml"),
+            "[tui]\nuser_input_style = \"cx\"\n",
+        );
+
+        use std::os::unix::fs::PermissionsExt;
+        let unreadable_path = global_dir.join("config.toml");
+        fs::set_permissions(&unreadable_path, fs::Permissions::from_mode(0o000))
+            .expect("chmod should work");
+
+        let resolution = DataDirResolution::Global(global_dir);
+        let (config, warnings) = load_with_resolution(Some(&working_dir), &resolution)
+            .expect("permission error should downgrade, not fatal");
+
+        let _ = fs::set_permissions(&unreadable_path, fs::Permissions::from_mode(0o644));
+
+        assert_eq!(config.tui.user_input_style, UserInputStyle::Cx);
+        assert_eq!(warnings.len(), 1, "expected one warning: {warnings:?}");
+        assert!(matches!(warnings[0], AppConfigError::Read { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_with_resolution_all_sources_unreadable_uses_defaults_with_warnings() {
+        if process_euid_is_root() {
+            eprintln!("skipping permission test under root");
+            return;
+        }
+
+        let working_dir = temp_test_dir("resolution-all-downgradable-working");
+        let global_dir = temp_test_dir("resolution-all-downgradable-config");
+        write_config(
+            &global_dir.join("config.toml"),
+            "[tui]\nuser_input_style = \"ms\"\n",
+        );
+        write_config(
+            &working_dir.join(".hunea").join("config.toml"),
+            "[tui]\nuser_input_style = \"cx\"\n",
+        );
+
+        use std::os::unix::fs::PermissionsExt;
+        let global_path = global_dir.join("config.toml");
+        let workspace_path = working_dir.join(".hunea").join("config.toml");
+        fs::set_permissions(&global_path, fs::Permissions::from_mode(0o000))
+            .expect("chmod should work");
+        fs::set_permissions(&workspace_path, fs::Permissions::from_mode(0o000))
+            .expect("chmod should work");
+
+        let resolution = DataDirResolution::Global(global_dir);
+        let (config, warnings) = load_with_resolution(Some(&working_dir), &resolution)
+            .expect("unreadable files should fall back to defaults");
+
+        let _ = fs::set_permissions(&global_path, fs::Permissions::from_mode(0o644));
+        let _ = fs::set_permissions(&workspace_path, fs::Permissions::from_mode(0o644));
+
+        assert_eq!(config.tui.user_input_style, UserInputStyle::Cx);
+        assert_eq!(warnings.len(), 2, "expected two warnings: {warnings:?}");
+        assert!(
+            warnings
+                .iter()
+                .all(|w| matches!(w, AppConfigError::Read { .. }))
+        );
     }
 
     fn temp_test_dir(prefix: &str) -> PathBuf {

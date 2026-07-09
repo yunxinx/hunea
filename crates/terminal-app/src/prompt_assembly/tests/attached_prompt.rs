@@ -1,5 +1,11 @@
 use super::*;
 
+fn test_config_dir(work_dir: &std::path::Path) -> std::path::PathBuf {
+    let dir = work_dir.join(".hunea");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
 #[test]
 fn assemble_attached_prompt_message_expands_unique_skill_mentions_in_first_use_order() {
     let work_dir = temp_dir("manual-skill-assembly");
@@ -159,7 +165,7 @@ fn assemble_attached_prompt_message_includes_custom_prompt_bodies_in_first_use_o
         )
         .expect("global prompt state should save");
 
-    let manager = PromptAssemblyWorkspace::new(&work_dir, &[])
+    let manager = PromptAssemblyWorkspace::new(&work_dir, &test_config_dir(&work_dir), &[])
         .load_manager(store)
         .expect("prompt assembly manager should load");
 

@@ -1,10 +1,10 @@
 use std::{
     collections::BTreeMap,
-    env, fmt, fs, io,
+    fmt, fs, io,
     path::{Path, PathBuf},
 };
 
-use directories::ProjectDirs;
+use runtime_domain::paths::{DataDirResolution, MODELS_FILE_NAME, WORKSPACE_HUNEA_DIRNAME};
 use serde::Deserialize;
 use toml_edit::DocumentMut;
 
@@ -19,7 +19,6 @@ use runtime_domain::{
     session::ProviderRequest,
 };
 
-const MODELS_FILE_NAME: &str = "models.toml";
 type ModelSyncResult = Result<Vec<String>, String>;
 
 /// `LoadedModelCatalog` 是从 `models.toml` 得到的 TUI 模型目录与默认选择。
@@ -167,10 +166,21 @@ impl std::error::Error for ModelsConfigError {
     }
 }
 
-/// `load` 从用户配置目录与当前工作目录加载 `models.toml`。
-pub fn load() -> Result<LoadedModelCatalog, ModelsConfigError> {
-    let working_dir = env::current_dir().ok();
-    load_from_paths(working_dir.as_deref(), user_config_directory().as_deref())
+/// `load_with_resolution` 根据预检阶段决定的数据目录解析结果加载 `models.toml`。
+///
+/// 后加载覆盖先加载。路径由 `DataDirResolution::layered_config_file_paths` 统一决议。
+///
+/// 错误策略与 `app-config` 一致：
+/// - NotFound → 跳过（可无 models.toml，走空目录默认）
+/// - Read 权限/IO → 降级为 warning，继续下一个源
+/// - 全部源均为 Read 错误 → 空目录默认 + warnings（内置默认足够启动）
+/// - Decode/Validation → fatal
+pub fn load_with_resolution(
+    working_dir: Option<&Path>,
+    resolution: &DataDirResolution,
+) -> Result<(LoadedModelCatalog, Vec<ModelsConfigError>), ModelsConfigError> {
+    let paths = resolution.layered_config_file_paths(working_dir, MODELS_FILE_NAME);
+    load_from_explicit_paths(&paths)
 }
 
 /// `load_from_paths` 从指定目录加载本地模型配置，不在启动路径同步 provider 模型列表。
@@ -178,32 +188,52 @@ pub fn load_from_paths(
     working_dir: Option<&Path>,
     user_config_dir: Option<&Path>,
 ) -> Result<LoadedModelCatalog, ModelsConfigError> {
+    let (loaded, _warnings) =
+        load_from_explicit_paths(&model_config_paths(working_dir, user_config_dir))?;
+    Ok(loaded)
+}
+
+fn load_from_explicit_paths(
+    paths: &[PathBuf],
+) -> Result<(LoadedModelCatalog, Vec<ModelsConfigError>), ModelsConfigError> {
     let mut merged = MergedModelsConfig::default();
     let mut source_path = None;
+    let mut warnings = Vec::new();
 
-    for path in model_config_paths(working_dir, user_config_dir) {
-        let Some(file_config) = read_models_config(&path)? else {
-            continue;
-        };
-        merge_models_config(&mut merged, file_config, &path);
-        source_path = Some(path);
+    for path in paths {
+        match read_models_config(path) {
+            Ok(Some(file_config)) => {
+                merge_models_config(&mut merged, file_config, path);
+                source_path = Some(path.clone());
+            }
+            // models.toml 可选：缺文件用空目录默认，不阻塞启动。
+            Ok(None) => {}
+            // 文件级权限/IO：降级为 warning。目录能否用由预检决定。
+            Err(error @ ModelsConfigError::Read { .. }) => warnings.push(error),
+            // Decode/Validation：内容错误，立即 fatal。
+            Err(other) => return Err(other),
+        }
     }
 
+    // 没有任何源成功加载时返回空目录 + warnings，而不是 fatal。
     if source_path.is_none() {
-        return Ok(LoadedModelCatalog::default());
+        return Ok((LoadedModelCatalog::default(), warnings));
     }
 
     let catalog = catalog_from_config(&merged, source_path.as_deref())?;
     let context_limits = context_limits_from_merged(&merged, source_path.as_deref())?;
     let selected_model = selection_from_default(merged.default.as_deref(), &catalog);
 
-    Ok(LoadedModelCatalog {
-        catalog,
-        context_limits,
-        selected_model,
-        source_path,
-        requires_model_selection: true,
-    })
+    Ok((
+        LoadedModelCatalog {
+            catalog,
+            context_limits,
+            selected_model,
+            source_path,
+            requires_model_selection: true,
+        },
+        warnings,
+    ))
 }
 
 /// `write_default_model` 将用户最后一次选择写回 `models.toml` 的 `default` 字段。
@@ -213,7 +243,7 @@ pub fn write_default_model(
 ) -> Result<PathBuf, ModelsConfigError> {
     let path = source_path
         .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from(MODELS_FILE_NAME));
+        .unwrap_or_else(|| PathBuf::from(WORKSPACE_HUNEA_DIRNAME).join(MODELS_FILE_NAME));
     let content = match fs::read_to_string(&path) {
         Ok(content) => content,
         Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
@@ -252,14 +282,15 @@ pub fn sync_provider_models_once(request: &ProviderSyncRequest) -> Result<Vec<St
     sync_provider_models(request)
 }
 
+/// 测试 / 显式路径入口用的搜索列表；生产路径走 `DataDirResolution::layered_config_file_paths`。
 fn model_config_paths(working_dir: Option<&Path>, user_config_dir: Option<&Path>) -> Vec<PathBuf> {
-    let mut paths = Vec::with_capacity(3);
+    let mut paths = Vec::with_capacity(2);
     if let Some(path) = user_config_dir {
         paths.push(path.join(MODELS_FILE_NAME));
     }
     if let Some(path) = working_dir {
-        paths.push(path.join(MODELS_FILE_NAME));
-        paths.push(path.join(".hunea").join(MODELS_FILE_NAME));
+        // 只认 `.hunea/models.toml`，不读工作区根 `models.toml`（历史错误位置，已废弃）。
+        paths.push(path.join(WORKSPACE_HUNEA_DIRNAME).join(MODELS_FILE_NAME));
     }
     paths
 }
@@ -479,13 +510,15 @@ fn sync_provider_models(request: &ProviderSyncRequest) -> ModelSyncResult {
     list_provider_models(&request).map_err(|error| error.to_string())
 }
 
-fn user_config_directory() -> Option<PathBuf> {
-    ProjectDirs::from("", "", "hunea").map(|dirs| dirs.config_dir().to_path_buf())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn process_euid_is_root() -> bool {
+        // SAFETY: geteuid 无参数、无内存副作用；仅测试用。
+        unsafe { libc::geteuid() == 0 }
+    }
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -558,6 +591,220 @@ models = ["fast-responses-model"]
             .expect_err("unreachable endpoint should fail after choosing /models sync");
 
         assert!(error.contains("transport error"));
+    }
+
+    #[test]
+    fn load_with_resolution_global_merges_global_and_workspace() {
+        let working_dir = tempdir_path("resolution-global-merge-working");
+        let global_dir = tempdir_path("resolution-global-merge-global");
+        fs::create_dir_all(&global_dir).expect("global dir should be created");
+        fs::write(
+            global_dir.join("models.toml"),
+            r#"
+[providers.global]
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:9/v1"
+models = ["global-model"]
+"#,
+        )
+        .expect("global models should be written");
+        fs::create_dir_all(working_dir.join(".hunea")).expect("hunea dir should be created");
+        fs::write(
+            working_dir.join(".hunea").join("models.toml"),
+            r#"
+[providers.workspace]
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:9/v1"
+models = ["workspace-model"]
+"#,
+        )
+        .expect("workspace models should be written");
+
+        let resolution = DataDirResolution::Global(global_dir);
+        let (loaded, _warnings) = load_with_resolution(Some(&working_dir), &resolution)
+            .expect("global resolution should load");
+
+        assert!(loaded.catalog.enabled_provider_by_id("global").is_some());
+        assert!(loaded.catalog.enabled_provider_by_id("workspace").is_some());
+    }
+
+    #[test]
+    fn load_with_resolution_portable_skips_global() {
+        let working_dir = tempdir_path("resolution-portable-skip-working");
+        let global_dir = tempdir_path("resolution-portable-skip-global");
+        fs::create_dir_all(&global_dir).expect("global dir should be created");
+        fs::write(
+            global_dir.join("models.toml"),
+            r#"
+[providers.global]
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:9/v1"
+"#,
+        )
+        .expect("global models should be written");
+        fs::create_dir_all(working_dir.join(".hunea")).expect("hunea dir should be created");
+        fs::write(
+            working_dir.join(".hunea").join("models.toml"),
+            r#"
+[providers.portable]
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:9/v1"
+"#,
+        )
+        .expect("portable models should be written");
+
+        let resolution = DataDirResolution::Portable(working_dir.join(".hunea"));
+        let (loaded, _warnings) = load_with_resolution(Some(&working_dir), &resolution)
+            .expect("portable resolution should load");
+
+        assert!(loaded.catalog.enabled_provider_by_id("portable").is_some());
+        assert!(loaded.catalog.enabled_provider_by_id("global").is_none());
+    }
+
+    #[test]
+    fn load_with_resolution_ignores_workspace_root_models_toml() {
+        let working_dir = tempdir_path("resolution-ignore-root-working");
+        fs::create_dir_all(&working_dir).expect("working dir should be created");
+        fs::write(
+            working_dir.join("models.toml"),
+            r#"
+[providers.root]
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:9/v1"
+models = ["root-model"]
+"#,
+        )
+        .expect("workspace-root models should be written");
+        fs::create_dir_all(working_dir.join(".hunea")).expect("hunea dir should be created");
+        fs::write(
+            working_dir.join(".hunea").join("models.toml"),
+            r#"
+[providers.project]
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:9/v1"
+models = ["project-model"]
+"#,
+        )
+        .expect("project models should be written");
+
+        let resolution = DataDirResolution::Portable(working_dir.join(".hunea"));
+        let (loaded, _warnings) = load_with_resolution(Some(&working_dir), &resolution)
+            .expect("portable resolution should load");
+
+        assert!(loaded.catalog.enabled_provider_by_id("root").is_none());
+        assert!(loaded.catalog.enabled_provider_by_id("project").is_some());
+        assert_eq!(
+            loaded.source_path.as_deref(),
+            Some(working_dir.join(".hunea").join("models.toml").as_path()),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_with_resolution_skips_unreadable_global_and_uses_workspace() {
+        if process_euid_is_root() {
+            eprintln!("skipping permission test under root");
+            return;
+        }
+
+        let working_dir = tempdir_path("resolution-skip-read-working");
+        let global_dir = tempdir_path("resolution-skip-read-global");
+        fs::create_dir_all(&global_dir).expect("global dir should be created");
+        fs::write(
+            global_dir.join("models.toml"),
+            r#"
+[providers.global]
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:9/v1"
+"#,
+        )
+        .expect("global models should be written");
+        fs::create_dir_all(working_dir.join(".hunea")).expect("hunea dir should be created");
+        fs::write(
+            working_dir.join(".hunea").join("models.toml"),
+            r#"
+[providers.workspace]
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:9/v1"
+"#,
+        )
+        .expect("workspace models should be written");
+
+        use std::os::unix::fs::PermissionsExt;
+        let unreadable_path = global_dir.join("models.toml");
+        fs::set_permissions(&unreadable_path, fs::Permissions::from_mode(0o000))
+            .expect("chmod should work");
+
+        let resolution = DataDirResolution::Global(global_dir);
+        let (loaded, warnings) = load_with_resolution(Some(&working_dir), &resolution)
+            .expect("should skip unreadable global and load workspace");
+
+        // 恢复权限以便 tempdir 清理
+        let _ = fs::set_permissions(&unreadable_path, fs::Permissions::from_mode(0o644));
+
+        assert!(loaded.catalog.enabled_provider_by_id("workspace").is_some());
+        assert!(loaded.catalog.enabled_provider_by_id("global").is_none());
+        assert_eq!(
+            warnings.len(),
+            1,
+            "unreadable global should surface as warning"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_with_resolution_all_sources_unreadable_uses_defaults_with_warnings() {
+        if process_euid_is_root() {
+            eprintln!("skipping permission test under root");
+            return;
+        }
+
+        let working_dir = tempdir_path("resolution-all-unreadable-working");
+        let global_dir = tempdir_path("resolution-all-unreadable-global");
+        fs::create_dir_all(&global_dir).expect("global dir should be created");
+        fs::write(
+            global_dir.join("models.toml"),
+            r#"
+[providers.global]
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:9/v1"
+"#,
+        )
+        .expect("global models should be written");
+        fs::create_dir_all(working_dir.join(".hunea")).expect("hunea dir should be created");
+        fs::write(
+            working_dir.join(".hunea").join("models.toml"),
+            r#"
+[providers.workspace]
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:9/v1"
+"#,
+        )
+        .expect("workspace models should be written");
+
+        use std::os::unix::fs::PermissionsExt;
+        let global_path = global_dir.join("models.toml");
+        let workspace_path = working_dir.join(".hunea").join("models.toml");
+        fs::set_permissions(&global_path, fs::Permissions::from_mode(0o000))
+            .expect("chmod should work");
+        fs::set_permissions(&workspace_path, fs::Permissions::from_mode(0o000))
+            .expect("chmod should work");
+
+        let resolution = DataDirResolution::Global(global_dir);
+        let (loaded, warnings) = load_with_resolution(Some(&working_dir), &resolution)
+            .expect("unreadable files should fall back to defaults");
+
+        let _ = fs::set_permissions(&global_path, fs::Permissions::from_mode(0o644));
+        let _ = fs::set_permissions(&workspace_path, fs::Permissions::from_mode(0o644));
+
+        assert_eq!(loaded.catalog.enabled_provider_count(), 0);
+        assert_eq!(warnings.len(), 2, "expected two warnings: {warnings:?}");
+        assert!(
+            warnings
+                .iter()
+                .all(|w| matches!(w, ModelsConfigError::Read { .. })),
+            "expected Read warnings, got: {warnings:?}"
+        );
     }
 
     fn tempdir_path(label: &str) -> PathBuf {

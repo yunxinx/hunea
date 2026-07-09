@@ -112,6 +112,7 @@ enum SessionStoreCommand {
     CheckPromptAssemblyMissingSources {
         store: Arc<dyn SessionStore>,
         work_dir: std::path::PathBuf,
+        config_dir: std::path::PathBuf,
     },
     LoadMessageHistoryPickerRows {
         store: Arc<dyn SessionStore>,
@@ -349,9 +350,14 @@ impl SessionStoreWorker {
         &mut self,
         store: Arc<dyn SessionStore>,
         work_dir: std::path::PathBuf,
+        config_dir: std::path::PathBuf,
     ) -> Result<(), String> {
         self.send_command(
-            SessionStoreCommand::CheckPromptAssemblyMissingSources { store, work_dir },
+            SessionStoreCommand::CheckPromptAssemblyMissingSources {
+                store,
+                work_dir,
+                config_dir,
+            },
             false,
         )
     }
@@ -698,7 +704,11 @@ async fn handle_session_command(command: SessionStoreCommand) -> SessionStoreWor
                 ),
             }
         }
-        SessionStoreCommand::CheckPromptAssemblyMissingSources { store, work_dir } => {
+        SessionStoreCommand::CheckPromptAssemblyMissingSources {
+            store,
+            work_dir,
+            config_dir,
+        } => {
             let global_state = match store.load_global_prompt_assembly_state().await {
                 Ok(state) => state,
                 Err(error) => {
@@ -718,6 +728,7 @@ async fn handle_session_command(command: SessionStoreCommand) -> SessionStoreWor
                 Ok::<_, runtime_domain::prompt_assembly::persistence::ProjectPromptAssemblyError>(
                     crate::prompt_assembly::check_prompt_assembly_missing_sources_from_states(
                         &work_dir,
+                        &config_dir,
                         &global_state,
                         &project_state,
                         &[],

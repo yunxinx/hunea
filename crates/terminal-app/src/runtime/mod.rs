@@ -69,6 +69,10 @@ pub(crate) struct AppRuntimeOptions {
     pub(crate) runtime_request_policy: RuntimeRequestPolicy,
     pub(crate) managed_search_tools: ManagedSearchToolConfig,
     pub(crate) managed_search_authorization_config_path: Option<PathBuf>,
+    /// 数据目录（全局或便携 `.hunea/`），用于 AGENTS.md 等用户级文件。
+    ///
+    /// 由预检 `DataDirResolution` 注入；测试 Default 用 `.hunea` 占位，生产路径必须显式设置。
+    pub(crate) hunea_config_dir: PathBuf,
     pub(crate) session_store: Option<Arc<dyn SessionStore>>,
     pub(crate) session_header_template: Option<SessionHeader>,
     pub(crate) prompt_assembly_manager: Option<PromptAssemblyManagerSnapshot>,
@@ -110,6 +114,7 @@ impl Default for AppRuntimeOptions {
             runtime_request_policy: RuntimeRequestPolicy::default(),
             managed_search_tools: ManagedSearchToolConfig::default(),
             managed_search_authorization_config_path: None,
+            hunea_config_dir: PathBuf::from(".hunea"),
             session_store: None,
             session_header_template: None,
             prompt_assembly_manager: None,

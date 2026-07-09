@@ -1,5 +1,11 @@
 use super::*;
 
+fn test_config_dir(work_dir: &std::path::Path) -> std::path::PathBuf {
+    let dir = work_dir.join(".hunea");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
 #[test]
 fn load_initial_prompt_prelude_reads_global_and_project_state() {
     let work_dir = temp_dir("load");
@@ -48,8 +54,8 @@ fn load_initial_prompt_prelude_reads_global_and_project_state() {
         )
         .expect("global state should save");
 
-    let prelude =
-        load_initial_prompt_prelude(global_store, &work_dir).expect("prelude should load");
+    let prelude = load_initial_prompt_prelude(global_store, &work_dir, &test_config_dir(&work_dir))
+        .expect("prelude should load");
 
     let effective = prelude
         .effective_system_prompt()
@@ -89,7 +95,7 @@ fn prompt_assembly_workspace_reads_snapshot_and_prelude() {
         )
         .expect("global state should save");
 
-    let loaded = PromptAssemblyWorkspace::new(&work_dir, &[])
+    let loaded = PromptAssemblyWorkspace::new(&work_dir, &test_config_dir(&work_dir), &[])
         .load_manager(global_store)
         .expect("snapshot should load");
 

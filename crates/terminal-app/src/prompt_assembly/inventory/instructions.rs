@@ -1,7 +1,9 @@
 use super::*;
 
+/// `config_dir` 是全局 AGENTS.md 所在目录（`DataDirResolution::config_dir`）。
 pub(in crate::prompt_assembly) fn discover_instruction_files(
     work_dir: &Path,
+    config_dir: &Path,
     global_instructions_path_override: Option<&Path>,
 ) -> (
     Vec<DiscoveredInstructionsFile>,
@@ -10,9 +12,10 @@ pub(in crate::prompt_assembly) fn discover_instruction_files(
     let mut discovered = Vec::new();
     let mut diagnostics = Vec::new();
 
+    let default_global_path = global_instructions_file_path(config_dir);
     if let Some(global_file) = global_instructions_path_override
         .map(Path::to_path_buf)
-        .or_else(global_instructions_file_path)
+        .or(Some(default_global_path))
         .filter(|path| path.is_file())
     {
         match load_instructions_file(
@@ -74,8 +77,9 @@ pub(in crate::prompt_assembly) fn load_instructions_file(
     }))
 }
 
-pub(in crate::prompt_assembly) fn global_instructions_file_path() -> Option<PathBuf> {
-    hunea_config_dir().map(|dir| dir.join(GLOBAL_INSTRUCTIONS_FILE_NAME))
+/// 全局 AGENTS.md 路径：始终位于数据目录根（全局 `~/.config/hunea/` 或便携 `.hunea/`）。
+pub(in crate::prompt_assembly) fn global_instructions_file_path(config_dir: &Path) -> PathBuf {
+    config_dir.join(GLOBAL_INSTRUCTIONS_FILE_NAME)
 }
 
 pub(in crate::prompt_assembly) fn project_instruction_search_dirs(

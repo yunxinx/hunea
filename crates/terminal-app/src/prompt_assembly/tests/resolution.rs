@@ -1,5 +1,11 @@
 use super::*;
 
+fn test_config_dir(work_dir: &std::path::Path) -> std::path::PathBuf {
+    let dir = work_dir.join(".hunea");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
 #[test]
 fn resolve_initial_prompt_prelude_orders_core_extra_discovery_and_long_lived_skill() {
     let work_dir = temp_dir("resolve");
@@ -62,6 +68,7 @@ fn resolve_initial_prompt_prelude_orders_core_extra_discovery_and_long_lived_ski
 
     let prelude = resolve_initial_prompt_prelude_with_overrides(
         &work_dir,
+        &test_config_dir(&work_dir),
         &global_state,
         &project_state,
         None,
@@ -115,6 +122,7 @@ fn resolve_initial_prompt_prelude_places_instruction_files_between_core_and_extr
 
     let prelude = resolve_initial_prompt_prelude_with_overrides(
         &nested_dir,
+        &test_config_dir(&nested_dir),
         &scope_state! {
             scope: PromptAssemblyScope::Global,
             core_system_override: Some("global core".to_string()),
@@ -199,6 +207,7 @@ fn resolve_initial_prompt_assembly_keeps_inactive_sources_for_manager_view() {
     let work_dir = temp_dir("snapshot");
     let resolved = resolve_prompt_assembly_manager_snapshot(
         &work_dir,
+        &test_config_dir(&work_dir),
         &scope_state! {
             scope: PromptAssemblyScope::Global,
             core_system_override: None,
@@ -263,6 +272,7 @@ fn dynamic_environment_session_config_uses_static_baseline_observations_from_man
     let work_dir = temp_dir("dynamic-environment-baseline-config");
     let manager = resolve_prompt_assembly_manager_snapshot(
         &work_dir,
+        &test_config_dir(&work_dir),
         &scope_state! {
             scope: PromptAssemblyScope::Global,
             core_system_override: None,
@@ -315,6 +325,7 @@ fn resolve_manager_snapshot_injects_default_skill_discovery_source_with_generate
 
     let resolved = resolve_prompt_assembly_manager_snapshot(
         &work_dir,
+        &test_config_dir(&work_dir),
         &PromptAssemblyScopeState::new(PromptAssemblyScope::Global),
         &PromptAssemblyScopeState::new(PromptAssemblyScope::Project),
         &[],
@@ -358,6 +369,7 @@ fn resolve_manager_snapshot_places_tool_guidelines_after_core_and_marks_it_built
 
     let resolved = resolve_prompt_assembly_manager_snapshot(
         &work_dir,
+        &test_config_dir(&work_dir),
         &PromptAssemblyScopeState::new(PromptAssemblyScope::Global),
         &PromptAssemblyScopeState::new(PromptAssemblyScope::Project),
         &builtin_tool_definitions(),
@@ -416,6 +428,7 @@ fn active_long_lived_skill_prefers_project_skill_when_names_collide() {
         .expect("global skill file should exist");
     let snapshot = resolve_prompt_assembly_manager_snapshot_with_global_skill_root(
         &work_dir,
+        &test_config_dir(&work_dir),
         &scope_state! {
             scope: PromptAssemblyScope::Global,
             core_system_override: None,
@@ -463,6 +476,7 @@ fn active_long_lived_skill_prefers_project_skill_when_names_collide() {
 #[test]
 fn missing_source_check_counts_missing_entries_without_blocking_snapshot_resolution() {
     let manager = resolve_prompt_assembly_manager_snapshot(
+        &temp_dir("missing-check"),
         &temp_dir("missing-check"),
         &scope_state! {
             scope: PromptAssemblyScope::Global,

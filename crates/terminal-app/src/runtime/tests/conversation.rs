@@ -649,9 +649,10 @@ fn custom_prompt_attachment_uses_cached_prompt_assembly_without_waiting_for_stor
             ),
         ))
         .expect("global prompt state should save");
-    let cached_manager = crate::prompt_assembly::PromptAssemblyWorkspace::new(&work_dir, &[])
-        .load_manager(Arc::clone(&base_store))
-        .expect("cached prompt assembly manager should load");
+    let cached_manager =
+        crate::prompt_assembly::PromptAssemblyWorkspace::new(&work_dir, &work_dir, &[])
+            .load_manager(Arc::clone(&base_store))
+            .expect("cached prompt assembly manager should load");
 
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();

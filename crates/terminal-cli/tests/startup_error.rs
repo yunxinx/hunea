@@ -11,8 +11,16 @@ fn invalid_app_config_exits_with_user_facing_table() {
     let config_path = working_dir.join(".hunea").join("config.toml");
     write_config(&config_path, "[tui]\nstatus_line = [\"current-mode\"]\n");
 
+    // 隔离 HOME：precheck 会探测全局配置目录可访问性（基于 HOME 解析），
+    // 解析到临时 HOME 下的 .config/hunea/ 并 create_dir_all 视为 Available，
+    // precheck 放行后 config loading 才能读到工作区无效配置并 fatal。
+    // 不隔离则会依赖真实环境的全局目录权限，测试无法自包含。
+    let isolated_home = temp_test_dir("invalid-app-config-table-home");
+
     let output = Command::new(env!("CARGO_BIN_EXE_hunea"))
         .current_dir(&working_dir)
+        .env("HOME", &isolated_home)
+        .env_remove("XDG_CONFIG_HOME")
         .output()
         .expect("hunea binary should run");
 

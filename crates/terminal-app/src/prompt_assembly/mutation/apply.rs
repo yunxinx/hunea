@@ -2,6 +2,7 @@ use super::*;
 
 pub(in crate::prompt_assembly) fn apply_mutation_to_scope_states(
     work_dir: &Path,
+    config_dir: &Path,
     global_state: &mut PromptAssemblyScopeState,
     project_state: &mut PromptAssemblyScopeState,
     mutation: PromptAssemblyMutation,
@@ -31,6 +32,7 @@ pub(in crate::prompt_assembly) fn apply_mutation_to_scope_states(
         }
         PromptAssemblyMutation::Scoped(scoped) => apply_scoped_mutation_to_scope_states(
             work_dir,
+            config_dir,
             global_state,
             project_state,
             scoped,
@@ -41,6 +43,7 @@ pub(in crate::prompt_assembly) fn apply_mutation_to_scope_states(
 
 fn apply_scoped_mutation_to_scope_states(
     work_dir: &Path,
+    config_dir: &Path,
     global_state: &mut PromptAssemblyScopeState,
     project_state: &mut PromptAssemblyScopeState,
     mutation: PromptAssemblyScopedMutation,
@@ -62,6 +65,7 @@ fn apply_scoped_mutation_to_scope_states(
         } => {
             ensure_prompt_source_entry_materialized(
                 work_dir,
+                config_dir,
                 global_state,
                 project_state,
                 scope,
@@ -192,6 +196,7 @@ fn apply_scoped_mutation_to_scope_states(
         PromptAssemblyScopedMutationKind::RemovePromptSource { kind, reference_id } => {
             ensure_prompt_source_entry_materialized(
                 work_dir,
+                config_dir,
                 global_state,
                 project_state,
                 scope,
@@ -212,6 +217,7 @@ fn apply_scoped_mutation_to_scope_states(
         } => {
             ensure_active_prompt_source_ordering_materialized(
                 work_dir,
+                config_dir,
                 global_state,
                 project_state,
                 scope,

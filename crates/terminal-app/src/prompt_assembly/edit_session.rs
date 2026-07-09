@@ -25,6 +25,7 @@ pub(crate) struct PromptAssemblyCommitOutcome {
 /// 这让 overlay 内的操作即时反馈，且抵消操作（如禁用再启用）不会触发误通知。
 pub(crate) struct PromptAssemblyEditSession {
     work_dir: PathBuf,
+    config_dir: PathBuf,
     tool_definitions: Vec<ToolDefinition>,
     global_state: PromptAssemblyScopeState,
     project_state: PromptAssemblyScopeState,
@@ -37,6 +38,7 @@ impl PromptAssemblyEditSession {
     pub(crate) fn load(
         store: Arc<dyn SessionStore>,
         work_dir: PathBuf,
+        config_dir: PathBuf,
         tool_definitions: Vec<ToolDefinition>,
     ) -> Result<Self> {
         let global_state = run_session_store_future(
@@ -48,6 +50,7 @@ impl PromptAssemblyEditSession {
             .wrap_err("load project prompt assembly state")?;
         Ok(Self::new(
             work_dir,
+            config_dir,
             tool_definitions,
             global_state,
             project_state,
@@ -56,6 +59,7 @@ impl PromptAssemblyEditSession {
 
     fn new(
         work_dir: PathBuf,
+        config_dir: PathBuf,
         tool_definitions: Vec<ToolDefinition>,
         global_state: PromptAssemblyScopeState,
         project_state: PromptAssemblyScopeState,
@@ -64,6 +68,7 @@ impl PromptAssemblyEditSession {
         let baseline_project_state = project_state.clone();
         Self {
             work_dir,
+            config_dir,
             tool_definitions,
             global_state,
             project_state,
@@ -79,6 +84,7 @@ impl PromptAssemblyEditSession {
     ) -> Result<PromptAssemblyManagerSnapshot> {
         super::apply_mutation_to_scope_states(
             &self.work_dir,
+            &self.config_dir,
             &mut self.global_state,
             &mut self.project_state,
             mutation,
@@ -91,6 +97,7 @@ impl PromptAssemblyEditSession {
     pub(crate) fn snapshot(&self) -> PromptAssemblyManagerSnapshot {
         super::resolve_prompt_assembly_manager_snapshot(
             &self.work_dir,
+            &self.config_dir,
             &self.global_state,
             &self.project_state,
             &self.tool_definitions,
@@ -133,6 +140,7 @@ impl PromptAssemblyEditSession {
 
         let manager = super::resolve_prompt_assembly_manager_snapshot(
             &self.work_dir,
+            &self.config_dir,
             &self.global_state,
             &self.project_state,
             &self.tool_definitions,

@@ -13,19 +13,37 @@ use super::{
     },
 };
 
+/// 配置文件加载结果，区分成功、跳过、可降级错误。
+///
+/// 用 outcome 而不是直接 `Err` 返回 Read 失败，是为了让上层在多源 merge 时
+/// 能“收集 warning 后继续”，而不是第一个不可读文件就中断整个加载链。
+/// Decode/Validation 仍走 `Err`：那是配置内容错误，继续 merge 只会掩盖问题。
+pub(super) enum ConfigFileLoadOutcome {
+    /// 成功加载并 merge 到 config
+    Loaded,
+    /// 文件不存在，跳过（config 未被修改）
+    Skipped,
+    /// 可降级错误：权限/IO 错误，config 未被修改，收集后继续尝试其他源
+    Downgradable(AppConfigError),
+}
+
 pub(super) fn merge_config_file(
-    mut config: Config,
+    config: &mut Config,
     path: &Path,
     reasoning_content_display_configured: &mut bool,
-) -> Result<Config, AppConfigError> {
+) -> Result<ConfigFileLoadOutcome, AppConfigError> {
     let content = match fs::read_to_string(path) {
         Ok(content) => content,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(config),
+        // 缺失是常态（用户可能只配了全局或只配了工作区），不是错误。
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(ConfigFileLoadOutcome::Skipped);
+        }
+        // 权限/磁盘等环境问题：降级，让其他配置源或默认值接管。
         Err(source) => {
-            return Err(AppConfigError::Read {
+            return Ok(ConfigFileLoadOutcome::Downgradable(AppConfigError::Read {
                 path: path.to_path_buf(),
                 source,
-            });
+            }));
         }
     };
 
@@ -170,7 +188,7 @@ pub(super) fn merge_config_file(
         config.debug.enabled = enabled;
     }
 
-    Ok(config)
+    Ok(ConfigFileLoadOutcome::Loaded)
 }
 
 fn merge_runtime_config(

@@ -69,6 +69,7 @@ impl AppRuntimeCoordinator {
         let session = PromptAssemblyEditSession::load(
             store,
             header.work_dir,
+            self.options.hunea_config_dir.clone(),
             self.prompt_assembly_tool_definitions().to_vec(),
         )
         .map_err(|error| error.to_string())?;

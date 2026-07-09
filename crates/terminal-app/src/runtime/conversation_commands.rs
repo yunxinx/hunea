@@ -370,13 +370,15 @@ impl AppRuntimeCoordinator {
                 custom_prompt_uses: Vec::new(),
             });
         };
-        Ok(
-            PromptAssemblyWorkspace::new(work_dir, self.prompt_assembly_tool_definitions())
-                .assemble_attached_prompt_message(
-                    self.options.prompt_assembly_manager.as_ref(),
-                    user_message,
-                ),
+        Ok(PromptAssemblyWorkspace::new(
+            work_dir,
+            &self.options.hunea_config_dir,
+            self.prompt_assembly_tool_definitions(),
         )
+        .assemble_attached_prompt_message(
+            self.options.prompt_assembly_manager.as_ref(),
+            user_message,
+        ))
     }
 
     fn manual_skill_activities(

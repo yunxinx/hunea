@@ -10,7 +10,7 @@ use runtime_domain::model_catalog::{ModelSelection, ModelSource};
 fn models_config_keeps_provider_local_when_allowlist_is_omitted() {
     let working_dir = temp_test_dir("local-provider-models");
     fs::write(
-        working_dir.join("models.toml"),
+        working_dir.join(".hunea").join("models.toml"),
         r#"
 default = "local/qwen3"
 
@@ -46,7 +46,7 @@ base_url = "http://127.0.0.1:1234/v1"
 fn models_config_accepts_direct_provider_api_key() {
     let working_dir = temp_test_dir("direct-provider-api-key");
     fs::write(
-        working_dir.join("models.toml"),
+        working_dir.join(".hunea").join("models.toml"),
         r#"
 default = "remote/qwen3"
 
@@ -78,7 +78,7 @@ api_key = "sk-test-direct"
 fn models_config_accepts_provider_kinds() {
     let working_dir = temp_test_dir("provider-kinds");
     fs::write(
-        working_dir.join("models.toml"),
+        working_dir.join(".hunea").join("models.toml"),
         r#"
 default = "anthropic/claude-sonnet-4-5"
 
@@ -139,7 +139,7 @@ models = ["gemini-2.5-pro"]
 fn models_config_does_not_record_sync_error_during_startup_load() {
     let working_dir = temp_test_dir("startup-load-without-sync-error");
     fs::write(
-        working_dir.join("models.toml"),
+        working_dir.join(".hunea").join("models.toml"),
         r#"
 default = "local/qwen3"
 
@@ -171,7 +171,7 @@ base_url = "http://127.0.0.1:1234/v1"
 fn models_config_uses_explicit_default_selection_when_present() {
     let working_dir = temp_test_dir("default-model-selection");
     fs::write(
-        working_dir.join("models.toml"),
+        working_dir.join(".hunea").join("models.toml"),
         r#"
 default = "local/qwen3"
 
@@ -207,7 +207,7 @@ models = ["qwen3"]
 fn models_config_trusts_default_model_outside_configured_allowlist() {
     let working_dir = temp_test_dir("default-model-outside-allowlist");
     fs::write(
-        working_dir.join("models.toml"),
+        working_dir.join(".hunea").join("models.toml"),
         r#"
 default = "local/qwen4"
 
@@ -232,7 +232,7 @@ models = ["qwen3"]
 #[test]
 fn write_default_model_persists_last_selected_model() {
     let working_dir = temp_test_dir("persist-default-model");
-    let config_path = working_dir.join("models.toml");
+    let config_path = working_dir.join(".hunea").join("models.toml");
     fs::write(
         &config_path,
         r#"
@@ -262,7 +262,7 @@ models = ["qwen3"]
 fn models_config_resolves_default_context_window() {
     let working_dir = temp_test_dir("default-context-window");
     fs::write(
-        working_dir.join("models.toml"),
+        working_dir.join(".hunea").join("models.toml"),
         r#"
 default = "local/qwen3"
 
@@ -293,7 +293,7 @@ fn models_config_preserves_context_window_above_u32() {
     let working_dir = temp_test_dir("large-context-window");
     let large_context_window = u64::from(u32::MAX) + 1;
     fs::write(
-        working_dir.join("models.toml"),
+        working_dir.join(".hunea").join("models.toml"),
         format!(
             r#"
 default = "local/large-context"
@@ -324,7 +324,7 @@ models = ["large-context"]
 fn models_config_resolves_per_provider_model_profile() {
     let working_dir = temp_test_dir("provider-model-profile");
     fs::write(
-        working_dir.join("models.toml"),
+        working_dir.join(".hunea").join("models.toml"),
         r#"
 default = "local/qwen3"
 
@@ -388,7 +388,7 @@ context_window = 200000
 fn models_config_rejects_invalid_context_window() {
     let working_dir = temp_test_dir("invalid-context-window");
     fs::write(
-        working_dir.join("models.toml"),
+        working_dir.join(".hunea").join("models.toml"),
         r#"
 [defaults]
 context_window = 0
@@ -450,7 +450,7 @@ models = ["qwen3"]
 fn models_config_resolution_prefers_profile_over_defaults_and_builtin() {
     let working_dir = temp_test_dir("resolution-order");
     fs::write(
-        working_dir.join("models.toml"),
+        working_dir.join(".hunea").join("models.toml"),
         r#"
 [defaults]
 context_window = 64000
@@ -476,7 +476,7 @@ context_window = 100000
 fn models_config_unknown_model_without_defaults_uses_default_fallback() {
     let working_dir = temp_test_dir("unknown-no-defaults");
     fs::write(
-        working_dir.join("models.toml"),
+        working_dir.join(".hunea").join("models.toml"),
         r#"
 [providers.local]
 enabled = true
@@ -497,7 +497,7 @@ models = ["custom-local-7b"]
 fn models_config_rejects_unknown_provider_field() {
     let working_dir = temp_test_dir("deny-unknown-provider");
     fs::write(
-        working_dir.join("models.toml"),
+        working_dir.join(".hunea").join("models.toml"),
         r#"
 [providers.local]
 enabled = true
@@ -558,6 +558,6 @@ fn temp_test_dir(name: &str) -> std::path::PathBuf {
     let path = std::env::temp_dir()
         .join("hunea-runtime-models-config-tests")
         .join(unique);
-    fs::create_dir_all(&path).expect("temp dir should be created");
+    fs::create_dir_all(path.join(".hunea")).expect("temp dir should be created");
     path
 }

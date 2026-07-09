@@ -1,12 +1,11 @@
 use std::{
-    env, fmt, fs, io,
+    fmt, fs, io,
     path::{Path, PathBuf},
 };
 
-use directories::ProjectDirs;
 use serde::Deserialize;
 
-const PHRASES_FILE_NAME: &str = "phrases.toml";
+use crate::paths::{DataDirResolution, PHRASES_FILE_NAME, WORKSPACE_HUNEA_DIRNAME};
 
 /// `DEFAULT_STATUS_PHRASES` 是等待行在没有模型 reasoning header 时使用的内置文案。
 pub const DEFAULT_STATUS_PHRASES: &[&str] = &[
@@ -122,10 +121,21 @@ impl std::error::Error for PhrasesConfigError {
     }
 }
 
-/// `load` 从用户配置目录与当前工作目录加载 `phrases.toml`。
-pub fn load() -> Result<LoadedStatusPhrases, PhrasesConfigError> {
-    let working_dir = env::current_dir().ok();
-    load_from_paths(working_dir.as_deref(), user_config_directory().as_deref())
+/// `load_with_resolution` 根据预检阶段决定的数据目录解析结果加载 `phrases.toml`。
+///
+/// 后加载覆盖先加载。路径由 `DataDirResolution::layered_config_file_paths` 统一决议。
+///
+/// 错误策略与 `app-config` 一致：
+/// - NotFound → 跳过（phrases 可选，缺文件用内置默认）
+/// - Read 权限/IO → 降级为 warning，继续下一个源
+/// - 全部源均为 Read 错误 → 内置默认 + warnings
+/// - Decode/Validation → fatal
+pub fn load_with_resolution(
+    working_dir: Option<&Path>,
+    resolution: &DataDirResolution,
+) -> Result<(LoadedStatusPhrases, Vec<PhrasesConfigError>), PhrasesConfigError> {
+    let paths = resolution.layered_config_file_paths(working_dir, PHRASES_FILE_NAME);
+    load_from_explicit_paths(&paths)
 }
 
 /// `load_from_paths` 从指定目录加载并合并等待行文案配置。
@@ -133,26 +143,44 @@ pub fn load_from_paths(
     working_dir: Option<&Path>,
     user_config_dir: Option<&Path>,
 ) -> Result<LoadedStatusPhrases, PhrasesConfigError> {
+    let (loaded, _warnings) =
+        load_from_explicit_paths(&phrase_config_paths(working_dir, user_config_dir))?;
+    Ok(loaded)
+}
+
+fn load_from_explicit_paths(
+    paths: &[PathBuf],
+) -> Result<(LoadedStatusPhrases, Vec<PhrasesConfigError>), PhrasesConfigError> {
+    // Default 已含内置短语；Read 失败时保留默认，不 fatal。
     let mut loaded = LoadedStatusPhrases::default();
     let mut saw_config = false;
+    let mut warnings = Vec::new();
 
-    for path in phrase_config_paths(working_dir, user_config_dir) {
-        let Some(config) = read_phrases_config(&path)? else {
-            continue;
-        };
-        merge_phrases_config(&mut loaded, config, &path)?;
-        loaded.source_path = Some(path);
-        saw_config = true;
+    for path in paths {
+        match read_phrases_config(path) {
+            Ok(Some(config)) => {
+                merge_phrases_config(&mut loaded, config, path)?;
+                loaded.source_path = Some(path.clone());
+                saw_config = true;
+            }
+            // phrases.toml 可选：缺文件用内置 DEFAULT_STATUS_PHRASES。
+            Ok(None) => {}
+            // 文件级权限/IO：降级为 warning。目录能否用由预检决定。
+            Err(error @ PhrasesConfigError::Read { .. }) => warnings.push(error),
+            // Decode/Validation：内容错误，立即 fatal。
+            Err(other) => return Err(other),
+        }
     }
 
     if !saw_config {
         loaded.source_path = None;
     }
+    // override 模式可能把短语清空；保证至少有一条可展示文案。
     if loaded.phrases.is_empty() {
         loaded.phrases.push("Generating".to_string());
     }
 
-    Ok(loaded)
+    Ok((loaded, warnings))
 }
 
 fn default_status_phrases() -> Vec<String> {
@@ -162,14 +190,15 @@ fn default_status_phrases() -> Vec<String> {
         .collect()
 }
 
+/// 测试 / 显式路径入口用的搜索列表；生产路径走 `DataDirResolution::layered_config_file_paths`。
 fn phrase_config_paths(working_dir: Option<&Path>, user_config_dir: Option<&Path>) -> Vec<PathBuf> {
-    let mut paths = Vec::with_capacity(3);
+    let mut paths = Vec::with_capacity(2);
     if let Some(path) = user_config_dir {
         paths.push(path.join(PHRASES_FILE_NAME));
     }
     if let Some(path) = working_dir {
-        paths.push(path.join(PHRASES_FILE_NAME));
-        paths.push(path.join(".hunea").join(PHRASES_FILE_NAME));
+        // 只认 `.hunea/phrases.toml`，不读工作区根 `phrases.toml`（历史错误位置，已废弃）。
+        paths.push(path.join(WORKSPACE_HUNEA_DIRNAME).join(PHRASES_FILE_NAME));
     }
     paths
 }
@@ -240,8 +269,4 @@ fn normalize_phrases(phrases: Vec<String>) -> Vec<String> {
         .map(|phrase| phrase.trim().to_string())
         .filter(|phrase| !phrase.is_empty())
         .collect()
-}
-
-fn user_config_directory() -> Option<PathBuf> {
-    ProjectDirs::from("", "", "hunea").map(|dirs| dirs.config_dir().to_path_buf())
 }

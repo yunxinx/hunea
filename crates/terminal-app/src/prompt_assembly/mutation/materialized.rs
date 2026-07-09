@@ -209,6 +209,7 @@ pub(in crate::prompt_assembly) fn candidate_body_key(
 
 pub(in crate::prompt_assembly) fn ensure_prompt_source_entry_materialized(
     work_dir: &Path,
+    config_dir: &Path,
     global_state: &mut PromptAssemblyScopeState,
     project_state: &mut PromptAssemblyScopeState,
     scope: PromptAssemblyScope,
@@ -236,7 +237,8 @@ pub(in crate::prompt_assembly) fn ensure_prompt_source_entry_materialized(
             ensure_default_dynamic_environment_sources(global_state);
         }
         PromptSourceKind::InstructionsFile => {
-            let (discovered_instruction_files, _) = discover_instruction_files(work_dir, None);
+            let (discovered_instruction_files, _) =
+                discover_instruction_files(work_dir, config_dir, None);
             ensure_discovered_instruction_entries(
                 global_state,
                 project_state,
@@ -249,6 +251,7 @@ pub(in crate::prompt_assembly) fn ensure_prompt_source_entry_materialized(
 
 pub(in crate::prompt_assembly) fn ensure_active_prompt_source_ordering_materialized(
     work_dir: &Path,
+    config_dir: &Path,
     global_state: &mut PromptAssemblyScopeState,
     project_state: &mut PromptAssemblyScopeState,
     scope: PromptAssemblyScope,
@@ -258,7 +261,7 @@ pub(in crate::prompt_assembly) fn ensure_active_prompt_source_ordering_materiali
     ensure_default_skill_discovery_source(global_state, project_state);
     ensure_default_tool_guidelines_source(global_state, project_state);
     ensure_default_dynamic_environment_sources(global_state);
-    let (discovered_instruction_files, _) = discover_instruction_files(work_dir, None);
+    let (discovered_instruction_files, _) = discover_instruction_files(work_dir, config_dir, None);
     ensure_discovered_instruction_entries(
         global_state,
         project_state,
@@ -266,6 +269,7 @@ pub(in crate::prompt_assembly) fn ensure_active_prompt_source_ordering_materiali
     );
     ensure_prompt_source_entry_materialized(
         work_dir,
+        config_dir,
         global_state,
         project_state,
         scope,

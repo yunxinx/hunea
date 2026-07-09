@@ -1,10 +1,10 @@
 //! App config 到 TUI/runtime options 的映射。
 
 use app_config::appconfig::{
-    self, Config, DebugConfig, ReasoningContentDisplay, RuntimeConfig, TuiConfig, UserInputStyle,
+    Config, DebugConfig, ReasoningContentDisplay, RuntimeConfig, TuiConfig, UserInputStyle,
 };
 use conversation_runtime::models::LoadedModelCatalog;
-use runtime_domain::{envinfo, phrases::LoadedStatusPhrases};
+use runtime_domain::{envinfo, paths::DataDirResolution, phrases::LoadedStatusPhrases};
 use terminal_ui::{
     EscRewindMode as TuiEscRewindMode, ModelOptions, ReasoningDisplayMode, RuntimeRequestPolicy,
     StatusLineItem, StyleMode,
@@ -50,7 +50,8 @@ pub(crate) fn model_options_from_app_config(config: &Config) -> ModelOptions {
 
 #[cfg(test)]
 pub(crate) fn runtime_options_from_app_config(config: &Config) -> AppRuntimeOptions {
-    runtime_options_from_app_config_and_models(config, &LoadedModelCatalog::default())
+    let resolution = DataDirResolution::Portable(std::path::PathBuf::from(".hunea"));
+    runtime_options_from_app_config_and_models(config, &LoadedModelCatalog::default(), &resolution)
 }
 
 pub(crate) fn model_options_from_config_and_models(
@@ -77,12 +78,19 @@ pub(crate) fn model_options_from_app_config_and_models(
 pub(crate) fn runtime_options_from_app_config_and_models(
     config: &Config,
     loaded_models: &LoadedModelCatalog,
+    data_dir_resolution: &DataDirResolution,
 ) -> AppRuntimeOptions {
     AppRuntimeOptions {
         loaded_models: loaded_models.clone(),
         runtime_request_policy: runtime_request_policy_from_config(&config.runtime),
         managed_search_tools: managed_search_tools_from_config(&config.runtime),
-        managed_search_authorization_config_path: appconfig::user_config_file_path(),
+        // 受管搜索授权写回与 config 同目录：便携模式下必须跟 resolution 走，
+        // 不能再写死全局 `~/.config/hunea/config.toml`。
+        managed_search_authorization_config_path: Some(
+            data_dir_resolution.config_dir().join("config.toml"),
+        ),
+        // 同上：AGENTS.md 等用户级文件的数据目录由预检注入。
+        hunea_config_dir: data_dir_resolution.config_dir().to_path_buf(),
         session_store: None,
         session_header_template: None,
         prompt_assembly_manager: None,

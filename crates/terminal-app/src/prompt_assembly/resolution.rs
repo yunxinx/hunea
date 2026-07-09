@@ -1,11 +1,17 @@
 use super::*;
 
+/// 测试辅助：加载初始 prompt prelude。
+///
+/// `work_dir` 与 `config_dir` 必须分开传入——前者是项目目录，后者是数据目录
+///（全局 `~/.config/hunea/` 或便携 `.hunea/`）。二者不可互换，否则全局
+/// AGENTS.md 会去项目目录下找。
 #[cfg(test)]
 pub(crate) fn load_initial_prompt_prelude(
     store: Arc<dyn SessionStore>,
     work_dir: &Path,
+    config_dir: &Path,
 ) -> Result<PromptPreludeSnapshot> {
-    Ok(PromptAssemblyWorkspace::new(work_dir, &[])
+    Ok(PromptAssemblyWorkspace::new(work_dir, config_dir, &[])
         .load_manager(store)?
         .resolution
         .prelude)
@@ -84,6 +90,7 @@ fn static_dynamic_environment_baseline_observations(
 #[cfg(test)]
 pub(super) fn resolve_initial_prompt_prelude_with_overrides(
     work_dir: &Path,
+    config_dir: &Path,
     global_state: &PromptAssemblyScopeState,
     project_state: &PromptAssemblyScopeState,
     global_skill_root_override: Option<&Path>,
@@ -91,6 +98,7 @@ pub(super) fn resolve_initial_prompt_prelude_with_overrides(
 ) -> PromptPreludeSnapshot {
     resolve_prompt_assembly_manager_snapshot_with_overrides(
         work_dir,
+        config_dir,
         global_state,
         project_state,
         global_skill_root_override,
@@ -103,12 +111,14 @@ pub(super) fn resolve_initial_prompt_prelude_with_overrides(
 
 pub(super) fn resolve_prompt_assembly_manager_snapshot(
     work_dir: &Path,
+    config_dir: &Path,
     global_state: &PromptAssemblyScopeState,
     project_state: &PromptAssemblyScopeState,
     tool_definitions: &[ToolDefinition],
 ) -> PromptAssemblyManagerSnapshot {
     resolve_prompt_assembly_manager_snapshot_with_overrides(
         work_dir,
+        config_dir,
         global_state,
         project_state,
         None,
@@ -120,6 +130,7 @@ pub(super) fn resolve_prompt_assembly_manager_snapshot(
 #[cfg(test)]
 pub(super) fn resolve_prompt_assembly_manager_snapshot_with_global_skill_root(
     work_dir: &Path,
+    config_dir: &Path,
     global_state: &PromptAssemblyScopeState,
     project_state: &PromptAssemblyScopeState,
     global_skill_root_override: Option<&Path>,
@@ -127,6 +138,7 @@ pub(super) fn resolve_prompt_assembly_manager_snapshot_with_global_skill_root(
 ) -> PromptAssemblyManagerSnapshot {
     resolve_prompt_assembly_manager_snapshot_with_overrides(
         work_dir,
+        config_dir,
         global_state,
         project_state,
         global_skill_root_override,
@@ -137,6 +149,7 @@ pub(super) fn resolve_prompt_assembly_manager_snapshot_with_global_skill_root(
 
 pub(super) fn resolve_prompt_assembly_manager_snapshot_with_overrides(
     work_dir: &Path,
+    config_dir: &Path,
     global_state: &PromptAssemblyScopeState,
     project_state: &PromptAssemblyScopeState,
     global_skill_root_override: Option<&Path>,
@@ -157,7 +170,7 @@ pub(super) fn resolve_prompt_assembly_manager_snapshot_with_overrides(
     let (discovered_skills, mut diagnostics) =
         discover_skills_with_diagnostics(work_dir, global_skill_root_override);
     let (discovered_instruction_files, instruction_diagnostics) =
-        discover_instruction_files(work_dir, global_instructions_path_override);
+        discover_instruction_files(work_dir, config_dir, global_instructions_path_override);
     diagnostics.extend(instruction_diagnostics);
     ensure_discovered_instruction_entries(
         &mut effective_global_state,

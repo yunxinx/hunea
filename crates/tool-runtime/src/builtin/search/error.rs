@@ -50,8 +50,6 @@ pub(crate) enum SearchToolError {
     Interrupted,
     #[error("no managed {tool} asset for this platform")]
     NoManagedAsset { tool: &'static str },
-    #[error("managed {tool} directory is unavailable")]
-    ManagedDirectoryUnavailable { tool: &'static str },
     #[error("{operation} task failed: {source}")]
     JoinTask {
         operation: &'static str,

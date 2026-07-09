@@ -17,9 +17,24 @@ use super::{
 };
 
 /// `WorkspaceToolRegistryOptions` 保存 workspace builtin 工具注册时的窄配置。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+///
+/// `managed_root` 是受管工具（rg/fd）的下载安装根，源自 `DataDirResolution::config_dir()`
+/// （全局 `~/.config/hunea/` 或便携 `<working_dir>/.hunea/`），由调用方注入。
+/// 故意不兼容旧版 `~/.hunea` 硬编码根：无迁移、无双路径查找。
+/// Default 用 `.hunea` 占位，仅测试路径使用；生产路径必显式设置。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceToolRegistryOptions {
     pub managed_search_tools: ManagedSearchToolConfig,
+    pub managed_root: PathBuf,
+}
+
+impl Default for WorkspaceToolRegistryOptions {
+    fn default() -> Self {
+        Self {
+            managed_search_tools: ManagedSearchToolConfig::default(),
+            managed_root: PathBuf::from(".hunea"),
+        }
+    }
 }
 
 /// `workspace_readonly_tool_registry` 组合只读 workspace 工具注册表。
@@ -52,10 +67,12 @@ pub fn workspace_readonly_tool_registry_with_options(
     registry.insert(grep::grep_tool_with_config(
         &root,
         options.managed_search_tools.clone(),
+        options.managed_root.clone(),
     ));
     registry.insert(find::find_tool_with_config(
         &root,
         options.managed_search_tools,
+        options.managed_root,
     ));
     registry
 }
@@ -91,10 +108,12 @@ pub fn workspace_tool_registry_with_options(
     registry.insert(grep::grep_tool_with_config(
         &root,
         options.managed_search_tools.clone(),
+        options.managed_root.clone(),
     ));
     registry.insert(find::find_tool_with_config(
         &root,
         options.managed_search_tools,
+        options.managed_root,
     ));
     registry.insert(super::write::write_tool_with_access(
         &root,

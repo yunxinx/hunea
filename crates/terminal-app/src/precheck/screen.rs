@@ -1,19 +1,23 @@
 //! PrecheckScreen 编排：step 路由 + event loop。
 
+use std::time::Duration;
+
 use color_eyre::eyre::{Result, WrapErr};
 use crossterm::event::{self, Event, KeyEventKind};
 use ratatui::widgets::Clear;
 use runtime_domain::paths::DataDirResolution;
 use terminal_ui::theme::default_palette;
+use tool_runtime::builtin::{ManagedToolKind, ManagedToolStatus, detect_managed_tool_status};
 
 use super::config_probe::write_portable_marker;
+use super::managed_search::{ManagedSearchOutcome, persist_managed_search_outcome};
 use super::step::{KeyboardHandler, PrecheckStep, StepRenderer, StepState, StepStateProvider};
 use super::steps::{
     ConfigAccessibilityWidget, ConfirmSelection, PortableModeConfirmWidget,
-    PortableModeRecoveryWidget, RecoverySelection,
+    PortableModeRecoveryWidget, RecoverySelection, SearchToolPrecheckWidget,
 };
 use super::{Accessibility, PortableMarkerProbe, PrecheckContext, PrecheckResult};
-use runtime_domain::paths::WORKSPACE_HUNEA_DIRNAME;
+use runtime_domain::paths::{CONFIG_FILE_NAME, WORKSPACE_HUNEA_DIRNAME};
 use terminal_ui::MinimalTerminalSession;
 
 pub(crate) struct PrecheckScreen {
@@ -21,6 +25,7 @@ pub(crate) struct PrecheckScreen {
     working_dir: std::path::PathBuf,
     data_dir_resolution: DataDirResolution,
     should_exit: bool,
+    managed_search_outcomes: Vec<ManagedSearchOutcome>,
 }
 
 impl PrecheckScreen {
@@ -33,6 +38,7 @@ impl PrecheckScreen {
             working_dir: ctx.working_dir.clone(),
             data_dir_resolution: initial_resolution,
             should_exit: false,
+            managed_search_outcomes: Vec::new(),
         }
     }
 
@@ -43,20 +49,41 @@ impl PrecheckScreen {
             .any(|s| matches!(s.step_state(), StepState::InProgress))
     }
 
-    /// 运行 event loop，完成后返回 PrecheckResult。
+    /// 有下载时 poll(50ms) 捞进度；无下载时阻塞 read，避免空转重绘。
     pub(crate) fn run(mut self, session: &mut MinimalTerminalSession) -> Result<PrecheckResult> {
         while !self.is_done() {
             self.draw(session)?;
-            if let Event::Key(key) = event::read().wrap_err("read precheck terminal event")? {
+            if self.has_active_download() {
+                if event::poll(Duration::from_millis(50))
+                    .wrap_err("poll precheck terminal event")?
+                    && let Event::Key(key) =
+                        event::read().wrap_err("read precheck terminal event")?
+                {
+                    self.handle_key_event(key);
+                }
+                self.poll_download_progress();
+            } else if let Event::Key(key) =
+                event::read().wrap_err("read precheck terminal event")?
+            {
                 self.handle_key_event(key);
-                self.apply_step_outcomes()?;
             }
+            self.apply_step_outcomes()?;
         }
         Ok(self.into_result())
     }
 
     fn is_done(&self) -> bool {
         self.should_exit || !self.needs_interaction()
+    }
+
+    fn has_active_download(&self) -> bool {
+        self.steps.iter().any(|step| {
+            if let PrecheckStep::SearchToolPrecheck(w) = step {
+                w.is_downloading()
+            } else {
+                false
+            }
+        })
     }
 
     fn handle_key_event(&mut self, key: crossterm::event::KeyEvent) {
@@ -75,14 +102,17 @@ impl PrecheckScreen {
             .find(|s| matches!(s.step_state(), StepState::InProgress))
     }
 
-    /// 从 step 状态同步副作用：写入便携标记、更新 resolution、设置退出标志。
-    ///
-    /// I/O（写 marker）放在 screen 而非 widget：widget 只表达选择状态，
-    /// 这样 Yes 路径在写盘失败时能把错误冒泡给 event loop，而不是卡在 InProgress。
-    /// `activated` 标志防止同一 key 轮次重复写 marker。
+    fn poll_download_progress(&mut self) {
+        if let Some(PrecheckStep::SearchToolPrecheck(w)) = self.current_step_mut() {
+            w.poll_progress();
+        }
+    }
+
+    /// 同步 step 副作用。写 marker 放 screen 而非 widget，便于 I/O 错误冒泡。
     fn apply_step_outcomes(&mut self) -> Result<()> {
         let mut should_exit = false;
         let mut new_resolution: Option<DataDirResolution> = None;
+        let mut new_outcomes: Vec<ManagedSearchOutcome> = Vec::new();
 
         for step in &mut self.steps {
             match step {
@@ -106,6 +136,16 @@ impl PrecheckScreen {
                     }
                 }
                 PrecheckStep::ConfigAccessibility(_) => {}
+                PrecheckStep::SearchToolPrecheck(w) => {
+                    if w.step_state() == StepState::Complete {
+                        if let Some(outcome) = w.take_outcome() {
+                            new_outcomes.push(outcome);
+                        }
+                        if w.wants_exit() {
+                            should_exit = true;
+                        }
+                    }
+                }
             }
         }
 
@@ -113,7 +153,22 @@ impl PrecheckScreen {
             self.should_exit = true;
         }
         if let Some(resolution) = new_resolution {
+            let new_managed_root = resolution.config_dir().to_path_buf();
             self.data_dir_resolution = resolution;
+            // 便携切换后更新 widget root；进行中的下载仍用旧 root。
+            for step in &mut self.steps {
+                if let PrecheckStep::SearchToolPrecheck(w) = step {
+                    w.set_managed_root(new_managed_root.clone());
+                }
+            }
+        }
+        // write-through：避免后续 step Quit 丢掉已完成工具的授权。
+        if !new_outcomes.is_empty() {
+            let config_path = self.data_dir_resolution.config_dir().join(CONFIG_FILE_NAME);
+            for outcome in &new_outcomes {
+                persist_managed_search_outcome(outcome, &config_path);
+            }
+            self.managed_search_outcomes.extend(new_outcomes);
         }
         Ok(())
     }
@@ -142,40 +197,98 @@ impl PrecheckScreen {
             .find(|s| matches!(s.step_state(), StepState::InProgress))
     }
 
-    pub(crate) fn into_result(self) -> PrecheckResult {
+    pub(crate) fn into_result(mut self) -> PrecheckResult {
+        // 有 Drop，字段用 take/clone 取出。
         PrecheckResult {
-            data_dir_resolution: self.data_dir_resolution,
-            working_dir: Some(self.working_dir),
+            data_dir_resolution: self.data_dir_resolution.clone(),
+            working_dir: Some(std::mem::take(&mut self.working_dir)),
             should_exit: self.should_exit,
+            managed_search_outcomes: std::mem::take(&mut self.managed_search_outcomes),
         }
     }
 }
 
-/// 根据 context 决定加入哪些 step（design.md §8.3 路由表）。
+impl Drop for PrecheckScreen {
+    fn drop(&mut self) {
+        for step in &mut self.steps {
+            if let PrecheckStep::SearchToolPrecheck(w) = step {
+                w.abort_download();
+            }
+        }
+    }
+}
+
 fn plan_steps(
     ctx: &PrecheckContext,
     palette: terminal_ui::theme::TerminalPalette,
 ) -> Vec<PrecheckStep> {
+    let mut steps = Vec::new();
+
     match (&ctx.portable_marker, &ctx.global_accessibility) {
-        (PortableMarkerProbe::WorkspaceInaccessible, _) => Vec::new(),
-        (PortableMarkerProbe::Absent, Accessibility::Available) => Vec::new(),
-        (PortableMarkerProbe::Absent, Accessibility::Unavailable { .. }) => vec![
-            PrecheckStep::ConfigAccessibility(ConfigAccessibilityWidget::new(
-                ctx.global_accessibility.clone(),
-                palette,
-            )),
-            PrecheckStep::PortableModeConfirm(PortableModeConfirmWidget::new(
-                ctx.working_dir.clone(),
-                palette,
-            )),
-        ],
-        (PortableMarkerProbe::Present, Accessibility::Available) => {
-            vec![PrecheckStep::PortableModeRecovery(
-                PortableModeRecoveryWidget::new(palette),
-            )]
+        (PortableMarkerProbe::WorkspaceInaccessible, _) => {}
+        (PortableMarkerProbe::Absent, Accessibility::Available) => {}
+        (PortableMarkerProbe::Absent, Accessibility::Unavailable { .. }) => {
+            steps.push(PrecheckStep::ConfigAccessibility(
+                ConfigAccessibilityWidget::new(ctx.global_accessibility.clone(), palette),
+            ));
+            steps.push(PrecheckStep::PortableModeConfirm(
+                PortableModeConfirmWidget::new(ctx.working_dir.clone(), palette),
+            ));
         }
-        (PortableMarkerProbe::Present, Accessibility::Unavailable { .. }) => Vec::new(),
+        (PortableMarkerProbe::Present, Accessibility::Available) => {
+            steps.push(PrecheckStep::PortableModeRecovery(
+                PortableModeRecoveryWidget::new(palette),
+            ));
+        }
+        (PortableMarkerProbe::Present, Accessibility::Unavailable { .. }) => {}
     }
+
+    // rg 先、fd 后；就绪/已拒绝不加 step。
+    for tool in [ManagedToolKind::Ripgrep, ManagedToolKind::Fd] {
+        let status =
+            detect_managed_tool_status(tool, &ctx.managed_search_config, &ctx.managed_root);
+        match status {
+            ManagedToolStatus::SystemPath(_)
+            | ManagedToolStatus::Bundled(_)
+            | ManagedToolStatus::ManagedReady(_)
+            | ManagedToolStatus::NotAuthorized => {}
+            ManagedToolStatus::NeedsDownload => {
+                steps.push(PrecheckStep::SearchToolPrecheck(
+                    SearchToolPrecheckWidget::new(
+                        tool,
+                        false,
+                        palette,
+                        ctx.managed_root.clone(),
+                        false,
+                    ),
+                ));
+            }
+            ManagedToolStatus::NeedsRebuild => {
+                steps.push(PrecheckStep::SearchToolPrecheck(
+                    SearchToolPrecheckWidget::new(
+                        tool,
+                        false,
+                        palette,
+                        ctx.managed_root.clone(),
+                        true,
+                    ),
+                ));
+            }
+            ManagedToolStatus::AndroidIncompatible => {
+                steps.push(PrecheckStep::SearchToolPrecheck(
+                    SearchToolPrecheckWidget::new(
+                        tool,
+                        true,
+                        palette,
+                        ctx.managed_root.clone(),
+                        false,
+                    ),
+                ));
+            }
+        }
+    }
+
+    steps
 }
 
 #[cfg(test)]

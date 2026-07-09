@@ -49,10 +49,6 @@ pub(crate) fn runtime_event_from_conversation_event(
             Some(target) => RuntimeEvent::TerminalUpdated { target, snapshot },
             None => missing_target_event("terminal update"),
         },
-        ConversationEvent::ManagedSearchToolAuthorization { .. } => RuntimeEvent::SystemMessage {
-            target,
-            message: "managed search tool authorization was not persisted".to_string(),
-        },
         ConversationEvent::PermissionRequested { request } => match target {
             Some(target) => RuntimeEvent::PermissionRequested { target, request },
             None => missing_target_event("permission request"),

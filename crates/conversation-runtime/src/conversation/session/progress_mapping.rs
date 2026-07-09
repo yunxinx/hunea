@@ -52,11 +52,6 @@ pub(super) fn conversation_worker_event_from_progress(
         ConversationProgress::TerminalUpdated { snapshot } => Some(
             ConversationWorkerEvent::progress(ConversationEvent::TerminalUpdated { snapshot }),
         ),
-        ConversationProgress::ManagedSearchToolAuthorization { tool } => {
-            Some(ConversationWorkerEvent::progress(
-                ConversationEvent::ManagedSearchToolAuthorization { tool },
-            ))
-        }
         ConversationProgress::ProviderTurnStarted
         | ConversationProgress::ProviderContextItem { .. } => None,
     }

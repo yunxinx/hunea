@@ -5,24 +5,20 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use directories::BaseDirs;
 use flate2::read::GzDecoder;
-use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::{io::AsyncWriteExt, task};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use crate::{
-    ToolCall, ToolDefinition, ToolExecutionContext, ToolKind, ToolPermissionDecision,
-    ToolPermissionPolicy, ToolPermissionRequest, ToolProgress,
-};
-
 use super::error::SearchToolError;
 
 const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
-const DOWNLOAD_REQUEST_SUFFIX: &str = "-managed-download";
-const REBUILD_REQUEST_SUFFIX: &str = "-managed-rebuild";
+/// spawn `--version` 超时，防止挂起候选阻塞启动。
+const SPAWN_VERIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// 下载进度节流：避免每个 chunk 都塞 channel。
+const PROGRESS_EMIT_BYTES: u64 = 64 * 1024;
+const PROGRESS_EMIT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// `ManagedSearchToolConfig` 保存 `rg` / `fd` 受管安装的授权配置面。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -32,64 +28,66 @@ pub struct ManagedSearchToolConfig {
 }
 
 impl ManagedSearchToolConfig {
-    pub(crate) fn allows(&self, tool: ManagedToolKind) -> bool {
+    pub fn allows(&self, tool: ManagedToolKind) -> bool {
         match tool {
             ManagedToolKind::Ripgrep => self.allow_managed_rg == Some(true),
             ManagedToolKind::Fd => self.allow_managed_fd == Some(true),
         }
     }
+
+    /// 区分「未配置」与「明确拒绝」：仅 `Some(false)` 返回 true。
+    pub fn rejects(&self, tool: ManagedToolKind) -> bool {
+        match tool {
+            ManagedToolKind::Ripgrep => self.allow_managed_rg == Some(false),
+            ManagedToolKind::Fd => self.allow_managed_fd == Some(false),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ManagedToolKind {
+pub enum ManagedToolKind {
     Ripgrep,
     Fd,
 }
 
 impl ManagedToolKind {
-    pub(crate) const fn binary_name(self) -> &'static str {
+    pub const fn binary_name(self) -> &'static str {
         match self {
             Self::Ripgrep => "rg",
             Self::Fd => "fd",
         }
     }
 
-    pub(crate) const fn system_binary_names(self) -> &'static [&'static str] {
+    pub const fn system_binary_names(self) -> &'static [&'static str] {
         match self {
             Self::Ripgrep => &["rg"],
             Self::Fd => &["fd", "fdfind"],
         }
     }
 
-    const fn version(self) -> &'static str {
+    /// 编译期固定 pin 版本，供下载与目录命名使用。
+    pub const fn version(self) -> &'static str {
         match self {
             Self::Ripgrep => "15.1.0",
             Self::Fd => "10.3.0",
         }
     }
 
-    const fn display_name(self) -> &'static str {
+    pub const fn display_name(self) -> &'static str {
         match self {
             Self::Ripgrep => "rg",
             Self::Fd => "fd",
         }
     }
 
-    const fn repository(self) -> &'static str {
+    pub const fn repository(self) -> &'static str {
         match self {
             Self::Ripgrep => "BurntSushi/ripgrep",
             Self::Fd => "sharkdp/fd",
         }
     }
 
-    const fn authorization_field(self) -> &'static str {
-        match self {
-            Self::Ripgrep => "allow_managed_rg",
-            Self::Fd => "allow_managed_fd",
-        }
-    }
-
-    const fn executable_file_name(self) -> &'static str {
+    pub const fn executable_file_name(self) -> &'static str {
         #[cfg(windows)]
         {
             match self {
@@ -105,6 +103,61 @@ impl ManagedToolKind {
 
     fn manifest(self) -> Option<ManagedToolManifest> {
         manifest_for_current_platform(self)
+    }
+}
+
+/// 受管工具可用性（纯检测，无网络）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManagedToolStatus {
+    SystemPath(PathBuf),
+    Bundled(PathBuf),
+    ManagedReady(PathBuf),
+    /// 已授权但 managed 二进制缺失/损坏。
+    NeedsRebuild,
+    /// 未授权且不可用，需用户决策。
+    NeedsDownload,
+    /// `allow_managed_* = Some(false)`。
+    NotAuthorized,
+    /// Termux/Android：managed 二进制不兼容。
+    AndroidIncompatible,
+}
+
+/// 安装进度事件（precheck 通过 channel 接收）。
+#[derive(Debug, Clone)]
+pub enum ManagedToolProgress {
+    /// `bytes_total` 为 None 表示无 content-length。
+    Downloading {
+        bytes_received: u64,
+        bytes_total: Option<u64>,
+    },
+    Verifying,
+    Extracting,
+    Installing,
+    Ready {
+        path: PathBuf,
+    },
+    Failed {
+        error: String,
+    },
+}
+
+/// 安装对外错误：不暴露内部 `SearchToolError`；详情走 `ManagedToolProgress::Failed`。
+#[derive(Debug, thiserror::Error)]
+pub enum ManagedToolInstallError {
+    #[error("managed tool install interrupted")]
+    Interrupted,
+    #[error("{message}")]
+    Other { message: String },
+}
+
+impl From<SearchToolError> for ManagedToolInstallError {
+    fn from(error: SearchToolError) -> Self {
+        match error {
+            SearchToolError::Interrupted => Self::Interrupted,
+            other => Self::Other {
+                message: other.to_string(),
+            },
+        }
     }
 }
 
@@ -134,9 +187,7 @@ pub(crate) struct ExternalCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ExternalCommandPlan {
     Ready(ExternalCommand),
-    AskManagedRebuild,
-    InstallManaged,
-    AskManagedDownload,
+    Unavailable,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -179,98 +230,110 @@ struct ManagedInstallPaths {
 pub(crate) fn resolve_external_command_plan(
     tool: ManagedToolKind,
     config: &ManagedSearchToolConfig,
+    managed_root: &Path,
 ) -> ExternalCommandPlan {
-    if let Some(path) = find_system_binary(tool) {
+    // 运行时只做文件检查，不 spawn。严格验证留给 precheck 的 detect_managed_tool_status；
+    // 合并两套会让热路径 fork 或让 precheck 变松。坏 system/bundled 由 managed_fallback_for 兜底。
+    //
+    // 授权契约：allow_managed_* 只管「下载/重建/静默装」；已装好的 managed 二进制能否用
+    // 只看 rejects（Some(false) 硬拒绝）。None/true 且文件在 → 可用。
+    if let Some(path) = find_system_binary_path(tool) {
         return ExternalCommandPlan::Ready(ExternalCommand {
             path,
             backend: ExternalToolBackend::SystemPath,
         });
     }
-    if let Some(path) = find_bundled_binary(tool) {
+    if let Some(path) = find_bundled_binary_path(tool) {
         return ExternalCommandPlan::Ready(ExternalCommand {
             path,
             backend: ExternalToolBackend::Bundled,
         });
     }
-    if config.allows(tool) && managed_cache_needs_rebuild(tool) {
-        return ExternalCommandPlan::AskManagedRebuild;
-    }
-    if let Some(path) = usable_managed_entry(tool) {
+    if !config.rejects(tool)
+        && let Some(path) = managed_entry_file_exists(tool, managed_root)
+    {
         return ExternalCommandPlan::Ready(ExternalCommand {
             path,
             backend: ExternalToolBackend::Managed,
         });
     }
-    if config.allows(tool) {
-        ExternalCommandPlan::InstallManaged
-    } else {
-        ExternalCommandPlan::AskManagedDownload
-    }
+    ExternalCommandPlan::Unavailable
 }
 
-pub(crate) async fn resolve_external_command_from_plan(
+/// primary 非 managed 时，返回 managed 候选供执行失败后重试。
+/// 与 `resolve_external_command_plan` 同一授权契约：仅 `rejects` 挡住已装二进制。
+pub(crate) fn managed_fallback_for(
+    plan: &ExternalCommandPlan,
     tool: ManagedToolKind,
-    plan: ExternalCommandPlan,
-    context: &ToolExecutionContext<'_>,
+    config: &ManagedSearchToolConfig,
+    managed_root: &Path,
 ) -> Option<ExternalCommand> {
     match plan {
-        ExternalCommandPlan::Ready(command) => Some(command),
-        ExternalCommandPlan::AskManagedRebuild => {
-            if !confirm_managed_rebuild(tool, context).await {
+        ExternalCommandPlan::Ready(cmd) if cmd.backend == ExternalToolBackend::Managed => None,
+        ExternalCommandPlan::Unavailable => None,
+        _ => {
+            if config.rejects(tool) {
                 return None;
             }
-            install_managed_command(tool, context).await
-        }
-        ExternalCommandPlan::InstallManaged => install_managed_command(tool, context).await,
-        ExternalCommandPlan::AskManagedDownload => {
-            if !confirm_managed_download(tool, context).await {
-                return None;
-            }
-            install_managed_command(tool, context).await
-        }
-    }
-}
-
-async fn install_managed_command(
-    tool: ManagedToolKind,
-    context: &ToolExecutionContext<'_>,
-) -> Option<ExternalCommand> {
-    match install_managed_tool(tool, context).await {
-        Ok(path) => {
-            context.emit(ToolProgress::ManagedSearchToolAuthorization {
-                tool_name: tool.binary_name().to_string(),
-            });
-            Some(ExternalCommand {
+            managed_entry_file_exists(tool, managed_root).map(|path| ExternalCommand {
                 path,
                 backend: ExternalToolBackend::Managed,
             })
         }
-        Err(error) => {
-            context.emit(ToolProgress::SystemMessage {
-                message: format!(
-                    "{} managed install failed; using Rust fallback. {error}",
-                    tool.display_name()
-                ),
-            });
-            None
-        }
     }
 }
 
-fn find_system_binary(tool: ManagedToolKind) -> Option<PathBuf> {
-    tool.system_binary_names()
-        .iter()
-        .find_map(|name| find_on_path(name))
+/// 纯检测（spawn `--version`），无网络。顺序：system → bundled → managed → Android/授权。
+///
+/// 已装好且 spawn 通过 → `ManagedReady`，不看 allow（与运行时「能跑就用」一致）。
+/// allow 只在 managed 不可用时决定 NeedsRebuild / NeedsDownload / NotAuthorized。
+pub fn detect_managed_tool_status(
+    tool: ManagedToolKind,
+    config: &ManagedSearchToolConfig,
+    managed_root: &Path,
+) -> ManagedToolStatus {
+    if let Some(path) = find_system_binary_verified(tool) {
+        return ManagedToolStatus::SystemPath(path);
+    }
+    if let Some(path) = find_bundled_binary_verified(tool) {
+        return ManagedToolStatus::Bundled(path);
+    }
+    if let Some(path) = usable_managed_entry_verified(tool, managed_root) {
+        return ManagedToolStatus::ManagedReady(path);
+    }
+    // manifest 无 android 目标，下载也不可用。
+    if env::consts::OS == "android" {
+        return ManagedToolStatus::AndroidIncompatible;
+    }
+    // 已授权：文件在但 spawn 失败 → Rebuild；文件不在 → Download。
+    if config.allows(tool) {
+        if managed_entry_file_exists(tool, managed_root).is_some() {
+            return ManagedToolStatus::NeedsRebuild;
+        }
+        return ManagedToolStatus::NeedsDownload;
+    }
+    if config.rejects(tool) {
+        return ManagedToolStatus::NotAuthorized;
+    }
+    ManagedToolStatus::NeedsDownload
 }
 
-fn find_on_path(binary_name: &str) -> Option<PathBuf> {
+// --- 轻量检查（运行时热路径用，只检查文件存在性与可执行权限）---
+
+fn find_system_binary_path(tool: ManagedToolKind) -> Option<PathBuf> {
+    tool.system_binary_names()
+        .iter()
+        .find_map(|name| find_executable_on_path(name))
+}
+
+fn find_executable_on_path(binary_name: &str) -> Option<PathBuf> {
     let paths = env::var_os("PATH")?;
     env::split_paths(&paths)
         .map(|directory| directory.join(binary_name))
         .find(|candidate| is_executable_file(candidate))
 }
 
-fn find_bundled_binary(tool: ManagedToolKind) -> Option<PathBuf> {
+fn find_bundled_binary_path(tool: ManagedToolKind) -> Option<PathBuf> {
     let executable_dir = env::current_exe().ok()?.parent()?.to_path_buf();
     [
         executable_dir
@@ -287,116 +350,71 @@ fn find_bundled_binary(tool: ManagedToolKind) -> Option<PathBuf> {
     .find(|candidate| is_executable_file(candidate))
 }
 
-fn usable_managed_entry(tool: ManagedToolKind) -> Option<PathBuf> {
-    let entry = managed_entry_path(tool)?;
+fn managed_entry_file_exists(tool: ManagedToolKind, managed_root: &Path) -> Option<PathBuf> {
+    let entry = managed_entry_path(tool, managed_root);
     is_executable_file(&entry).then_some(entry)
 }
 
-fn managed_cache_needs_rebuild(tool: ManagedToolKind) -> bool {
-    let Some(entry) = managed_entry_path(tool) else {
-        return false;
-    };
-    let Some(version_binary) = managed_version_binary_path(tool) else {
-        return false;
-    };
-    !is_executable_file(&entry) || !is_executable_file(&version_binary)
+// --- spawn 验证（precheck 用，一次性，带超时）---
+
+fn find_system_binary_verified(tool: ManagedToolKind) -> Option<PathBuf> {
+    // 对 PATH 上全部候选 spawn 验证，避免坏的第一个短路后续可用项。
+    let paths = env::var_os("PATH")?;
+    tool.system_binary_names()
+        .iter()
+        .flat_map(|name| env::split_paths(&paths).map(move |directory| directory.join(name)))
+        .filter(|candidate| is_executable_file(candidate))
+        .find(|path| verify_binary_via_spawn(path))
 }
 
-async fn confirm_managed_rebuild(
+fn find_bundled_binary_verified(tool: ManagedToolKind) -> Option<PathBuf> {
+    find_bundled_binary_path(tool).filter(|path| verify_binary_via_spawn(path))
+}
+
+fn usable_managed_entry_verified(tool: ManagedToolKind, managed_root: &Path) -> Option<PathBuf> {
+    managed_entry_file_exists(tool, managed_root).filter(|path| verify_binary_via_spawn(path))
+}
+
+/// 带进度的受管工具安装。cancel 后清临时文件，不续传。`progress_tx` send 失败表示调用方已退出。
+pub async fn install_managed_tool_with_progress(
     tool: ManagedToolKind,
-    context: &ToolExecutionContext<'_>,
-) -> bool {
-    let Some(install_root) = managed_tool_root(tool) else {
-        return false;
-    };
-    let request = ToolPermissionRequest::new(
-        ToolCall::new(
-            format!("{}{}", tool.binary_name(), REBUILD_REQUEST_SUFFIX),
-            format!("managed_{}_rebuild", tool.binary_name()),
-            json!({
-                "tool": tool.display_name(),
-                "source": format!("https://github.com/{}", tool.repository()),
-                "install_dir": install_root.display().to_string(),
-                "description": format!(
-                    "The previously authorized managed {} binary is missing or damaged. Rebuild it now, or reject to use Rust fallback.",
-                    tool.display_name()
-                )
-            }),
-        ),
-        permission_definition(
-            format!("managed_{}_rebuild", tool.binary_name()),
-            format!("Rebuild {}", tool.display_name()),
-        ),
-    );
-    matches!(
-        context.request_permission(request).await,
-        ToolPermissionDecision::Allow
-    )
+    managed_root: &Path,
+    cancellation: CancellationToken,
+    progress_tx: &tokio::sync::mpsc::UnboundedSender<ManagedToolProgress>,
+) -> Result<PathBuf, ManagedToolInstallError> {
+    let outcome =
+        install_managed_tool_with_progress_inner(tool, managed_root, &cancellation, progress_tx)
+            .await;
+    match &outcome {
+        Ok(path) => {
+            let _ = progress_tx.send(ManagedToolProgress::Ready { path: path.clone() });
+        }
+        Err(error) => {
+            let _ = progress_tx.send(ManagedToolProgress::Failed {
+                error: error.to_string(),
+            });
+        }
+    }
+    outcome.map_err(ManagedToolInstallError::from)
 }
 
-async fn confirm_managed_download(
+async fn install_managed_tool_with_progress_inner(
     tool: ManagedToolKind,
-    context: &ToolExecutionContext<'_>,
-) -> bool {
-    let Some(install_root) = managed_tool_root(tool) else {
-        return false;
-    };
-    let request = ToolPermissionRequest::new(
-        ToolCall::new(
-            format!("{}{}", tool.binary_name(), DOWNLOAD_REQUEST_SUFFIX),
-            format!("managed_{}_download", tool.binary_name()),
-            json!({
-                "tool": tool.display_name(),
-                "source": format!("https://github.com/{}", tool.repository()),
-                "install_dir": install_root.display().to_string(),
-                "config_field": tool.authorization_field(),
-                "description": format!(
-                    "Download {} from official GitHub Releases, verify SHA256, install under hunea managed tools, and remember this authorization.",
-                    tool.display_name()
-                )
-            }),
-        ),
-        permission_definition(
-            format!("managed_{}_download", tool.binary_name()),
-            format!("Download {}", tool.display_name()),
-        ),
-    );
-    matches!(
-        context.request_permission(request).await,
-        ToolPermissionDecision::Allow
-    )
-}
-
-fn permission_definition(name: String, label: String) -> ToolDefinition {
-    ToolDefinition::new(name)
-        .with_label(label)
-        .with_kind(ToolKind::Fetch)
-        .with_description("Install a pinned external search tool for hunea managed use.")
-        .with_input_schema(json!({ "type": "object" }))
-        .with_permission_policy(ToolPermissionPolicy::Ask)
-}
-
-async fn install_managed_tool(
-    tool: ManagedToolKind,
-    context: &ToolExecutionContext<'_>,
+    managed_root: &Path,
+    cancellation: &CancellationToken,
+    progress_tx: &tokio::sync::mpsc::UnboundedSender<ManagedToolProgress>,
 ) -> Result<PathBuf, SearchToolError> {
-    ensure_not_cancelled(context.cancellation())?;
+    ensure_not_cancelled(cancellation)?;
     let manifest = tool.manifest().ok_or(SearchToolError::NoManagedAsset {
         tool: tool.display_name(),
     })?;
-    let stable_entry =
-        managed_entry_path(tool).ok_or(SearchToolError::ManagedDirectoryUnavailable {
-            tool: tool.display_name(),
-        })?;
-    let version_binary =
-        managed_version_binary_path(tool).ok_or(SearchToolError::ManagedDirectoryUnavailable {
-            tool: tool.display_name(),
-        })?;
-    if is_executable_file(&stable_entry) {
+    let stable_entry = managed_entry_path(tool, managed_root);
+    let version_binary = managed_version_binary_path(tool, managed_root);
+    if is_executable_file(&stable_entry) && verify_binary_via_spawn(&stable_entry) {
         return Ok(stable_entry);
     }
-    if is_executable_file(&version_binary) {
-        let cancellation = context.cancellation().clone();
+    if is_executable_file(&version_binary) && verify_binary_via_spawn(&version_binary) {
+        let cancellation = cancellation.clone();
         let version_binary = version_binary.clone();
         let stable_entry_for_update = stable_entry.clone();
         task::spawn_blocking(move || {
@@ -410,10 +428,7 @@ async fn install_managed_tool(
         return Ok(stable_entry);
     }
 
-    let app_root = app_managed_root().ok_or(SearchToolError::ManagedDirectoryUnavailable {
-        tool: tool.display_name(),
-    })?;
-    let temp_root = app_root.join("tmp");
+    let temp_root = managed_root.join("tmp");
     tokio::fs::create_dir_all(&temp_root)
         .await
         .map_err(|source| SearchToolError::PathIo {
@@ -431,33 +446,25 @@ async fn install_managed_tool(
         archive_path: temp_root.join(format!("{unique}.archive")),
         extract_dir: temp_root.join(format!("{unique}.extract")),
         version_temp_dir: temp_root.join(format!("{unique}.version")),
-        final_version_dir: managed_version_dir(tool).ok_or(
-            SearchToolError::ManagedDirectoryUnavailable {
-                tool: tool.display_name(),
-            },
-        )?,
+        final_version_dir: managed_version_dir(tool, managed_root),
         version_binary,
         stable_entry,
     };
 
     let install_result = async {
         let url = manifest.url(tool);
-        emit_install_message(
-            context,
-            format!("Downloading {} from {url}", tool.display_name()),
-        );
-        download_archive(&url, &paths.archive_path, context.cancellation()).await?;
-        emit_install_message(context, format!("Verifying {}", tool.display_name()));
-        emit_install_message(context, format!("Installing {}", tool.display_name()));
+        download_archive(&url, &paths.archive_path, cancellation, Some(progress_tx)).await?;
         let blocking_paths = paths.clone();
-        let cancellation = context.cancellation().clone();
+        let blocking_cancellation = cancellation.clone();
+        let progress_tx_for_blocking = progress_tx.clone();
         let stable_entry = task::spawn_blocking(move || {
             install_archive_blocking(
                 blocking_paths,
                 manifest.sha256,
                 manifest.archive_kind,
                 tool.executable_file_name(),
-                cancellation,
+                blocking_cancellation,
+                Some(&progress_tx_for_blocking),
             )
         })
         .await
@@ -465,7 +472,6 @@ async fn install_managed_tool(
             operation: "managed install",
             source,
         })??;
-        emit_install_message(context, format!("{} is ready", tool.display_name()));
         Ok(stable_entry)
     }
     .await;
@@ -474,14 +480,11 @@ async fn install_managed_tool(
     install_result
 }
 
-fn emit_install_message(context: &ToolExecutionContext<'_>, message: String) {
-    context.emit(ToolProgress::SystemMessage { message });
-}
-
 async fn download_archive(
     url: &str,
     destination: &Path,
     cancellation: &CancellationToken,
+    progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<ManagedToolProgress>>,
 ) -> Result<(), SearchToolError> {
     ensure_not_cancelled(cancellation)?;
     let parsed =
@@ -502,6 +505,7 @@ async fn download_archive(
     let response = response
         .error_for_status()
         .map_err(|source| SearchToolError::Download { source })?;
+    let bytes_total = response.content_length();
     let mut response = response;
     let mut file = tokio::fs::File::create(destination)
         .await
@@ -511,6 +515,11 @@ async fn download_archive(
             source,
         })?;
 
+    let mut bytes_received: u64 = 0;
+    let mut last_emitted_bytes: u64 = 0;
+    let mut last_emitted_at = std::time::Instant::now()
+        .checked_sub(PROGRESS_EMIT_INTERVAL)
+        .unwrap_or_else(std::time::Instant::now);
     loop {
         let chunk = tokio::select! {
             _ = cancellation.cancelled() => return Err(SearchToolError::Interrupted),
@@ -530,6 +539,32 @@ async fn download_archive(
                 })?;
             }
         }
+        bytes_received = bytes_received.saturating_add(chunk.len() as u64);
+        if let Some(tx) = progress_tx {
+            let now = std::time::Instant::now();
+            if should_emit_download_progress(
+                bytes_received,
+                last_emitted_bytes,
+                now.duration_since(last_emitted_at),
+            ) {
+                let _ = tx.send(ManagedToolProgress::Downloading {
+                    bytes_received,
+                    bytes_total,
+                });
+                last_emitted_bytes = bytes_received;
+                last_emitted_at = now;
+            }
+        }
+    }
+    // 循环结束强制发一次最终字节，避免节流吞掉 100%。
+    if let Some(tx) = progress_tx
+        && bytes_received > 0
+        && bytes_received != last_emitted_bytes
+    {
+        let _ = tx.send(ManagedToolProgress::Downloading {
+            bytes_received,
+            bytes_total,
+        });
     }
     tokio::select! {
         _ = cancellation.cancelled() => Err(SearchToolError::Interrupted),
@@ -547,10 +582,17 @@ fn install_archive_blocking(
     archive_kind: ArchiveKind,
     executable_file_name: &str,
     cancellation: CancellationToken,
+    progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<ManagedToolProgress>>,
 ) -> Result<PathBuf, SearchToolError> {
     ensure_not_cancelled(&cancellation)?;
+    if let Some(tx) = progress_tx {
+        let _ = tx.send(ManagedToolProgress::Verifying);
+    }
     verify_sha256(&paths.archive_path, expected_sha256, &cancellation)?;
     ensure_not_cancelled(&cancellation)?;
+    if let Some(tx) = progress_tx {
+        let _ = tx.send(ManagedToolProgress::Extracting);
+    }
     fs::create_dir_all(&paths.extract_dir).map_err(|source| SearchToolError::PathIo {
         operation: "create extraction directory",
         path: paths.extract_dir.clone(),
@@ -574,6 +616,9 @@ fn install_archive_blocking(
     copy_file_with_cancellation(&extracted_binary, &temp_binary, &cancellation)?;
     make_executable(&temp_binary)?;
     ensure_not_cancelled(&cancellation)?;
+    if let Some(tx) = progress_tx {
+        let _ = tx.send(ManagedToolProgress::Installing);
+    }
     if paths.final_version_dir.exists() {
         let _ = fs::remove_dir_all(&paths.final_version_dir);
     }
@@ -861,38 +906,24 @@ fn ensure_not_cancelled(cancellation: &CancellationToken) -> Result<(), SearchTo
     }
 }
 
-fn managed_entry_path(tool: ManagedToolKind) -> Option<PathBuf> {
-    Some(
-        app_managed_root()?
-            .join("bin")
-            .join(tool.executable_file_name()),
-    )
+/// 路径布局：`{managed_root}/bin/<exe>`、`{managed_root}/tools/<name>/<version>/`。
+///
+/// `managed_root` 由调用方注入（= data/config dir），**不**再硬编码 `~/.hunea`。
+/// 旧路径无兼容、无迁移——干净实现优先。
+fn managed_entry_path(tool: ManagedToolKind, managed_root: &Path) -> PathBuf {
+    managed_root.join("bin").join(tool.executable_file_name())
 }
 
-fn managed_version_binary_path(tool: ManagedToolKind) -> Option<PathBuf> {
-    Some(managed_version_dir(tool)?.join(tool.executable_file_name()))
+fn managed_version_binary_path(tool: ManagedToolKind, managed_root: &Path) -> PathBuf {
+    managed_version_dir(tool, managed_root).join(tool.executable_file_name())
 }
 
-fn managed_version_dir(tool: ManagedToolKind) -> Option<PathBuf> {
-    Some(managed_tool_root(tool)?.join(tool.version()))
+fn managed_version_dir(tool: ManagedToolKind, managed_root: &Path) -> PathBuf {
+    managed_tool_root(tool, managed_root).join(tool.version())
 }
 
-fn managed_tool_root(tool: ManagedToolKind) -> Option<PathBuf> {
-    Some(app_managed_root()?.join("tools").join(tool.binary_name()))
-}
-
-fn app_managed_root() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        env::var_os("APPDATA")
-            .map(PathBuf::from)
-            .or_else(|| BaseDirs::new().map(|dirs| dirs.data_dir().to_path_buf()))
-            .map(|path| path.join("hunea"))
-    }
-    #[cfg(not(windows))]
-    {
-        BaseDirs::new().map(|dirs| dirs.home_dir().join(".hunea"))
-    }
+fn managed_tool_root(tool: ManagedToolKind, managed_root: &Path) -> PathBuf {
+    managed_root.join("tools").join(tool.binary_name())
 }
 
 fn is_executable_file(path: &Path) -> bool {
@@ -910,6 +941,43 @@ fn is_executable_file(path: &Path) -> bool {
     {
         true
     }
+}
+
+/// 下载进度是否该发：首次、≥64KiB 增量、或距上次 ≥100ms。最终字节由调用方强制补发。
+fn should_emit_download_progress(
+    bytes_received: u64,
+    last_emitted_bytes: u64,
+    elapsed_since_last: std::time::Duration,
+) -> bool {
+    last_emitted_bytes == 0
+        || bytes_received.saturating_sub(last_emitted_bytes) >= PROGRESS_EMIT_BYTES
+        || elapsed_since_last >= PROGRESS_EMIT_INTERVAL
+}
+
+/// spawn `--version`：比文件权限检查更严，能发现坏架构/缺库。
+///
+/// std 无 `Child::wait_timeout`，用 try_wait + 短 sleep 做 deadline；超时 kill。
+/// 不引入 wait_timeout/nix 依赖——启动期各工具约 5–20ms，足够。
+fn verify_binary_via_spawn(path: &Path) -> bool {
+    let Ok(mut child) = std::process::Command::new(path)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    let started = std::time::Instant::now();
+    while started.elapsed() < SPAWN_VERIFY_TIMEOUT {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Err(_) => break,
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    false
 }
 
 fn make_executable(path: &Path) -> Result<(), SearchToolError> {
@@ -1066,6 +1134,7 @@ mod tests {
             "https://github.com/example/project/releases/download/v1/archive.tar.gz",
             &archive_path,
             &cancellation,
+            None,
         )
         .await;
 
@@ -1087,5 +1156,168 @@ mod tests {
 
     fn cleanup(path: &Path) {
         let _ = fs::remove_dir_all(path);
+    }
+
+    // --- ManagedSearchToolConfig ---
+
+    #[test]
+    fn config_allows_only_explicit_true() {
+        let config = ManagedSearchToolConfig {
+            allow_managed_rg: Some(true),
+            allow_managed_fd: Some(false),
+        };
+        assert!(config.allows(ManagedToolKind::Ripgrep));
+        assert!(!config.allows(ManagedToolKind::Fd));
+    }
+
+    #[test]
+    fn config_rejects_only_explicit_false() {
+        let config = ManagedSearchToolConfig {
+            allow_managed_rg: Some(false),
+            allow_managed_fd: None,
+        };
+        assert!(config.rejects(ManagedToolKind::Ripgrep));
+        assert!(!config.rejects(ManagedToolKind::Fd));
+    }
+
+    #[test]
+    fn config_default_neither_allows_nor_rejects() {
+        let config = ManagedSearchToolConfig::default();
+        for tool in [ManagedToolKind::Ripgrep, ManagedToolKind::Fd] {
+            assert!(!config.allows(tool));
+            assert!(!config.rejects(tool));
+        }
+    }
+
+    // --- managed_fallback_for ---
+
+    #[test]
+    fn managed_fallback_for_returns_none_when_primary_is_managed() {
+        let config = ManagedSearchToolConfig::default();
+        let plan = ExternalCommandPlan::Ready(ExternalCommand {
+            path: PathBuf::from("/fake/rg"),
+            backend: ExternalToolBackend::Managed,
+        });
+        assert!(
+            managed_fallback_for(
+                &plan,
+                ManagedToolKind::Ripgrep,
+                &config,
+                Path::new("/tmp/fake-managed-root")
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn managed_fallback_for_returns_none_when_unavailable() {
+        let config = ManagedSearchToolConfig::default();
+        let result = managed_fallback_for(
+            &ExternalCommandPlan::Unavailable,
+            ManagedToolKind::Ripgrep,
+            &config,
+            Path::new("/tmp/fake-managed-root"),
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn managed_fallback_for_returns_none_when_rejected() {
+        let config = ManagedSearchToolConfig {
+            allow_managed_rg: Some(false),
+            allow_managed_fd: None,
+        };
+        let plan = ExternalCommandPlan::Ready(ExternalCommand {
+            path: PathBuf::from("/fake/rg"),
+            backend: ExternalToolBackend::SystemPath,
+        });
+        assert!(
+            managed_fallback_for(
+                &plan,
+                ManagedToolKind::Ripgrep,
+                &config,
+                Path::new("/tmp/fake-managed-root")
+            )
+            .is_none()
+        );
+    }
+
+    // --- download progress throttle ---
+
+    #[test]
+    fn should_emit_download_progress_on_first_update() {
+        assert!(should_emit_download_progress(
+            1024,
+            0,
+            std::time::Duration::from_millis(0),
+        ));
+    }
+
+    #[test]
+    fn should_emit_download_progress_on_byte_threshold() {
+        // 刚发过、增量不足、时间也不足 → 不发
+        assert!(!should_emit_download_progress(
+            PROGRESS_EMIT_BYTES + 1024,
+            PROGRESS_EMIT_BYTES,
+            std::time::Duration::from_millis(10),
+        ));
+        // 增量够 → 发
+        assert!(should_emit_download_progress(
+            PROGRESS_EMIT_BYTES * 2,
+            PROGRESS_EMIT_BYTES,
+            std::time::Duration::from_millis(10),
+        ));
+    }
+
+    #[test]
+    fn should_emit_download_progress_on_time_threshold() {
+        assert!(should_emit_download_progress(
+            PROGRESS_EMIT_BYTES + 1,
+            PROGRESS_EMIT_BYTES,
+            PROGRESS_EMIT_INTERVAL,
+        ));
+    }
+
+    // --- verify_binary_via_spawn ---
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_binary_via_spawn_returns_false_for_missing_path() {
+        assert!(!verify_binary_via_spawn(Path::new(
+            "/nonexistent/hunea-binary"
+        )));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_binary_via_spawn_returns_true_for_healthy_binary() {
+        let root = temp_root("verify-spawn-healthy");
+        let script = write_executable(&root, "fake-tool", "#!/bin/sh\nexit 0\n");
+        assert!(verify_binary_via_spawn(&script));
+        cleanup(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_binary_via_spawn_returns_false_for_failing_binary() {
+        let root = temp_root("verify-spawn-failing");
+        let script = write_executable(&root, "fake-tool", "#!/bin/sh\nexit 1\n");
+        assert!(!verify_binary_via_spawn(&script));
+        cleanup(&root);
+    }
+
+    #[cfg(unix)]
+    fn write_executable(root: &Path, name: &str, content: &str) -> PathBuf {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = root.join(name);
+        let mut file = fs::File::create(&path).expect("create fake executable");
+        file.write_all(content.as_bytes())
+            .expect("write fake executable");
+        file.sync_all().expect("sync fake executable");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+            .expect("chmod fake executable");
+        path
     }
 }

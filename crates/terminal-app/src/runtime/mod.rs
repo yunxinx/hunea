@@ -9,7 +9,10 @@ mod session_commands;
 mod session_tree_load;
 mod session_worker;
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use conversation_runtime::{
     ConversationWorker, ModelRefreshWorker, ProviderConversation, models as provider_models,
@@ -39,9 +42,7 @@ use self::{
     event_mapping::{
         runtime_event_from_conversation_event, should_defer_runtime_event_for_render_barrier,
     },
-    managed_search_authorization::{
-        conversation_workspace_tools, persist_managed_search_tool_authorization,
-    },
+    managed_search_authorization::conversation_workspace_tools,
     session_worker::{SessionStoreWorker, SessionStoreWorkerEvent},
 };
 use crate::prompt_assembly::PromptAssemblyEditSession;
@@ -50,8 +51,12 @@ use crate::prompt_assembly::PromptAssemblyEditSession;
 /// 供初始 prompt assembly 加载使用。
 pub(crate) fn tool_definitions_for_managed_search(
     managed_search_tools: &ManagedSearchToolConfig,
+    managed_root: &Path,
 ) -> Vec<ToolDefinition> {
-    tool_definitions_from_registry(&conversation_workspace_tools(managed_search_tools))
+    tool_definitions_from_registry(&conversation_workspace_tools(
+        managed_search_tools,
+        managed_root,
+    ))
 }
 
 fn tool_definitions_from_registry(workspace_tools: &ToolExecutorRegistry) -> Vec<ToolDefinition> {
@@ -68,7 +73,6 @@ pub(crate) struct AppRuntimeOptions {
     pub(crate) loaded_models: provider_models::LoadedModelCatalog,
     pub(crate) runtime_request_policy: RuntimeRequestPolicy,
     pub(crate) managed_search_tools: ManagedSearchToolConfig,
-    pub(crate) managed_search_authorization_config_path: Option<PathBuf>,
     /// 数据目录（全局或便携 `.hunea/`），用于 AGENTS.md 等用户级文件。
     ///
     /// 由预检 `DataDirResolution` 注入；测试 Default 用 `.hunea` 占位，生产路径必须显式设置。
@@ -113,7 +117,6 @@ impl Default for AppRuntimeOptions {
             loaded_models: provider_models::LoadedModelCatalog::default(),
             runtime_request_policy: RuntimeRequestPolicy::default(),
             managed_search_tools: ManagedSearchToolConfig::default(),
-            managed_search_authorization_config_path: None,
             hunea_config_dir: PathBuf::from(".hunea"),
             session_store: None,
             session_header_template: None,
@@ -128,7 +131,8 @@ impl Default for AppRuntimeOptions {
 
 impl AppRuntimeCoordinator {
     pub(crate) fn new(options: AppRuntimeOptions) -> Result<Self, String> {
-        let workspace_tools = conversation_workspace_tools(&options.managed_search_tools);
+        let workspace_tools =
+            conversation_workspace_tools(&options.managed_search_tools, &options.hunea_config_dir);
         let prompt_assembly_tool_definitions = tool_definitions_from_registry(&workspace_tools);
         let provider_conversation = fresh_provider_conversation(&options)?;
         let dynamic_environment_observer = Arc::clone(&options.dynamic_environment_observer);
@@ -215,8 +219,10 @@ impl AppRuntimeCoordinator {
                 self.provider_conversation = fresh_provider_conversation(&self.options)?;
                 self.model_refresh.reset_after_clear();
                 self.context_budget_worker.cancel_pending();
-                self.workspace_tools =
-                    conversation_workspace_tools(&self.options.managed_search_tools);
+                self.workspace_tools = conversation_workspace_tools(
+                    &self.options.managed_search_tools,
+                    &self.options.hunea_config_dir,
+                );
                 self.refresh_prompt_assembly_tool_definitions();
                 self.pending_runtime_events.clear();
                 self.manual_skill_activity_sequence = 0;
@@ -409,19 +415,6 @@ impl RuntimeCoordinator for AppRuntimeCoordinator {
                 self.provider_conversation
                     .set_upstream_context_tokens(upstream_context_tokens);
             }
-            if let ConversationEvent::ManagedSearchToolAuthorization { tool } = event {
-                if let Some(event) = persist_managed_search_tool_authorization(
-                    &mut self.options,
-                    &mut self.workspace_tools,
-                    tool,
-                    target.clone(),
-                ) {
-                    events.push(event);
-                } else {
-                    self.refresh_prompt_assembly_tool_definitions();
-                }
-                continue;
-            }
             if event.is_terminal() {
                 let _ = self.provider_conversation.rollback_pending_user();
             }
@@ -555,24 +548,6 @@ impl AppRuntimeCoordinator {
         }
 
         self.provider_conversation.commit_turn_items(items);
-    }
-
-    #[cfg(test)]
-    fn persist_managed_search_tool_authorization(
-        &mut self,
-        tool: runtime_domain::session::ManagedSearchTool,
-        target: Option<RuntimeTarget>,
-    ) -> Option<RuntimeEvent> {
-        let event = persist_managed_search_tool_authorization(
-            &mut self.options,
-            &mut self.workspace_tools,
-            tool,
-            target,
-        );
-        if event.is_none() {
-            self.refresh_prompt_assembly_tool_definitions();
-        }
-        event
     }
 }
 

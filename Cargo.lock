@@ -3636,7 +3636,6 @@ version = "0.10.1-alpha.2"
 dependencies = [
  "base16ct",
  "base64",
- "directories",
  "flate2",
  "globset",
  "ignore",

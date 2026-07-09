@@ -38,9 +38,6 @@ pub(crate) enum ConversationProgress {
     TerminalUpdated {
         snapshot: runtime_domain::session::RuntimeTerminalSnapshot,
     },
-    ManagedSearchToolAuthorization {
-        tool: runtime_domain::session::ManagedSearchTool,
-    },
 }
 
 #[derive(Debug)]

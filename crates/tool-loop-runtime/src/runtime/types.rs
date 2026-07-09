@@ -2,8 +2,7 @@ use std::time::{Duration, Instant};
 
 use provider_protocol::ConversationItem;
 use runtime_domain::session::{
-    ManagedSearchTool, ProviderRequestMetrics, RuntimeTerminalSnapshot, RuntimeToolActivity,
-    RuntimeToolActivityUpdate,
+    ProviderRequestMetrics, RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityUpdate,
 };
 use tool_runtime::{
     DefaultToolErrorFormatter, SharedToolErrorFormatter, SharedToolPermissionHandler,
@@ -23,7 +22,6 @@ pub enum ToolLoopProgress {
     ToolActivityStarted { activity: RuntimeToolActivity },
     ToolActivityUpdated { update: RuntimeToolActivityUpdate },
     TerminalUpdated { snapshot: RuntimeTerminalSnapshot },
-    ManagedSearchToolAuthorization { tool: ManagedSearchTool },
 }
 
 /// `ToolLoopResponse` 保存本轮运行时输出的完整 provider-visible items。

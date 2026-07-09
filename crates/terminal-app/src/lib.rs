@@ -59,7 +59,7 @@ pub fn run() -> Result<()> {
     if precheck_result.should_exit {
         return Ok(());
     }
-    let (config, warnings) = appconfig::load_with_resolution(
+    let (mut config, warnings) = appconfig::load_with_resolution(
         precheck_result.working_dir.as_deref(),
         &precheck_result.data_dir_resolution,
     )
@@ -67,6 +67,11 @@ pub fn run() -> Result<()> {
     for warning in &warnings {
         eprintln!("warning: {warning}");
     }
+    // 磁盘已由 step write-through；此处只同步内存 Config。
+    precheck::sync_managed_search_outcomes_to_config(
+        &precheck_result.managed_search_outcomes,
+        &mut config,
+    );
     run_loaded_config(
         &config,
         &precheck_result.data_dir_resolution,
@@ -82,7 +87,7 @@ pub fn run_for_cli() -> std::result::Result<(), AppRunError> {
     if precheck_result.should_exit {
         return Ok(());
     }
-    let (config, warnings) = appconfig::load_with_resolution(
+    let (mut config, warnings) = appconfig::load_with_resolution(
         precheck_result.working_dir.as_deref(),
         &precheck_result.data_dir_resolution,
     )
@@ -90,6 +95,11 @@ pub fn run_for_cli() -> std::result::Result<(), AppRunError> {
     for warning in &warnings {
         eprintln!("warning: {warning}");
     }
+    // 磁盘已由 step write-through；此处只同步内存 Config。
+    precheck::sync_managed_search_outcomes_to_config(
+        &precheck_result.managed_search_outcomes,
+        &mut config,
+    );
     run_loaded_config(
         &config,
         &precheck_result.data_dir_resolution,
@@ -258,7 +268,10 @@ fn attach_default_session_persistence(
     };
     options.session_store = Some(Arc::clone(&store));
     options.session_header_template = Some(session_header);
-    let tool_definitions = tool_definitions_for_managed_search(&options.managed_search_tools);
+    let tool_definitions = tool_definitions_for_managed_search(
+        &options.managed_search_tools,
+        &options.hunea_config_dir,
+    );
     // work_dir = 项目目录（找项目 AGENTS.md）；config_dir = 数据目录（找全局 AGENTS.md）。
     // 便携模式下二者都落在工作区 `.hunea/` 一侧，但语义仍要分开传，避免全局模式找错位置。
     let config_dir = data_dir_resolution.config_dir();

@@ -56,7 +56,6 @@ pub(super) fn apply_conversation_event(
             target: target.expect("conversation target should be available for terminal update"),
             snapshot,
         },
-        ConversationEvent::ManagedSearchToolAuthorization { .. } => return,
         ConversationEvent::PermissionRequested { request } => RuntimeEvent::PermissionRequested {
             target: target.expect("conversation target should be available for permission request"),
             request,

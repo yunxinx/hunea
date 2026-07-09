@@ -27,7 +27,7 @@ use super::{
     error::SearchToolError,
     external_tool::{
         ExternalCommand, ExternalCommandPlan, ManagedSearchToolConfig, ManagedToolKind,
-        resolve_external_command_from_plan, resolve_external_command_plan,
+        managed_fallback_for, resolve_external_command_plan,
     },
     search_fallback::{
         GREP_MAX_LINE_CHARS, SEARCH_MAX_OUTPUT_BYTES, TOOL_CALL_INTERRUPTED,
@@ -45,16 +45,22 @@ const MAX_CONTEXT_LINES: usize = 20;
 
 /// `grep_tool` 创建 workspace 内容搜索工具。
 pub fn grep_tool(root: impl AsRef<Path>) -> impl Tool + 'static {
-    grep_tool_with_config(root, ManagedSearchToolConfig::default())
+    grep_tool_with_config(
+        root,
+        ManagedSearchToolConfig::default(),
+        PathBuf::from(".hunea"),
+    )
 }
 
 pub(crate) fn grep_tool_with_config(
     root: impl AsRef<Path>,
     managed_tools: ManagedSearchToolConfig,
+    managed_root: PathBuf,
 ) -> impl Tool + 'static {
     GrepTool {
         root: root.as_ref().to_path_buf(),
         managed_tools,
+        managed_root,
     }
 }
 
@@ -62,6 +68,7 @@ pub(crate) fn grep_tool_with_config(
 struct GrepTool {
     root: PathBuf,
     managed_tools: ManagedSearchToolConfig,
+    managed_root: PathBuf,
 }
 
 impl std::fmt::Debug for GrepTool {
@@ -141,7 +148,10 @@ impl Tool for GrepTool {
     ) -> ToolExecutionFuture<'a> {
         let root = self.root.clone();
         let managed_tools = self.managed_tools.clone();
-        Box::pin(async move { execute_grep(root, managed_tools, call, context).await })
+        let managed_root = self.managed_root.clone();
+        Box::pin(
+            async move { execute_grep(root, managed_tools, managed_root, call, context).await },
+        )
     }
 }
 
@@ -185,11 +195,15 @@ struct GrepExecutionPlan {
     search_path: PathBuf,
     arguments: NormalizedGrepArguments,
     external_command: ExternalCommandPlan,
+    /// primary 非managed 时可能存在的 managed 二进制候选，用于 primary 执行失败后重试，
+    /// 避免 PATH 上坏的 rg 短路已安装的 managed rg。
+    managed_fallback: Option<ExternalCommand>,
 }
 
 async fn execute_grep(
     root: PathBuf,
     managed_tools: ManagedSearchToolConfig,
+    managed_root: PathBuf,
     call: ToolCall,
     context: ToolExecutionContext<'_>,
 ) -> ToolResult {
@@ -199,7 +213,13 @@ async fn execute_grep(
     let call_id = call.call_id;
     let cancellation = context.cancellation().clone();
     let plan = match task::spawn_blocking(move || {
-        build_grep_execution_plan(root, managed_tools, call.arguments, &cancellation)
+        build_grep_execution_plan(
+            root,
+            managed_tools,
+            managed_root,
+            call.arguments,
+            &cancellation,
+        )
     })
     .await
     {
@@ -213,11 +233,19 @@ async fn execute_grep(
         search_path,
         arguments,
         external_command,
+        managed_fallback,
     } = plan;
 
-    if let Some(command) =
-        resolve_external_command_from_plan(ManagedToolKind::Ripgrep, external_command, &context)
-            .await
+    if let ExternalCommandPlan::Ready(command) = external_command
+        && let Ok(outcome) =
+            run_external_grep(&command, &root, &search_path, &arguments, &context).await
+    {
+        return grep_result(call_id, outcome);
+    }
+
+    // primary（system/bundled）执行失败时，尝试 managed 二进制重试，
+    // 避免 PATH 上坏的 rg 短路已安装的 managed rg。
+    if let Some(command) = managed_fallback
         && let Ok(outcome) =
             run_external_grep(&command, &root, &search_path, &arguments, &context).await
     {
@@ -238,6 +266,7 @@ async fn execute_grep(
 fn build_grep_execution_plan(
     root: PathBuf,
     managed_tools: ManagedSearchToolConfig,
+    managed_root: PathBuf,
     arguments: serde_json::Value,
     cancellation: &CancellationToken,
 ) -> Result<GrepExecutionPlan, SearchToolError> {
@@ -256,11 +285,20 @@ fn build_grep_execution_plan(
             Err(source) => return Err(SearchToolError::WorkspacePath { source }),
         };
 
+    let external_command =
+        resolve_external_command_plan(ManagedToolKind::Ripgrep, &managed_tools, &managed_root);
+    let managed_fallback = managed_fallback_for(
+        &external_command,
+        ManagedToolKind::Ripgrep,
+        &managed_tools,
+        &managed_root,
+    );
     Ok(GrepExecutionPlan {
         root,
         search_path,
         arguments,
-        external_command: resolve_external_command_plan(ManagedToolKind::Ripgrep, &managed_tools),
+        external_command,
+        managed_fallback,
     })
 }
 
@@ -759,6 +797,7 @@ mod tests {
         let plan = build_grep_execution_plan(
             root.clone(),
             ManagedSearchToolConfig::default(),
+            root.clone(),
             json!({
                 "pattern": "needle",
                 "path": "src",

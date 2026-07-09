@@ -86,38 +86,6 @@ fn token_estimate_creates_render_barrier_before_permission_request() {
 }
 
 #[test]
-fn app_layer_persists_managed_search_tool_authorization() {
-    let root = temp_test_dir("managed-search-authorization");
-    let config_path = root.join("config.toml");
-    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
-        managed_search_authorization_config_path: Some(config_path.clone()),
-        ..AppRuntimeOptions::default()
-    });
-
-    let event = coordinator.persist_managed_search_tool_authorization(ManagedSearchTool::Fd, None);
-
-    assert_eq!(event, None);
-    assert_eq!(
-        coordinator.options.managed_search_tools.allow_managed_fd,
-        Some(true)
-    );
-    let registry_definitions = coordinator
-        .workspace_tools
-        .definitions()
-        .definitions()
-        .cloned()
-        .collect::<Vec<_>>();
-    assert_eq!(
-        coordinator.prompt_assembly_tool_definitions(),
-        registry_definitions.as_slice(),
-        "prompt assembly should use the refreshed workspace tool definitions"
-    );
-    let content = fs::read_to_string(&config_path).expect("config should be readable");
-    assert!(content.contains("allow_managed_fd = true"));
-    cleanup(&root);
-}
-
-#[test]
 fn conversation_failure_before_provider_request_rolls_back_pending_user() {
     let mut coordinator = runtime_coordinator(AppRuntimeOptions {
         runtime_request_policy: runtime_domain::request_policy::RuntimeRequestPolicy::new(

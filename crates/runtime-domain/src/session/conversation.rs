@@ -405,25 +405,6 @@ pub enum ManagedSearchTool {
     Fd,
 }
 
-impl ManagedSearchTool {
-    /// `from_binary_name` 从外部工具二进制名解析受管搜索工具。
-    pub fn from_binary_name(name: &str) -> Option<Self> {
-        match name {
-            "rg" => Some(Self::Ripgrep),
-            "fd" => Some(Self::Fd),
-            _ => None,
-        }
-    }
-
-    /// `binary_name` 返回工具的标准二进制名。
-    pub const fn binary_name(self) -> &'static str {
-        match self {
-            Self::Ripgrep => "rg",
-            Self::Fd => "fd",
-        }
-    }
-}
-
 /// `ConversationEvent` 是对话 worker 暴露给消费层的事件。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConversationEvent {
@@ -456,9 +437,6 @@ pub enum ConversationEvent {
     },
     TerminalUpdated {
         snapshot: RuntimeTerminalSnapshot,
-    },
-    ManagedSearchToolAuthorization {
-        tool: ManagedSearchTool,
     },
     PermissionRequested {
         request: RuntimePermissionRequest,

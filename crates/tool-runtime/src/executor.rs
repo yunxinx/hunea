@@ -22,7 +22,6 @@ pub type ToolExecutionFuture<'a> = Pin<Box<dyn Future<Output = ToolResult> + Sen
 pub enum ToolProgress {
     SystemMessage { message: String },
     TerminalUpdated { snapshot: ToolTerminalSnapshot },
-    ManagedSearchToolAuthorization { tool_name: String },
 }
 
 /// `ToolTerminalSnapshot` 描述执行类工具的 terminal 输出快照。

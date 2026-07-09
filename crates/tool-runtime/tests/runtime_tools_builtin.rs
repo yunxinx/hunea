@@ -582,7 +582,6 @@ async fn builtin_bash_emits_terminal_progress_snapshots() {
         match progress {
             ToolProgress::SystemMessage { .. } => {}
             ToolProgress::TerminalUpdated { snapshot } => snapshots.push(snapshot),
-            ToolProgress::ManagedSearchToolAuthorization { .. } => {}
         }
     }
     assert!(

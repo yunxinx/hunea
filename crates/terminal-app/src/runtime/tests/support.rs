@@ -15,12 +15,12 @@ pub(super) use runtime_domain::{
     model_catalog::ModelSelection,
     provider::ProviderKind,
     session::{
-        ConversationTurnRequest, ManagedSearchTool, RuntimeCommand, RuntimeCommandReceipt,
-        RuntimeEvent, RuntimePermissionRequest, RuntimeTarget, RuntimeToolActivity,
-        RuntimeToolActivityContent, RuntimeToolActivityRawValue, RuntimeToolActivityStatus,
-        RuntimeToolKind, SessionBranchTreePayload, SessionLoadRequestId, SessionPickerRow,
-        SessionPreviewPayload, SessionResumePayload, SessionTreePayload, SessionTreeRowKind,
-        TranscriptReplayItem, TranscriptReplayRole,
+        ConversationTurnRequest, RuntimeCommand, RuntimeCommandReceipt, RuntimeEvent,
+        RuntimePermissionRequest, RuntimeTarget, RuntimeToolActivity, RuntimeToolActivityContent,
+        RuntimeToolActivityRawValue, RuntimeToolActivityStatus, RuntimeToolKind,
+        SessionBranchTreePayload, SessionLoadRequestId, SessionPickerRow, SessionPreviewPayload,
+        SessionResumePayload, SessionTreePayload, SessionTreeRowKind, TranscriptReplayItem,
+        TranscriptReplayRole,
     },
 };
 pub(super) use session_store::{

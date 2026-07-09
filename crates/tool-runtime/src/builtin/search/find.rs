@@ -25,7 +25,7 @@ use super::{
     error::SearchToolError,
     external_tool::{
         ExternalCommand, ExternalCommandPlan, ManagedSearchToolConfig, ManagedToolKind,
-        resolve_external_command_from_plan, resolve_external_command_plan,
+        managed_fallback_for, resolve_external_command_plan,
     },
     search_fallback::{
         BoundedSortedPaths, SEARCH_MAX_OUTPUT_BYTES, TOOL_CALL_INTERRUPTED,
@@ -41,16 +41,22 @@ const MAX_ENTRY_LIMIT: usize = 10_000;
 
 /// `find_tool` 创建 workspace 路径发现工具。
 pub fn find_tool(root: impl AsRef<Path>) -> impl Tool + 'static {
-    find_tool_with_config(root, ManagedSearchToolConfig::default())
+    find_tool_with_config(
+        root,
+        ManagedSearchToolConfig::default(),
+        PathBuf::from(".hunea"),
+    )
 }
 
 pub(crate) fn find_tool_with_config(
     root: impl AsRef<Path>,
     managed_tools: ManagedSearchToolConfig,
+    managed_root: PathBuf,
 ) -> impl Tool + 'static {
     FindTool {
         root: root.as_ref().to_path_buf(),
         managed_tools,
+        managed_root,
     }
 }
 
@@ -58,6 +64,7 @@ pub(crate) fn find_tool_with_config(
 struct FindTool {
     root: PathBuf,
     managed_tools: ManagedSearchToolConfig,
+    managed_root: PathBuf,
 }
 
 impl std::fmt::Debug for FindTool {
@@ -117,7 +124,10 @@ impl Tool for FindTool {
     ) -> ToolExecutionFuture<'a> {
         let root = self.root.clone();
         let managed_tools = self.managed_tools.clone();
-        Box::pin(async move { execute_find(root, managed_tools, call, context).await })
+        let managed_root = self.managed_root.clone();
+        Box::pin(
+            async move { execute_find(root, managed_tools, managed_root, call, context).await },
+        )
     }
 }
 
@@ -151,11 +161,15 @@ struct FindExecutionPlan {
     search_path: PathBuf,
     arguments: NormalizedFindArguments,
     external_command: ExternalCommandPlan,
+    /// primary 非managed 时可能存在的 managed 二进制候选，用于 primary 执行失败后重试，
+    /// 避免 PATH 上坏的 fd 短路已安装的 managed fd。
+    managed_fallback: Option<ExternalCommand>,
 }
 
 async fn execute_find(
     root: PathBuf,
     managed_tools: ManagedSearchToolConfig,
+    managed_root: PathBuf,
     call: ToolCall,
     context: ToolExecutionContext<'_>,
 ) -> ToolResult {
@@ -165,7 +179,13 @@ async fn execute_find(
     let call_id = call.call_id;
     let cancellation = context.cancellation().clone();
     let plan = match task::spawn_blocking(move || {
-        build_find_execution_plan(root, managed_tools, call.arguments, &cancellation)
+        build_find_execution_plan(
+            root,
+            managed_tools,
+            managed_root,
+            call.arguments,
+            &cancellation,
+        )
     })
     .await
     {
@@ -179,10 +199,19 @@ async fn execute_find(
         search_path,
         arguments,
         external_command,
+        managed_fallback,
     } = plan;
 
-    if let Some(command) =
-        resolve_external_command_from_plan(ManagedToolKind::Fd, external_command, &context).await
+    if let ExternalCommandPlan::Ready(command) = external_command
+        && let Ok(outcome) =
+            run_external_find(&command, &root, &search_path, &arguments, &context).await
+    {
+        return find_result(call_id, outcome);
+    }
+
+    // primary（system/bundled）执行失败时，尝试 managed 二进制重试，
+    // 避免 PATH 上坏的 fd 短路已安装的 managed fd。
+    if let Some(command) = managed_fallback
         && let Ok(outcome) =
             run_external_find(&command, &root, &search_path, &arguments, &context).await
     {
@@ -203,6 +232,7 @@ async fn execute_find(
 fn build_find_execution_plan(
     root: PathBuf,
     managed_tools: ManagedSearchToolConfig,
+    managed_root: PathBuf,
     arguments: serde_json::Value,
     cancellation: &CancellationToken,
 ) -> Result<FindExecutionPlan, SearchToolError> {
@@ -221,11 +251,20 @@ fn build_find_execution_plan(
             Err(source) => return Err(SearchToolError::WorkspacePath { source }),
         };
 
+    let external_command =
+        resolve_external_command_plan(ManagedToolKind::Fd, &managed_tools, &managed_root);
+    let managed_fallback = managed_fallback_for(
+        &external_command,
+        ManagedToolKind::Fd,
+        &managed_tools,
+        &managed_root,
+    );
     Ok(FindExecutionPlan {
         root,
         search_path,
         arguments,
-        external_command: resolve_external_command_plan(ManagedToolKind::Fd, &managed_tools),
+        external_command,
+        managed_fallback,
     })
 }
 
@@ -545,6 +584,7 @@ mod tests {
         let plan = build_find_execution_plan(
             root.clone(),
             ManagedSearchToolConfig::default(),
+            root.clone(),
             json!({
                 "pattern": "*.rs",
                 "path": "src",

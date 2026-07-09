@@ -40,8 +40,7 @@ where
             | ConversationProgress::ProviderContextItem { .. }
             | ConversationProgress::ToolActivityStarted { .. }
             | ConversationProgress::ToolActivityUpdated { .. }
-            | ConversationProgress::TerminalUpdated { .. }
-            | ConversationProgress::ManagedSearchToolAuthorization { .. } => {}
+            | ConversationProgress::TerminalUpdated { .. } => {}
         },
     )
     .await

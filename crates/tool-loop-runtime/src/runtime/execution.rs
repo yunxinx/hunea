@@ -2,9 +2,7 @@ use provider_protocol::{
     ContentBlock, ToolCall as AiToolCall, ToolCallArgumentsError,
     ToolDefinition as AiToolDefinition, ToolResult as AiToolResult,
 };
-use runtime_domain::session::{
-    ManagedSearchTool, RuntimeTerminalExitStatus, RuntimeTerminalSnapshot,
-};
+use runtime_domain::session::{RuntimeTerminalExitStatus, RuntimeTerminalSnapshot};
 use tokio_util::sync::CancellationToken;
 use tool_runtime::{
     ProcessedToolError, SharedToolErrorFormatter, SharedToolPermissionHandler,
@@ -228,11 +226,6 @@ fn emit_tool_progress(
                 snapshot: snapshot.clone(),
             });
             state.observe_terminal_snapshot_output(&snapshot, clock.now(), on_progress);
-        }
-        ToolProgress::ManagedSearchToolAuthorization { tool_name } => {
-            if let Some(tool) = ManagedSearchTool::from_binary_name(&tool_name) {
-                on_progress(ToolLoopProgress::ManagedSearchToolAuthorization { tool });
-            }
         }
     }
 }

@@ -3,7 +3,8 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc};
 use ratatui::text::Line;
 
 use crate::{
-    Model, selection::apply_selection_to_viewport, transcript::TranscriptItemMetricsIndex,
+    Model, frame_time::FrameRenderContext, selection::apply_selection_to_viewport,
+    transcript::TranscriptItemMetricsIndex,
 };
 
 use super::{
@@ -31,26 +32,21 @@ impl Model {
         self.document_runtime.viewport_cache.valid = false;
     }
 
-    pub(crate) fn build_document_layout(&mut self) -> Rc<DocumentLayout> {
+    pub(crate) fn build_document_layout(
+        &mut self,
+        context: FrameRenderContext,
+    ) -> Rc<DocumentLayout> {
         self.ensure_current_transcript_window_exact();
-        let key = self.current_document_layout_key();
+        let key = self.current_document_layout_key(context);
         if self.document_runtime.layout_cache.valid && self.document_runtime.layout_cache.key == key
         {
             return Rc::clone(&self.document_runtime.layout_cache.layout);
         }
 
         let layout = Rc::new(compose_document_layout(
-            self.current_document_layout_input(),
+            key.clone(),
+            self.current_document_layout_input(context),
         ));
-        self.document_runtime.transcript_cache = DocumentTranscriptCache {
-            key: DocumentTranscriptKey {
-                transcript_render_version: self.transcript_render_version,
-                document_width: self.width,
-                tool_activity_frame: self.tool_activity_frame_key(std::time::Instant::now()),
-            },
-            snapshot: Rc::clone(&layout.transcript),
-            valid: true,
-        };
         self.document_runtime.layout_cache = DocumentLayoutCache {
             key,
             layout: Rc::clone(&layout),
@@ -62,12 +58,13 @@ impl Model {
     pub(crate) fn build_document_viewport(
         &mut self,
         layout: &DocumentLayout,
+        context: FrameRenderContext,
     ) -> Rc<DocumentViewport> {
         let uses_bottom_follow = self.document_runtime.viewport_state.follow_bottom()
             && !self.document_runtime.viewport_state.manual_scroll();
         let viewport_height = self.document_viewport_height();
         let key = DocumentViewportKey {
-            layout_key: self.current_document_layout_key(),
+            layout_key: layout.key().clone(),
             offset: self.document_runtime.viewport_state.resolved_offset(),
             height: viewport_height,
             bottom_follow: uses_bottom_follow,
@@ -83,15 +80,22 @@ impl Model {
             layout,
             self.document_runtime.viewport_state.resolved_offset(),
             viewport_height,
+            context,
         );
         if uses_bottom_follow {
             viewport = compose_bottom_follow_document_viewport(
                 layout,
                 viewport_height,
                 self.bottom_follow_presentation(layout),
+                context,
             );
         }
-        apply_selection_to_viewport(&mut viewport, layout, self.selection_runtime.selection);
+        apply_selection_to_viewport(
+            &mut viewport,
+            layout,
+            self.selection_runtime.selection,
+            context,
+        );
 
         let viewport = Rc::new(viewport);
         self.document_runtime.viewport_cache = DocumentViewportCache {
@@ -123,7 +127,10 @@ impl Model {
         offset.min(total_lines - viewport_height)
     }
 
-    pub(crate) fn current_document_layout_key(&self) -> DocumentLayoutKey {
+    pub(crate) fn current_document_layout_key(
+        &self,
+        context: FrameRenderContext,
+    ) -> DocumentLayoutKey {
         DocumentLayoutKey {
             transcript_render_version: self.transcript_render_version,
             palette_version: self.palette_version,
@@ -157,15 +164,18 @@ impl Model {
             status_line_config: self.status_line_config_bits(),
             status_line_2_config: self.status_line_2_config_bits(),
             status_line_revision: self.status_line_revision(),
-            stream_activity_frame: self.stream_activity_frame_key(std::time::Instant::now()),
-            tool_activity_frame: self.tool_activity_frame_key(std::time::Instant::now()),
+            stream_activity_frame: self.stream_activity_frame_key(context.now()),
+            tool_activity_frame: self.tool_activity_frame_key(context.now()),
         }
     }
 
-    pub(crate) fn current_document_layout_input(&mut self) -> DocumentLayoutInput {
+    pub(crate) fn current_document_layout_input(
+        &mut self,
+        context: FrameRenderContext,
+    ) -> DocumentLayoutInput {
         DocumentLayoutInput {
-            transcript: self.current_document_transcript_snapshot(),
-            tail: self.build_document_tail_layout(),
+            transcript: self.current_document_transcript_snapshot(context),
+            tail: self.build_document_tail_layout(context),
         }
     }
 
@@ -196,21 +206,28 @@ impl Model {
     pub(crate) fn document_layout_for_transcript_index(
         &mut self,
         index: TranscriptItemMetricsIndex,
+        context: FrameRenderContext,
     ) -> DocumentLayout {
-        compose_document_layout(DocumentLayoutInput {
-            transcript: Rc::new(self.transient_document_transcript_snapshot(index)),
-            tail: self.build_document_tail_layout(),
-        })
+        let key = self.current_document_layout_key(context);
+        compose_document_layout(
+            key,
+            DocumentLayoutInput {
+                transcript: Rc::new(self.transient_document_transcript_snapshot(index)),
+                tail: self.build_document_tail_layout(context),
+            },
+        )
     }
 
     pub(crate) fn transcript_window_layout(
         &mut self,
         transcript_line_count: usize,
+        context: FrameRenderContext,
     ) -> DocumentLayout {
-        let tail = self.build_document_tail_layout();
+        let tail = self.build_document_tail_layout(context);
         let composer_slot = offset_slot_frame(tail.composer_slot, transcript_line_count);
 
         DocumentLayout {
+            key: self.current_document_layout_key(context),
             transcript: Rc::new(DocumentTranscriptSnapshot {
                 index: TranscriptItemMetricsIndex {
                     line_count: transcript_line_count,
@@ -247,12 +264,16 @@ impl Model {
     }
 }
 
-pub(crate) fn compose_document_layout(input: DocumentLayoutInput) -> DocumentLayout {
+pub(crate) fn compose_document_layout(
+    key: DocumentLayoutKey,
+    input: DocumentLayoutInput,
+) -> DocumentLayout {
     let transcript_line_count = input.transcript.line_count();
     let transcript = Rc::clone(&input.transcript);
     let composer_slot = offset_slot_frame(input.tail.composer_slot, transcript_line_count);
 
     DocumentLayout {
+        key,
         transcript,
         transcript_line_count,
         tail: Rc::clone(&input.tail),
@@ -268,6 +289,7 @@ pub(crate) fn compose_document_viewport(
     layout: &DocumentLayout,
     offset: usize,
     height: usize,
+    context: FrameRenderContext,
 ) -> DocumentViewport {
     if layout.line_count() == 0 {
         return DocumentViewport {
@@ -281,7 +303,7 @@ pub(crate) fn compose_document_viewport(
     }
 
     if height == 0 || height >= layout.line_count() {
-        let range = document_range_snapshot(layout, 0, layout.line_count());
+        let range = document_range_snapshot(layout, 0, layout.line_count(), context);
         return DocumentViewport {
             lines: range.lines,
             assistant_lines: range.assistant_lines,
@@ -295,7 +317,7 @@ pub(crate) fn compose_document_viewport(
     let max_offset = layout.line_count().saturating_sub(height);
     let resolved_offset = offset.min(max_offset);
     let visible_line_count = height.min(layout.line_count() - resolved_offset);
-    let range = document_range_snapshot(layout, resolved_offset, visible_line_count);
+    let range = document_range_snapshot(layout, resolved_offset, visible_line_count, context);
 
     DocumentViewport {
         lines: range.lines,
@@ -318,16 +340,22 @@ pub(crate) fn visible_document_lines(
     }
 
     if height == 0 || height >= layout.line_count() {
+        let context = FrameRenderContext::capture();
         return (
-            layout.lines_for_range(0, layout.line_count()),
-            layout.all_plain_lines(),
+            layout.lines_for_range(0, layout.line_count(), context),
+            layout.all_plain_lines(context),
             0,
         );
     }
 
     let max_offset = layout.line_count().saturating_sub(height);
     let resolved_offset = offset.min(max_offset);
-    let range = document_range_snapshot(layout, resolved_offset, height);
+    let range = document_range_snapshot(
+        layout,
+        resolved_offset,
+        height,
+        FrameRenderContext::capture(),
+    );
     (range.lines, range.plain_lines, resolved_offset)
 }
 
@@ -344,6 +372,7 @@ fn document_range_snapshot(
     layout: &DocumentLayout,
     mut start: usize,
     count: usize,
+    context: FrameRenderContext,
 ) -> DocumentRangeSnapshot {
     if count == 0 || layout.line_count() == 0 || start >= layout.line_count() {
         return DocumentRangeSnapshot::default();
@@ -359,9 +388,10 @@ fn document_range_snapshot(
 
     if start < layout.transcript_line_count {
         let transcript_end = end.min(layout.transcript_line_count);
-        let transcript_slice = layout
-            .transcript
-            .viewport_snapshot(start, transcript_end - start);
+        let transcript_slice =
+            layout
+                .transcript
+                .viewport_snapshot(start, transcript_end - start, context);
         plain_text_len += transcript_slice.plain_text_len;
         line_count += transcript_slice.lines.len();
         lines.extend(transcript_slice.lines);
@@ -405,11 +435,12 @@ fn document_range_snapshot(
 impl Model {
     pub(crate) fn current_document_transcript_snapshot(
         &mut self,
+        context: FrameRenderContext,
     ) -> Rc<DocumentTranscriptSnapshot> {
         let key = DocumentTranscriptKey {
             transcript_render_version: self.transcript_render_version,
             document_width: self.width,
-            tool_activity_frame: self.tool_activity_frame_key(std::time::Instant::now()),
+            tool_activity_frame: self.tool_activity_frame_key(context.now()),
         };
         if self.document_runtime.transcript_cache.valid
             && self.document_runtime.transcript_cache.key == key
@@ -427,7 +458,7 @@ impl Model {
             self.current_visible_transcript_window(index.line_count)
         {
             self.transcript
-                .prewarm_viewport_window(&index, start, count)
+                .prewarm_viewport_window(&index, start, count, context)
         } else {
             0
         };

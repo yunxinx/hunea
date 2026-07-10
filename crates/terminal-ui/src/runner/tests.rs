@@ -1131,7 +1131,9 @@ fn conversation_completion_keeps_reasoning_body_gap_to_one_line() {
         },
     );
 
-    let render = model.transcript_mut().render();
+    let render = model
+        .transcript_mut()
+        .render(crate::frame_time::FrameRenderContext::capture());
 
     assert_eq!(render.all_plain_lines(), vec!["先分析", "", "结论"]);
 }

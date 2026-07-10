@@ -329,7 +329,11 @@ impl Model {
         area: Rect,
         buffer: &mut Buffer,
     ) -> Option<Position> {
-        let mut frame = RenderFrame::new_at(now, area, buffer);
+        let mut frame = RenderFrame::new(
+            crate::frame_time::FrameRenderContext::new(now),
+            area,
+            buffer,
+        );
         view::render(self, &mut frame);
         project_wide_selection_styles(frame.buffer_mut());
         frame.cursor_position()
@@ -522,15 +526,15 @@ impl Model {
         self.sync_document_viewport_to_bottom();
     }
 
-    pub(crate) fn startup_banner_entrance_frame_interval_at(
+    pub(crate) fn startup_banner_entrance_next_frame_deadline_at(
         &self,
         now: Instant,
-    ) -> Option<std::time::Duration> {
+    ) -> Option<Instant> {
         if !self.startup_banner_entrance_target_renderable() {
             return None;
         }
 
-        self.startup_banner_entrance.frame_interval_at(now)
+        self.startup_banner_entrance.next_frame_deadline_at(now)
     }
 
     pub(crate) fn apply_startup_banner_entrance_at(

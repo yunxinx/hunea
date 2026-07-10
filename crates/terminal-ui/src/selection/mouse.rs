@@ -1,11 +1,10 @@
-use std::time::Instant;
-
 use crossterm::event::MouseButton;
 
 use crate::{
     AppEffect, Model,
     composer::ComposerMouseOutcome,
     document::{DocumentAnchorRegion, DocumentLayout},
+    frame_time::FrameRenderContext,
     message::assistant_message_visual_inset,
     transcript::LineAnchorKind,
 };
@@ -36,26 +35,22 @@ impl Model {
             }
             MouseButton::Left => {
                 self.stop_selection_auto_scroll();
-                let layout = self.build_document_layout();
-                self.prepare_reasoning_toggle_click(column, row, &layout);
-                match self.handle_composer_selection_mouse_down(
-                    column,
-                    row,
-                    &layout,
-                    Instant::now(),
-                ) {
+                let context = FrameRenderContext::capture();
+                let layout = self.build_document_layout(context);
+                self.prepare_reasoning_toggle_click(column, row, &layout, context);
+                match self.handle_composer_selection_mouse_down(column, row, &layout, context) {
                     ComposerMouseOutcome::Handled(effect) => return effect,
                     ComposerMouseOutcome::Ignored => {}
                 }
 
                 self.clear_pending_composer_cursor_click();
                 if let Some(point) =
-                    self.selection_point_for_mouse_with_layout(column, row, &layout)
+                    self.selection_point_for_mouse_with_layout(column, row, &layout, context)
                 {
-                    match self.register_selection_click(point, Instant::now()) {
-                        2 if self.select_word_at_point(point, &layout) => return None,
+                    match self.register_selection_click(point, context.now()) {
+                        2 if self.select_word_at_point(point, &layout, context) => return None,
                         3 => {
-                            self.select_line_at_point(point, &layout);
+                            self.select_line_at_point(point, &layout, context);
                             return None;
                         }
                         _ => {
@@ -105,12 +100,13 @@ impl Model {
             }
         }
 
-        let layout = self.build_document_layout();
+        let context = crate::frame_time::FrameRenderContext::capture();
+        let layout = self.build_document_layout(context);
         let completed_drag_selection = was_dragging
             && self
                 .selection_runtime
                 .selection
-                .ordered_points(&layout)
+                .ordered_points(&layout, context)
                 .is_some();
         if completed_drag_selection {
             self.reset_selection_click();
@@ -179,9 +175,15 @@ impl Model {
         self.arm_selection_auto_scroll();
     }
 
-    fn prepare_reasoning_toggle_click(&mut self, column: u16, row: u16, layout: &DocumentLayout) {
+    fn prepare_reasoning_toggle_click(
+        &mut self,
+        column: u16,
+        row: u16,
+        layout: &DocumentLayout,
+        context: FrameRenderContext,
+    ) {
         self.clear_pending_reasoning_toggle_click();
-        let Some(item_index) = self.reasoning_header_item_at(column, row, layout) else {
+        let Some(item_index) = self.reasoning_header_item_at(column, row, layout, context) else {
             return;
         };
 
@@ -203,8 +205,9 @@ impl Model {
             return false;
         }
 
-        let layout = self.build_document_layout();
-        let Some(item_index) = self.reasoning_header_item_at(column, row, &layout) else {
+        let context = FrameRenderContext::capture();
+        let layout = self.build_document_layout(context);
+        let Some(item_index) = self.reasoning_header_item_at(column, row, &layout, context) else {
             return false;
         };
         if item_index != pending.item_index {
@@ -226,11 +229,12 @@ impl Model {
         column: u16,
         row: u16,
         layout: &DocumentLayout,
+        context: FrameRenderContext,
     ) -> Option<usize> {
         let line = *self
             .document_viewport_line_indices(layout)
             .get(usize::from(row))?;
-        let anchor = layout.line_anchor_at(line)?;
+        let anchor = layout.line_anchor_at(line, context)?;
         if anchor.region != DocumentAnchorRegion::Transcript
             || matches!(anchor.transcript.item_anchor.kind, LineAnchorKind::ItemGap)
         {

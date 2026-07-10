@@ -1,6 +1,7 @@
 use crate::{
     Model,
     document::{DocumentAnchorRegion, DocumentLayout, DocumentViewport},
+    frame_time::FrameRenderContext,
     message::assistant_message_visual_inset,
 };
 
@@ -20,12 +21,14 @@ impl Model {
         column: u16,
         row: u16,
         layout: &DocumentLayout,
+        context: FrameRenderContext,
     ) -> Option<SelectionPoint> {
         let line = *self
             .document_viewport_line_indices(layout)
             .get(usize::from(row))?;
-        let selection_line = layout.selection_line_at(line)?;
-        let column = self.selection_column_for_display_column(usize::from(column), line, layout)?;
+        let selection_line = layout.selection_line_at(line, context)?;
+        let column =
+            self.selection_column_for_display_column(usize::from(column), line, layout, context)?;
         selection_line
             .selectable
             .point_for_mouse_down(selection_line.anchor, column)
@@ -36,17 +39,28 @@ impl Model {
         column: u16,
         row: u16,
     ) -> Option<SelectionPoint> {
-        let layout = self.build_document_layout();
-        let line_indices = self.document_viewport_line_indices(&layout);
+        let context = FrameRenderContext::capture();
+        let layout = self.build_document_layout(context);
+        self.selection_point_for_drag_mouse_with_layout(column, row, &layout, context)
+    }
+
+    pub(crate) fn selection_point_for_drag_mouse_with_layout(
+        &self,
+        column: u16,
+        row: u16,
+        layout: &DocumentLayout,
+        context: FrameRenderContext,
+    ) -> Option<SelectionPoint> {
+        let line_indices = self.document_viewport_line_indices(layout);
         if line_indices.is_empty() {
             return None;
         }
 
         let clamped_row = usize::from(row).min(line_indices.len().saturating_sub(1));
         let line = *line_indices.get(clamped_row)?;
-        let selection_line = layout.selection_line_at(line)?;
+        let selection_line = layout.selection_line_at(line, context)?;
         let mut column =
-            self.selection_column_for_display_column(usize::from(column), line, &layout)?;
+            self.selection_column_for_display_column(usize::from(column), line, layout, context)?;
         if column + 1 == usize::from(self.width) {
             column = column.saturating_add(1);
         }
@@ -69,8 +83,9 @@ impl Model {
             return;
         }
 
-        let layout = self.build_document_layout();
-        if selection_intersects_status_line(&layout, self.selection_runtime.selection) {
+        let context = FrameRenderContext::capture();
+        let layout = self.build_document_layout(context);
+        if selection_intersects_status_line(&layout, self.selection_runtime.selection, context) {
             self.clear_selection();
         }
     }
@@ -80,8 +95,9 @@ impl Model {
         column: usize,
         line: usize,
         layout: &DocumentLayout,
+        context: FrameRenderContext,
     ) -> Option<usize> {
-        if !layout.is_assistant_message_line(line) {
+        if !layout.is_assistant_message_line(line, context) {
             return Some(column);
         }
 
@@ -97,14 +113,18 @@ impl Model {
     }
 }
 
-fn selection_intersects_status_line(layout: &DocumentLayout, selection: SelectionState) -> bool {
-    let Some((start, end)) = selection.ordered_points(layout) else {
+fn selection_intersects_status_line(
+    layout: &DocumentLayout,
+    selection: SelectionState,
+    context: FrameRenderContext,
+) -> bool {
+    let Some((start, end)) = selection.ordered_points(layout, context) else {
         return false;
     };
 
     for line in start.line()..=end.line() {
         if layout
-            .line_anchor_at(line)
+            .line_anchor_at(line, context)
             .is_some_and(|anchor| anchor.region == DocumentAnchorRegion::StatusLine)
         {
             return true;
@@ -118,8 +138,9 @@ pub(crate) fn visible_selection_ranges(
     viewport: &DocumentViewport,
     layout: &DocumentLayout,
     selection: SelectionState,
+    context: FrameRenderContext,
 ) -> Vec<VisibleSelectableRange> {
-    let Some((start, end)) = selection.ordered_points(layout) else {
+    let Some((start, end)) = selection.ordered_points(layout, context) else {
         return Vec::new();
     };
 
@@ -130,12 +151,16 @@ pub(crate) fn visible_selection_ranges(
             continue;
         }
 
-        let Some(selection_line) = layout.selection_line_at(absolute_line) else {
+        let Some(selection_line) = layout.selection_line_at(absolute_line, context) else {
             continue;
         };
-        let Some((start_column, end_column)) =
-            selection_columns_for_line(selection, layout, absolute_line, selection_line.selectable)
-        else {
+        let Some((start_column, end_column)) = selection_columns_for_line(
+            selection,
+            layout,
+            absolute_line,
+            selection_line.selectable,
+            context,
+        ) else {
             continue;
         };
         visible.push(VisibleSelectableRange {
@@ -152,8 +177,9 @@ pub(crate) fn apply_selection_to_viewport(
     viewport: &mut DocumentViewport,
     layout: &DocumentLayout,
     selection: SelectionState,
+    context: FrameRenderContext,
 ) {
-    for visible in visible_selection_ranges(viewport, layout, selection) {
+    for visible in visible_selection_ranges(viewport, layout, selection, context) {
         if let Some(line) = viewport.lines.get_mut(visible.viewport_row) {
             *line = apply_selection_to_line(line, visible.start_column, visible.end_column);
         }

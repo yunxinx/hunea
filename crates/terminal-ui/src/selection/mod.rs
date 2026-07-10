@@ -8,7 +8,8 @@ mod viewport;
 use std::time::Instant;
 
 use crate::{
-    AppEffect, Model, display_width::display_width, document::DocumentLayout, toast::ToastSeverity,
+    AppEffect, Model, display_width::display_width, document::DocumentLayout,
+    frame_time::FrameRenderContext, toast::ToastSeverity,
 };
 
 pub(super) use self::copy::selection_text;
@@ -114,8 +115,9 @@ impl Model {
         &mut self,
         point: SelectionPoint,
         layout: &DocumentLayout,
+        context: FrameRenderContext,
     ) -> bool {
-        let Some(line) = layout.selection_line_for_anchor(point.anchor()) else {
+        let Some(line) = layout.selection_line_for_anchor(point.anchor(), context) else {
             return false;
         };
         let Some((start_column, end_column)) = word_selection_columns(&line.text, point.column())
@@ -131,12 +133,17 @@ impl Model {
         true
     }
 
-    pub(crate) fn select_line_at_point(&mut self, point: SelectionPoint, layout: &DocumentLayout) {
-        let Some(line_index) = layout.line_index_for_anchor(point.anchor()) else {
+    pub(crate) fn select_line_at_point(
+        &mut self,
+        point: SelectionPoint,
+        layout: &DocumentLayout,
+        context: FrameRenderContext,
+    ) {
+        let Some(line_index) = layout.line_index_for_anchor(point.anchor(), context) else {
             return;
         };
         let selectable = layout
-            .selection_line_at(line_index)
+            .selection_line_at(line_index, context)
             .map(|line_data| line_data.selectable)
             .unwrap_or_default();
         let start_column = selectable
@@ -144,17 +151,17 @@ impl Model {
             .map(|(start_column, _)| start_column)
             .unwrap_or_default();
         let focus = if line_index + 1 < layout.line_count() {
-            match layout.line_anchor_at(line_index + 1) {
+            match layout.line_anchor_at(line_index + 1, context) {
                 Some(next_anchor) => SelectionPoint::new(next_anchor, 0),
                 None => SelectionPoint::new(
                     point.anchor(),
-                    line_selection_end_column(line_index, layout),
+                    line_selection_end_column(line_index, layout, context),
                 ),
             }
         } else {
             SelectionPoint::new(
                 point.anchor(),
-                line_selection_end_column(line_index, layout),
+                line_selection_end_column(line_index, layout, context),
             )
         };
 
@@ -193,8 +200,9 @@ impl Model {
 
     pub(crate) fn request_copy_selection(&mut self) -> Option<AppEffect> {
         self.ensure_selection_range_exact();
-        let layout = self.build_document_layout();
-        let text = selection_text(&layout, self.selection_runtime.selection)?;
+        let context = crate::frame_time::FrameRenderContext::capture();
+        let layout = self.build_document_layout(context);
+        let text = selection_text(&layout, self.selection_runtime.selection, context)?;
         if text.is_empty() {
             return None;
         }
@@ -280,9 +288,13 @@ impl Model {
     }
 }
 
-fn line_selection_end_column(line_index: usize, layout: &DocumentLayout) -> usize {
+fn line_selection_end_column(
+    line_index: usize,
+    layout: &DocumentLayout,
+    context: crate::frame_time::FrameRenderContext,
+) -> usize {
     layout
-        .selection_line_at(line_index)
+        .selection_line_at(line_index, context)
         .map(|line| {
             line.selectable
                 .content_columns()

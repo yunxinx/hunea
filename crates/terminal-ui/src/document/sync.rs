@@ -23,7 +23,7 @@ impl Model {
     }
 
     pub(crate) fn current_document_viewport_state(&mut self) -> ViewportState {
-        let layout = self.build_document_layout();
+        let layout = self.build_document_layout(crate::frame_time::FrameRenderContext::capture());
         self.capture_viewport_state_with_layout(
             &layout,
             self.document_runtime.viewport_y,
@@ -37,7 +37,7 @@ impl Model {
             return;
         }
 
-        let layout = self.build_document_layout();
+        let layout = self.build_document_layout(crate::frame_time::FrameRenderContext::capture());
         if layout.line_count() == 0 {
             self.apply_document_viewport_position(&layout, 0, 0, true, false);
             self.clear_manual_document_scroll_restore_target();
@@ -77,7 +77,7 @@ impl Model {
     }
 
     pub(crate) fn sync_document_viewport_to_bottom(&mut self) {
-        let layout = self.build_document_layout();
+        let layout = self.build_document_layout(crate::frame_time::FrameRenderContext::capture());
         let (document_offset, composer_offset) = self.bottom_follow_viewport_offsets(&layout);
         self.apply_document_viewport_position(
             &layout,
@@ -90,7 +90,7 @@ impl Model {
     }
 
     pub(crate) fn sync_document_viewport_for_composer_cursor(&mut self) {
-        let layout = self.build_document_layout();
+        let layout = self.build_document_layout(crate::frame_time::FrameRenderContext::capture());
         if self.document_runtime.follow_bottom {
             self.sync_document_viewport_to_bottom();
             return;
@@ -126,7 +126,7 @@ impl Model {
     }
 
     pub(crate) fn sync_document_viewport_preserving_position(&mut self) {
-        let layout = self.build_document_layout();
+        let layout = self.build_document_layout(crate::frame_time::FrameRenderContext::capture());
         if layout.line_count() == 0 {
             self.apply_document_viewport_position(
                 &layout,
@@ -151,7 +151,7 @@ impl Model {
     }
 
     pub(crate) fn sync_document_viewport_for_viewport_state(&mut self, state: &ViewportState) {
-        let layout = self.build_document_layout();
+        let layout = self.build_document_layout(crate::frame_time::FrameRenderContext::capture());
         if layout.line_count() == 0 {
             self.apply_document_viewport_position(
                 &layout,
@@ -187,7 +187,7 @@ impl Model {
     }
 
     pub(crate) fn sync_document_viewport_for_composer_page(&mut self) {
-        let layout = self.build_document_layout();
+        let layout = self.build_document_layout(crate::frame_time::FrameRenderContext::capture());
         let max_offset = layout
             .composer_line_count
             .saturating_sub(self.composer.viewport_height().max(1));

@@ -10,6 +10,7 @@ use ratatui::{
 use super::{
     Model,
     display_width::{char_display_width, display_width},
+    frame_time::next_animation_frame_deadline,
     selection::SelectableLineRange,
     shimmer::shimmer_spans_at,
     status_line::{StatusLineRenderResult, truncate_display_width_with_ellipsis},
@@ -362,11 +363,12 @@ impl Model {
             .unwrap_or(0)
     }
 
-    pub(crate) fn stream_activity_frame_interval_at(&self, now: Instant) -> Option<Duration> {
-        self.stream_activity
+    pub(crate) fn stream_activity_next_frame_deadline_at(&self, now: Instant) -> Option<Instant> {
+        let activity = self
+            .stream_activity
             .as_ref()
-            .filter(|activity| !activity.is_paused())
-            .map(|activity| activity.frame_interval_at(now))
+            .filter(|activity| !activity.is_paused())?;
+        next_animation_frame_deadline(activity.started_at, now, activity.frame_interval_at(now))
     }
 
     pub(crate) fn tool_activity_frame_key(&self, now: Instant) -> usize {
@@ -383,16 +385,7 @@ impl Model {
 
     pub(crate) fn tool_activity_next_frame_deadline_at(&self, now: Instant) -> Option<Instant> {
         let started_at = self.transcript.active_tool_activity_started_at()?;
-        let interval = TOOL_ACTIVITY_ACTIVE_MARKER_BLINK_INTERVAL;
-        let interval_ms = interval.as_millis().max(1);
-        let elapsed_ms = now.saturating_duration_since(started_at).as_millis();
-        let next_frame = elapsed_ms / interval_ms + 1;
-        let offset_ms = interval_ms.saturating_mul(next_frame);
-        let offset = Duration::from_millis(u64::try_from(offset_ms).unwrap_or(u64::MAX));
-
-        started_at
-            .checked_add(offset)
-            .or_else(|| now.checked_add(interval))
+        next_animation_frame_deadline(started_at, now, TOOL_ACTIVITY_ACTIVE_MARKER_BLINK_INTERVAL)
     }
 }
 

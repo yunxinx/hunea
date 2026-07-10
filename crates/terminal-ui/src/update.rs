@@ -780,10 +780,14 @@ impl Model {
             return None;
         }
 
-        let layout = self.build_document_layout();
-        let (start, end) = self.selection_runtime.selection.ordered_points(&layout)?;
-        let start_anchor = layout.line_anchor_at(start.line())?;
-        let end_anchor = layout.line_anchor_at(end.line())?;
+        let context = crate::frame_time::FrameRenderContext::capture();
+        let layout = self.build_document_layout(context);
+        let (start, end) = self
+            .selection_runtime
+            .selection
+            .ordered_points(&layout, context)?;
+        let start_anchor = layout.line_anchor_at(start.line(), context)?;
+        let end_anchor = layout.line_anchor_at(end.line(), context)?;
         if start_anchor.region != DocumentAnchorRegion::Composer
             || end_anchor.region != DocumentAnchorRegion::Composer
         {

@@ -1,5 +1,3 @@
-use std::time::Instant;
-
 use ratatui::{buffer::Buffer, layout::Rect, text::Line, widgets::Widget};
 
 use super::{
@@ -74,8 +72,9 @@ pub fn render(model: &mut Model, frame: &mut RenderFrame<'_>) {
         return;
     }
 
-    let document = model.build_document_layout();
-    let viewport = model.build_document_viewport(&document);
+    let context = frame.context();
+    let document = model.build_document_layout(context);
+    let viewport = model.build_document_viewport(&document, context);
 
     frame.render_widget(
         DocumentViewportWidget {
@@ -91,7 +90,7 @@ pub fn render(model: &mut Model, frame: &mut RenderFrame<'_>) {
         Rect::default()
     };
     model.apply_startup_banner_entrance_at(
-        Instant::now(),
+        context.now(),
         frame.buffer_mut(),
         startup_banner_entrance_area,
     );
@@ -189,6 +188,35 @@ mod tests {
     };
 
     #[test]
+    fn render_to_buffer_at_is_deterministic_for_the_same_frame_time() {
+        let mut model = Model::new(StartupBannerOptions::default());
+        model.transcript_mut().clear();
+        model.set_window(40, 8);
+        model.set_palette(default_palette(), true);
+        model.show_stream_activity_with_header("Working");
+        model.append_runtime_tool_activity_from_runtime(RuntimeToolActivity {
+            activity_id: "call-1".to_string(),
+            title: "WriteFile: TEMP.md".to_string(),
+            kind: RuntimeToolKind::Other,
+            status: RuntimeToolActivityStatus::InProgress,
+            content: Vec::new(),
+            locations: Vec::new(),
+            raw_input: Some(r##"{"path":"TEMP.md","content":"body"}"##.into()),
+            raw_output: None,
+        });
+        let area = Rect::new(0, 0, 40, 8);
+        let now = std::time::Instant::now();
+        let mut first = Buffer::empty(area);
+        let mut second = Buffer::empty(area);
+
+        let first_cursor = model.render_to_buffer_at(now, area, &mut first);
+        let second_cursor = model.render_to_buffer_at(now, area, &mut second);
+
+        assert_eq!(first, second);
+        assert_eq!(first_cursor, second_cursor);
+    }
+
+    #[test]
     fn assistant_message_uses_two_column_visual_inset() {
         let mut model = Model::new(StartupBannerOptions::default());
         model.transcript_mut().clear();
@@ -214,8 +242,9 @@ mod tests {
         model.set_palette(default_palette(), true);
         model.append_assistant_message_from_runtime("hello world");
 
-        let layout = model.build_document_layout();
-        let viewport = model.build_document_viewport(&layout);
+        let context = crate::frame_time::FrameRenderContext::capture();
+        let layout = model.build_document_layout(context);
+        let viewport = model.build_document_viewport(&layout, context);
 
         assert!(
             viewport
@@ -266,7 +295,7 @@ mod tests {
         model.composer_mut().move_to_begin_for_test();
         model.sync_composer_height();
 
-        let layout = model.build_document_layout();
+        let layout = model.build_document_layout(crate::frame_time::FrameRenderContext::capture());
         let document_offset = layout.cursor_y + 1;
         let composer_offset = model.current_composer_viewport_offset(&layout, document_offset);
         model.apply_document_viewport_position(

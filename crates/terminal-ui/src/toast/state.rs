@@ -138,9 +138,13 @@ impl ToastState {
         }
     }
 
-    pub(super) fn frame_interval(&self) -> Option<Duration> {
-        matches!(self.phase, ToastPhase::Entering(_) | ToastPhase::Exiting(_))
-            .then_some(TOAST_FRAME_INTERVAL)
+    pub(super) fn next_frame_deadline_at(&self, now: Instant) -> Option<Instant> {
+        match &self.phase {
+            ToastPhase::Entering(animation) | ToastPhase::Exiting(animation) => {
+                animation.next_frame_deadline_at(now)
+            }
+            ToastPhase::Idle | ToastPhase::Visible { .. } => None,
+        }
     }
 
     pub(super) fn advance_at(&mut self, now: Instant) {

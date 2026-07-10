@@ -92,8 +92,8 @@ fn command_panel_rows_are_inserted_into_document_before_status_notice() {
     model.sync_command_panel_navigation();
     model.show_transient_status_notice("Press Esc again to interrupt");
 
-    let layout = model.build_document_layout();
-    let plain_lines = layout.all_plain_lines();
+    let layout = model.build_document_layout(crate::frame_time::FrameRenderContext::capture());
+    let plain_lines = layout.all_plain_lines(crate::frame_time::FrameRenderContext::capture());
     let panel_line = plain_lines
         .iter()
         .position(|line| line.contains("/exit"))
@@ -103,7 +103,7 @@ fn command_panel_rows_are_inserted_into_document_before_status_notice() {
         .position(|line| line.contains("Press Esc again to interrupt"))
         .expect("status notice should exist");
     let command_panel_rows = layout
-        .all_line_anchors()
+        .all_line_anchors(crate::frame_time::FrameRenderContext::capture())
         .into_iter()
         .filter(|anchor| anchor.region == DocumentAnchorRegion::CommandPanel)
         .count();

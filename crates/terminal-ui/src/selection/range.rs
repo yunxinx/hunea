@@ -3,6 +3,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::{
     display_width::{display_width, grapheme_width},
     document::{DocumentLayout, DocumentLineAnchor},
+    frame_time::FrameRenderContext,
 };
 
 use super::{SelectionPoint, SelectionState};
@@ -158,8 +159,9 @@ pub(crate) fn selection_columns_for_line(
     layout: &DocumentLayout,
     line: usize,
     selectable: SelectableLineRange,
+    context: FrameRenderContext,
 ) -> Option<(usize, usize)> {
-    let (start, end) = selection.ordered_points(layout)?;
+    let (start, end) = selection.ordered_points(layout, context)?;
     if line < start.line() || line > end.line() || !selectable.has_content() {
         return None;
     }
@@ -193,8 +195,9 @@ pub(crate) fn selection_ends_before_line_content(
     layout: &DocumentLayout,
     line: usize,
     selectable: SelectableLineRange,
+    context: FrameRenderContext,
 ) -> bool {
-    let Some((start, end)) = selection.ordered_points(layout) else {
+    let Some((start, end)) = selection.ordered_points(layout, context) else {
         return false;
     };
     if start.line() >= end.line() || line != end.line() {
@@ -384,7 +387,9 @@ mod tests {
         assert!(range.contains_hit(0));
         assert!(!range.contains_content(0));
         let layout = selection_test_layout(1);
-        let anchor = layout.line_anchor_at(0).expect("line anchor");
+        let anchor = layout
+            .line_anchor_at(0, FrameRenderContext::capture())
+            .expect("line anchor");
 
         let hit = range
             .point_for_mouse_down(anchor, 0)
@@ -394,7 +399,7 @@ mod tests {
         let mut selection = SelectionState::default();
         selection.select_range(hit, SelectionPoint::new(hit.anchor(), 6));
         assert_eq!(
-            selection_columns_for_line(selection, &layout, 0, range),
+            selection_columns_for_line(selection, &layout, 0, range, FrameRenderContext::capture(),),
             Some((2, 6))
         );
     }
@@ -425,12 +430,28 @@ mod tests {
         let layout = selection_test_layout(2);
         let mut selection = SelectionState::default();
         selection.select_range(
-            SelectionPoint::new(layout.line_anchor_at(1).expect("line anchor"), 2),
-            SelectionPoint::new(layout.line_anchor_at(1).expect("line anchor"), 5),
+            SelectionPoint::new(
+                layout
+                    .line_anchor_at(1, FrameRenderContext::capture())
+                    .expect("line anchor"),
+                2,
+            ),
+            SelectionPoint::new(
+                layout
+                    .line_anchor_at(1, FrameRenderContext::capture())
+                    .expect("line anchor"),
+                5,
+            ),
         );
 
         assert_eq!(
-            selection_columns_for_line(selection, &layout, 1, SelectableLineRange::new(0, 10)),
+            selection_columns_for_line(
+                selection,
+                &layout,
+                1,
+                SelectableLineRange::new(0, 10),
+                FrameRenderContext::capture(),
+            ),
             Some((2, 5))
         );
     }

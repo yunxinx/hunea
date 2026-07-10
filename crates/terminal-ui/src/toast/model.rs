@@ -18,8 +18,8 @@ impl Model {
         self.toast_state.handle_visible_timeout(token);
     }
 
-    pub(crate) fn toast_frame_interval(&self) -> Option<Duration> {
-        self.toast_state.frame_interval()
+    pub(crate) fn toast_next_frame_deadline_at(&self, now: Instant) -> Option<Instant> {
+        self.toast_state.next_frame_deadline_at(now)
     }
 
     pub(crate) fn advance_toast_at(&mut self, now: Instant) {

@@ -3,6 +3,7 @@ use std::rc::Rc;
 use ratatui::text::Line;
 
 use crate::{
+    frame_time::FrameRenderContext,
     selection::{
         ResolvedSelectionPoint, SelectableLineRange, SelectionPoint,
         normalize_transcript_selectable_range,
@@ -51,7 +52,12 @@ impl DocumentTranscriptSnapshot {
         self.index.line_count
     }
 
-    pub(crate) fn plain_text_len_for_range(&self, start: usize, count: usize) -> usize {
+    pub(crate) fn plain_text_len_for_range(
+        &self,
+        start: usize,
+        count: usize,
+        context: FrameRenderContext,
+    ) -> usize {
         if start == 0 && count >= self.line_count() {
             return if self.line_count() == 0 {
                 0
@@ -60,22 +66,34 @@ impl DocumentTranscriptSnapshot {
             };
         }
 
-        self.range_snapshot(start, count, false).plain_text_len
+        self.range_snapshot(start, count, false, context)
+            .plain_text_len
     }
 
     #[cfg(test)]
-    pub(crate) fn plain_lines_for_range(&self, start: usize, count: usize) -> Vec<String> {
-        self.range_snapshot(start, count, true).plain_lines
+    pub(crate) fn plain_lines_for_range(
+        &self,
+        start: usize,
+        count: usize,
+        context: FrameRenderContext,
+    ) -> Vec<String> {
+        self.range_snapshot(start, count, true, context).plain_lines
     }
 
-    pub(crate) fn lines_for_range(&self, start: usize, count: usize) -> Vec<Line<'static>> {
-        self.range_snapshot(start, count, false).lines
+    pub(crate) fn lines_for_range(
+        &self,
+        start: usize,
+        count: usize,
+        context: FrameRenderContext,
+    ) -> Vec<Line<'static>> {
+        self.range_snapshot(start, count, false, context).lines
     }
 
     pub(super) fn viewport_snapshot(
         &self,
         offset: usize,
         height: usize,
+        context: FrameRenderContext,
     ) -> DocumentTranscriptViewportSnapshot {
         if self.line_count() == 0 {
             return DocumentTranscriptViewportSnapshot::default();
@@ -92,27 +110,40 @@ impl DocumentTranscriptSnapshot {
             height
         };
 
-        let mut snapshot = self.range_snapshot(resolved_offset, visible_line_count, cfg!(test));
+        let mut snapshot =
+            self.range_snapshot(resolved_offset, visible_line_count, cfg!(test), context);
         snapshot.resolved_offset = resolved_offset;
         snapshot
     }
 
-    pub(crate) fn line_at(&self, index: usize) -> Option<DocumentLayoutLine> {
-        self.materialize_line(index, true)
+    pub(crate) fn line_at(
+        &self,
+        index: usize,
+        context: FrameRenderContext,
+    ) -> Option<DocumentLayoutLine> {
+        self.materialize_line(index, true, context)
     }
 
-    pub(crate) fn plain_line_at(&self, index: usize) -> Option<String> {
+    pub(crate) fn plain_line_at(
+        &self,
+        index: usize,
+        context: FrameRenderContext,
+    ) -> Option<String> {
         let position = self.index.position_for_line(index)?;
         let relative = index.saturating_sub(position.start_line);
         if relative < position.gap_before {
             return Some(String::new());
         }
 
-        let block = self.render_block(position.item_index)?;
+        let block = self.render_block(position.item_index, context)?;
         block.plain_line_at(relative - position.gap_before)
     }
 
-    pub(crate) fn anchor_at(&self, index: usize) -> Option<DocumentLineAnchor> {
+    pub(crate) fn anchor_at(
+        &self,
+        index: usize,
+        context: FrameRenderContext,
+    ) -> Option<DocumentLineAnchor> {
         let position = self.index.position_for_line(index)?;
         let relative = index.saturating_sub(position.start_line);
         if relative < position.gap_before {
@@ -126,7 +157,7 @@ impl DocumentTranscriptSnapshot {
             }));
         }
 
-        let block = self.render_block(position.item_index)?;
+        let block = self.render_block(position.item_index, context)?;
         Some(document_anchor_for_transcript(LineAnchor {
             item_index: position.item_index,
             item_anchor: block.anchor_at(relative - position.gap_before)?,
@@ -137,6 +168,7 @@ impl DocumentTranscriptSnapshot {
         &self,
         index: usize,
         include_selectable: bool,
+        context: FrameRenderContext,
     ) -> Option<DocumentLayoutLine> {
         let position = self.index.position_for_line(index)?;
         let relative = index.saturating_sub(position.start_line);
@@ -156,7 +188,7 @@ impl DocumentTranscriptSnapshot {
             });
         }
 
-        let block = self.render_block(position.item_index)?;
+        let block = self.render_block(position.item_index, context)?;
         let block_index = relative - position.gap_before;
         let anchor = document_anchor_for_transcript(LineAnchor {
             item_index: position.item_index,
@@ -181,6 +213,7 @@ impl DocumentTranscriptSnapshot {
         &self,
         index: usize,
         include_test_plain_lines: bool,
+        context: FrameRenderContext,
     ) -> Option<DocumentTranscriptViewportLine> {
         #[cfg(not(test))]
         let _ = include_test_plain_lines;
@@ -197,7 +230,7 @@ impl DocumentTranscriptSnapshot {
             });
         }
 
-        let block = self.render_block(position.item_index)?;
+        let block = self.render_block(position.item_index, context)?;
         let block_index = relative - position.gap_before;
         let is_assistant = self
             .items
@@ -216,7 +249,11 @@ impl DocumentTranscriptSnapshot {
         })
     }
 
-    pub(crate) fn line_index_for_anchor(&self, target: LineAnchor) -> Option<usize> {
+    pub(crate) fn line_index_for_anchor(
+        &self,
+        target: LineAnchor,
+        context: FrameRenderContext,
+    ) -> Option<usize> {
         let item_lines = self.index.item_lines(target.item_index)?;
         if matches!(target.item_anchor.kind, LineAnchorKind::ItemGap) {
             let gap_line_count = self.index.trailing_gap_line_count(target.item_index);
@@ -230,7 +267,7 @@ impl DocumentTranscriptSnapshot {
             );
         }
 
-        let block = self.render_block(target.item_index)?;
+        let block = self.render_block(target.item_index, context)?;
         let block_index = block.anchor_index(target.item_anchor)?;
         Some(item_lines.content_start_line + block_index)
     }
@@ -240,12 +277,13 @@ impl DocumentTranscriptSnapshot {
         start: usize,
         count: usize,
         include_test_plain_lines: bool,
+        context: FrameRenderContext,
     ) -> DocumentTranscriptViewportSnapshot {
         if count == 0 || self.line_count() == 0 || start >= self.line_count() {
             return DocumentTranscriptViewportSnapshot::default();
         }
 
-        self.prewarm_item_blocks_for_window(start, count);
+        self.prewarm_item_blocks_for_window(start, count, context);
         let end = (start + count).min(self.line_count());
         let mut lines = Vec::with_capacity(end - start);
         let mut assistant_lines = Vec::with_capacity(end - start);
@@ -254,7 +292,7 @@ impl DocumentTranscriptSnapshot {
         let mut plain_lines = Vec::with_capacity(end - start);
 
         for index in start..end {
-            let Some(line) = self.viewport_line(index, include_test_plain_lines) else {
+            let Some(line) = self.viewport_line(index, include_test_plain_lines, context) else {
                 continue;
             };
             if !lines.is_empty() {
@@ -279,7 +317,12 @@ impl DocumentTranscriptSnapshot {
         }
     }
 
-    fn prewarm_item_blocks_for_window(&self, start: usize, count: usize) {
+    fn prewarm_item_blocks_for_window(
+        &self,
+        start: usize,
+        count: usize,
+        context: FrameRenderContext,
+    ) {
         let overscan_lines = viewport_overscan_line_budget(count);
         let Some((start_position, end_position)) =
             self.index
@@ -301,14 +344,18 @@ impl DocumentTranscriptSnapshot {
                 continue;
             }
 
-            let Some(block) = self.materialize_block(item_index) else {
+            let Some(block) = self.materialize_block(item_index, context) else {
                 continue;
             };
             self.item_block_cache.borrow_mut().insert(item_index, block);
         }
     }
 
-    fn render_block(&self, item_index: usize) -> Option<Rc<CachedRenderBlock>> {
+    fn render_block(
+        &self,
+        item_index: usize,
+        context: FrameRenderContext,
+    ) -> Option<Rc<CachedRenderBlock>> {
         if let Some(block) = self.item_block_cache.borrow().get(&item_index).cloned() {
             return Some(block);
         }
@@ -321,6 +368,7 @@ impl DocumentTranscriptSnapshot {
             self.items.get(item_index)?.as_ref(),
             self.width.max(1),
             self.palette,
+            context,
         ));
         self.item_block_cache
             .borrow_mut()
@@ -328,7 +376,11 @@ impl DocumentTranscriptSnapshot {
         Some(block)
     }
 
-    fn materialize_block(&self, item_index: usize) -> Option<Rc<CachedRenderBlock>> {
+    fn materialize_block(
+        &self,
+        item_index: usize,
+        context: FrameRenderContext,
+    ) -> Option<Rc<CachedRenderBlock>> {
         if let Some(block) = self.warmed_block(item_index) {
             return Some(block);
         }
@@ -337,6 +389,7 @@ impl DocumentTranscriptSnapshot {
             self.items.get(item_index)?.as_ref(),
             self.width.max(1),
             self.palette,
+            context,
         )))
     }
 
@@ -418,12 +471,17 @@ impl DocumentLayout {
     }
 
     /// `plain_text_len` 返回 unified document 纯文本的总字符数（含换行分隔）。
-    pub(crate) fn plain_text_len(&self) -> usize {
-        self.plain_text_len_for_range(0, self.line_count())
+    pub(crate) fn plain_text_len(&self, context: FrameRenderContext) -> usize {
+        self.plain_text_len_for_range(0, self.line_count(), context)
     }
 
     /// `plain_text_len_for_range` 返回指定连续范围内纯文本的总字符数（含换行分隔）。
-    pub(crate) fn plain_text_len_for_range(&self, mut start: usize, count: usize) -> usize {
+    pub(crate) fn plain_text_len_for_range(
+        &self,
+        mut start: usize,
+        count: usize,
+        context: FrameRenderContext,
+    ) -> usize {
         if count == 0 || self.line_count() == 0 || start >= self.line_count() {
             return 0;
         }
@@ -433,9 +491,9 @@ impl DocumentLayout {
         let mut used_transcript = false;
         if start < self.transcript_line_count {
             let transcript_end = end.min(self.transcript_line_count);
-            total += self
-                .transcript
-                .plain_text_len_for_range(start, transcript_end - start);
+            total +=
+                self.transcript
+                    .plain_text_len_for_range(start, transcript_end - start, context);
             used_transcript = transcript_end > start;
             start = transcript_end;
         }
@@ -452,12 +510,16 @@ impl DocumentLayout {
     }
 
     /// `line_at` 返回指定视觉行的统一只读视图。
-    pub(crate) fn line_at(&self, index: usize) -> Option<DocumentLayoutLine> {
+    pub(crate) fn line_at(
+        &self,
+        index: usize,
+        context: FrameRenderContext,
+    ) -> Option<DocumentLayoutLine> {
         if index >= self.line_count() {
             return None;
         }
         if index < self.transcript_line_count {
-            return self.transcript.line_at(index);
+            return self.transcript.line_at(index, context);
         }
 
         Some(DocumentLayoutLine {
@@ -489,12 +551,12 @@ impl DocumentLayout {
     }
 
     /// `line_text_at` 返回指定视觉行的纯文本内容。
-    pub(crate) fn line_text_at(&self, index: usize) -> Option<String> {
+    pub(crate) fn line_text_at(&self, index: usize, context: FrameRenderContext) -> Option<String> {
         if index >= self.line_count() {
             return None;
         }
         if index < self.transcript_line_count {
-            return self.transcript.plain_line_at(index);
+            return self.transcript.plain_line_at(index, context);
         }
 
         self.tail
@@ -504,12 +566,16 @@ impl DocumentLayout {
     }
 
     /// `line_anchor_at` 返回指定视觉行的锚点。
-    pub(crate) fn line_anchor_at(&self, index: usize) -> Option<DocumentLineAnchor> {
+    pub(crate) fn line_anchor_at(
+        &self,
+        index: usize,
+        context: FrameRenderContext,
+    ) -> Option<DocumentLineAnchor> {
         if index >= self.line_count() {
             return None;
         }
         if index < self.transcript_line_count {
-            return self.transcript.anchor_at(index);
+            return self.transcript.anchor_at(index, context);
         }
 
         self.tail
@@ -519,8 +585,12 @@ impl DocumentLayout {
     }
 
     /// `is_assistant_message_line` 判断指定文档行是否属于 assistant 消息正文。
-    pub(crate) fn is_assistant_message_line(&self, index: usize) -> bool {
-        let Some(anchor) = self.line_anchor_at(index) else {
+    pub(crate) fn is_assistant_message_line(
+        &self,
+        index: usize,
+        context: FrameRenderContext,
+    ) -> bool {
+        let Some(anchor) = self.line_anchor_at(index, context) else {
             return false;
         };
         if anchor.region != DocumentAnchorRegion::Transcript
@@ -536,9 +606,15 @@ impl DocumentLayout {
     }
 
     /// `line_index_for_anchor` 把语义锚点解析回当前布局中的视觉行。
-    pub(crate) fn line_index_for_anchor(&self, target: DocumentLineAnchor) -> Option<usize> {
+    pub(crate) fn line_index_for_anchor(
+        &self,
+        target: DocumentLineAnchor,
+        context: FrameRenderContext,
+    ) -> Option<usize> {
         if target.region == DocumentAnchorRegion::Transcript {
-            return self.transcript.line_index_for_anchor(target.transcript);
+            return self
+                .transcript
+                .line_index_for_anchor(target.transcript, context);
         }
 
         self.tail
@@ -552,16 +628,21 @@ impl DocumentLayout {
     pub(crate) fn resolve_selection_point(
         &self,
         point: SelectionPoint,
+        context: FrameRenderContext,
     ) -> Option<ResolvedSelectionPoint> {
         Some(ResolvedSelectionPoint::new(
-            self.line_index_for_anchor(point.anchor())?,
+            self.line_index_for_anchor(point.anchor(), context)?,
             point.column(),
         ))
     }
 
     /// `selection_line_at` 返回 selection / copy 路径需要的文本与锚点信息。
-    pub(crate) fn selection_line_at(&self, index: usize) -> Option<DocumentSelectionLine> {
-        let line = self.line_at(index)?;
+    pub(crate) fn selection_line_at(
+        &self,
+        index: usize,
+        context: FrameRenderContext,
+    ) -> Option<DocumentSelectionLine> {
+        let line = self.line_at(index, context)?;
         Some(DocumentSelectionLine {
             text: line.plain_line,
             anchor: line.anchor,
@@ -573,28 +654,34 @@ impl DocumentLayout {
     pub(crate) fn selection_line_for_anchor(
         &self,
         anchor: DocumentLineAnchor,
+        context: FrameRenderContext,
     ) -> Option<DocumentSelectionLine> {
-        let index = self.line_index_for_anchor(anchor)?;
-        self.selection_line_at(index)
+        let index = self.line_index_for_anchor(anchor, context)?;
+        self.selection_line_at(index, context)
     }
 
     #[cfg(test)]
     /// `all_plain_lines` 返回 unified document 的完整纯文本行视图。
-    pub(crate) fn all_plain_lines(&self) -> Vec<String> {
-        self.line_texts_for_range(0, self.line_count())
+    pub(crate) fn all_plain_lines(&self, context: FrameRenderContext) -> Vec<String> {
+        self.line_texts_for_range(0, self.line_count(), context)
     }
 
     #[cfg(test)]
     /// `all_line_anchors` 返回 unified document 的完整锚点视图。
-    pub(crate) fn all_line_anchors(&self) -> Vec<DocumentLineAnchor> {
+    pub(crate) fn all_line_anchors(&self, context: FrameRenderContext) -> Vec<DocumentLineAnchor> {
         (0..self.line_count())
-            .filter_map(|index| self.line_anchor_at(index))
+            .filter_map(|index| self.line_anchor_at(index, context))
             .collect()
     }
 
     #[cfg(test)]
     /// `line_texts_for_range` 返回给定连续范围内的纯文本行。
-    pub(crate) fn line_texts_for_range(&self, mut start: usize, count: usize) -> Vec<String> {
+    pub(crate) fn line_texts_for_range(
+        &self,
+        mut start: usize,
+        count: usize,
+        context: FrameRenderContext,
+    ) -> Vec<String> {
         if count == 0 || self.line_count() == 0 || start >= self.line_count() {
             return Vec::new();
         }
@@ -603,10 +690,11 @@ impl DocumentLayout {
         let mut lines = Vec::with_capacity(end - start);
         if start < self.transcript_line_count {
             let transcript_end = end.min(self.transcript_line_count);
-            lines.extend(
-                self.transcript
-                    .plain_lines_for_range(start, transcript_end - start),
-            );
+            lines.extend(self.transcript.plain_lines_for_range(
+                start,
+                transcript_end - start,
+                context,
+            ));
             start = transcript_end;
         }
         if start < end {
@@ -619,7 +707,12 @@ impl DocumentLayout {
     }
 
     /// `lines_for_range` 返回给定连续范围内的带样式行。
-    pub(crate) fn lines_for_range(&self, mut start: usize, count: usize) -> Vec<Line<'static>> {
+    pub(crate) fn lines_for_range(
+        &self,
+        mut start: usize,
+        count: usize,
+        context: FrameRenderContext,
+    ) -> Vec<Line<'static>> {
         if count == 0 || self.line_count() == 0 || start >= self.line_count() {
             return Vec::new();
         }
@@ -630,7 +723,7 @@ impl DocumentLayout {
             let transcript_end = end.min(self.transcript_line_count);
             lines.extend(
                 self.transcript
-                    .lines_for_range(start, transcript_end - start),
+                    .lines_for_range(start, transcript_end - start, context),
             );
             start = transcript_end;
         }

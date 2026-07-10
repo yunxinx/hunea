@@ -189,7 +189,10 @@ fn stream_activity_pause_hides_and_resume_excludes_paused_duration() {
             .has_content,
         "paused activity should be hidden"
     );
-    assert_eq!(model.stream_activity_frame_interval_at(resume_at), None);
+    assert_eq!(
+        model.stream_activity_next_frame_deadline_at(resume_at),
+        None
+    );
 
     model.resume_stream_activity_at(resume_at);
     let resumed = model
@@ -360,20 +363,45 @@ fn stream_activity_token_indicator_uses_fast_tick_until_target_or_stale() {
     model.set_stream_activity_output_tokens_at(36, started_at);
 
     assert_eq!(
-        model.stream_activity_frame_interval_at(started_at + Duration::from_millis(33)),
-        Some(Duration::from_millis(33))
+        model
+            .stream_activity
+            .as_ref()
+            .unwrap()
+            .frame_interval_at(started_at + Duration::from_millis(33)),
+        Duration::from_millis(33)
     );
     assert_eq!(
-        model.stream_activity_frame_interval_at(started_at + Duration::from_millis(130)),
-        Some(Duration::from_millis(80)),
+        model
+            .stream_activity
+            .as_ref()
+            .unwrap()
+            .frame_interval_at(started_at + Duration::from_millis(130)),
+        Duration::from_millis(80),
         "token tick should stop once the displayed value catches the target"
     );
 
     model.set_stream_activity_output_tokens_at(72, started_at + Duration::from_millis(200));
     assert_eq!(
-        model.stream_activity_frame_interval_at(started_at + Duration::from_millis(600)),
-        Some(Duration::from_millis(80)),
+        model
+            .stream_activity
+            .as_ref()
+            .unwrap()
+            .frame_interval_at(started_at + Duration::from_millis(600)),
+        Duration::from_millis(80),
         "stale token snapshots should not keep the fast tick alive"
+    );
+}
+
+#[test]
+fn stream_activity_next_frame_deadline_is_anchored_to_started_at() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.show_stream_activity_with_header("Working");
+    let started_at = model.stream_activity.as_ref().unwrap().started_at;
+    let now = started_at + Duration::from_millis(70);
+
+    assert_eq!(
+        model.stream_activity_next_frame_deadline_at(now),
+        Some(started_at + STREAM_ACTIVITY_FRAME_INTERVAL),
     );
 }
 
@@ -386,14 +414,14 @@ fn document_layout_rebuilds_when_stream_activity_tick_changes() {
     model.set_palette(default_palette(), true);
     model.show_stream_activity_with_header("Working");
 
-    let initial = model.build_document_layout();
+    let initial = model.build_document_layout(crate::frame_time::FrameRenderContext::capture());
     assert!(
         initial.tail.text_lines[0].contains("Working (0s"),
         "activity should include the current elapsed segment"
     );
 
     model.stream_activity.as_mut().unwrap().started_at -= std::time::Duration::from_secs(2);
-    let updated = model.build_document_layout();
+    let updated = model.build_document_layout(crate::frame_time::FrameRenderContext::capture());
 
     assert!(
         updated.tail.text_lines[0].contains("Working (2s"),

@@ -1,6 +1,9 @@
 use std::time::{Duration, Instant};
 
-use crate::document::{DocumentLayout, DocumentLineAnchor};
+use crate::{
+    document::{DocumentLayout, DocumentLineAnchor},
+    frame_time::FrameRenderContext,
+};
 
 /// `SELECTION_MULTI_CLICK_WINDOW` 表示双击/三击识别窗口。
 pub(crate) const SELECTION_MULTI_CLICK_WINDOW: Duration = Duration::from_millis(500);
@@ -95,9 +98,10 @@ impl DocumentSelectionRange {
     pub(crate) fn ordered_points(
         self,
         layout: &DocumentLayout,
+        context: FrameRenderContext,
     ) -> Option<(ResolvedSelectionPoint, ResolvedSelectionPoint)> {
-        let mut start = layout.resolve_selection_point(self.anchor)?;
-        let mut end = layout.resolve_selection_point(self.focus)?;
+        let mut start = layout.resolve_selection_point(self.anchor, context)?;
+        let mut end = layout.resolve_selection_point(self.focus, context)?;
         if end.line < start.line || (end.line == start.line && end.column < start.column) {
             std::mem::swap(&mut start, &mut end);
         }
@@ -167,12 +171,13 @@ impl SelectionState {
     pub(crate) fn ordered_points(
         self,
         layout: &DocumentLayout,
+        context: FrameRenderContext,
     ) -> Option<(ResolvedSelectionPoint, ResolvedSelectionPoint)> {
         if !self.active {
             return None;
         }
 
-        self.range.ordered_points(layout)
+        self.range.ordered_points(layout, context)
     }
 }
 
@@ -283,7 +288,7 @@ mod tests {
         assert!(!selection.is_dragging());
         assert_eq!(selection.focus(), focus);
         assert_eq!(
-            selection.ordered_points(&layout),
+            selection.ordered_points(&layout, FrameRenderContext::capture()),
             Some((
                 ResolvedSelectionPoint::new(2, 3),
                 ResolvedSelectionPoint::new(4, 6)
@@ -319,7 +324,7 @@ mod tests {
         );
 
         let (start, end) = selection
-            .ordered_points(&layout)
+            .ordered_points(&layout, FrameRenderContext::capture())
             .expect("active multi-cell selection should normalize");
         assert_eq!(start, ResolvedSelectionPoint::new(2, 3));
         assert_eq!(end, ResolvedSelectionPoint::new(4, 7));

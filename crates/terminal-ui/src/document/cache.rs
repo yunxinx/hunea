@@ -95,6 +95,7 @@ pub(crate) struct DocumentLayoutKey {
 /// `DocumentLayout` 表示整份统一文档流的稳定布局。
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DocumentLayout {
+    pub(super) key: DocumentLayoutKey,
     pub(super) transcript: Rc<DocumentTranscriptSnapshot>,
     pub(crate) transcript_line_count: usize,
     pub(crate) tail: Rc<DocumentTailLayout>,
@@ -103,6 +104,12 @@ pub(crate) struct DocumentLayout {
     pub(crate) composer_line_count: usize,
     pub(crate) cursor_x: u16,
     pub(crate) cursor_y: usize,
+}
+
+impl DocumentLayout {
+    pub(crate) const fn key(&self) -> &DocumentLayoutKey {
+        &self.key
+    }
 }
 
 #[cfg(test)]

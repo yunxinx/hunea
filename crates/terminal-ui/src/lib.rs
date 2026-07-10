@@ -23,6 +23,7 @@ mod external_editor;
 mod file_picker;
 mod file_search;
 mod floating;
+mod frame_time;
 mod fullscreen_list_chrome;
 mod fullscreen_search_list;
 mod history_scroll_indicator;

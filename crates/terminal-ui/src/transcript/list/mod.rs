@@ -642,7 +642,10 @@ impl Transcript {
     /// `render` 渲染整个 transcript，并返回带锚点的稳定结果。
     /// 这条路径保留给显式需要完整 transcript block/anchor 的冷路径；steady-state
     /// document 主路径应继续走 `item_metrics_index()` 与局部 viewport materialization。
-    pub(crate) fn render(&mut self) -> Rc<RenderResult> {
+    pub(crate) fn render(
+        &mut self,
+        context: crate::frame_time::FrameRenderContext,
+    ) -> Rc<RenderResult> {
         let width = self.render_width();
         if self
             .screen_cache
@@ -680,7 +683,8 @@ impl Transcript {
         };
         self.screen_cache.begin_recent_limit_batch();
         let index = self.item_metrics_index();
-        let result = Rc::new(self.build_render_result(width, dirty_from, append_start_line, index));
+        let result =
+            Rc::new(self.build_render_result(width, dirty_from, append_start_line, index, context));
         self.screen_cache.store_result(
             width,
             self.gap,

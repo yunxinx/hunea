@@ -70,8 +70,12 @@ pub(crate) fn render_transcript_overlay_view(
     let highlight_item_index = overlay.highlight_item_index;
 
     if effective_total > 0 && content_height > 0 {
-        let mut window = transcript
-            .materialize_line_window(startup_banner_lines + scroll_offset, content_height);
+        let context = frame.context();
+        let mut window = transcript.materialize_line_window(
+            startup_banner_lines + scroll_offset,
+            content_height,
+            context,
+        );
         let exact_startup_banner_lines =
             transcript_overlay_startup_banner_lines_for_index(transcript, &window.index);
         let exact_total = window.index.line_count;
@@ -85,6 +89,7 @@ pub(crate) fn render_transcript_overlay_view(
             window = transcript.materialize_line_window(
                 exact_startup_banner_lines + scroll_offset,
                 content_height,
+                context,
             );
         }
 

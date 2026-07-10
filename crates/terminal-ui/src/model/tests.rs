@@ -65,20 +65,20 @@ fn startup_banner_entrance_runs_only_once_across_banner_rebuilds() {
 
     let started_at = Instant::now();
     assert_eq!(
-        model.startup_banner_entrance_frame_interval_at(started_at),
+        model.startup_banner_entrance_next_frame_deadline_at(started_at),
         None
     );
 
     model.start_startup_banner_entrance_for_test(started_at);
     assert_eq!(
-        model.startup_banner_entrance_frame_interval_at(started_at),
-        Some(Duration::from_millis(16))
+        model.startup_banner_entrance_next_frame_deadline_at(started_at),
+        Some(started_at + Duration::from_millis(16))
     );
 
     model.complete_startup_banner_entrance_for_test();
     assert!(model.startup_banner_entrance_completed_for_test());
     assert_eq!(
-        model.startup_banner_entrance_frame_interval_at(started_at),
+        model.startup_banner_entrance_next_frame_deadline_at(started_at),
         None
     );
 
@@ -86,7 +86,7 @@ fn startup_banner_entrance_runs_only_once_across_banner_rebuilds() {
 
     assert!(model.startup_banner_entrance_completed_for_test());
     assert_eq!(
-        model.startup_banner_entrance_frame_interval_at(started_at),
+        model.startup_banner_entrance_next_frame_deadline_at(started_at),
         None
     );
 }
@@ -235,15 +235,19 @@ fn startup_banner_entrance_starts_after_ready_render() {
     let now = Instant::now();
 
     let _ = render_model_buffer(&mut model, 80, 24);
-    assert_eq!(model.startup_banner_entrance_frame_interval_at(now), None);
+    assert_eq!(
+        model.startup_banner_entrance_next_frame_deadline_at(now),
+        None
+    );
 
     model.set_window(80, 24);
     model.set_palette(crate::theme::default_palette(), true);
     let _ = render_model_buffer(&mut model, 80, 24);
 
-    assert_eq!(
-        model.startup_banner_entrance_frame_interval_at(now),
-        Some(Duration::from_millis(16))
+    assert!(
+        model
+            .startup_banner_entrance_next_frame_deadline_at(Instant::now())
+            .is_some()
     );
 }
 
@@ -258,7 +262,10 @@ fn startup_banner_entrance_does_not_poll_while_transcript_overlay_hides_target()
     model.open_transcript_overlay();
 
     assert!(model.startup_banner_entrance_completed_for_test());
-    assert_eq!(model.startup_banner_entrance_frame_interval_at(now), None);
+    assert_eq!(
+        model.startup_banner_entrance_next_frame_deadline_at(now),
+        None
+    );
 }
 
 #[test]
@@ -273,7 +280,10 @@ fn startup_banner_entrance_completes_when_transcript_overlay_renders_over_target
     let _ = render_model_buffer(&mut model, 80, 24);
 
     assert!(model.startup_banner_entrance_completed_for_test());
-    assert_eq!(model.startup_banner_entrance_frame_interval_at(now), None);
+    assert_eq!(
+        model.startup_banner_entrance_next_frame_deadline_at(now),
+        None
+    );
 }
 
 #[test]
@@ -304,7 +314,7 @@ fn startup_banner_entrance_completes_across_overlay_toggle() {
 
     assert!(model.startup_banner_entrance_completed_for_test());
     assert_eq!(
-        model.startup_banner_entrance_frame_interval_at(Instant::now()),
+        model.startup_banner_entrance_next_frame_deadline_at(Instant::now()),
         None
     );
     assert!(
@@ -347,7 +357,8 @@ fn conversation_test_model() -> Model {
 }
 
 fn apply_scrolled_offset(model: &mut Model, offset: usize, manual_scroll: bool) {
-    let layout = model.build_document_layout();
+    let context = crate::frame_time::FrameRenderContext::capture();
+    let layout = model.build_document_layout(context);
     let composer_offset = model.current_composer_viewport_offset(&layout, offset);
     model.apply_document_viewport_position(&layout, offset, composer_offset, false, manual_scroll);
 }
@@ -361,10 +372,11 @@ fn overflowing_document_bottom_slice_keeps_full_draft_height() {
     model.sync_composer_height();
     model.sync_document_viewport_to_bottom();
 
-    let layout = model.build_document_layout();
+    let context = crate::frame_time::FrameRenderContext::capture();
+    let layout = model.build_document_layout(context);
     assert_eq!(layout.composer_line_count, 3);
 
-    let viewport = model.build_document_viewport(&layout);
+    let viewport = model.build_document_viewport(&layout, context);
     let rendered = viewport.plain_lines.clone();
     assert_eq!(
         rendered,
@@ -1306,7 +1318,7 @@ fn file_picker_remains_visible_when_composer_uses_most_of_viewport() {
     model.set_window(36, 6);
     type_text(&mut model, "line one\nline two\nline three\nline four\n@s");
 
-    let layout = model.build_document_layout();
+    let layout = model.build_document_layout(crate::frame_time::FrameRenderContext::capture());
     let rows = rendered_rows_for_model(&mut model, 36, 6);
 
     assert!(
@@ -1339,7 +1351,7 @@ fn file_picker_remains_visible_when_composer_cursor_mode_fills_viewport() {
 
     type_text(&mut model, "\n@s");
 
-    let layout = model.build_document_layout();
+    let layout = model.build_document_layout(crate::frame_time::FrameRenderContext::capture());
     let rows = rendered_rows_for_model(&mut model, 36, 6);
 
     assert!(
@@ -1371,8 +1383,9 @@ fn file_picker_overlay_does_not_clip_or_extend_the_composer_document_layout() {
     type_text(&mut model, "@");
 
     let expected_composer_lines = usize::from(model.composer.full_height());
-    let layout = model.build_document_layout();
-    let viewport = model.build_document_viewport(&layout);
+    let context = crate::frame_time::FrameRenderContext::capture();
+    let layout = model.build_document_layout(context);
+    let viewport = model.build_document_viewport(&layout, context);
     let rows = rendered_rows_for_model(&mut model, 36, 6);
 
     assert_eq!(
@@ -1434,8 +1447,9 @@ fn file_picker_floating_layer_does_not_shrink_document_viewport() {
     );
 
     assert!(model.file_picker_active());
-    let layout = model.build_document_layout();
-    let viewport = model.build_document_viewport(&layout);
+    let context = crate::frame_time::FrameRenderContext::capture();
+    let layout = model.build_document_layout(context);
+    let viewport = model.build_document_viewport(&layout, context);
 
     assert_eq!(
         viewport.lines.len(),
@@ -1821,7 +1835,7 @@ fn runtime_terminal_updates_keep_manual_scrollback() {
         })
     );
 
-    let layout = model.build_document_layout();
+    let layout = model.build_document_layout(crate::frame_time::FrameRenderContext::capture());
     let refreshed_bottom_offset = model.document_bottom_offset(layout.line_count());
     assert!(
         model.document_runtime.viewport_y < refreshed_bottom_offset,
@@ -1853,7 +1867,8 @@ fn runtime_terminal_updates_keep_manual_scrollback() {
             },
         )
     );
-    let final_layout = model.build_document_layout();
+    let final_layout =
+        model.build_document_layout(crate::frame_time::FrameRenderContext::capture());
     let final_bottom_offset = model.document_bottom_offset(final_layout.line_count());
     assert!(
         model.document_runtime.viewport_y < final_bottom_offset,
@@ -1980,7 +1995,8 @@ fn current_visible_transcript_window_matches_actual_viewport_line_indices() {
         model.sync_transcript_render();
         model.sync_document_viewport_to_bottom();
 
-        let layout = model.build_document_layout();
+        let context = crate::frame_time::FrameRenderContext::capture();
+        let layout = model.build_document_layout(context);
         let visible_transcript_indices = model
             .document_viewport_line_indices(&layout)
             .into_iter()
@@ -2023,7 +2039,8 @@ fn sync_transcript_render_evicts_warmed_transcript_blocks_during_metrics_only_re
     );
 
     model.document_runtime.transcript_cache = Default::default();
-    let _snapshot = model.current_document_transcript_snapshot();
+    let _snapshot = model
+        .current_document_transcript_snapshot(crate::frame_time::FrameRenderContext::capture());
     assert!(
         !model
             .transcript
@@ -2063,13 +2080,15 @@ fn current_visible_transcript_window_reresolves_manual_scroll_viewport_after_res
     model.set_palette(default_palette(), true);
     model.sync_transcript_render();
 
-    let layout = model.build_document_layout();
+    let layout = model.build_document_layout(crate::frame_time::FrameRenderContext::capture());
     let target_document_line = (0..layout.line_count())
         .find(|&line_index| {
-            layout.line_anchor_at(line_index).is_some_and(|anchor| {
-                anchor.region == DocumentAnchorRegion::Transcript
-                    && anchor.transcript.item_index == 1
-            })
+            layout
+                .line_anchor_at(line_index, crate::frame_time::FrameRenderContext::capture())
+                .is_some_and(|anchor| {
+                    anchor.region == DocumentAnchorRegion::Transcript
+                        && anchor.transcript.item_index == 1
+                })
         })
         .expect("target item should exist in the initial transcript layout");
     let document_offset = target_document_line;
@@ -2079,11 +2098,12 @@ fn current_visible_transcript_window_reresolves_manual_scroll_viewport_after_res
     model.set_window(12, 4);
 
     let transcript_line_count = model.transcript.item_metrics_index().line_count;
-    let resized_layout = model.build_document_layout();
+    let resized_layout =
+        model.build_document_layout(crate::frame_time::FrameRenderContext::capture());
     let resized_target_document_line = (0..resized_layout.line_count())
         .find(|&line_index| {
             resized_layout
-                .line_anchor_at(line_index)
+                .line_anchor_at(line_index, crate::frame_time::FrameRenderContext::capture())
                 .is_some_and(|anchor| {
                     anchor.region == DocumentAnchorRegion::Transcript
                         && anchor.transcript.item_index == 1
@@ -2156,13 +2176,15 @@ fn current_visible_transcript_window_rebuilds_manual_scroll_index_when_reflow_ke
     model.set_palette(default_palette(), true);
     model.sync_transcript_render();
 
-    let layout = model.build_document_layout();
+    let layout = model.build_document_layout(crate::frame_time::FrameRenderContext::capture());
     let target_document_line = (0..layout.line_count())
         .find(|&line_index| {
-            layout.line_anchor_at(line_index).is_some_and(|anchor| {
-                anchor.region == DocumentAnchorRegion::Transcript
-                    && anchor.transcript.item_index == 1
-            })
+            layout
+                .line_anchor_at(line_index, crate::frame_time::FrameRenderContext::capture())
+                .is_some_and(|anchor| {
+                    anchor.region == DocumentAnchorRegion::Transcript
+                        && anchor.transcript.item_index == 1
+                })
         })
         .expect("target item should exist in the initial transcript layout");
     model.apply_document_viewport_position(&layout, target_document_line, 0, false, true);
@@ -2173,7 +2195,10 @@ fn current_visible_transcript_window_rebuilds_manual_scroll_index_when_reflow_ke
     model.transcript.set_width(12);
     model.composer.set_width(12);
     let resized_index = model.transcript.progressive_item_metrics_index();
-    let resized_layout = model.document_layout_for_transcript_index(resized_index.clone());
+    let resized_layout = model.document_layout_for_transcript_index(
+        resized_index.clone(),
+        crate::frame_time::FrameRenderContext::capture(),
+    );
     let expected_offset =
         preserved_viewport_state.resolve_offset(&resized_layout, model.document_viewport_height());
     let expected_window_lines = model
@@ -2234,7 +2259,8 @@ fn sync_transcript_render_keeps_transcript_blocks_cold_when_document_viewport_is
         );
 
         model.document_runtime.transcript_cache = Default::default();
-        let _snapshot = model.current_document_transcript_snapshot();
+        let _snapshot = model
+            .current_document_transcript_snapshot(crate::frame_time::FrameRenderContext::capture());
         assert!(
             !model
                 .transcript
@@ -2272,7 +2298,8 @@ fn sync_transcript_render_keeps_transcript_blocks_cold_when_document_viewport_is
         );
 
         model.document_runtime.transcript_cache = Default::default();
-        let _snapshot = model.current_document_transcript_snapshot();
+        let _snapshot = model
+            .current_document_transcript_snapshot(crate::frame_time::FrameRenderContext::capture());
         assert!(
             model
                 .transcript
@@ -2346,12 +2373,12 @@ fn composer_cursor_only_layout_refresh_reuses_long_composer_document() {
         .composer_mut()
         .reset_text_and_move_to_end("中英 mixed long composer text ".repeat(120));
     model.sync_composer_height();
-    let _ = model.build_document_layout();
+    let _ = model.build_document_layout(crate::frame_time::FrameRenderContext::capture());
 
     crate::composer::reset_render_document_call_count();
     model.composer_mut().move_to_begin();
     model.sync_document_viewport_for_composer_cursor();
-    let _ = model.build_document_layout();
+    let _ = model.build_document_layout(crate::frame_time::FrameRenderContext::capture());
 
     assert_eq!(
         crate::composer::render_document_call_count(),
@@ -2402,10 +2429,10 @@ fn build_document_layout_exactizes_a_newly_scrolled_transcript_window() {
     model.set_palette(default_palette(), true);
     model.sync_transcript_render();
 
-    let tail_layout = model.build_document_layout();
+    let tail_layout = model.build_document_layout(crate::frame_time::FrameRenderContext::capture());
     model.apply_document_viewport_position(&tail_layout, 0, 0, false, true);
 
-    let _top_layout = model.build_document_layout();
+    let _top_layout = model.build_document_layout(crate::frame_time::FrameRenderContext::capture());
     let index = model.transcript_render.index.clone();
     let (start, count) = model
         .current_visible_transcript_window(index.line_count)
@@ -2429,7 +2456,9 @@ fn build_document_layout_exactizes_a_newly_scrolled_transcript_window() {
 #[test]
 fn build_document_layout_stable_exactization_loop_keeps_visible_window_exact() {
     let base = progressive_exactization_fixture();
-    let layout = base.clone().build_document_layout();
+    let layout = base
+        .clone()
+        .build_document_layout(crate::frame_time::FrameRenderContext::capture());
     let max_offset = layout
         .line_count()
         .saturating_sub(base.document_viewport_height());
@@ -2497,7 +2526,9 @@ fn exactize_line_window_keeps_manual_scroll_window_local_after_reflow() {
 #[test]
 fn build_document_layout_keeps_manual_scroll_viewport_stable_without_exactization_reflow() {
     let base = progressive_exactization_fixture();
-    let layout = base.clone().build_document_layout();
+    let layout = base
+        .clone()
+        .build_document_layout(crate::frame_time::FrameRenderContext::capture());
     let max_offset = layout
         .line_count()
         .saturating_sub(base.document_viewport_height());
@@ -2507,10 +2538,11 @@ fn build_document_layout_keeps_manual_scroll_viewport_stable_without_exactizatio
         apply_scrolled_offset(&mut model, offset, true);
         let preserved_viewport_state = model.document_runtime.viewport_state.clone();
 
-        let layout = model.build_document_layout();
+        let context = crate::frame_time::FrameRenderContext::capture();
+        let layout = model.build_document_layout(context);
         let expected_offset =
             preserved_viewport_state.resolve_offset(&layout, model.document_viewport_height());
-        let viewport = model.build_document_viewport(&layout);
+        let viewport = model.build_document_viewport(&layout, context);
 
         assert_eq!(
             model.document_runtime.viewport_y, expected_offset,
@@ -2531,7 +2563,9 @@ fn build_document_layout_keeps_manual_scroll_viewport_stable_without_exactizatio
 #[test]
 fn build_document_layout_resyncs_idle_viewport_after_exactization_reflow() {
     let base = idle_refinement_fixture();
-    let layout = base.clone().build_document_layout();
+    let layout = base
+        .clone()
+        .build_document_layout(crate::frame_time::FrameRenderContext::capture());
     let max_offset = layout
         .line_count()
         .saturating_sub(base.document_viewport_height());
@@ -2546,7 +2580,8 @@ fn build_document_layout_resyncs_idle_viewport_after_exactization_reflow() {
 
         let stale_offset = probe.document_runtime.viewport_state.resolved_offset();
         let mut exactized = probe.clone();
-        let layout = exactized.build_document_layout();
+        let layout =
+            exactized.build_document_layout(crate::frame_time::FrameRenderContext::capture());
         let cursor_hidden_with_stale_offset = layout.cursor_y < stale_offset
             || layout.cursor_y >= stale_offset.saturating_add(exactized.document_viewport_height());
 
@@ -2566,11 +2601,12 @@ fn build_document_layout_resyncs_idle_viewport_after_exactization_reflow() {
     apply_scrolled_offset(&mut model, offset, false);
 
     let mut expected = model.clone();
-    let _ = expected.build_document_layout();
+    let _ = expected.build_document_layout(crate::frame_time::FrameRenderContext::capture());
     expected.sync_document_viewport_for_composer_cursor();
 
-    let layout = model.build_document_layout();
-    let viewport = model.build_document_viewport(&layout);
+    let context = crate::frame_time::FrameRenderContext::capture();
+    let layout = model.build_document_layout(context);
+    let viewport = model.build_document_viewport(&layout, context);
 
     assert_eq!(
         model.document_runtime.viewport_y, expected.document_runtime.viewport_y,
@@ -2987,7 +3023,7 @@ fn stream_activity_line_renders_above_composer() {
     model.set_palette(default_palette(), true);
     model.show_stream_activity("Kimi Code CLI");
 
-    let layout = model.build_document_layout();
+    let layout = model.build_document_layout(crate::frame_time::FrameRenderContext::capture());
 
     let activity_line = layout
         .tail

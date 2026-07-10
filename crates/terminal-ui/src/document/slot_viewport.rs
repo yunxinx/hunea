@@ -1,7 +1,7 @@
 use ratatui::text::Line;
 
 use super::{DocumentLayout, DocumentViewport};
-use crate::Model;
+use crate::{Model, frame_time::FrameRenderContext};
 
 /// `BottomFollowPresentation` 描述底部跟随视图的临时展示决策。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -77,16 +77,19 @@ pub(crate) fn compose_bottom_follow_document_viewport(
     layout: &DocumentLayout,
     height: usize,
     presentation: BottomFollowPresentation,
+    context: FrameRenderContext,
 ) -> DocumentViewport {
     compose_document_viewport_from_line_indices(
         layout,
         &bottom_follow_viewport_line_indices(layout, height, presentation),
+        context,
     )
 }
 
 pub(crate) fn compose_document_viewport_from_line_indices(
     layout: &DocumentLayout,
     line_indices: &[usize],
+    context: FrameRenderContext,
 ) -> DocumentViewport {
     if line_indices.is_empty() {
         return DocumentViewport {
@@ -101,11 +104,11 @@ pub(crate) fn compose_document_viewport_from_line_indices(
 
     if let Some((start, count)) = contiguous_line_range(line_indices) {
         return DocumentViewport {
-            lines: layout.lines_for_range(start, count),
-            assistant_lines: assistant_flags_for_line_indices(layout, line_indices),
-            plain_text_len: layout.plain_text_len_for_range(start, count),
+            lines: layout.lines_for_range(start, count, context),
+            assistant_lines: assistant_flags_for_line_indices(layout, line_indices, context),
+            plain_text_len: layout.plain_text_len_for_range(start, count, context),
             #[cfg(test)]
-            plain_lines: layout.line_texts_for_range(start, count),
+            plain_lines: layout.line_texts_for_range(start, count, context),
             resolved_offset: start,
         };
     }
@@ -116,13 +119,13 @@ pub(crate) fn compose_document_viewport_from_line_indices(
     #[cfg(test)]
     let mut plain_lines = Vec::with_capacity(line_indices.len());
     for &index in line_indices {
-        if let Some(line) = layout.line_at(index) {
+        if let Some(line) = layout.line_at(index, context) {
             if !lines.is_empty() {
                 plain_text_len += 1;
             }
             plain_text_len += line.plain_line.len();
             lines.push(line.line);
-            assistant_lines.push(layout.is_assistant_message_line(index));
+            assistant_lines.push(layout.is_assistant_message_line(index, context));
             #[cfg(test)]
             plain_lines.push(line.plain_line);
         }
@@ -152,10 +155,14 @@ fn contiguous_line_range(line_indices: &[usize]) -> Option<(usize, usize)> {
     Some((start, line_indices.len()))
 }
 
-fn assistant_flags_for_line_indices(layout: &DocumentLayout, line_indices: &[usize]) -> Vec<bool> {
+fn assistant_flags_for_line_indices(
+    layout: &DocumentLayout,
+    line_indices: &[usize],
+    context: FrameRenderContext,
+) -> Vec<bool> {
     line_indices
         .iter()
-        .map(|index| layout.is_assistant_message_line(*index))
+        .map(|index| layout.is_assistant_message_line(*index, context))
         .collect()
 }
 
@@ -195,6 +202,7 @@ mod tests {
             &layout,
             model.document_viewport_height(),
             model.bottom_follow_presentation(&layout),
+            FrameRenderContext::capture(),
         );
 
         assert_eq!(
@@ -236,6 +244,7 @@ mod tests {
             &layout,
             model.document_viewport_height(),
             model.bottom_follow_presentation(&layout),
+            FrameRenderContext::capture(),
         );
 
         assert_eq!(

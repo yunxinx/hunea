@@ -180,6 +180,7 @@ pub struct TranscriptBench {
 pub struct DocumentBench {
     model: Model,
     layout: Rc<super::document::DocumentLayout>,
+    layout_context: crate::frame_time::FrameRenderContext,
     next_index: usize,
 }
 
@@ -422,12 +423,13 @@ fn measure_document_pipeline_stress_with_model(
     model.sync_composer_height();
 
     let document_layout_started_at = std::time::Instant::now();
-    let layout = model.build_document_layout();
+    let context = crate::frame_time::FrameRenderContext::capture();
+    let layout = model.build_document_layout(context);
     let document_layout_time = document_layout_started_at.elapsed();
     let rss_after_layout_kib = process_rss_kib();
 
     let document_viewport_started_at = std::time::Instant::now();
-    let viewport = model.build_document_viewport(&layout);
+    let viewport = model.build_document_viewport(&layout, context);
     let document_viewport_time = document_viewport_started_at.elapsed();
     let rss_after_viewport_kib = process_rss_kib();
 
@@ -611,14 +613,22 @@ impl TranscriptBench {
 
     /// `render` 渲染当前 transcript 并返回稳定摘要。
     pub fn render(&mut self) -> TranscriptRenderSummary {
-        summarize_transcript_render(&self.transcript.render())
+        summarize_transcript_render(
+            &self
+                .transcript
+                .render(crate::frame_time::FrameRenderContext::capture()),
+        )
     }
 
     /// `append_benchmark_item_and_render` 追加一项并测量 append fast path。
     pub fn append_benchmark_item_and_render(&mut self) -> TranscriptRenderSummary {
         append_transcript_benchmark_item(&mut self.transcript, self.next_index);
         self.next_index += 1;
-        summarize_transcript_render(&self.transcript.render())
+        summarize_transcript_render(
+            &self
+                .transcript
+                .render(crate::frame_time::FrameRenderContext::capture()),
+        )
     }
 }
 
@@ -628,10 +638,12 @@ impl DocumentBench {
         let mut model = new_stress_document_model(item_count, width, height);
         model.sync_transcript_render();
 
-        let layout = model.build_document_layout();
+        let layout_context = crate::frame_time::FrameRenderContext::capture();
+        let layout = model.build_document_layout(layout_context);
         Self {
             model,
             layout,
+            layout_context,
             next_index: item_count,
         }
     }
@@ -640,9 +652,11 @@ impl DocumentBench {
     pub fn rebuild_layout(&mut self) -> DocumentLayoutSummary {
         self.model.document_runtime.transcript_cache = Default::default();
         self.model.document_runtime.layout_cache = Default::default();
-        let layout = self.model.build_document_layout();
+        let layout_context = crate::frame_time::FrameRenderContext::capture();
+        let layout = self.model.build_document_layout(layout_context);
         let summary = summarize_document_layout(&layout);
         self.layout = layout;
+        self.layout_context = layout_context;
         summary
     }
 
@@ -668,7 +682,11 @@ impl DocumentBench {
     pub fn build_offset_viewport(&mut self) -> DocumentViewportSummary {
         self.model.document_runtime.viewport_cache = Default::default();
 
-        summarize_document_viewport(&self.model.build_document_viewport(&self.layout))
+        summarize_document_viewport(
+            &self
+                .model
+                .build_document_viewport(&self.layout, self.layout_context),
+        )
     }
 
     /// `prepare_bottom_follow_viewport_state` 把模型切到底部跟随状态。
@@ -688,7 +706,11 @@ impl DocumentBench {
     pub fn build_bottom_follow_viewport(&mut self) -> DocumentViewportSummary {
         self.model.document_runtime.viewport_cache = Default::default();
 
-        summarize_document_viewport(&self.model.build_document_viewport(&self.layout))
+        summarize_document_viewport(
+            &self
+                .model
+                .build_document_viewport(&self.layout, self.layout_context),
+        )
     }
 
     /// `rebuild_layout_after_transcript_append` 追加 transcript 后重建 layout 并返回稳定摘要。
@@ -701,9 +723,11 @@ impl DocumentBench {
         self.next_index += 1;
         self.model.sync_transcript_render();
 
-        let layout = self.model.build_document_layout();
+        let layout_context = crate::frame_time::FrameRenderContext::capture();
+        let layout = self.model.build_document_layout(layout_context);
         let summary = summarize_document_layout(&layout);
         self.layout = layout;
+        self.layout_context = layout_context;
         summary
     }
 
@@ -712,9 +736,11 @@ impl DocumentBench {
         self.model.composer_mut().insert_text("x");
         self.model.sync_composer_height();
 
-        let layout = self.model.build_document_layout();
+        let layout_context = crate::frame_time::FrameRenderContext::capture();
+        let layout = self.model.build_document_layout(layout_context);
         let summary = summarize_document_layout(&layout);
         self.layout = layout;
+        self.layout_context = layout_context;
         summary
     }
 }
@@ -930,14 +956,19 @@ fn apply_stress_window_resize_without_render(model: &mut Model, width: u16, heig
 fn mid_history_restore_viewport_state(item_count: usize, width: u16, height: u16) -> ViewportState {
     let mut model = new_warm_stress_document_model(item_count, width, height);
     let exact_index = model.transcript.item_metrics_index();
-    let layout = model.document_layout_for_transcript_index(exact_index);
+    let layout = model.document_layout_for_transcript_index(
+        exact_index,
+        crate::frame_time::FrameRenderContext::capture(),
+    );
     let target_item_index = item_count / 2;
     let target_line = (0..layout.line_count())
         .find(|&line_index| {
-            layout.line_anchor_at(line_index).is_some_and(|anchor| {
-                anchor.region == super::document::DocumentAnchorRegion::Transcript
-                    && anchor.transcript.item_index == target_item_index
-            })
+            layout
+                .line_anchor_at(line_index, crate::frame_time::FrameRenderContext::capture())
+                .is_some_and(|anchor| {
+                    anchor.region == super::document::DocumentAnchorRegion::Transcript
+                        && anchor.transcript.item_index == target_item_index
+                })
         })
         .unwrap_or(0);
     let composer_offset = model.current_composer_viewport_offset(&layout, target_line);
@@ -995,7 +1026,7 @@ fn summarize_transcript_render(
 fn summarize_document_layout(layout: &super::document::DocumentLayout) -> DocumentLayoutSummary {
     DocumentLayoutSummary {
         line_count: layout.line_count(),
-        plain_text_len: layout.plain_text_len(),
+        plain_text_len: layout.plain_text_len(crate::frame_time::FrameRenderContext::capture()),
         transcript_line_count: layout.transcript_line_count,
         composer_line_count: layout.composer_line_count,
         cursor_x: layout.cursor_x,

@@ -10,6 +10,7 @@ impl Transcript {
         dirty_from: usize,
         append_start_line: isize,
         index: TranscriptItemMetricsIndex,
+        context: crate::frame_time::FrameRenderContext,
     ) -> RenderResult {
         let previous = Rc::clone(&self.screen_cache.result);
         let mut items = Vec::with_capacity(self.items.len());
@@ -27,7 +28,7 @@ impl Transcript {
             .visible_items
             .partition_point(|item| item.item_index < dirty_from);
         for position in index.visible_items.iter().skip(start_position) {
-            let block = self.render_screen_block(position.item_index, width);
+            let block = self.render_screen_block(position.item_index, width, context);
             let summary = RenderItemSummary {
                 item_index: position.item_index,
                 start_line: position.start_line,
@@ -47,6 +48,7 @@ impl Transcript {
         &mut self,
         index: usize,
         width: u16,
+        context: crate::frame_time::FrameRenderContext,
     ) -> Rc<CachedRenderBlock> {
         let has_dynamic_render = self.items[index].has_active_runtime_tool_activity();
         let cache_key = self.items[index].render_cache_key();
@@ -62,6 +64,7 @@ impl Transcript {
             self.items[index].as_ref(),
             width,
             self.palette,
+            context,
         ));
         if !has_dynamic_render {
             self.screen_cache.store_item_block(index, Rc::clone(&block));
@@ -75,6 +78,7 @@ pub(crate) fn materialize_transcript_item_render_block(
     item: &TranscriptItem,
     width: u16,
     palette: TerminalPalette,
+    context: crate::frame_time::FrameRenderContext,
 ) -> CachedRenderBlock {
     let cache_key = item.render_cache_key();
 
@@ -120,7 +124,7 @@ pub(crate) fn materialize_transcript_item_render_block(
 
     let lines = match item {
         TranscriptItem::ToolResult(tool_result) => {
-            tool_result.render_lines_at(width, palette, std::time::Instant::now())
+            tool_result.render_lines_at(width, palette, context.now())
         }
         _ => item.render_lines(width, palette),
     };

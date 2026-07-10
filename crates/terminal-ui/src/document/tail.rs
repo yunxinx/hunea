@@ -7,6 +7,7 @@ use crate::{
     command_panel::CommandPanelRenderResult,
     composer,
     context_budget::ContextBudgetRenderResult,
+    frame_time::FrameRenderContext,
     inline_panel::InlinePanelRenderResult,
     model_panel::ModelPanelRenderResult,
     selection::{SelectableLineRange, selectable_range_for_plain_line},
@@ -96,8 +97,11 @@ pub(crate) struct DocumentTailLayoutInput {
 }
 
 impl Model {
-    pub(crate) fn build_document_tail_layout(&mut self) -> Rc<DocumentTailLayout> {
-        let key = self.current_document_tail_layout_key();
+    pub(crate) fn build_document_tail_layout(
+        &mut self,
+        context: FrameRenderContext,
+    ) -> Rc<DocumentTailLayout> {
+        let key = self.current_document_tail_layout_key(context);
         if self.document_runtime.tail_layout_cache.valid
             && self.document_runtime.tail_layout_cache.key == key
         {
@@ -105,7 +109,7 @@ impl Model {
         }
 
         let tail = Rc::new(compose_document_tail_layout(
-            self.current_document_tail_layout_input(),
+            self.current_document_tail_layout_input(context),
         ));
         self.document_runtime.tail_layout_cache = DocumentTailLayoutCache {
             key,
@@ -115,7 +119,10 @@ impl Model {
         tail
     }
 
-    pub(crate) fn current_document_tail_layout_key(&self) -> DocumentTailLayoutKey {
+    pub(crate) fn current_document_tail_layout_key(
+        &self,
+        context: FrameRenderContext,
+    ) -> DocumentTailLayoutKey {
         DocumentTailLayoutKey {
             transcript_has_content: self.transcript_render.line_count > 0,
             palette_version: self.palette_version,
@@ -149,7 +156,7 @@ impl Model {
             status_line_config: self.status_line_config_bits(),
             status_line_2_config: self.status_line_2_config_bits(),
             status_line_revision: self.status_line_revision(),
-            stream_activity_frame: self.stream_activity_frame_key(std::time::Instant::now()),
+            stream_activity_frame: self.stream_activity_frame_key(context.now()),
         }
     }
 
@@ -189,7 +196,10 @@ impl Model {
             .cursor_visual_position_for_anchors(&composer_anchors)
     }
 
-    pub(crate) fn current_document_tail_layout_input(&mut self) -> DocumentTailLayoutInput {
+    pub(crate) fn current_document_tail_layout_input(
+        &mut self,
+        context: FrameRenderContext,
+    ) -> DocumentTailLayoutInput {
         let composer_document = self.composer.render_document(self.palette);
 
         DocumentTailLayoutInput {
@@ -206,7 +216,7 @@ impl Model {
                 .frame_decoration_bottom_plain_line,
             composer_cursor_x: composer_document.cursor_x,
             composer_cursor_y: composer_document.cursor_y,
-            stream_activity: self.current_stream_activity_render_result(),
+            stream_activity: self.current_stream_activity_render_result_at(context.now()),
             command_panel: self.current_inline_command_panel_render_result(),
             tool_approval_panel: self.current_inline_tool_approval_panel_render_result(),
             model_panel: self.current_inline_model_panel_render_result(),

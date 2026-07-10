@@ -1,11 +1,10 @@
 use std::io;
 
-use crossterm::event::{self, Event};
 use ratatui::backend::CrosstermBackend;
 
 use crate::terminal_lifecycle::TerminalLifecycleGuard;
 
-use super::{event_pipeline::TerminalWaitPlan, terminal_surface::TerminalSurface};
+use super::terminal_surface::TerminalSurface;
 
 pub(super) type TuiTerminal = TerminalSurface<CrosstermBackend<io::Stdout>>;
 
@@ -45,19 +44,6 @@ impl TerminalMouseMode {
             Self::from_preference(TerminalMouseModePreference::Capture)
         } else {
             Self::from_preference(TerminalMouseModePreference::NativeWithAlternateScroll)
-        }
-    }
-}
-
-pub(super) fn wait_for_terminal_event(wait_plan: TerminalWaitPlan) -> io::Result<Option<Event>> {
-    match wait_plan {
-        TerminalWaitPlan::Block => event::read().map(Some),
-        TerminalWaitPlan::Poll { duration, .. } => {
-            if event::poll(duration)? {
-                event::read().map(Some)
-            } else {
-                Ok(None)
-            }
         }
     }
 }

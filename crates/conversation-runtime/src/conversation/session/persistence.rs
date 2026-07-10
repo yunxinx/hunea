@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, mpsc},
+    sync::Arc,
 };
 
 use provider_protocol::{ConversationItem, Role};
@@ -12,7 +12,7 @@ use runtime_domain::session::{
 use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use super::ConversationWorkerEvent;
+use super::{ConversationWorkerEvent, ConversationWorkerEventSender};
 use crate::conversation::PreparedConversationPersistence;
 use session_store::{SessionId, SessionStoreError};
 
@@ -91,7 +91,7 @@ pub(super) enum SessionPersistenceError {
 pub(super) async fn run_session_persistence_actor(
     persistence: Option<PreparedConversationPersistence>,
     mut receiver: tokio_mpsc::Receiver<SessionPersistenceCommand>,
-    sender: mpsc::Sender<ConversationWorkerEvent>,
+    sender: ConversationWorkerEventSender,
     conversation_cancellation: CancellationToken,
 ) {
     let mut state = SessionPersistenceState::default();
@@ -174,7 +174,7 @@ fn cancel_pending_flushes(
 
 pub(super) async fn persist_turn_start(
     persistence: Option<&PreparedConversationPersistence>,
-    sender: &mpsc::Sender<ConversationWorkerEvent>,
+    sender: &ConversationWorkerEventSender,
     state: &mut SessionPersistenceState,
 ) -> Result<(), SessionPersistenceError> {
     if state.has_persisted_turn_start {
@@ -238,7 +238,7 @@ pub(super) async fn persist_turn_start(
 
 pub(super) async fn persist_context_item(
     persistence: Option<&PreparedConversationPersistence>,
-    sender: &mpsc::Sender<ConversationWorkerEvent>,
+    sender: &ConversationWorkerEventSender,
     item: ConversationItem,
     state: &mut SessionPersistenceState,
 ) -> Result<(), SessionPersistenceError> {

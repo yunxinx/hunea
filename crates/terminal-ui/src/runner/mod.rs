@@ -20,6 +20,7 @@ pub(crate) use effects::run_open_message_history_picker_effect;
 mod event_pipeline;
 mod external_io;
 mod input;
+mod loop_event_pump;
 mod model_refresh;
 mod terminal;
 mod terminal_probe;
@@ -29,25 +30,28 @@ use super::{runtime::RuntimeEventApply, theme::palette_detection_from_background
 use effects::apply_effect_if_needed;
 use external_io::{ExternalIoRuntime, apply_external_io_event};
 pub(crate) use input::TerminalInputCoalescing;
-use input::{
-    TerminalInputAction, coalesced_input_actions_with_options, read_ready_terminal_events,
-};
+use input::{TerminalInputAction, coalesced_input_actions_with_options};
+pub use loop_event_pump::LoopEventWaker;
+use loop_event_pump::{LoopEvent, LoopEventPump};
 use model_refresh::apply_model_provider_refresh_event;
 pub(crate) use terminal::TerminalMouseModePreference;
-use terminal::{TerminalMouseMode, TerminalSession, wait_for_terminal_event};
+use terminal::{TerminalMouseMode, TerminalSession};
 
 /// `RuntimeCoordinator` 是 TUI runner 与具体对话运行时之间的最小边界。
 pub trait RuntimeCoordinator {
+    fn install_loop_event_waker(
+        &mut self,
+        _waker: LoopEventWaker,
+    ) -> std::result::Result<(), String> {
+        Ok(())
+    }
+
     fn drain_runtime_events(&mut self) -> Vec<RuntimeEvent> {
         Vec::new()
     }
 
     fn drain_model_provider_refresh_events(&mut self) -> Vec<ModelProviderRefreshEvent> {
         Vec::new()
-    }
-
-    fn has_background_runtime(&self) -> bool {
-        false
     }
 
     fn dispatch_runtime_command(
@@ -172,6 +176,11 @@ pub fn run_with_runtime_coordinator(
         "initial terminal resize",
     );
 
+    let mut loop_events = LoopEventPump::start()?;
+    runtime_coordinator
+        .install_loop_event_waker(loop_events.waker())
+        .map_err(color_eyre::eyre::Report::msg)?;
+
     if let Err(message) =
         runtime_coordinator.dispatch_runtime_command(RuntimeCommand::LoadMessageHistoryStartupCache)
     {
@@ -185,7 +194,7 @@ pub fn run_with_runtime_coordinator(
 
     let mut render_needed = true;
     let mut mouse_mode = TerminalMouseMode::for_mouse_capture(true);
-    let mut external_io = ExternalIoRuntime::new();
+    let mut external_io = ExternalIoRuntime::new(loop_events.waker());
 
     loop {
         render_needed |= drain_runtime_coordinator_events(&mut model, runtime_coordinator);
@@ -219,27 +228,26 @@ pub fn run_with_runtime_coordinator(
                 &mut model,
                 runtime_coordinator,
                 &mut external_io,
+                &mut loop_events,
                 effect,
             )?;
             render_needed = true;
             continue;
         }
 
-        let has_background_work =
-            runtime_coordinator.has_background_runtime() || external_io.has_pending_work();
-        let wait_plan = event_pipeline::terminal_wait_plan(&model, now, has_background_work);
-        let first_event = match wait_for_terminal_event(wait_plan)? {
-            Some(event) => event,
+        let wait_plan = event_pipeline::loop_wait_plan(&model, now);
+        let first_event = match loop_events.wait(wait_plan.timeout())? {
+            Some(LoopEvent::Terminal(event)) => event,
+            Some(LoopEvent::BackgroundReady) => continue,
+            Some(LoopEvent::TerminalInputFailed(error)) => return Err(error.into()),
             None => {
-                // timeout 到期或后台 runtime poll 到期。下一轮会先 drain runtime，
-                // activity frame 到期时需要重绘；后台 poll 到期则只检查事件。
                 render_needed = wait_plan.render_on_timeout();
                 continue;
             }
         };
 
         let input_coalescing = model.terminal_input_coalescing();
-        let terminal_events = read_ready_terminal_events(first_event, input_coalescing)?;
+        let terminal_events = loop_events.collect_terminal_burst(first_event, input_coalescing)?;
         if apply_terminal_input_actions(
             coalesced_input_actions_with_options(terminal_events, input_coalescing),
             &mut terminal,
@@ -247,6 +255,7 @@ pub fn run_with_runtime_coordinator(
             &mut model,
             runtime_coordinator,
             &mut external_io,
+            &mut loop_events,
         )? {
             render_needed = true;
         }
@@ -291,6 +300,7 @@ fn apply_terminal_input_actions(
     model: &mut Model,
     runtime_coordinator: &mut impl RuntimeCoordinator,
     external_io: &mut ExternalIoRuntime,
+    loop_events: &mut LoopEventPump,
 ) -> Result<bool> {
     let mut changed = false;
     for action in actions {
@@ -303,6 +313,7 @@ fn apply_terminal_input_actions(
                     model,
                     runtime_coordinator,
                     external_io,
+                    loop_events,
                     effect,
                 )?;
                 changed = true;

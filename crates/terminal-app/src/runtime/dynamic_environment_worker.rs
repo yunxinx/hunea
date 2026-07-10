@@ -1,4 +1,5 @@
 use std::{
+    panic::AssertUnwindSafe,
     path::PathBuf,
     sync::{
         Arc,
@@ -7,6 +8,7 @@ use std::{
     thread::{self, JoinHandle as ThreadJoinHandle},
 };
 
+use futures_util::FutureExt;
 use runtime_domain::dynamic_environment::{
     DynamicEnvironmentObservation, DynamicEnvironmentSessionConfig, DynamicEnvironmentSnapshotKind,
     build_dynamic_environment_snapshot, dynamic_environment_changes,
@@ -17,6 +19,7 @@ use tokio::task::JoinHandle as TokioJoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::dynamic_environment::DynamicEnvironmentObserver;
+use conversation_runtime::RuntimeEventNotifier;
 
 pub(super) struct DynamicEnvironmentWorker {
     observer: Arc<dyn DynamicEnvironmentObserver>,
@@ -63,12 +66,19 @@ enum DynamicEnvironmentWorkerCommand {
 }
 
 impl DynamicEnvironmentWorker {
-    pub(super) fn new(observer: Arc<dyn DynamicEnvironmentObserver>) -> Self {
+    pub(super) fn new(
+        observer: Arc<dyn DynamicEnvironmentObserver>,
+        event_notifier: RuntimeEventNotifier,
+    ) -> Self {
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         let (result_tx, result_rx) = mpsc::unbounded_channel();
+        let worker_event_notifier = event_notifier.clone();
         let worker_thread = thread::Builder::new()
             .name("dynamic-environment-runtime".to_string())
-            .spawn(move || dynamic_environment_worker_loop(command_rx, result_tx));
+            .spawn(move || {
+                let _exit_notification = worker_event_notifier.notify_on_drop();
+                dynamic_environment_worker_loop(command_rx, result_tx, worker_event_notifier);
+            });
         Self {
             observer,
             generation: Arc::new(AtomicU64::new(0)),
@@ -80,6 +90,7 @@ impl DynamicEnvironmentWorker {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn has_pending_work(&self) -> bool {
         self.active_generation.is_some()
     }
@@ -131,13 +142,25 @@ impl DynamicEnvironmentWorker {
         &mut self,
     ) -> Option<Result<DynamicEnvironmentInjection, String>> {
         loop {
-            let envelope = self.result_rx.try_recv().ok()?;
-            if self.active_generation == Some(envelope.generation)
-                && self.generation.load(Ordering::Relaxed) == envelope.generation
-            {
-                self.active_generation = None;
-                self.active_cancellation = None;
-                return Some(envelope.result);
+            match self.result_rx.try_recv() {
+                Ok(envelope) => {
+                    if self.active_generation == Some(envelope.generation)
+                        && self.generation.load(Ordering::Relaxed) == envelope.generation
+                    {
+                        self.active_generation = None;
+                        self.active_cancellation = None;
+                        return Some(envelope.result);
+                    }
+                }
+                Err(mpsc::error::TryRecvError::Empty) => return None,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    if self.active_generation.take().is_some() {
+                        self.active_cancellation = None;
+                        self.command_tx = None;
+                        return Some(Err("dynamic environment worker stopped".to_string()));
+                    }
+                    return None;
+                }
             }
         }
     }
@@ -154,6 +177,7 @@ impl DynamicEnvironmentWorker {
 fn dynamic_environment_worker_loop(
     mut command_rx: mpsc::UnboundedReceiver<DynamicEnvironmentWorkerCommand>,
     result_tx: mpsc::UnboundedSender<DynamicEnvironmentTaskEnvelope>,
+    event_notifier: RuntimeEventNotifier,
 ) {
     let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -174,16 +198,31 @@ fn dynamic_environment_worker_loop(
                 } => {
                     cancel_and_join_active_task(&mut active_task).await;
                     let result_tx = result_tx.clone();
+                    let task_event_notifier = event_notifier.clone();
                     let task_cancellation = cancellation.clone();
                     let handle = tokio::spawn(async move {
-                        let result = build_dynamic_environment_injection(
+                        let result = match AssertUnwindSafe(build_dynamic_environment_injection(
                             observer,
                             request,
                             &task_cancellation,
-                        )
-                        .await;
-                        let _ =
-                            result_tx.send(DynamicEnvironmentTaskEnvelope { generation, result });
+                        ))
+                        .catch_unwind()
+                        .await
+                        {
+                            Ok(result) => result,
+                            Err(panic_payload) => {
+                                // panic payload 的析构也允许再次 panic。这里不读取 payload，
+                                // 避免已收敛的 worker 异常触发第二次 unwinding。
+                                std::mem::forget(panic_payload);
+                                Err("dynamic environment worker panicked".to_string())
+                            }
+                        };
+                        if result_tx
+                            .send(DynamicEnvironmentTaskEnvelope { generation, result })
+                            .is_ok()
+                        {
+                            task_event_notifier.notify();
+                        }
                     });
                     active_task = Some(ActiveDynamicEnvironmentTask {
                         cancellation,
@@ -471,7 +510,10 @@ mod tests {
             cancelled: Mutex::new(Some(cancelled_tx)),
             finish: Mutex::new(Some(finish_rx)),
         });
-        let mut worker = DynamicEnvironmentWorker::new(observer);
+        let mut worker = DynamicEnvironmentWorker::new(
+            observer,
+            conversation_runtime::RuntimeEventNotifier::default(),
+        );
 
         worker
             .load(DynamicEnvironmentRequest {
@@ -518,6 +560,110 @@ mod tests {
             .expect("shutdown should finish after active observation exits");
     }
 
+    #[test]
+    fn dynamic_environment_result_wakes_after_the_payload_is_queued() {
+        let (wake_sender, wake_receiver) = std_mpsc::channel();
+        let notifier = conversation_runtime::RuntimeEventNotifier::default();
+        notifier
+            .install(move || {
+                let _ = wake_sender.send(());
+            })
+            .expect("test notifier should install once");
+        let observer = Arc::new(FixedObserver::new(vec![observation(
+            DynamicEnvironmentSourceKind::Date,
+            "2026-07-10",
+            "2026-07-10",
+        )]));
+        let mut worker = DynamicEnvironmentWorker::new(observer, notifier);
+
+        worker
+            .load(DynamicEnvironmentRequest {
+                work_dir: std::env::temp_dir(),
+                session_config: DynamicEnvironmentSessionConfig {
+                    baseline_enabled: true,
+                    changes_enabled: false,
+                    source_selections: vec![DynamicEnvironmentSourceSelection {
+                        snapshot_kind: DynamicEnvironmentSnapshotKind::Baseline,
+                        source_kind: DynamicEnvironmentSourceKind::Date,
+                        enabled: true,
+                    }],
+                    static_baseline_observations: Vec::new(),
+                },
+                is_first_turn: true,
+                previous_observations: Vec::new(),
+            })
+            .expect("dynamic environment load should queue");
+
+        wake_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("dynamic environment result should wake its consumer");
+        assert!(matches!(worker.try_recv_injection(), Some(Ok(_))));
+        worker.shutdown();
+    }
+
+    #[test]
+    fn panicking_dynamic_environment_observer_reports_failure_and_clears_active_request() {
+        let (wake_sender, wake_receiver) = std_mpsc::channel();
+        let notifier = conversation_runtime::RuntimeEventNotifier::default();
+        notifier
+            .install(move || {
+                let _ = wake_sender.send(());
+            })
+            .expect("test notifier should install once");
+        let mut worker = DynamicEnvironmentWorker::new(Arc::new(PanickingObserver), notifier);
+
+        worker
+            .load(DynamicEnvironmentRequest {
+                work_dir: std::env::temp_dir(),
+                session_config: DynamicEnvironmentSessionConfig {
+                    baseline_enabled: true,
+                    changes_enabled: false,
+                    source_selections: vec![DynamicEnvironmentSourceSelection {
+                        snapshot_kind: DynamicEnvironmentSnapshotKind::Baseline,
+                        source_kind: DynamicEnvironmentSourceKind::Date,
+                        enabled: true,
+                    }],
+                    static_baseline_observations: Vec::new(),
+                },
+                is_first_turn: true,
+                previous_observations: Vec::new(),
+            })
+            .expect("dynamic environment load should queue");
+
+        wake_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("observer panic should wake the dynamic environment consumer");
+        assert!(matches!(
+            worker.try_recv_injection(),
+            Some(Err(message)) if message == "dynamic environment worker panicked"
+        ));
+        assert!(!worker.has_pending_work());
+        worker.shutdown();
+    }
+
+    #[test]
+    fn disconnected_dynamic_environment_worker_clears_active_request_and_reports_failure() {
+        let observer = Arc::new(FixedObserver::new(Vec::new()));
+        let mut worker = DynamicEnvironmentWorker::new(
+            observer,
+            conversation_runtime::RuntimeEventNotifier::default(),
+        );
+        let (result_tx, result_rx) = mpsc::unbounded_channel();
+        drop(result_tx);
+        worker.result_rx = result_rx;
+        worker.active_generation = Some(7);
+        worker.active_cancellation = Some(CancellationToken::new());
+
+        let result = worker.try_recv_injection();
+
+        assert!(matches!(
+            result,
+            Some(Err(message)) if message == "dynamic environment worker stopped"
+        ));
+        assert!(!worker.has_pending_work());
+        assert!(worker.active_cancellation.is_none());
+    }
+
     struct ShutdownBlockingObserver {
         started: Mutex<Option<std_mpsc::Sender<()>>>,
         cancelled: Mutex<Option<std_mpsc::Sender<()>>>,
@@ -527,6 +673,8 @@ mod tests {
     struct FixedObserver {
         observations: Vec<DynamicEnvironmentObservation>,
     }
+
+    struct PanickingObserver;
 
     impl FixedObserver {
         fn new(observations: Vec<DynamicEnvironmentObservation>) -> Self {
@@ -552,6 +700,27 @@ mod tests {
             >,
         > {
             Box::pin(async move { Ok(self.observations.clone()) })
+        }
+    }
+
+    impl crate::dynamic_environment::DynamicEnvironmentObserver for PanickingObserver {
+        fn observe<'a>(
+            &'a self,
+            _work_dir: &'a Path,
+            _sources: &'a [DynamicEnvironmentSourceKind],
+            _cancellation: &'a CancellationToken,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            Vec<DynamicEnvironmentObservation>,
+                            crate::dynamic_environment::DynamicEnvironmentObservationError,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async move { panic!("injected dynamic environment observer panic") })
         }
     }
 

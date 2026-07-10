@@ -6,7 +6,7 @@ use super::ConversationWorkerEvent;
 use crate::conversation::ConversationProgress;
 
 pub(super) fn progress_sender_to_permission_sender(
-    sender: mpsc::Sender<ConversationWorkerEvent>,
+    sender: super::ConversationWorkerEventSender,
 ) -> mpsc::Sender<ConversationEvent> {
     let (permission_sender, permission_receiver) = mpsc::channel();
     thread::spawn(move || {

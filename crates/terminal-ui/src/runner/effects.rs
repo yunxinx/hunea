@@ -8,6 +8,7 @@ use super::conversation::run_send_conversation_turn_effect;
 use super::external_io::{
     ExternalIoRuntime, run_copy_selection_effect, run_external_editor_effect,
 };
+use super::loop_event_pump::LoopEventPump;
 use super::model_refresh::{persist_selected_model, run_refresh_model_provider_effect};
 use super::terminal::{TerminalSession, TuiTerminal};
 
@@ -36,6 +37,7 @@ pub(super) fn apply_effect_if_needed(
     model: &mut Model,
     runtime_coordinator: &mut impl RuntimeCoordinator,
     external_io: &mut ExternalIoRuntime,
+    loop_events: &mut LoopEventPump,
     effect: Option<AppEffect>,
 ) -> Result<()> {
     dispatch_context_budget_cancellation_if_needed(model, runtime_coordinator);
@@ -47,13 +49,15 @@ pub(super) fn apply_effect_if_needed(
 
     match effect {
         AppEffect::LaunchExternalEditor(launch) => {
-            let follow_up = run_external_editor_effect(terminal, terminal_session, model, launch)?;
+            let follow_up =
+                run_external_editor_effect(terminal, terminal_session, loop_events, model, launch)?;
             apply_effect_if_needed(
                 terminal,
                 terminal_session,
                 model,
                 runtime_coordinator,
                 external_io,
+                loop_events,
                 follow_up,
             )
         }

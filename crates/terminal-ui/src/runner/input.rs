@@ -1,13 +1,6 @@
-use std::time::{Duration, Instant};
-
-use color_eyre::eyre::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, MouseEventKind};
+use crossterm::event::{Event, KeyCode, KeyEvent, MouseEventKind};
 
 use crate::{AppEvent, Model};
-
-const MAX_READY_TERMINAL_EVENTS_PER_FRAME: usize = 4096;
-const PAGE_SCROLL_BURST_QUIET_PERIOD: Duration = Duration::from_millis(24);
-const PAGE_SCROLL_BURST_MAX_READ_PERIOD: Duration = Duration::from_millis(96);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum TerminalInputAction {
@@ -18,23 +11,6 @@ pub(super) enum TerminalInputAction {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct TerminalInputCoalescing {
     pub(crate) has_page_scroll_burst_coalescing: bool,
-}
-
-pub(super) fn read_ready_terminal_events(
-    first_event: Event,
-    options: TerminalInputCoalescing,
-) -> Result<Vec<Event>> {
-    let mut events = vec![first_event];
-    let mut page_scroll_burst = PageScrollBurstRead::default();
-    page_scroll_burst.observe(events.last().expect("first event is present"), options);
-
-    while events.len() < MAX_READY_TERMINAL_EVENTS_PER_FRAME
-        && event::poll(page_scroll_burst.poll_duration())?
-    {
-        events.push(event::read()?);
-        page_scroll_burst.observe(events.last().expect("event was just pushed"), options);
-    }
-    Ok(events)
 }
 
 #[cfg(test)]
@@ -234,53 +210,4 @@ fn flush_pending_alternate_scroll_delta(actions: &mut Vec<TerminalInputAction>, 
         key_code,
     ))));
     *delta = 0;
-}
-
-#[derive(Debug, Default)]
-struct PageScrollBurstRead {
-    started_at: Option<Instant>,
-    quiet_deadline: Option<Instant>,
-}
-
-impl PageScrollBurstRead {
-    fn observe(&mut self, event: &Event, options: TerminalInputCoalescing) {
-        if !options.has_page_scroll_burst_coalescing {
-            self.clear();
-            return;
-        }
-
-        if !is_page_scroll_event(event) {
-            self.clear();
-            return;
-        }
-
-        let now = Instant::now();
-        let started_at = *self.started_at.get_or_insert(now);
-        let max_deadline = started_at + PAGE_SCROLL_BURST_MAX_READ_PERIOD;
-        self.quiet_deadline = Some((now + PAGE_SCROLL_BURST_QUIET_PERIOD).min(max_deadline));
-    }
-
-    fn poll_duration(&self) -> Duration {
-        self.quiet_deadline
-            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
-            .unwrap_or(Duration::ZERO)
-    }
-
-    fn clear(&mut self) {
-        self.started_at = None;
-        self.quiet_deadline = None;
-    }
-}
-
-fn is_page_scroll_event(event: &Event) -> bool {
-    match event {
-        Event::Mouse(mouse) => matches!(
-            mouse.kind,
-            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-        ),
-        Event::Key(key) => {
-            key.modifiers.is_empty() && matches!(key.code, KeyCode::Up | KeyCode::Down)
-        }
-        _ => false,
-    }
 }

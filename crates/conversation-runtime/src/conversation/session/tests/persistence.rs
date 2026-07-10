@@ -24,7 +24,7 @@ fn conversation_worker_persists_config_change_and_flushes_finished_turn() {
         ))
         .expect("turn should prepare");
     let assistant = ConversationItem::text(Role::Assistant, "hi");
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = conversation_worker_event_channel();
     let mut runtime = ConversationWorker {
         receiver: Some(receiver),
         cancellation: Some(CancellationToken::new()),
@@ -34,6 +34,7 @@ fn conversation_worker_persists_config_change_and_flushes_finished_turn() {
         pending_user_entry_id: None,
         session_items: Vec::new(),
         upstream_context_tokens: None,
+        event_notifier: RuntimeEventNotifier::default(),
     };
     let sender_copy = sender.clone();
     let persistence = request.persistence_cloned();
@@ -103,7 +104,7 @@ fn conversation_worker_persists_user_turn_when_request_fails_before_streaming() 
             user.clone(),
         ))
         .expect("turn should prepare");
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = conversation_worker_event_channel();
 
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -177,7 +178,7 @@ fn flush_session_persistence_preserves_store_error_source() {
         .expect("test runtime should build")
         .block_on(async {
             let (command_sender, command_receiver) = tokio_mpsc::channel(16);
-            let (event_sender, _event_receiver) = mpsc::channel();
+            let (event_sender, _event_receiver) = conversation_worker_event_channel();
             let actor = tokio::spawn(run_session_persistence_actor(
                 request.persistence_cloned(),
                 command_receiver,
@@ -229,7 +230,7 @@ fn session_persistence_actor_replies_to_pending_flush_when_error_stops_actor() {
         .expect("test runtime should build")
         .block_on(async {
             let (command_sender, command_receiver) = tokio_mpsc::channel(16);
-            let (event_sender, _event_receiver) = mpsc::channel();
+            let (event_sender, _event_receiver) = conversation_worker_event_channel();
             command_sender
                 .send(SessionPersistenceCommand::ProviderContextItem(
                     ConversationItem::text(Role::Assistant, "hi"),
@@ -293,7 +294,7 @@ fn session_persistence_actor_flushes_finish_work_after_conversation_cancellation
         .expect("test runtime should build")
         .block_on(async {
             let (command_sender, command_receiver) = tokio_mpsc::channel(16);
-            let (event_sender, _event_receiver) = mpsc::channel();
+            let (event_sender, _event_receiver) = conversation_worker_event_channel();
             let cancellation = CancellationToken::new();
             let actor = tokio::spawn(run_session_persistence_actor(
                 request.persistence_cloned(),
@@ -359,7 +360,7 @@ fn persistence_helpers_store_rich_tool_replay_without_duplicate_tool_result() {
             ConversationItem::text(Role::User, "edit file"),
         ))
         .expect("turn should prepare");
-    let (sender, _receiver) = mpsc::channel();
+    let (sender, _receiver) = conversation_worker_event_channel();
     let persistence = request.persistence_cloned();
     let mut state = SessionPersistenceState::default();
     let started_activity = RuntimeToolActivity {
@@ -537,7 +538,7 @@ fn persist_turn_start_keeps_provider_message_in_items_and_transcript_projection_
                 }]),
         )
         .expect("turn should prepare");
-    let (sender, _receiver) = mpsc::channel();
+    let (sender, _receiver) = conversation_worker_event_channel();
     let persistence = request.persistence_cloned();
     let mut state = SessionPersistenceState::default();
 
@@ -614,7 +615,7 @@ fn persist_turn_start_replays_image_only_user_message_as_bound_message() {
             ),
         )
         .expect("turn should prepare");
-    let (sender, _receiver) = mpsc::channel();
+    let (sender, _receiver) = conversation_worker_event_channel();
     let persistence = request.persistence_cloned();
     let mut state = SessionPersistenceState::default();
 
@@ -676,7 +677,7 @@ fn persist_context_item_replays_image_only_tool_result_with_visible_summary() {
         }],
         false,
     );
-    let (sender, _receiver) = mpsc::channel();
+    let (sender, _receiver) = conversation_worker_event_channel();
     let persistence = request.persistence_cloned();
     let mut state = SessionPersistenceState::default();
 

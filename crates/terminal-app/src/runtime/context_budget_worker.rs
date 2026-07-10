@@ -9,7 +9,7 @@ use conversation_runtime::context_budget::{
     ContextBudgetProbe, build_context_budget_snapshot_with_cancellation,
     context_budget_tool_definitions,
 };
-use conversation_runtime::{ConversationItem, ToolDefinition};
+use conversation_runtime::{ConversationItem, RuntimeEventNotifier, ToolDefinition};
 use runtime_domain::{
     context_budget::{ContextBudgetSnapshot, ContextTokenLimit},
     prompt_assembly::PromptPreludeSnapshot,
@@ -23,8 +23,14 @@ pub(super) struct ContextBudgetWorker {
     worker_tx: Option<mpsc::Sender<WorkerControl>>,
     result_rx: mpsc::Receiver<ContextBudgetTaskEnvelope>,
     worker_thread: Option<JoinHandle<()>>,
-    active_generation: Option<u64>,
+    active_request: Option<ActiveContextBudgetRequest>,
     queued_command: Option<ContextBudgetWorkerCommand>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ActiveContextBudgetRequest {
+    request_id: SessionLoadRequestId,
+    generation: u64,
 }
 
 #[derive(Debug)]
@@ -97,16 +103,27 @@ impl ContextBudgetWorkerLoadError {
 }
 
 impl ContextBudgetWorker {
-    pub(super) fn new() -> Result<Self, ContextBudgetWorkerInitError> {
+    pub(super) fn new(
+        event_notifier: RuntimeEventNotifier,
+    ) -> Result<Self, ContextBudgetWorkerInitError> {
         let current_generation = Arc::new(AtomicU64::new(0));
         let (worker_tx, worker_rx) = mpsc::channel();
         let (result_tx, result_rx) = mpsc::channel();
         let worker_generation = Arc::clone(&current_generation);
+        let worker_event_notifier = event_notifier.clone();
         // `/context` 投影偏 CPU 密集且会合并快速请求；专用线程避免占用 Tokio
         // shared blocking pool，generation 检查负责在投影阶段之间协作式取消。
         let worker_thread = thread::Builder::new()
             .name("context-budget-worker".to_string())
-            .spawn(move || worker_loop(worker_rx, result_tx, worker_generation))
+            .spawn(move || {
+                let _exit_notification = worker_event_notifier.notify_on_drop();
+                worker_loop(
+                    worker_rx,
+                    result_tx,
+                    worker_generation,
+                    worker_event_notifier,
+                );
+            })
             .map_err(|error| ContextBudgetWorkerInitError {
                 detail: error.to_string(),
             })?;
@@ -116,13 +133,14 @@ impl ContextBudgetWorker {
             worker_tx: Some(worker_tx),
             result_rx,
             worker_thread: Some(worker_thread),
-            active_generation: None,
+            active_request: None,
             queued_command: None,
         })
     }
 
+    #[cfg(test)]
     pub(super) fn has_pending_work(&self) -> bool {
-        self.active_generation.is_some() || self.queued_command.is_some()
+        self.active_request.is_some() || self.queued_command.is_some()
     }
 
     pub(super) fn load_snapshot(
@@ -156,7 +174,7 @@ impl ContextBudgetWorker {
             upstream_context_tokens,
         };
 
-        if self.active_generation.is_some() {
+        if self.active_request.is_some() {
             self.queued_command = Some(command);
             return Ok(());
         }
@@ -168,14 +186,14 @@ impl ContextBudgetWorker {
         // `/context` 使用 soft cancel：UI 立刻停止追踪旧请求，但后台线程仍可能
         // 执行到下一次协作式取消检查或自然结束；结果会因 generation 不匹配而被丢弃。
         self.bump_generation();
-        self.active_generation = None;
+        self.active_request = None;
         self.queued_command = None;
         self.drain_result_channel();
     }
 
     pub(super) fn shutdown(&mut self) -> Result<(), String> {
         self.cancel_pending();
-        self.active_generation = None;
+        self.active_request = None;
         self.queued_command = None;
 
         if let Some(worker_tx) = self.worker_tx.take() {
@@ -194,7 +212,7 @@ impl ContextBudgetWorker {
         let mut events = Vec::new();
         self.collect_finished_events(&mut events);
 
-        if self.active_generation.is_none()
+        if self.active_request.is_none()
             && let Some(command) = self.queued_command.take()
         {
             let request_id = command.request_id;
@@ -226,6 +244,10 @@ impl ContextBudgetWorker {
         &mut self,
         command: ContextBudgetWorkerCommand,
     ) -> Result<(), ContextBudgetWorkerLoadError> {
+        let active_request = ActiveContextBudgetRequest {
+            request_id: command.request_id,
+            generation: command.generation,
+        };
         let worker_tx = self
             .worker_tx
             .as_ref()
@@ -233,17 +255,35 @@ impl ContextBudgetWorker {
         worker_tx
             .send(WorkerControl::Load(command))
             .map_err(|_| ContextBudgetWorkerLoadError::WorkerStopped)?;
-        self.active_generation = Some(self.current_generation.load(Ordering::Acquire));
+        self.active_request = Some(active_request);
         Ok(())
     }
 
     fn collect_finished_events(&mut self, events: &mut Vec<RuntimeEvent>) {
-        while let Ok(envelope) = self.result_rx.try_recv() {
-            if Some(envelope.generation) == self.active_generation {
-                self.active_generation = None;
-            }
-            if let Some(event) = self.runtime_event_from_envelope(envelope) {
-                events.push(event);
+        loop {
+            match self.result_rx.try_recv() {
+                Ok(envelope) => {
+                    if self
+                        .active_request
+                        .is_some_and(|active| active.generation == envelope.generation)
+                    {
+                        self.active_request = None;
+                    }
+                    if let Some(event) = self.runtime_event_from_envelope(envelope) {
+                        events.push(event);
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    if let Some(active) = self.active_request.take() {
+                        events.push(context_budget_worker_stopped_event(active.request_id));
+                    }
+                    if let Some(queued) = self.queued_command.take() {
+                        events.push(context_budget_worker_stopped_event(queued.request_id));
+                    }
+                    self.worker_tx = None;
+                    break;
+                }
             }
         }
     }
@@ -282,6 +322,7 @@ fn worker_loop(
     worker_rx: mpsc::Receiver<WorkerControl>,
     result_tx: mpsc::Sender<ContextBudgetTaskEnvelope>,
     current_generation: Arc<AtomicU64>,
+    event_notifier: RuntimeEventNotifier,
 ) {
     while let Ok(control) = worker_rx.recv() {
         match coalesce_worker_controls(control, worker_rx.try_iter()) {
@@ -299,9 +340,19 @@ fn worker_loop(
                 {
                     break;
                 }
+                event_notifier.notify();
             }
             WorkerLoopAction::Shutdown => break,
         }
+    }
+}
+
+fn context_budget_worker_stopped_event(request_id: SessionLoadRequestId) -> RuntimeEvent {
+    RuntimeEvent::ContextBudgetSnapshotLoadFailed {
+        request_id,
+        error: ContextBudgetLoadErrorPayload::RuntimeInternal {
+            detail: Some("context budget worker stopped".to_string()),
+        },
     }
 }
 
@@ -395,6 +446,7 @@ mod tests {
         context_budget::{ContextBudgetSnapshot, ContextTokenLimit, ContextWindowUsage},
         session::SessionLoadRequestId,
     };
+    use std::{sync::mpsc, time::Duration};
 
     #[test]
     fn coalesce_worker_controls_keeps_only_the_latest_load() {
@@ -441,7 +493,8 @@ mod tests {
 
     #[test]
     fn stale_loaded_task_result_is_dropped_before_runtime_event_dispatch() {
-        let worker = ContextBudgetWorker::new().expect("worker should initialize");
+        let worker = ContextBudgetWorker::new(RuntimeEventNotifier::default())
+            .expect("worker should initialize");
         worker.current_generation.store(2, Ordering::Release);
 
         let event = worker.runtime_event_from_envelope(ContextBudgetTaskEnvelope {
@@ -467,13 +520,76 @@ mod tests {
 
     #[test]
     fn bump_generation_advances_current_generation_without_shadow_state() {
-        let mut worker = ContextBudgetWorker::new().expect("worker should initialize");
+        let mut worker = ContextBudgetWorker::new(RuntimeEventNotifier::default())
+            .expect("worker should initialize");
 
         assert_eq!(worker.current_generation.load(Ordering::Acquire), 0);
         assert_eq!(worker.bump_generation(), 1);
         assert_eq!(worker.current_generation.load(Ordering::Acquire), 1);
         assert_eq!(worker.bump_generation(), 2);
         assert_eq!(worker.current_generation.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn context_budget_result_wakes_after_the_payload_is_queued() {
+        let (wake_sender, wake_receiver) = mpsc::channel();
+        let notifier = conversation_runtime::RuntimeEventNotifier::default();
+        notifier
+            .install(move || {
+                let _ = wake_sender.send(());
+            })
+            .expect("test notifier should install once");
+        let mut worker = ContextBudgetWorker::new(notifier).expect("worker should initialize");
+
+        worker
+            .load_snapshot(ContextBudgetSnapshotRequest {
+                request_id: SessionLoadRequestId::new(11),
+                provider_kind: ProviderKind::Anthropic,
+                model_id: "claude".to_string(),
+                items: Arc::from([ConversationItem::text(
+                    provider_protocol::Role::User,
+                    "hello",
+                )]),
+                prompt_prelude: None,
+                tool_definitions: Vec::new(),
+                context_limit: ContextTokenLimit::try_from(1_000)
+                    .expect("fixture limit should be valid"),
+                upstream_context_tokens: None,
+            })
+            .expect("context budget work should queue");
+
+        wake_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("context budget result should wake its consumer");
+        assert_eq!(worker.drain_events().len(), 1);
+    }
+
+    #[test]
+    fn disconnected_context_budget_worker_clears_active_request_and_reports_failure() {
+        let mut worker =
+            ContextBudgetWorker::new(conversation_runtime::RuntimeEventNotifier::default())
+                .expect("worker should initialize");
+        let (result_tx, result_rx) = mpsc::channel();
+        drop(result_tx);
+        worker.result_rx = result_rx;
+        worker.active_request = Some(ActiveContextBudgetRequest {
+            request_id: SessionLoadRequestId::new(12),
+            generation: 7,
+        });
+
+        let events = worker.drain_events();
+
+        assert!(!worker.has_pending_work());
+        assert!(matches!(
+            events.as_slice(),
+            [RuntimeEvent::ContextBudgetSnapshotLoadFailed { request_id, error }]
+                if *request_id == SessionLoadRequestId::new(12)
+                    && matches!(
+                        error,
+                        ContextBudgetLoadErrorPayload::RuntimeInternal { detail: Some(detail) }
+                            if detail == "context budget worker stopped"
+                    )
+        ));
     }
 
     fn fixture_command(request_value: u64, generation: u64) -> ContextBudgetWorkerCommand {

@@ -25,6 +25,7 @@ use crate::{AppEffect, AppEvent, ExternalEditorLaunch, Model};
 
 use super::{
     apply_model_event_without_effect,
+    loop_event_pump::{LoopEventPump, LoopEventWaker},
     terminal::{TerminalSession, TuiTerminal},
 };
 
@@ -66,6 +67,8 @@ struct ClipboardWorker {
     worker_thread: Option<JoinHandle<()>>,
 }
 
+struct ClipboardWorkerExitWake(LoopEventWaker);
+
 struct ClipboardJob {
     text: String,
 }
@@ -78,11 +81,12 @@ pub(super) enum CopySelectionStartResult {
 }
 
 impl ExternalIoRuntime {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(loop_event_waker: LoopEventWaker) -> Self {
         let (clipboard_events_sender, clipboard_events_receiver) = mpsc::channel();
         let clipboard_worker = ClipboardWorker::start(
             clipboard_events_sender.clone(),
             SystemClipboardWriter::system(),
+            loop_event_waker,
         );
         Self {
             clipboard_events_sender,
@@ -96,10 +100,22 @@ impl ExternalIoRuntime {
     fn with_system_clipboard_writer(
         writer: impl Fn(&str) -> SystemClipboardResult + Send + Sync + 'static,
     ) -> Self {
+        Self::with_system_clipboard_writer_and_waker(
+            writer,
+            LoopEventWaker::disconnected_for_test(),
+        )
+    }
+
+    #[cfg(test)]
+    fn with_system_clipboard_writer_and_waker(
+        writer: impl Fn(&str) -> SystemClipboardResult + Send + Sync + 'static,
+        loop_event_waker: LoopEventWaker,
+    ) -> Self {
         let (clipboard_events_sender, clipboard_events_receiver) = mpsc::channel();
         let clipboard_worker = ClipboardWorker::start(
             clipboard_events_sender.clone(),
             SystemClipboardWriter::from_write_fn_for_test(writer),
+            loop_event_waker,
         );
         Self {
             clipboard_events_sender,
@@ -131,6 +147,7 @@ impl ExternalIoRuntime {
         }
     }
 
+    #[cfg(test)]
     pub(super) const fn has_pending_work(&self) -> bool {
         self.pending_clipboard_writes > 0
     }
@@ -155,12 +172,6 @@ impl ExternalIoRuntime {
 enum ClipboardSubmitError {
     QueueFull,
     WorkerStopped { text: String },
-}
-
-impl Default for ExternalIoRuntime {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl SystemClipboardWriter {
@@ -248,10 +259,12 @@ impl ClipboardWorker {
     fn start(
         events_sender: mpsc::Sender<ExternalIoEvent>,
         mut writer: SystemClipboardWriter,
+        loop_event_waker: LoopEventWaker,
     ) -> Self {
         let (jobs_sender, jobs_receiver) =
             mpsc::sync_channel::<ClipboardJob>(CLIPBOARD_JOB_QUEUE_CAPACITY);
         let worker_thread = thread::spawn(move || {
+            let _exit_wake = ClipboardWorkerExitWake(loop_event_waker.clone());
             let mut can_write_system_clipboard = true;
             while let Ok(job) = jobs_receiver.recv() {
                 let event = if can_write_system_clipboard {
@@ -271,6 +284,7 @@ impl ClipboardWorker {
                 if events_sender.send(event).is_err() {
                     break;
                 }
+                loop_event_waker.wake();
             }
         });
         Self {
@@ -312,6 +326,12 @@ impl ClipboardWorker {
             }
             self.jobs_sender.take();
         }
+    }
+}
+
+impl Drop for ClipboardWorkerExitWake {
+    fn drop(&mut self) {
+        self.0.wake();
     }
 }
 
@@ -385,12 +405,19 @@ fn catch_clipboard_worker_panic(
 pub(super) fn run_external_editor_effect(
     terminal: &mut TuiTerminal,
     terminal_session: &mut TerminalSession,
+    loop_events: &mut LoopEventPump,
     model: &mut Model,
     launch: ExternalEditorLaunch,
 ) -> Result<Option<AppEffect>> {
-    terminal_session.suspend(terminal)?;
-    let failed = run_external_editor_command(&launch.command).is_err();
-    terminal_session.resume(terminal)?;
+    let failed = {
+        let mut host = RuntimeExternalEditorHost {
+            terminal,
+            terminal_session,
+            loop_events,
+            command: &launch.command,
+        };
+        run_external_editor_transition(&mut host)?
+    };
 
     let area = terminal.size()?;
     apply_model_event_without_effect(
@@ -406,6 +433,52 @@ pub(super) fn run_external_editor_effect(
         original_draft: launch.original_draft,
         failed,
     }))
+}
+
+trait ExternalEditorHost {
+    fn pause_terminal_input(&mut self) -> io::Result<()>;
+    fn suspend_terminal(&mut self) -> io::Result<()>;
+    fn run_editor(&mut self) -> bool;
+    fn resume_terminal(&mut self) -> io::Result<()>;
+    fn resume_terminal_input(&mut self) -> io::Result<()>;
+}
+
+fn run_external_editor_transition(host: &mut impl ExternalEditorHost) -> io::Result<bool> {
+    host.pause_terminal_input()?;
+    host.suspend_terminal()?;
+    let failed = host.run_editor();
+    host.resume_terminal()?;
+    host.resume_terminal_input()?;
+    Ok(failed)
+}
+
+struct RuntimeExternalEditorHost<'a> {
+    terminal: &'a mut TuiTerminal,
+    terminal_session: &'a mut TerminalSession,
+    loop_events: &'a mut LoopEventPump,
+    command: &'a [String],
+}
+
+impl ExternalEditorHost for RuntimeExternalEditorHost<'_> {
+    fn pause_terminal_input(&mut self) -> io::Result<()> {
+        self.loop_events.pause_terminal_input()
+    }
+
+    fn suspend_terminal(&mut self) -> io::Result<()> {
+        self.terminal_session.suspend(self.terminal)
+    }
+
+    fn run_editor(&mut self) -> bool {
+        run_external_editor_command(self.command).is_err()
+    }
+
+    fn resume_terminal(&mut self) -> io::Result<()> {
+        self.terminal_session.resume(self.terminal)
+    }
+
+    fn resume_terminal_input(&mut self) -> io::Result<()> {
+        self.loop_events.resume_terminal_input()
+    }
 }
 
 pub(super) fn run_copy_selection_effect(
@@ -492,6 +565,125 @@ mod tests {
     };
 
     use super::*;
+    use crate::runner::loop_event_pump::{LoopEvent, LoopEventPump};
+
+    #[test]
+    fn clipboard_completion_wakes_the_loop_after_queuing_its_payload() {
+        let (mut loop_events, _event_sender) = LoopEventPump::channel_for_test();
+        let mut external_io = ExternalIoRuntime::with_system_clipboard_writer_and_waker(
+            |_text| Ok(()),
+            loop_events.waker(),
+        );
+
+        external_io.start_copy_selection("alpha".to_string());
+
+        assert!(matches!(
+            loop_events
+                .wait(Some(Duration::from_secs(1)))
+                .expect("clipboard wake should be readable"),
+            Some(LoopEvent::BackgroundReady)
+        ));
+        assert_eq!(
+            external_io.drain_events(),
+            vec![ExternalIoEvent::SelectionCopiedToSystemClipboard]
+        );
+    }
+
+    #[test]
+    fn clipboard_worker_exit_wakes_the_loop() {
+        let (mut loop_events, _event_sender) = LoopEventPump::channel_for_test();
+        let mut external_io = ExternalIoRuntime::with_system_clipboard_writer_and_waker(
+            |_text| Ok(()),
+            loop_events.waker(),
+        );
+
+        external_io.shutdown_and_drain_events();
+
+        assert!(matches!(
+            loop_events
+                .wait(Some(Duration::from_secs(1)))
+                .expect("clipboard worker exit wake should be readable"),
+            Some(LoopEvent::BackgroundReady)
+        ));
+    }
+
+    #[test]
+    fn external_editor_transition_pauses_input_before_terminal_and_resumes_it_last() {
+        let mut host = RecordingExternalEditorHost::default();
+
+        let failed = run_external_editor_transition(&mut host)
+            .expect("external editor transition should succeed");
+
+        assert!(!failed);
+        assert_eq!(
+            host.operations,
+            [
+                "pause_input",
+                "suspend_terminal",
+                "run_editor",
+                "resume_terminal",
+                "resume_input",
+            ]
+        );
+    }
+
+    #[test]
+    fn external_editor_transition_keeps_input_paused_when_terminal_resume_fails() {
+        let mut host = RecordingExternalEditorHost {
+            fail_terminal_resume: true,
+            ..RecordingExternalEditorHost::default()
+        };
+
+        let error = run_external_editor_transition(&mut host)
+            .expect_err("terminal resume failure should abort the transition");
+
+        assert_eq!(error.to_string(), "injected terminal resume failure");
+        assert_eq!(
+            host.operations,
+            [
+                "pause_input",
+                "suspend_terminal",
+                "run_editor",
+                "resume_terminal",
+            ]
+        );
+    }
+
+    #[derive(Default)]
+    struct RecordingExternalEditorHost {
+        operations: Vec<&'static str>,
+        fail_terminal_resume: bool,
+    }
+
+    impl ExternalEditorHost for RecordingExternalEditorHost {
+        fn pause_terminal_input(&mut self) -> io::Result<()> {
+            self.operations.push("pause_input");
+            Ok(())
+        }
+
+        fn suspend_terminal(&mut self) -> io::Result<()> {
+            self.operations.push("suspend_terminal");
+            Ok(())
+        }
+
+        fn run_editor(&mut self) -> bool {
+            self.operations.push("run_editor");
+            false
+        }
+
+        fn resume_terminal(&mut self) -> io::Result<()> {
+            self.operations.push("resume_terminal");
+            if self.fail_terminal_resume {
+                return Err(io::Error::other("injected terminal resume failure"));
+            }
+            Ok(())
+        }
+
+        fn resume_terminal_input(&mut self) -> io::Result<()> {
+            self.operations.push("resume_input");
+            Ok(())
+        }
+    }
 
     #[test]
     fn copy_selection_system_clipboard_write_runs_on_background_thread() {

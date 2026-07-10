@@ -86,7 +86,7 @@ pub mod theme;
 pub use external_editor::ExternalEditorLaunch;
 pub use model::{EscRewindMode, Model, ModelOptions, RequestMetrics};
 pub use runner::{
-    NoopRuntimeCoordinator, RuntimeCoordinator, run, run_with_options,
+    LoopEventWaker, NoopRuntimeCoordinator, RuntimeCoordinator, run, run_with_options,
     run_with_runtime_coordinator, run_with_style_mode,
 };
 pub use sender::Sender;

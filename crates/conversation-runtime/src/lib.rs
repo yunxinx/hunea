@@ -1,5 +1,6 @@
 pub mod context_budget;
 pub mod conversation;
+mod event_notifier;
 mod llm;
 pub mod models;
 
@@ -15,6 +16,9 @@ pub use conversation::{
 pub use conversation::{
     PreparedConversationRequest, PreparedTurnOptions, ProviderConversation,
     ProviderConversationError,
+};
+pub use event_notifier::{
+    RuntimeEventExitNotification, RuntimeEventNotifier, RuntimeEventNotifierInstallError,
 };
 pub use llm::ProviderRequestError;
 pub use llm::ProviderRequestMetrics;

@@ -146,6 +146,7 @@ pub struct Model {
     pub(super) toast_state: ToastState,
     pub(super) pending_prompt_assembly_notice: Option<PromptAssemblyUpdateNotice>,
     pub(super) status_line_revision: usize,
+    pub(super) stream_activity_revision: usize,
     quitting: bool,
 }
 
@@ -321,6 +322,7 @@ impl Model {
             toast_state: ToastState::default(),
             pending_prompt_assembly_notice: None,
             status_line_revision: 1,
+            stream_activity_revision: 1,
             quitting: false,
         }
     }

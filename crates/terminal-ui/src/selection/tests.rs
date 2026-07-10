@@ -88,16 +88,18 @@ fn line_selection_falls_back_to_current_line_end_when_next_anchor_is_missing() {
         ..DocumentLineAnchor::default()
     };
     let mut layout = DocumentLayout::with_test_plain_lines(0, &["alpha", "beta"]);
-    layout.tail = Rc::new(DocumentTailLayout {
-        lines: vec![Line::raw("alpha"), Line::raw("beta")],
-        text_lines: vec!["alpha".to_string(), "beta".to_string()],
-        anchors: vec![first_anchor],
-        selectable: vec![
+    layout.tail = Rc::new(DocumentTailLayout::from_test_parts(
+        vec![Line::raw("alpha"), Line::raw("beta")],
+        vec!["alpha".to_string(), "beta".to_string()],
+        vec![first_anchor],
+        vec![
             SelectableLineRange::new(0, 5),
             SelectableLineRange::new(0, 4),
         ],
-        ..layout.tail.as_ref().clone()
-    });
+        layout.tail.composer_slot,
+        layout.tail.cursor_x,
+        layout.tail.cursor_y,
+    ));
 
     model.select_line_at_point(
         SelectionPoint::new(first_anchor, 2),

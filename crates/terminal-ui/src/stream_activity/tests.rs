@@ -416,7 +416,10 @@ fn document_layout_rebuilds_when_stream_activity_tick_changes() {
 
     let initial = model.build_document_layout(crate::frame_time::FrameRenderContext::capture());
     assert!(
-        initial.tail.text_lines[0].contains("Working (0s"),
+        initial
+            .tail
+            .text_line_at(0)
+            .is_some_and(|line| line.contains("Working (0s")),
         "activity should include the current elapsed segment"
     );
 
@@ -424,7 +427,80 @@ fn document_layout_rebuilds_when_stream_activity_tick_changes() {
     let updated = model.build_document_layout(crate::frame_time::FrameRenderContext::capture());
 
     assert!(
-        updated.tail.text_lines[0].contains("Working (2s"),
+        updated
+            .tail
+            .text_line_at(0)
+            .is_some_and(|line| line.contains("Working (2s")),
         "outer document layout cache must not hide updated activity text"
+    );
+}
+
+#[test]
+fn stream_activity_frame_reuses_the_long_composer_document() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.transcript_mut().clear();
+    model.sync_transcript_render();
+    model.set_window(80, 24);
+    model.set_palette(default_palette(), true);
+    model
+        .composer_mut()
+        .reset_text_and_move_to_end("中英 mixed long composer text ".repeat(240));
+    model.sync_composer_height();
+    model.show_stream_activity_with_header("Working");
+    let started_at = model.stream_activity.as_ref().unwrap().started_at;
+    let initial_context = crate::frame_time::FrameRenderContext::new(started_at);
+    let initial = model.build_document_tail_layout(initial_context);
+
+    crate::composer::reset_render_document_call_count();
+    let next_frame = model
+        .stream_activity_next_frame_deadline_at(started_at)
+        .expect("active stream should expose its next frame");
+    let updated =
+        model.build_document_tail_layout(crate::frame_time::FrameRenderContext::new(next_frame));
+
+    assert_eq!(
+        crate::composer::render_document_call_count(),
+        0,
+        "activity-only frames must reuse the stable composer document"
+    );
+    assert!(
+        initial.shares_stable_layout_with(&updated),
+        "activity-only frames must share the stable tail allocation"
+    );
+}
+
+#[test]
+fn stream_activity_state_updates_reuse_the_stable_tail_layout() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.transcript_mut().clear();
+    model.sync_transcript_render();
+    model.set_window(80, 24);
+    model.set_palette(default_palette(), true);
+    model
+        .composer_mut()
+        .reset_text_and_move_to_end("中英 mixed long composer text ".repeat(240));
+    model.sync_composer_height();
+    model.show_stream_activity_with_header("Working");
+    let initial =
+        model.build_document_tail_layout(crate::frame_time::FrameRenderContext::capture());
+
+    crate::composer::reset_render_document_call_count();
+    model.set_stream_activity_thinking(true);
+    model.set_stream_activity_output_tokens(42);
+    let updated =
+        model.build_document_tail_layout(crate::frame_time::FrameRenderContext::capture());
+
+    assert!(
+        !std::rc::Rc::ptr_eq(&initial, &updated),
+        "activity state changes must rebuild the lightweight final tail view"
+    );
+    assert_eq!(
+        crate::composer::render_document_call_count(),
+        0,
+        "activity state changes must not rerender the stable composer document"
+    );
+    assert!(
+        initial.shares_stable_layout_with(&updated),
+        "activity state changes must share the stable tail allocation"
     );
 }

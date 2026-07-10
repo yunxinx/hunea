@@ -222,12 +222,15 @@ impl Model {
             self.document_runtime.viewport_y,
             self.document_viewport_height(),
         );
+        let Some(content_bottom_line) = layout.composer_slot.content_bottom_line() else {
+            return 0;
+        };
 
         line_indices
             .into_iter()
             .filter(|line_index| {
                 *line_index >= layout.composer_slot.content_start_line
-                    && *line_index <= layout.composer_slot.content_bottom_line()
+                    && *line_index <= content_bottom_line
             })
             .count()
     }

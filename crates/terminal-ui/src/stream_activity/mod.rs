@@ -41,6 +41,13 @@ pub(crate) struct StreamActivityState {
     paused_at: Option<Instant>,
 }
 
+/// `StreamActivityFrameKey` 同时描述 activity 内容状态与当前动画帧。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct StreamActivityFrameKey {
+    revision: usize,
+    frame_index: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ActivityTokenProgress {
     previous_display: usize,
@@ -84,7 +91,7 @@ impl Model {
             paused_at: None,
         });
         self.reset_chat_interrupt_esc_count();
-        self.bump_status_line_revision();
+        self.bump_stream_activity_revision();
         self.sync_composer_height();
         if self.document_runtime.follow_bottom {
             self.sync_document_viewport_to_bottom();
@@ -112,7 +119,7 @@ impl Model {
                 paused_at: Some(now),
             });
             self.reset_chat_interrupt_esc_count();
-            self.bump_status_line_revision();
+            self.bump_stream_activity_revision();
             self.sync_composer_height();
             if self.document_runtime.follow_bottom {
                 self.sync_document_viewport_to_bottom();
@@ -123,7 +130,7 @@ impl Model {
             return;
         }
 
-        self.bump_status_line_revision();
+        self.bump_stream_activity_revision();
         self.sync_composer_height();
         if self.document_runtime.follow_bottom {
             self.sync_document_viewport_to_bottom();
@@ -142,7 +149,7 @@ impl Model {
             return;
         }
 
-        self.bump_status_line_revision();
+        self.bump_stream_activity_revision();
         self.sync_composer_height();
         if self.document_runtime.follow_bottom {
             self.sync_document_viewport_to_bottom();
@@ -173,7 +180,7 @@ impl Model {
             self.sync_transcript_render();
         }
         self.reset_chat_interrupt_esc_count();
-        self.bump_status_line_revision();
+        self.bump_stream_activity_revision();
         self.sync_composer_height();
         if self.document_runtime.follow_bottom {
             self.sync_document_viewport_to_bottom();
@@ -223,7 +230,7 @@ impl Model {
         }
 
         activity.pause_at(now);
-        self.bump_status_line_revision();
+        self.bump_stream_activity_revision();
         self.sync_composer_height();
         if self.document_runtime.follow_bottom {
             self.sync_document_viewport_to_bottom();
@@ -242,7 +249,7 @@ impl Model {
             return;
         }
 
-        self.bump_status_line_revision();
+        self.bump_stream_activity_revision();
         self.sync_composer_height();
         if self.document_runtime.follow_bottom {
             self.sync_document_viewport_to_bottom();
@@ -281,7 +288,7 @@ impl Model {
             return;
         }
         activity.is_thinking = is_thinking;
-        self.bump_status_line_revision();
+        self.bump_stream_activity_revision();
         if self.document_runtime.follow_bottom {
             self.sync_document_viewport_to_bottom();
         }
@@ -292,7 +299,7 @@ impl Model {
             return;
         };
         activity.record_output_tokens(total_tokens, now);
-        self.bump_status_line_revision();
+        self.bump_stream_activity_revision();
         if self.document_runtime.follow_bottom {
             self.sync_document_viewport_to_bottom();
         }
@@ -304,7 +311,7 @@ impl Model {
             return;
         };
         activity.add_input_tokens(token_delta, now);
-        self.bump_status_line_revision();
+        self.bump_stream_activity_revision();
         if self.document_runtime.follow_bottom {
             self.sync_document_viewport_to_bottom();
         }
@@ -315,7 +322,7 @@ impl Model {
             return;
         };
         activity.record_input_tokens(total_tokens, now);
-        self.bump_status_line_revision();
+        self.bump_stream_activity_revision();
         if self.document_runtime.follow_bottom {
             self.sync_document_viewport_to_bottom();
         }
@@ -356,11 +363,20 @@ impl Model {
         }
     }
 
-    pub(crate) fn stream_activity_frame_key(&self, now: Instant) -> usize {
-        self.stream_activity
+    fn bump_stream_activity_revision(&mut self) {
+        self.stream_activity_revision = self.stream_activity_revision.saturating_add(1);
+    }
+
+    pub(crate) fn stream_activity_frame_key(&self, now: Instant) -> StreamActivityFrameKey {
+        let frame_index = self
+            .stream_activity
             .as_ref()
             .map(|activity| activity.frame_index_at(activity.active_now(now)))
-            .unwrap_or(0)
+            .unwrap_or(0);
+        StreamActivityFrameKey {
+            revision: self.stream_activity_revision,
+            frame_index,
+        }
     }
 
     pub(crate) fn stream_activity_next_frame_deadline_at(&self, now: Instant) -> Option<Instant> {

@@ -2473,17 +2473,21 @@ fn composer_cursor_only_layout_refresh_reuses_long_composer_document() {
         .composer_mut()
         .reset_text_and_move_to_end("中英 mixed long composer text ".repeat(120));
     model.sync_composer_height();
-    let _ = model.build_document_layout(crate::frame_time::FrameRenderContext::capture());
+    let initial = model.build_document_layout(crate::frame_time::FrameRenderContext::capture());
 
     crate::composer::reset_render_document_call_count();
     model.composer_mut().move_to_begin();
     model.sync_document_viewport_for_composer_cursor();
-    let _ = model.build_document_layout(crate::frame_time::FrameRenderContext::capture());
+    let updated = model.build_document_layout(crate::frame_time::FrameRenderContext::capture());
 
     assert_eq!(
         crate::composer::render_document_call_count(),
         0,
         "cursor-only layout refresh should reuse the cached long composer document"
+    );
+    assert!(
+        initial.tail.shares_stable_layout_with(&updated.tail),
+        "cursor-only layout refresh must reuse the stable tail allocation"
     );
 }
 
@@ -3127,14 +3131,13 @@ fn stream_activity_line_renders_above_composer() {
 
     let activity_line = layout
         .tail
-        .text_lines
-        .first()
-        .map(|line| line.trim())
+        .text_line_at(0)
+        .map(|line| line.trim().to_string())
         .unwrap_or_default();
     assert!(activity_line.contains("Cooking"));
     assert!(!activity_line.contains("Kimi Code CLI"));
     assert_eq!(
-        layout.tail.text_lines.get(1).map(String::as_str),
+        layout.tail.text_line_at(1).as_deref(),
         Some(""),
         "activity indicator should breathe before the composer"
     );

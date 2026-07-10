@@ -2,7 +2,8 @@ use std::time::Instant;
 
 use crate::{
     document::{
-        LayoutCache, RestoreState, TailLayoutCache, TranscriptCache, ViewportCache, ViewportState,
+        LayoutCache, RestoreState, StableTailLayoutCache, TailLayoutCache, TranscriptCache,
+        ViewportCache, ViewportState,
     },
     selection::{AutoScrollDirection, MousePosition, SelectionClickState, SelectionState},
 };
@@ -47,6 +48,7 @@ pub(crate) struct DocumentRuntimeState {
     pub(crate) viewport_y: usize,
     pub(crate) viewport_state: ViewportState,
     pub(crate) transcript_cache: TranscriptCache,
+    pub(crate) stable_tail_layout_cache: StableTailLayoutCache,
     pub(crate) tail_layout_cache: TailLayoutCache,
     pub(crate) layout_cache: LayoutCache,
     pub(crate) viewport_cache: ViewportCache,

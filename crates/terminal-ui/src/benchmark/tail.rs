@@ -5,7 +5,7 @@ use crate::{
     theme::default_palette,
 };
 
-use super::{large_composer_draft_fixture, plain_lines_len};
+use super::large_composer_draft_fixture;
 
 /// `TailLayoutSummary` 收敛 stream animation frame 下的 tail 布局特征。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,8 +75,8 @@ impl StreamActivityTailBench {
             .build_document_tail_layout(FrameRenderContext::new(self.frame_time));
 
         TailLayoutSummary {
-            line_count: tail.lines.len(),
-            plain_text_len: plain_lines_len(&tail.text_lines),
+            line_count: tail.line_count(),
+            plain_text_len: tail.plain_text_len_for_range(0, tail.line_count()),
             composer_line_count: tail.composer_slot.content_line_count,
             cursor_x: tail.cursor_x,
             cursor_y: tail.cursor_y,

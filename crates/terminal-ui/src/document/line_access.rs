@@ -467,7 +467,7 @@ impl DocumentTranscriptSnapshot {
 impl DocumentLayout {
     /// `line_count` 返回 unified document 的总行数。
     pub(crate) fn line_count(&self) -> usize {
-        self.transcript_line_count + self.tail.lines.len()
+        self.transcript_line_count + self.tail.line_count()
     }
 
     /// `plain_text_len` 返回 unified document 纯文本的总字符数（含换行分隔）。
@@ -503,7 +503,9 @@ impl DocumentLayout {
             if used_transcript {
                 total += 1;
             }
-            total += plain_lines_len(&self.tail.text_lines[tail_start..tail_end]);
+            total += self
+                .tail
+                .plain_text_len_for_range(tail_start, tail_end - tail_start);
         }
 
         total
@@ -525,27 +527,19 @@ impl DocumentLayout {
         Some(DocumentLayoutLine {
             line: self
                 .tail
-                .lines
-                .get(index - self.transcript_line_count)
-                .cloned()
+                .line_at(index - self.transcript_line_count)
                 .unwrap_or_default(),
             plain_line: self
                 .tail
-                .text_lines
-                .get(index - self.transcript_line_count)
-                .cloned()
+                .text_line_at(index - self.transcript_line_count)
                 .unwrap_or_default(),
             anchor: self
                 .tail
-                .anchors
-                .get(index - self.transcript_line_count)
-                .copied()
+                .anchor_at(index - self.transcript_line_count)
                 .unwrap_or_default(),
             selectable: self
                 .tail
-                .selectable
-                .get(index - self.transcript_line_count)
-                .copied()
+                .selectable_at(index - self.transcript_line_count)
                 .unwrap_or_default(),
         })
     }
@@ -559,10 +553,7 @@ impl DocumentLayout {
             return self.transcript.plain_line_at(index, context);
         }
 
-        self.tail
-            .text_lines
-            .get(index - self.transcript_line_count)
-            .cloned()
+        self.tail.text_line_at(index - self.transcript_line_count)
     }
 
     /// `line_anchor_at` 返回指定视觉行的锚点。
@@ -578,10 +569,7 @@ impl DocumentLayout {
             return self.transcript.anchor_at(index, context);
         }
 
-        self.tail
-            .anchors
-            .get(index - self.transcript_line_count)
-            .copied()
+        self.tail.anchor_at(index - self.transcript_line_count)
     }
 
     /// `is_assistant_message_line` 判断指定文档行是否属于 assistant 消息正文。
@@ -618,9 +606,7 @@ impl DocumentLayout {
         }
 
         self.tail
-            .anchors
-            .iter()
-            .position(|anchor| *anchor == target)
+            .line_index_for_anchor(target)
             .map(|index| self.transcript_line_count + index)
     }
 
@@ -700,7 +686,10 @@ impl DocumentLayout {
         if start < end {
             let tail_start = start - self.transcript_line_count;
             let tail_end = end - self.transcript_line_count;
-            lines.extend_from_slice(&self.tail.text_lines[tail_start..tail_end]);
+            lines.extend(
+                self.tail
+                    .text_lines_for_range(tail_start, tail_end - tail_start),
+            );
         }
 
         lines
@@ -730,7 +719,7 @@ impl DocumentLayout {
         if start < end {
             let tail_start = start - self.transcript_line_count;
             let tail_end = end - self.transcript_line_count;
-            lines.extend_from_slice(&self.tail.lines[tail_start..tail_end]);
+            lines.extend(self.tail.lines_for_range(tail_start, tail_end - tail_start));
         }
 
         lines
@@ -751,14 +740,6 @@ impl DocumentLayout {
             })
             .filter(|item| item.content_line_count > 0)
     }
-}
-
-fn plain_lines_len(lines: &[String]) -> usize {
-    if lines.is_empty() {
-        return 0;
-    }
-
-    lines.iter().map(String::len).sum::<usize>() + lines.len().saturating_sub(1)
 }
 
 fn document_anchor_for_transcript(transcript: LineAnchor) -> DocumentLineAnchor {

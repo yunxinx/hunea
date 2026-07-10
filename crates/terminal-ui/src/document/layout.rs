@@ -27,6 +27,7 @@ impl Model {
 
     #[cfg(test)]
     pub(crate) fn invalidate_document_caches_for_test(&mut self) {
+        self.document_runtime.stable_tail_layout_cache.valid = false;
         self.document_runtime.tail_layout_cache.valid = false;
         self.document_runtime.layout_cache.valid = false;
         self.document_runtime.viewport_cache.valid = false;
@@ -405,22 +406,24 @@ fn document_range_snapshot(
         let tail_start = start - layout.transcript_line_count;
         let tail_end = end - layout.transcript_line_count;
         let tail_line_count = tail_end - tail_start;
-        lines.extend_from_slice(&layout.tail.lines[tail_start..tail_end]);
+        lines.extend(
+            layout
+                .tail
+                .lines_for_range(tail_start, tail_end - tail_start),
+        );
         assistant_lines.extend(std::iter::repeat_n(false, tail_line_count));
         if line_count > 0 && tail_line_count > 0 {
             plain_text_len += 1;
         }
-        plain_text_len += if tail_line_count == 0 {
-            0
-        } else {
-            layout.tail.text_lines[tail_start..tail_end]
-                .iter()
-                .map(String::len)
-                .sum::<usize>()
-                + tail_line_count.saturating_sub(1)
-        };
+        plain_text_len += layout
+            .tail
+            .plain_text_len_for_range(tail_start, tail_line_count);
         #[cfg(test)]
-        plain_lines.extend_from_slice(&layout.tail.text_lines[tail_start..tail_end]);
+        plain_lines.extend(
+            layout
+                .tail
+                .text_lines_for_range(tail_start, tail_line_count),
+        );
     }
 
     DocumentRangeSnapshot {

@@ -21,8 +21,10 @@ impl Model {
 
     pub(crate) fn bottom_follow_anchor_line(&self, layout: &DocumentLayout) -> usize {
         if !layout_has_content_below_composer_frame(layout) {
-            if layout.composer_slot.frame_line_count <= self.document_viewport_height() {
-                return layout.composer_slot.frame_bottom_line();
+            if layout.composer_slot.frame_line_count <= self.document_viewport_height()
+                && let Some(frame_bottom_line) = layout.composer_slot.frame_bottom_line()
+            {
+                return frame_bottom_line;
             }
             return layout.cursor_y;
         }
@@ -141,7 +143,12 @@ pub(crate) fn compose_document_viewport_from_line_indices(
 }
 
 fn layout_has_content_below_composer_frame(layout: &DocumentLayout) -> bool {
-    layout.composer_slot.frame_bottom_line() < layout.line_count().saturating_sub(1)
+    layout
+        .composer_slot
+        .frame_bottom_line()
+        .map_or(layout.line_count() > 0, |frame_bottom_line| {
+            frame_bottom_line < layout.line_count().saturating_sub(1)
+        })
 }
 
 fn contiguous_line_range(line_indices: &[usize]) -> Option<(usize, usize)> {
@@ -179,19 +186,23 @@ mod tests {
         model.has_window = true;
 
         let layout = DocumentLayout {
-            tail: std::rc::Rc::new(DocumentTailLayout {
-                lines: vec![
+            tail: std::rc::Rc::new(DocumentTailLayout::from_test_parts(
+                vec![
                     Line::raw("frame-top"),
                     Line::raw("input-line"),
                     Line::raw("frame-bottom"),
                 ],
-                text_lines: vec![
+                vec![
                     "frame-top".to_string(),
                     "input-line".to_string(),
                     "frame-bottom".to_string(),
                 ],
-                ..DocumentTailLayout::default()
-            }),
+                Vec::new(),
+                Vec::new(),
+                SlotFrame::new(0, true, 1),
+                2,
+                1,
+            )),
             composer_slot: SlotFrame::new(0, true, 1),
             cursor_x: 2,
             cursor_y: 1,
@@ -219,21 +230,25 @@ mod tests {
         model.has_window = true;
 
         let layout = DocumentLayout {
-            tail: std::rc::Rc::new(DocumentTailLayout {
-                lines: vec![
+            tail: std::rc::Rc::new(DocumentTailLayout::from_test_parts(
+                vec![
                     Line::raw("frame-top"),
                     Line::raw("input-line"),
                     Line::raw("frame-bottom"),
                     Line::raw("status-line"),
                 ],
-                text_lines: vec![
+                vec![
                     "frame-top".to_string(),
                     "input-line".to_string(),
                     "frame-bottom".to_string(),
                     "status-line".to_string(),
                 ],
-                ..DocumentTailLayout::default()
-            }),
+                Vec::new(),
+                Vec::new(),
+                SlotFrame::new(0, true, 1),
+                2,
+                1,
+            )),
             composer_slot: SlotFrame::new(0, true, 1),
             cursor_x: 2,
             cursor_y: 1,

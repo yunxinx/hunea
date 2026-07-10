@@ -9,6 +9,7 @@ use crate::transcript::{
 use crate::{
     composer,
     selection::SelectableLineRange,
+    stream_activity::StreamActivityFrameKey,
     style_mode::StyleMode,
     theme::TerminalPalette,
     transcript::{self, CachedRenderBlock, TranscriptItem, TranscriptItemMetricsIndex},
@@ -88,7 +89,7 @@ pub(crate) struct DocumentLayoutKey {
     pub(super) status_line_config: u8,
     pub(super) status_line_2_config: u8,
     pub(super) status_line_revision: usize,
-    pub(super) stream_activity_frame: usize,
+    pub(super) stream_activity_frame: StreamActivityFrameKey,
     pub(super) tool_activity_frame: usize,
 }
 
@@ -174,16 +175,16 @@ impl DocumentLayout {
                 )),
                 ..DocumentTranscriptSnapshot::default()
             }),
-            tail: Rc::new(DocumentTailLayout {
-                lines: tail_plain_lines
+            tail: Rc::new(DocumentTailLayout::from_test_parts(
+                tail_plain_lines
                     .iter()
                     .map(|line| Line::raw((*line).to_string()))
                     .collect(),
-                text_lines: tail_plain_lines
+                tail_plain_lines
                     .iter()
                     .map(|line| (*line).to_string())
                     .collect(),
-                anchors: tail_plain_lines
+                tail_plain_lines
                     .iter()
                     .enumerate()
                     .map(|(index, _)| DocumentLineAnchor {
@@ -192,9 +193,11 @@ impl DocumentLayout {
                         ..DocumentLineAnchor::default()
                     })
                     .collect(),
-                selectable: vec![SelectableLineRange::default(); tail_plain_lines.len()],
-                ..DocumentTailLayout::default()
-            }),
+                vec![SelectableLineRange::default(); tail_plain_lines.len()],
+                SlotFrame::default(),
+                0,
+                0,
+            )),
             ..Self::default()
         }
     }

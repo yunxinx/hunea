@@ -5,18 +5,21 @@ use std::{cell::RefCell, collections::HashMap, hint::black_box, rc::Rc};
 use super::layout::{
     DocumentLayoutInput, compose_document_layout, compose_document_viewport, visible_document_lines,
 };
+use super::slot_frame::SlotFrame;
 use super::*;
 use crate::{
     Model, Sender, StartupBannerOptions, StatusLineItem, StyleMode,
     frame_time::FrameRenderContext,
     selection::SelectableLineRange as DocumentSelectable,
     theme::{default_palette, terminal_default_palette},
+    tool_approval_panel::ToolApprovalSource,
     transcript::{
         CachedLineAnchors, CachedRenderBlock, ItemLineAnchor, LineAnchorKind, RenderItemSummary,
         TranscriptItemMetricsIndex, new_render_result, reset_tracked_cached_render_block_access,
         tracked_cached_render_block_access,
     },
 };
+use runtime_domain::session::RuntimeTarget;
 
 #[test]
 fn document_layout_owns_the_exact_frame_key_used_by_viewport_cache() {
@@ -70,6 +73,149 @@ fn build_document_layout_combines_transcript_and_composer_snapshots() {
 }
 
 #[test]
+fn segmented_tail_accessors_cross_activity_boundaries_without_flattening() {
+    let mut model = ready_document_model(40, 8);
+    model
+        .transcript_mut()
+        .append_message(Sender::Assistant, "history");
+    model.sync_transcript_render();
+    model.composer_mut().set_text_for_test("draft");
+    model.sync_composer_height();
+    model.show_stream_activity_with_header("Working");
+    let context = FrameRenderContext::capture();
+    let layout = model.build_document_layout(context);
+    let tail_start = layout.transcript_line_count;
+    let tail_line_count = layout.tail.line_count();
+    let text_lines = layout.line_texts_for_range(tail_start, tail_line_count, context);
+    let styled_lines = layout
+        .lines_for_range(tail_start, tail_line_count, context)
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+    let anchors = layout.tail.all_anchors();
+
+    assert_eq!(tail_line_count, 4);
+    assert_eq!(styled_lines, text_lines);
+    assert_eq!(text_lines[0], "");
+    assert!(text_lines[1].contains("Working"));
+    assert_eq!(text_lines[2], "");
+    assert_eq!(text_lines[3], "┃ draft");
+    assert_eq!(
+        anchors
+            .iter()
+            .map(|anchor| anchor.region)
+            .collect::<Vec<_>>(),
+        vec![
+            DocumentAnchorRegion::TranscriptComposerGap,
+            DocumentAnchorRegion::StreamActivity,
+            DocumentAnchorRegion::StreamActivityComposerGap,
+            DocumentAnchorRegion::Composer,
+        ]
+    );
+    assert_eq!(
+        layout.plain_text_len_for_range(tail_start, tail_line_count, context),
+        text_lines.join("\n").len()
+    );
+
+    for (tail_index, anchor) in anchors.into_iter().enumerate() {
+        assert_eq!(
+            layout.line_index_for_anchor(anchor, context),
+            Some(tail_start + tail_index)
+        );
+        assert_eq!(
+            layout
+                .selection_line_at(tail_start + tail_index, context)
+                .map(|line| (line.anchor, line.selectable)),
+            Some((
+                anchor,
+                layout.tail.selectable_at(tail_index).unwrap_or_default()
+            ))
+        );
+    }
+}
+
+#[test]
+fn model_panel_activity_segment_has_no_composer_gap_or_slot_offset() {
+    let mut model = ready_document_model(60, 24);
+    model.show_stream_activity_with_header("Working");
+    let stable_composer = model.build_document_tail_layout(FrameRenderContext::capture());
+    model.open_model_panel();
+    let context = FrameRenderContext::capture();
+    let panel_tail = model.build_document_tail_layout(context);
+    let regions = panel_tail
+        .all_anchors()
+        .into_iter()
+        .map(|anchor| anchor.region)
+        .collect::<Vec<_>>();
+
+    assert!(!stable_composer.shares_stable_layout_with(&panel_tail));
+    assert_eq!(regions.first(), Some(&DocumentAnchorRegion::StreamActivity));
+    assert_eq!(regions.get(1), Some(&DocumentAnchorRegion::ModelPanel));
+    assert!(!regions.contains(&DocumentAnchorRegion::StreamActivityComposerGap));
+    assert_eq!(panel_tail.composer_slot, SlotFrame::empty());
+    assert_eq!(
+        panel_tail.cursor_y,
+        panel_tail.line_count().saturating_add(1)
+    );
+}
+
+#[test]
+fn context_budget_activity_segment_has_no_composer_gap_or_slot_offset() {
+    let mut model = ready_document_model(60, 24);
+    model.show_stream_activity_with_header("Working");
+    model.open_context_budget_loading();
+    let tail = model.build_document_tail_layout(FrameRenderContext::capture());
+    let regions = tail
+        .all_anchors()
+        .into_iter()
+        .map(|anchor| anchor.region)
+        .collect::<Vec<_>>();
+
+    assert_eq!(regions.first(), Some(&DocumentAnchorRegion::StreamActivity));
+    assert_eq!(
+        regions.get(1),
+        Some(&DocumentAnchorRegion::ContextBudgetPanel)
+    );
+    assert!(!regions.contains(&DocumentAnchorRegion::StreamActivityComposerGap));
+    assert_eq!(tail.composer_slot, SlotFrame::empty());
+    assert_eq!(tail.cursor_y, tail.line_count().saturating_add(1));
+}
+
+#[test]
+fn tool_approval_activity_segment_has_no_composer_gap_or_slot_offset() {
+    let mut model = ready_document_model(60, 24);
+    model.show_stream_activity_with_header("Working");
+    model.open_tool_approval_panel(
+        ToolApprovalSource::RuntimePermission {
+            target: RuntimeTarget::provider("local", "qwen3"),
+            request_id: "permission-1".to_string(),
+            allow_option_id: Some("allow-once".to_string()),
+            allow_always_option_id: None,
+            reject_option_id: Some("reject-once".to_string()),
+            reject_always_option_id: None,
+        },
+        "Write file".to_string(),
+        Vec::new(),
+    );
+    model.resume_stream_activity();
+    let tail = model.build_document_tail_layout(FrameRenderContext::capture());
+    let regions = tail
+        .all_anchors()
+        .into_iter()
+        .map(|anchor| anchor.region)
+        .collect::<Vec<_>>();
+
+    assert_eq!(regions.first(), Some(&DocumentAnchorRegion::StreamActivity));
+    assert_eq!(
+        regions.get(1),
+        Some(&DocumentAnchorRegion::ToolApprovalPanel)
+    );
+    assert!(!regions.contains(&DocumentAnchorRegion::StreamActivityComposerGap));
+    assert_eq!(tail.composer_slot, SlotFrame::empty());
+    assert_eq!(tail.cursor_y, tail.line_count().saturating_add(1));
+}
+
+#[test]
 fn document_tail_layout_cache_reuses_tail_when_transcript_append_keeps_tail_inputs_stable() {
     let mut model = ready_document_model(20, 4);
     model
@@ -91,6 +237,50 @@ fn document_tail_layout_cache_reuses_tail_when_transcript_append_keeps_tail_inpu
     assert!(
         Rc::ptr_eq(&first, &second),
         "tail layout should stay cached when transcript append does not change tail inputs"
+    );
+}
+
+#[test]
+fn composer_content_change_invalidates_the_stable_tail_layout() {
+    let mut model = ready_document_model(40, 8);
+    model.composer_mut().set_text_for_test("first draft");
+    model.sync_composer_height();
+    let initial = model.build_document_tail_layout(FrameRenderContext::capture());
+
+    model.composer_mut().set_text_for_test("second draft");
+    model.sync_composer_height();
+    let updated = model.build_document_tail_layout(FrameRenderContext::capture());
+
+    assert!(
+        !initial.shares_stable_layout_with(&updated),
+        "composer content changes must invalidate the stable tail allocation"
+    );
+    assert!(
+        (0..updated.line_count())
+            .filter_map(|index| updated.text_line_at(index))
+            .any(|line| line.contains("second draft"))
+    );
+}
+
+#[test]
+fn status_line_change_invalidates_the_stable_tail_layout() {
+    let mut model = ready_document_model(40, 8);
+    model.status_line_items = vec![StatusLineItem::GitBranch];
+    model.git_branch = "main".to_string();
+    let initial = model.build_document_tail_layout(FrameRenderContext::capture());
+
+    model.git_branch = "feature/stable-tail".to_string();
+    model.bump_status_line_revision();
+    let updated = model.build_document_tail_layout(FrameRenderContext::capture());
+
+    assert!(
+        !initial.shares_stable_layout_with(&updated),
+        "stable status rows must invalidate when their revision changes"
+    );
+    assert!(
+        (0..updated.line_count())
+            .filter_map(|index| updated.text_line_at(index))
+            .any(|line| line.contains("feature/stable-tail"))
     );
 }
 
@@ -139,8 +329,8 @@ fn document_tail_layout_cache_invalidates_on_height_only_resize_when_command_pan
 
     let first = model.build_document_tail_layout(crate::frame_time::FrameRenderContext::capture());
     let first_command_panel_rows = first
-        .anchors
-        .iter()
+        .all_anchors()
+        .into_iter()
         .filter(|anchor| anchor.region == DocumentAnchorRegion::CommandPanel)
         .count();
 
@@ -148,14 +338,18 @@ fn document_tail_layout_cache_invalidates_on_height_only_resize_when_command_pan
 
     let second = model.build_document_tail_layout(crate::frame_time::FrameRenderContext::capture());
     let second_command_panel_rows = second
-        .anchors
-        .iter()
+        .all_anchors()
+        .into_iter()
         .filter(|anchor| anchor.region == DocumentAnchorRegion::CommandPanel)
         .count();
 
     assert!(
         !Rc::ptr_eq(&first, &second),
         "height-only resize should invalidate the tail cache when command panel rows depend on viewport height"
+    );
+    assert!(
+        !first.shares_stable_layout_with(&second),
+        "height-dependent command panel rows must invalidate the stable tail allocation"
     );
     assert_eq!(first_command_panel_rows, 3);
     assert_eq!(second_command_panel_rows, 7);
@@ -701,11 +895,15 @@ fn transcript_line_access_resolves_without_full_render_result() {
 #[test]
 fn visible_document_lines_tracks_cursor_visibility() {
     let layout = DocumentLayout {
-        tail: Rc::new(DocumentTailLayout {
-            lines: vec![Line::raw("a"), Line::raw("b"), Line::raw("c")],
-            text_lines: vec!["a".to_string(), "b".to_string(), "c".to_string()],
-            ..DocumentTailLayout::default()
-        }),
+        tail: Rc::new(DocumentTailLayout::from_test_parts(
+            vec![Line::raw("a"), Line::raw("b"), Line::raw("c")],
+            vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            Vec::new(),
+            Vec::new(),
+            SlotFrame::default(),
+            0,
+            0,
+        )),
         cursor_x: 4,
         cursor_y: 1,
         ..DocumentLayout::default()
@@ -1102,7 +1300,7 @@ fn build_document_layout_matches_full_compose_after_transcript_append() {
         layout.all_line_anchors(FrameRenderContext::capture()),
         expected.all_line_anchors(FrameRenderContext::capture())
     );
-    assert_eq!(layout.tail.selectable, expected.tail.selectable);
+    assert_eq!(layout.tail.all_selectable(), expected.tail.all_selectable());
     assert_eq!(layout.composer_slot, expected.composer_slot);
     assert_eq!(layout.cursor_y, expected.cursor_y);
 }
@@ -1193,7 +1391,7 @@ fn build_document_layout_matches_full_compose_after_appending_to_non_empty_trans
         layout.all_line_anchors(FrameRenderContext::capture()),
         expected.all_line_anchors(FrameRenderContext::capture())
     );
-    assert_eq!(layout.tail.selectable, expected.tail.selectable);
+    assert_eq!(layout.tail.all_selectable(), expected.tail.all_selectable());
     assert_eq!(layout.composer_slot, expected.composer_slot);
     assert_eq!(layout.cursor_y, expected.cursor_y);
 }
@@ -1231,7 +1429,7 @@ fn build_document_layout_after_multiple_pending_transcript_appends_matches_compo
         layout.all_line_anchors(FrameRenderContext::capture()),
         expected.all_line_anchors(FrameRenderContext::capture())
     );
-    assert_eq!(layout.tail.selectable, expected.tail.selectable);
+    assert_eq!(layout.tail.all_selectable(), expected.tail.all_selectable());
     assert_eq!(layout.composer_slot, expected.composer_slot);
     assert_eq!(layout.cursor_y, expected.cursor_y);
 }

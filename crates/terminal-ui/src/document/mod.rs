@@ -23,7 +23,10 @@ pub(super) use self::manual_scroll::ManualScrollRestoreState as RestoreState;
 pub(crate) use self::slot_viewport::{
     bottom_follow_viewport_line_indices, offset_viewport_line_indices,
 };
-pub(super) use self::tail::DocumentTailLayoutCache as TailLayoutCache;
+pub(super) use self::tail::{
+    DocumentStableTailLayoutCache as StableTailLayoutCache,
+    DocumentTailLayoutCache as TailLayoutCache,
+};
 pub(super) use self::tail::{DocumentTailLayout, offset_slot_frame};
 pub(super) use self::viewport_state::ViewportState;
 #[cfg(test)]

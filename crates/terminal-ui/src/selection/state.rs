@@ -245,6 +245,7 @@ pub(crate) fn selection_auto_scroll_direction_for_mouse_row(
 mod tests {
     use super::*;
     use crate::document::{DocumentAnchorRegion, DocumentLayout};
+    use crate::selection::SelectableLineRange;
 
     fn test_anchor(line: usize) -> DocumentLineAnchor {
         DocumentLineAnchor {
@@ -257,15 +258,18 @@ mod tests {
     fn selection_test_layout(line_count: usize) -> DocumentLayout {
         let lines = vec![""; line_count];
         let mut layout = DocumentLayout::with_test_plain_lines(0, &lines);
-        layout.tail = std::rc::Rc::new(crate::document::DocumentTailLayout {
-            anchors: (0..line_count).map(test_anchor).collect(),
-            lines: lines
+        layout.tail = std::rc::Rc::new(crate::document::DocumentTailLayout::from_test_parts(
+            lines
                 .iter()
                 .map(|line| ratatui::text::Line::raw((*line).to_string()))
                 .collect(),
-            text_lines: lines.iter().map(|line| (*line).to_string()).collect(),
-            ..layout.tail.as_ref().clone()
-        });
+            lines.iter().map(|line| (*line).to_string()).collect(),
+            (0..line_count).map(test_anchor).collect(),
+            vec![SelectableLineRange::default(); line_count],
+            layout.tail.composer_slot,
+            layout.tail.cursor_x,
+            layout.tail.cursor_y,
+        ));
         layout
     }
 

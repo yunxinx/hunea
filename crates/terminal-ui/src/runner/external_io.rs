@@ -384,12 +384,13 @@ fn catch_clipboard_worker_panic(
 
 pub(super) fn run_external_editor_effect(
     terminal: &mut TuiTerminal,
+    terminal_session: &mut TerminalSession,
     model: &mut Model,
     launch: ExternalEditorLaunch,
 ) -> Result<Option<AppEffect>> {
-    TerminalSession::suspend(terminal)?;
+    terminal_session.suspend(terminal)?;
     let failed = run_external_editor_command(&launch.command).is_err();
-    TerminalSession::resume(terminal)?;
+    terminal_session.resume(terminal)?;
 
     let area = terminal.size()?;
     apply_model_event_without_effect(

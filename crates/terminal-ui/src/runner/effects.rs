@@ -9,7 +9,7 @@ use super::external_io::{
     ExternalIoRuntime, run_copy_selection_effect, run_external_editor_effect,
 };
 use super::model_refresh::{persist_selected_model, run_refresh_model_provider_effect};
-use super::terminal::TuiTerminal;
+use super::terminal::{TerminalSession, TuiTerminal};
 
 pub(crate) fn dispatch_record_message_history(
     model: &mut Model,
@@ -32,6 +32,7 @@ pub(crate) fn dispatch_record_message_history(
 
 pub(super) fn apply_effect_if_needed(
     terminal: &mut TuiTerminal,
+    terminal_session: &mut TerminalSession,
     model: &mut Model,
     runtime_coordinator: &mut impl RuntimeCoordinator,
     external_io: &mut ExternalIoRuntime,
@@ -46,8 +47,15 @@ pub(super) fn apply_effect_if_needed(
 
     match effect {
         AppEffect::LaunchExternalEditor(launch) => {
-            let follow_up = run_external_editor_effect(terminal, model, launch)?;
-            apply_effect_if_needed(terminal, model, runtime_coordinator, external_io, follow_up)
+            let follow_up = run_external_editor_effect(terminal, terminal_session, model, launch)?;
+            apply_effect_if_needed(
+                terminal,
+                terminal_session,
+                model,
+                runtime_coordinator,
+                external_io,
+                follow_up,
+            )
         }
         AppEffect::CopySelection(text) => run_copy_selection_effect(model, external_io, text),
         AppEffect::ResetRuntimeSession => {

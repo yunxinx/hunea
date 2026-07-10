@@ -33,7 +33,7 @@ use input::{
 };
 use model_refresh::apply_model_provider_refresh_event;
 pub(crate) use terminal::TerminalMouseModePreference;
-use terminal::{TerminalMouseMode, TerminalSession, apply_mouse_mode, wait_for_terminal_event};
+use terminal::{TerminalMouseMode, TerminalSession, wait_for_terminal_event};
 
 /// `RuntimeCoordinator` 是 TUI runner 与具体对话运行时之间的最小边界。
 pub trait RuntimeCoordinator {
@@ -152,7 +152,7 @@ pub fn run_with_runtime_coordinator(
 ) -> Result<Model> {
     let mut model = Model::new_with_options(startup_banner_options, options);
 
-    let (mut terminal, _guard) = TerminalSession::enter()?;
+    let (mut terminal, mut terminal_session) = TerminalSession::enter()?;
 
     let background_probe = terminal_probe::query_background(STARTUP_PROBE_TIMEOUT);
     if let Some(detection) = startup_palette_detection(background_probe) {
@@ -204,7 +204,7 @@ pub fn run_with_runtime_coordinator(
             let desired_mouse_mode =
                 TerminalMouseMode::from_preference(model.mouse_mode_preference());
             if desired_mouse_mode != mouse_mode {
-                apply_mouse_mode(&mut terminal, desired_mouse_mode)?;
+                terminal_session.apply_mouse_mode(&mut terminal, desired_mouse_mode)?;
                 mouse_mode = desired_mouse_mode;
             }
             render_needed = false;
@@ -219,6 +219,7 @@ pub fn run_with_runtime_coordinator(
             let effect = model.update(AppEvent::StartupReadyTimeout);
             apply_effect_if_needed(
                 &mut terminal,
+                &mut terminal_session,
                 &mut model,
                 runtime_coordinator,
                 &mut external_io,
@@ -232,6 +233,7 @@ pub fn run_with_runtime_coordinator(
             let effect = model.update(timeout_event);
             apply_effect_if_needed(
                 &mut terminal,
+                &mut terminal_session,
                 &mut model,
                 runtime_coordinator,
                 &mut external_io,
@@ -260,6 +262,7 @@ pub fn run_with_runtime_coordinator(
         if apply_terminal_input_actions(
             coalesced_input_actions_with_options(terminal_events, input_coalescing),
             &mut terminal,
+            &mut terminal_session,
             &mut model,
             runtime_coordinator,
             &mut external_io,
@@ -292,6 +295,7 @@ fn apply_model_event_without_effect(model: &mut Model, event: AppEvent, context:
 fn apply_terminal_input_actions(
     actions: Vec<TerminalInputAction>,
     terminal: &mut terminal::TuiTerminal,
+    terminal_session: &mut TerminalSession,
     model: &mut Model,
     runtime_coordinator: &mut impl RuntimeCoordinator,
     external_io: &mut ExternalIoRuntime,
@@ -301,7 +305,14 @@ fn apply_terminal_input_actions(
         match action {
             TerminalInputAction::App(app_event) => {
                 let effect = model.update(app_event);
-                apply_effect_if_needed(terminal, model, runtime_coordinator, external_io, effect)?;
+                apply_effect_if_needed(
+                    terminal,
+                    terminal_session,
+                    model,
+                    runtime_coordinator,
+                    external_io,
+                    effect,
+                )?;
                 changed = true;
             }
             TerminalInputAction::CancelExitConfirmation => {

@@ -65,6 +65,7 @@ mod stream_activity;
 mod style_mode;
 mod styled_text;
 mod terminal_grid;
+mod terminal_lifecycle;
 pub mod terminal_session;
 mod terminal_text;
 #[cfg(test)]

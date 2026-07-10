@@ -355,7 +355,7 @@ mod tests {
     #[test]
     fn transcript_preview_equality_includes_bottom_follow_state() {
         let following = TranscriptPreviewState {
-            transcript: Transcript::new(default_palette()),
+            transcript: Transcript::new(default_palette(), None),
             overlay: TranscriptOverlayState::new(),
             is_following_bottom: true,
         };

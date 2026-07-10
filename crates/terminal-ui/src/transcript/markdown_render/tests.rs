@@ -1,28 +1,30 @@
+use std::path::Path;
+
 use super::{render_markdown_lines, render_markdown_metrics, render_reasoning_markdown_lines};
 use crate::{
     styled_text::{line_plain_text_len, lines_to_ansi_text, lines_to_plain_text},
-    theme::{default_palette, terminal_default_palette},
+    theme::{default_palette, palette_from_background, terminal_default_palette},
     transcript::markdown_highlight::{
         highlight_code_chunks_call_count, reset_highlight_code_chunks_call_count,
     },
 };
-use ratatui::style::Modifier;
+use ratatui::style::{Color, Modifier};
 
 #[test]
 fn render_markdown_uses_codex_style_heading_markers() {
-    let lines = render_markdown_lines("# Overview of the API", 80, default_palette());
+    let lines = render_markdown_lines("# Overview of the API", 80, default_palette(), None);
     assert_eq!(lines_to_plain_text(&lines), "# Overview of the API");
 }
 
 #[test]
 fn render_markdown_removes_emphasis_markers() {
-    let lines = render_markdown_lines("__init__", 20, default_palette());
+    let lines = render_markdown_lines("__init__", 20, default_palette(), None);
     assert_eq!(lines_to_plain_text(&lines), "init");
 }
 
 #[test]
 fn render_markdown_strikethrough_applies_crossed_out_style() {
-    let lines = render_markdown_lines("keep ~~drop~~ now", 80, default_palette());
+    let lines = render_markdown_lines("keep ~~drop~~ now", 80, default_palette(), None);
     let strike_span = lines[0]
         .spans
         .iter()
@@ -42,7 +44,7 @@ fn render_markdown_strikethrough_applies_crossed_out_style() {
 #[test]
 fn render_markdown_blockquote_uses_quote_style() {
     let palette = default_palette();
-    let lines = render_markdown_lines("> quoted text", 80, palette);
+    let lines = render_markdown_lines("> quoted text", 80, palette, None);
 
     assert_eq!(lines_to_plain_text(&lines), "> quoted text");
     for span in &lines[0].spans {
@@ -67,6 +69,7 @@ fn render_markdown_renders_fenced_code_without_fence_markers() {
         "```go\nif err != nil {\n\treturn err\n}\n```",
         20,
         default_palette(),
+        None,
     );
     let rendered = lines_to_plain_text(&lines);
 
@@ -77,7 +80,7 @@ fn render_markdown_renders_fenced_code_without_fence_markers() {
 
 #[test]
 fn render_markdown_preserves_intentional_trailing_blank_line_in_code_block() {
-    let lines = render_markdown_lines("```rust\nfn main() {}\n\n```", 80, default_palette());
+    let lines = render_markdown_lines("```rust\nfn main() {}\n\n```", 80, default_palette(), None);
 
     assert_eq!(lines_to_plain_text(&lines), "fn main() {}\n");
     assert_eq!(lines.len(), 2);
@@ -89,6 +92,7 @@ fn render_markdown_splits_embedded_text_newlines_into_real_lines() {
         "# 简单文档\n这是一个示例 Markdown 文件。\n## 列表\n- 项目一\n- 项目二\n\n```rust\nfn main() {\n    println!(\"Hello, world!\");\n}\n```\n\n[示例链接](https://example.com)",
         80,
         default_palette(),
+        None,
     );
 
     for line in &lines {
@@ -114,6 +118,7 @@ fn render_markdown_preserves_blank_line_between_list_and_following_heading() {
         "- 当前共识：仍待验证。\n\n### 💡 为什么重要？\n1. 算力策略：提示",
         80,
         default_palette(),
+        None,
     );
 
     assert_eq!(
@@ -128,6 +133,7 @@ fn render_markdown_preserves_blank_line_between_heading_and_following_list() {
         "### 1. 构词逻辑\n*   **Q**：取自英文单词 **Question**（问题）。",
         80,
         default_palette(),
+        None,
     );
 
     assert_eq!(
@@ -138,7 +144,12 @@ fn render_markdown_preserves_blank_line_between_heading_and_following_list() {
 
 #[test]
 fn render_markdown_preserves_link_destinations() {
-    let lines = render_markdown_lines("[main.go](<cmd/hunea/main.go>)", 40, default_palette());
+    let lines = render_markdown_lines(
+        "[main.go](<cmd/hunea/main.go>)",
+        40,
+        default_palette(),
+        None,
+    );
     let rendered = lines_to_plain_text(&lines);
 
     assert!(rendered.contains("cmd/hunea/main.go"));
@@ -146,11 +157,11 @@ fn render_markdown_preserves_link_destinations() {
 
 #[test]
 fn render_markdown_local_link_uses_normalized_target_not_label() {
-    let cwd = std::env::current_dir().expect("test should run inside the workspace");
+    let cwd = Path::new("/workspace/hunea");
     let target = cwd.join("src/frontend/tui/transcript/markdown_render.rs");
     let markdown = format!("[custom label](<{}:74:3-76:9>)", target.display());
 
-    let lines = render_markdown_lines(&markdown, 120, default_palette());
+    let lines = render_markdown_lines(&markdown, 120, default_palette(), Some(cwd));
 
     assert_eq!(
         lines_to_plain_text(&lines),
@@ -159,12 +170,28 @@ fn render_markdown_local_link_uses_normalized_target_not_label() {
 }
 
 #[test]
+fn explicit_working_directory_keeps_render_and_metrics_link_shape_identical() {
+    let working_dir = Path::new("/workspace/project");
+    let markdown = "[report](</workspace/project/reports/current.md>)";
+    let palette = default_palette();
+
+    let lines = render_markdown_lines(markdown, 80, palette, Some(working_dir));
+    let metrics = render_markdown_metrics(markdown, 80, palette, Some(working_dir));
+
+    assert_eq!(lines_to_plain_text(&lines), "reports/current.md");
+    assert_eq!(
+        metrics,
+        (lines.len(), lines.iter().map(line_plain_text_len).sum())
+    );
+}
+
+#[test]
 fn render_markdown_file_url_hash_location_is_normalized() {
-    let cwd = std::env::current_dir().expect("test should run inside the workspace");
+    let cwd = Path::new("/workspace/hunea");
     let target = cwd.join("src/frontend/tui/transcript/markdown_render.rs");
     let markdown = format!("[ignored](file://{}#L74C3-L76C9)", target.display());
 
-    let lines = render_markdown_lines(&markdown, 120, default_palette());
+    let lines = render_markdown_lines(&markdown, 120, default_palette(), Some(cwd));
 
     assert_eq!(
         lines_to_plain_text(&lines),
@@ -174,13 +201,13 @@ fn render_markdown_file_url_hash_location_is_normalized() {
 
 #[test]
 fn render_markdown_decodes_percent_encoded_local_link_target() {
-    let cwd = std::env::current_dir().expect("test should run inside the workspace");
+    let cwd = Path::new("/workspace/hunea");
     let markdown = format!(
         "[report](<{}/Example%20Folder/R%C3%A9sum%C3%A9/report.md>)",
         cwd.display()
     );
 
-    let lines = render_markdown_lines(&markdown, 120, default_palette());
+    let lines = render_markdown_lines(&markdown, 120, default_palette(), Some(cwd));
 
     assert_eq!(
         lines_to_plain_text(&lines),
@@ -190,14 +217,14 @@ fn render_markdown_decodes_percent_encoded_local_link_target() {
 
 #[test]
 fn render_markdown_local_file_link_soft_break_before_colon_stays_inline() {
-    let cwd = std::env::current_dir().expect("test should run inside the workspace");
+    let cwd = Path::new("/workspace/hunea");
     let target = cwd.join("README.md");
     let markdown = format!(
         "- [binary](<{}:93>)\n  : core owns the runtime behavior.",
         target.display()
     );
 
-    let lines = render_markdown_lines(&markdown, 120, default_palette());
+    let lines = render_markdown_lines(&markdown, 120, default_palette(), Some(cwd));
 
     assert_eq!(
         lines_to_plain_text(&lines),
@@ -207,7 +234,12 @@ fn render_markdown_local_file_link_soft_break_before_colon_stays_inline() {
 
 #[test]
 fn render_markdown_web_link_keeps_label_and_destination() {
-    let lines = render_markdown_lines("[Example](https://example.com)", 80, default_palette());
+    let lines = render_markdown_lines(
+        "[Example](https://example.com)",
+        80,
+        default_palette(),
+        None,
+    );
 
     assert_eq!(lines_to_plain_text(&lines), "Example (https://example.com)");
 }
@@ -218,6 +250,7 @@ fn render_reasoning_image_alt_text_does_not_close_outer_link() {
         "[![diagram](image.png) docs](https://example.com)",
         80,
         default_palette(),
+        None,
     );
     let rendered = lines_to_plain_text(&lines);
 
@@ -240,7 +273,7 @@ fn render_reasoning_image_alt_text_does_not_close_outer_link() {
 
 #[test]
 fn render_markdown_renders_inline_html_as_literal_text() {
-    let lines = render_markdown_lines("Press <kbd>Ctrl</kbd> now", 80, default_palette());
+    let lines = render_markdown_lines("Press <kbd>Ctrl</kbd> now", 80, default_palette(), None);
 
     assert_eq!(lines_to_plain_text(&lines), "Press <kbd>Ctrl</kbd> now");
 }
@@ -251,6 +284,7 @@ fn render_markdown_renders_block_html_lines_as_literal_text() {
         "<details>\n<summary>More</summary>\n</details>\n\nAfter",
         80,
         default_palette(),
+        None,
     );
     let rendered = lines_to_plain_text(&lines);
 
@@ -266,6 +300,7 @@ fn render_markdown_highlights_known_fenced_code_language() {
         "```rust\nfn main() { let value = 42; }\n```",
         120,
         default_palette(),
+        None,
     );
     let rendered = lines_to_plain_text(&lines);
 
@@ -295,6 +330,7 @@ fn render_markdown_highlights_two_face_extra_language() {
         "```typescript\nconst answer: number = 42;\n```",
         120,
         default_palette(),
+        None,
     );
 
     assert_eq!(lines_to_plain_text(&lines), "const answer: number = 42;");
@@ -314,7 +350,7 @@ fn render_markdown_highlights_two_face_extra_language() {
 
 #[test]
 fn render_markdown_highlighted_fenced_code_does_not_use_block_background() {
-    let lines = render_markdown_lines("```rust\nfn main() {}\n```", 80, default_palette());
+    let lines = render_markdown_lines("```rust\nfn main() {}\n```", 80, default_palette(), None);
 
     assert!(
         lines
@@ -328,7 +364,7 @@ fn render_markdown_highlighted_fenced_code_does_not_use_block_background() {
 #[test]
 fn render_markdown_unknown_fenced_code_language_stays_plain_text() {
     let palette = default_palette();
-    let lines = render_markdown_lines("```not-a-real-language\nhello\n```", 80, palette);
+    let lines = render_markdown_lines("```not-a-real-language\nhello\n```", 80, palette, None);
 
     assert_eq!(lines_to_plain_text(&lines), "hello");
     assert_eq!(lines.len(), 1);
@@ -341,7 +377,7 @@ fn render_markdown_unknown_fenced_code_language_stays_plain_text() {
 #[test]
 fn render_markdown_inline_code_uses_command_accent_foreground() {
     let palette = default_palette();
-    let lines = render_markdown_lines("use `cargo test` first", 80, palette);
+    let lines = render_markdown_lines("use `cargo test` first", 80, palette, None);
     let code_span = lines[0]
         .spans
         .iter()
@@ -359,7 +395,7 @@ fn render_markdown_inline_code_uses_command_accent_foreground() {
 #[test]
 fn render_markdown_inline_math_uses_code_background() {
     let palette = default_palette();
-    let lines = render_markdown_lines("energy $E = mc^2$ now", 80, palette);
+    let lines = render_markdown_lines("energy $E = mc^2$ now", 80, palette, None);
     let math_span = lines[0]
         .spans
         .iter()
@@ -376,7 +412,7 @@ fn render_markdown_inline_math_uses_code_background() {
 #[test]
 fn render_markdown_display_math_uses_literal_code_background() {
     let palette = default_palette();
-    let lines = render_markdown_lines("$$\nE = mc^2\n$$", 80, palette);
+    let lines = render_markdown_lines("$$\nE = mc^2\n$$", 80, palette, None);
 
     assert_eq!(lines_to_plain_text(&lines), "E = mc^2");
     assert!(
@@ -390,14 +426,14 @@ fn render_markdown_display_math_uses_literal_code_background() {
 
 #[test]
 fn render_markdown_does_not_enable_footnote_definitions() {
-    let lines = render_markdown_lines("[^n]: note", 80, default_palette());
+    let lines = render_markdown_lines("[^n]: note", 80, default_palette(), None);
 
     assert_eq!(lines_to_plain_text(&lines), "");
 }
 
 #[test]
 fn render_markdown_keeps_heading_attributes_literal() {
-    let lines = render_markdown_lines("# Title {#custom-id .lead}", 80, default_palette());
+    let lines = render_markdown_lines("# Title {#custom-id .lead}", 80, default_palette(), None);
 
     assert_eq!(lines_to_plain_text(&lines), "# Title {#custom-id .lead}");
 }
@@ -405,7 +441,12 @@ fn render_markdown_keeps_heading_attributes_literal() {
 #[test]
 fn render_markdown_unwraps_markdown_fence_containing_table() {
     let markdown = "```markdown\n| A | B |\n|---|---|\n| 1 | 2 |\n```\n";
-    let rendered = lines_to_plain_text(&render_markdown_lines(markdown, 80, default_palette()));
+    let rendered = lines_to_plain_text(&render_markdown_lines(
+        markdown,
+        80,
+        default_palette(),
+        None,
+    ));
 
     assert!(rendered.contains('━'));
     assert!(
@@ -423,7 +464,12 @@ fn render_markdown_unwraps_markdown_fence_containing_table() {
 #[test]
 fn render_markdown_unwraps_markdown_fence_containing_table_without_outer_pipes() {
     let markdown = "```md\nCol A | Col B | Col C\n--- | --- | ---\nx | y | z\n```\n";
-    let rendered = lines_to_plain_text(&render_markdown_lines(markdown, 80, default_palette()));
+    let rendered = lines_to_plain_text(&render_markdown_lines(
+        markdown,
+        80,
+        default_palette(),
+        None,
+    ));
 
     assert!(rendered.contains('━'));
     assert!(
@@ -441,7 +487,12 @@ fn render_markdown_unwraps_markdown_fence_containing_table_without_outer_pipes()
 #[test]
 fn render_markdown_unwraps_blockquoted_markdown_fence_containing_table() {
     let markdown = "> ```md\n> | A | B |\n> |---|---|\n> | 1 | 2 |\n> ```\n";
-    let rendered = lines_to_plain_text(&render_markdown_lines(markdown, 80, default_palette()));
+    let rendered = lines_to_plain_text(&render_markdown_lines(
+        markdown,
+        80,
+        default_palette(),
+        None,
+    ));
 
     assert!(rendered.lines().all(|line| line.starts_with("> ")));
     assert!(
@@ -452,7 +503,7 @@ fn render_markdown_unwraps_blockquoted_markdown_fence_containing_table() {
 
 #[test]
 fn render_markdown_keeps_markdown_fence_without_table_as_code() {
-    let lines = render_markdown_lines("```markdown\n**bold**\n```", 80, default_palette());
+    let lines = render_markdown_lines("```markdown\n**bold**\n```", 80, default_palette(), None);
 
     assert_eq!(lines_to_plain_text(&lines), "**bold**");
     assert!(
@@ -467,7 +518,7 @@ fn render_markdown_keeps_markdown_fence_without_table_as_code() {
 #[test]
 fn render_markdown_keeps_non_markdown_fence_containing_table_as_code() {
     let markdown = "```rust\n| A | B |\n|---|---|\n| 1 | 2 |\n```";
-    let lines = render_markdown_lines(markdown, 80, default_palette());
+    let lines = render_markdown_lines(markdown, 80, default_palette(), None);
     let rendered = lines_to_plain_text(&lines);
 
     assert_eq!(rendered, "| A | B |\n|---|---|\n| 1 | 2 |");
@@ -481,7 +532,7 @@ fn render_markdown_keeps_non_markdown_fence_containing_table_as_code() {
 fn render_markdown_renders_tables_with_codex_row_separators() {
     let markdown = "| 名称 | 类型 | 版本 | 启用 |\n| --- | --- | ---: | :---: |\n| hunea | 应用 | 0.1.0 | 是 |\n| ratatui | 依赖 | 0.24 | 否 |";
 
-    let lines = render_markdown_lines(markdown, 80, default_palette());
+    let lines = render_markdown_lines(markdown, 80, default_palette(), None);
 
     assert_eq!(
         lines_to_plain_text(&lines),
@@ -503,6 +554,7 @@ fn render_markdown_table_header_uses_table_header_accent() {
         "| Name | Status |\n| --- | --- |\n| hunea | ready |",
         80,
         palette,
+        None,
     );
 
     let header_span = lines[0]
@@ -534,7 +586,7 @@ fn render_markdown_wraps_table_cells_without_box_borders_or_ellipsis() {
     let markdown =
         "| 名称 | 说明 |\n| --- | --- |\n| hunea | 一个基于 Rust 和 Ratatui 的 TUI 客户端 |";
 
-    let lines = render_markdown_lines(markdown, 24, default_palette());
+    let lines = render_markdown_lines(markdown, 24, default_palette(), None);
     let rendered = lines_to_plain_text(&lines);
 
     assert!(
@@ -579,7 +631,7 @@ fn render_markdown_wraps_table_cells_without_box_borders_or_ellipsis() {
 #[test]
 fn render_markdown_table_alignment_respects_markers() {
     let markdown = "| Left | Center | Right |\n|:-----|:------:|------:|\n| a | b | c |";
-    let lines = render_markdown_lines(markdown, 80, default_palette());
+    let lines = render_markdown_lines(markdown, 80, default_palette(), None);
     let rendered = lines_to_plain_text(&lines);
 
     assert!(rendered.contains(" Left"));
@@ -593,7 +645,7 @@ fn render_markdown_table_alignment_respects_markers() {
 #[test]
 fn render_markdown_table_falls_back_to_key_value_records_when_grid_cannot_fit() {
     let markdown = "| c1 | c2 | c3 | c4 | c5 | c6 | c7 | c8 | c9 | c10 |\n|---|---|---|---|---|---|---|---|---|---|\n| 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |";
-    let lines = render_markdown_lines(markdown, 20, default_palette());
+    let lines = render_markdown_lines(markdown, 20, default_palette(), None);
     let rendered = lines_to_plain_text(&lines);
 
     assert!(rendered.contains("c1"));
@@ -609,6 +661,7 @@ fn render_markdown_table_preserves_inline_styles_inside_cells() {
         "| Key | Content |\n| --- | --- |\n| item | [link](https://example.com) **bold** `code` |",
         80,
         palette,
+        None,
     );
     let rendered = lines_to_plain_text(&lines);
 
@@ -658,6 +711,7 @@ fn render_markdown_table_header_style_is_base_for_inline_cell_styles() {
         "| Plain | [Docs](https://example.com) | `Code` |\n| --- | --- | --- |\n| value | value | value |",
         120,
         palette,
+        None,
     );
 
     let plain_header = lines[0]
@@ -693,7 +747,12 @@ fn render_markdown_table_header_style_is_base_for_inline_cell_styles() {
 
 #[test]
 fn render_markdown_table_preserves_escaped_pipe_inside_cell() {
-    let lines = render_markdown_lines("| Text |\n| --- |\n| a \\| b |", 80, default_palette());
+    let lines = render_markdown_lines(
+        "| Text |\n| --- |\n| a \\| b |",
+        80,
+        default_palette(),
+        None,
+    );
     let rendered = lines_to_plain_text(&lines);
 
     assert!(
@@ -709,7 +768,12 @@ fn render_markdown_table_preserves_escaped_pipe_inside_cell() {
 #[test]
 fn render_markdown_table_keeps_spillover_text_outside_table() {
     let markdown = "| A | B |\n| --- | --- |\n| 1 | 2 |\ntrailing paragraph";
-    let rendered = lines_to_plain_text(&render_markdown_lines(markdown, 80, default_palette()));
+    let rendered = lines_to_plain_text(&render_markdown_lines(
+        markdown,
+        80,
+        default_palette(),
+        None,
+    ));
 
     assert!(rendered.contains(" 1"));
     assert!(rendered.ends_with("trailing paragraph"));
@@ -718,7 +782,12 @@ fn render_markdown_table_keeps_spillover_text_outside_table() {
 #[test]
 fn render_markdown_table_keeps_prefixed_html_spillover_outside_table() {
     let markdown = "| A | B |\n| --- | --- |\n| 1 | 2 |\n| HTML follows <div>content</div> |";
-    let rendered = lines_to_plain_text(&render_markdown_lines(markdown, 80, default_palette()));
+    let rendered = lines_to_plain_text(&render_markdown_lines(
+        markdown,
+        80,
+        default_palette(),
+        None,
+    ));
 
     assert!(
         rendered
@@ -737,7 +806,12 @@ fn render_markdown_table_keeps_prefixed_html_spillover_outside_table() {
 #[test]
 fn render_markdown_table_does_not_treat_html_substring_label_as_spillover() {
     let markdown = "| Key | Value |\n| --- | --- |\n| nothtml: | |";
-    let rendered = lines_to_plain_text(&render_markdown_lines(markdown, 80, default_palette()));
+    let rendered = lines_to_plain_text(&render_markdown_lines(
+        markdown,
+        80,
+        default_palette(),
+        None,
+    ));
 
     assert!(
         rendered.lines().any(|line| line.starts_with(" nothtml:")),
@@ -749,7 +823,12 @@ fn render_markdown_table_does_not_treat_html_substring_label_as_spillover() {
 fn render_markdown_table_wraps_path_heavy_narrow_rows_without_truncation() {
     let path = "/home/archie/GoCodes/lumos_rust/crates/terminal-ui/src/transcript/markdown_render/table.rs";
     let markdown = format!("| File | Path |\n| --- | --- |\n| renderer | {path} |");
-    let rendered = lines_to_plain_text(&render_markdown_lines(&markdown, 28, default_palette()));
+    let rendered = lines_to_plain_text(&render_markdown_lines(
+        &markdown,
+        28,
+        default_palette(),
+        None,
+    ));
     let compact_rendered = rendered
         .chars()
         .filter(|char| !char.is_whitespace())
@@ -774,7 +853,12 @@ fn render_markdown_table_wraps_path_heavy_narrow_rows_without_truncation() {
 #[test]
 fn render_markdown_table_falls_back_for_compact_systemic_fragmentation() {
     let markdown = "| Build | Test | Lint | Format |\n| --- | --- | --- | --- |\n| build-pipeline-20260529 | nextest-suite-20260529 | clippy-workspace-20260529 | rustfmt-check-20260529 |";
-    let rendered = lines_to_plain_text(&render_markdown_lines(markdown, 34, default_palette()));
+    let rendered = lines_to_plain_text(&render_markdown_lines(
+        markdown,
+        34,
+        default_palette(),
+        None,
+    ));
 
     for token in [
         "build-pipeline-20260529",
@@ -796,7 +880,12 @@ fn render_markdown_table_falls_back_for_compact_systemic_fragmentation() {
 #[test]
 fn render_markdown_table_inside_blockquote_keeps_quote_prefix() {
     let markdown = "> | A | B |\n> |---|---|\n> | 1 | 2 |";
-    let rendered = lines_to_plain_text(&render_markdown_lines(markdown, 80, default_palette()));
+    let rendered = lines_to_plain_text(&render_markdown_lines(
+        markdown,
+        80,
+        default_palette(),
+        None,
+    ));
 
     assert!(rendered.lines().all(|line| line.starts_with("> ")));
     assert!(rendered.contains("━━━━━"));
@@ -805,7 +894,7 @@ fn render_markdown_table_inside_blockquote_keeps_quote_prefix() {
 #[test]
 fn render_markdown_keeps_non_table_pipe_text_plain() {
     let markdown = "苹果 | 10 | 有货\n香蕉 | 5 | 缺货";
-    let lines = render_markdown_lines(markdown, 80, default_palette());
+    let lines = render_markdown_lines(markdown, 80, default_palette(), None);
 
     assert_eq!(
         lines_to_plain_text(&lines),
@@ -815,14 +904,19 @@ fn render_markdown_keeps_non_table_pipe_text_plain() {
 
 #[test]
 fn render_markdown_renders_task_list_markers() {
-    let lines = render_markdown_lines("- [x] done\n- [ ] todo", 40, default_palette());
+    let lines = render_markdown_lines("- [x] done\n- [ ] todo", 40, default_palette(), None);
 
     assert_eq!(lines_to_plain_text(&lines), "- [x] done\n- [ ] todo");
 }
 
 #[test]
 fn render_markdown_nested_lists_use_codex_style_indent() {
-    let lines = render_markdown_lines("- outer\n  - inner\n    1. ordered", 80, default_palette());
+    let lines = render_markdown_lines(
+        "- outer\n  - inner\n    1. ordered",
+        80,
+        default_palette(),
+        None,
+    );
 
     assert_eq!(
         lines_to_plain_text(&lines),
@@ -832,28 +926,72 @@ fn render_markdown_nested_lists_use_codex_style_indent() {
 
 #[test]
 fn render_markdown_keeps_terminal_default_plain_text_unstyled() {
-    let lines = render_markdown_lines("plain text", 20, terminal_default_palette());
+    let lines = render_markdown_lines("plain text", 20, terminal_default_palette(), None);
     let rendered = lines_to_ansi_text(&lines);
 
     assert_eq!(rendered, "plain text");
 }
 
 #[test]
+fn fenced_code_uses_a_syntax_theme_matching_the_terminal_background() {
+    let markdown = "```rust\npub fn main() { let answer = true; }\n```";
+    let dark_lines = render_markdown_lines(
+        markdown,
+        80,
+        palette_from_background(true, Some(Color::Rgb(18, 24, 32))),
+        None,
+    );
+    let light_lines = render_markdown_lines(
+        markdown,
+        80,
+        palette_from_background(false, Some(Color::Rgb(242, 242, 242))),
+        None,
+    );
+    let dark_foregrounds = syntax_rgb_foregrounds(&dark_lines);
+    let light_foregrounds = syntax_rgb_foregrounds(&light_lines);
+
+    assert!(!dark_foregrounds.is_empty());
+    assert!(!light_foregrounds.is_empty());
+    assert_ne!(dark_foregrounds, light_foregrounds);
+}
+
+#[test]
+fn terminal_default_fenced_code_does_not_emit_syntect_rgb_foregrounds() {
+    let lines = render_markdown_lines(
+        "```rust\npub fn main() { let answer = true; }\n```",
+        80,
+        terminal_default_palette(),
+        None,
+    );
+
+    assert!(syntax_rgb_foregrounds(&lines).is_empty());
+}
+
+fn syntax_rgb_foregrounds(lines: &[ratatui::text::Line<'_>]) -> Vec<Color> {
+    lines
+        .iter()
+        .flat_map(|line| &line.spans)
+        .filter_map(|span| span.style.fg)
+        .filter(|color| matches!(color, Color::Rgb(_, _, _)))
+        .collect()
+}
+
+#[test]
 fn render_markdown_preserves_explicit_edge_blank_lines() {
-    let lines = render_markdown_lines("\nhello\n", 20, default_palette());
+    let lines = render_markdown_lines("\nhello\n", 20, default_palette(), None);
     assert_eq!(lines_to_plain_text(&lines), "\nhello\n");
 }
 
 #[test]
 fn render_markdown_lines_removes_terminal_control_sequences_before_parsing() {
-    let lines = render_markdown_lines("a\u{1b}[31mb\u{1b}[0m", 20, default_palette());
+    let lines = render_markdown_lines("a\u{1b}[31mb\u{1b}[0m", 20, default_palette(), None);
 
     assert_eq!(lines_to_plain_text(&lines), "ab");
 }
 
 #[test]
 fn render_markdown_does_not_insert_blank_row_before_wide_glyph() {
-    let lines = render_markdown_lines("中", 1, default_palette());
+    let lines = render_markdown_lines("中", 1, default_palette(), None);
     assert_eq!(lines_to_plain_text(&lines), "中");
     assert_eq!(lines.len(), 1);
 }
@@ -861,7 +999,7 @@ fn render_markdown_does_not_insert_blank_row_before_wide_glyph() {
 #[test]
 fn render_markdown_uses_cjk_breakpoints_in_mixed_prose() {
     let content = "你好，请你随意阅读一下当前目录下的目录和文件情况，不过最多读 10 个文件即可。我只是在测试我的工具，而不是关心你的分析结果内容";
-    let lines = render_markdown_lines(content, 102, default_palette());
+    let lines = render_markdown_lines(content, 102, default_palette(), None);
 
     assert_eq!(
         lines_to_plain_text(&lines),
@@ -884,12 +1022,12 @@ fn main() {
     let width = 32;
     let palette = default_palette();
 
-    let rendered = render_markdown_lines(markdown, width, palette);
+    let rendered = render_markdown_lines(markdown, width, palette, None);
     let rendered_line_count = rendered.len();
     let rendered_plain_text_len = rendered.iter().map(line_plain_text_len).sum::<usize>();
 
     reset_highlight_code_chunks_call_count();
-    let metrics = render_markdown_metrics(markdown, width, palette);
+    let metrics = render_markdown_metrics(markdown, width, palette, None);
 
     assert_eq!(metrics, (rendered_line_count, rendered_plain_text_len));
     assert_eq!(
@@ -899,7 +1037,7 @@ fn main() {
     );
 
     reset_highlight_code_chunks_call_count();
-    let _ = render_markdown_lines(markdown, width, palette);
+    let _ = render_markdown_lines(markdown, width, palette, None);
     assert!(
         highlight_code_chunks_call_count() > 0,
         "visible rendering should still apply syntax highlighting"
@@ -921,6 +1059,11 @@ fn render_markdown_perf_smoke() {
             .join("\n");
 
     for _ in 0..128 {
-        black_box(render_markdown_lines(&markdown, 72, default_palette()));
+        black_box(render_markdown_lines(
+            &markdown,
+            72,
+            default_palette(),
+            None,
+        ));
     }
 }

@@ -15,7 +15,7 @@ use runtime_domain::{
     prompt_assembly::PromptSourceOrigin,
     session::{TranscriptSkillBinding, TranscriptUserAttachment},
 };
-use std::rc::Rc;
+use std::{path::PathBuf, rc::Rc};
 
 #[test]
 fn assistant_plain_output_preserves_the_raw_command_text() {
@@ -24,6 +24,58 @@ fn assistant_plain_output_preserves_the_raw_command_text() {
     assert_eq!(
         item.render_plain_text(6, default_palette()),
         "go\ntest\n./..."
+    );
+}
+
+#[test]
+fn assistant_projection_materializes_pages_with_the_message_working_directory() {
+    let markdown = format!(
+        "# Files\n\n[report](/workspace/project/reports/current.md)\n\n{}",
+        "- projected item\n".repeat(320)
+    );
+    let item = MessageItem::new_with_style_mode_and_source(
+        Sender::Assistant,
+        markdown,
+        StyleMode::Cx,
+        None,
+        Some(Rc::from(PathBuf::from("/workspace/project"))),
+    );
+    let projection = item
+        .render_assistant_projection(80, default_palette())
+        .expect("long structured Markdown should use assistant projection");
+    let lines = (0..projection.line_count())
+        .filter_map(|index| projection.plain_line_at(index))
+        .collect::<Vec<_>>();
+
+    assert!(lines.iter().any(|line| line == "reports/current.md"));
+    assert!(
+        lines
+            .iter()
+            .all(|line| line != "/workspace/project/reports/current.md")
+    );
+}
+
+#[test]
+fn assistant_render_cache_key_ignores_transcript_owned_working_directory() {
+    let item_in_first_transcript = MessageItem::new_with_style_mode_and_source(
+        Sender::Assistant,
+        "[report](reports/current.md)",
+        StyleMode::Cx,
+        None,
+        Some(Rc::from(PathBuf::from("/workspace/first"))),
+    );
+    let item_in_second_transcript = MessageItem::new_with_style_mode_and_source(
+        Sender::Assistant,
+        "[report](reports/current.md)",
+        StyleMode::Cx,
+        None,
+        Some(Rc::from(PathBuf::from("/workspace/second"))),
+    );
+
+    assert_eq!(
+        item_in_first_transcript.render_cache_key(),
+        item_in_second_transcript.render_cache_key(),
+        "working_dir is immutable transcript context, not message identity"
     );
 }
 
@@ -81,6 +133,7 @@ fn user_render_colors_entire_bound_skill_token_with_command_accent() {
             }],
             Vec::new(),
         )),
+        None,
     );
 
     let lines = item.render_lines(40, palette);
@@ -122,6 +175,7 @@ fn user_render_colors_image_placeholder_with_command_accent_on_later_line() {
                 )],
             ),
         ),
+        None,
     );
 
     let lines = item.render_lines(40, palette);

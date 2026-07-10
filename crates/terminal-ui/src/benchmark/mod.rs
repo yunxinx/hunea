@@ -313,7 +313,7 @@ pub fn render_markdown_plain_text(
     width: usize,
     palette: TerminalPalette,
 ) -> TextRenderSummary {
-    summarize_text_lines(&render_markdown_lines(markdown, width, palette))
+    summarize_text_lines(&render_markdown_lines(markdown, width, palette, None))
 }
 
 /// `wrap_prompt_visual_lines_summary` 运行 prompt wrap 并返回稳定摘要。
@@ -635,7 +635,7 @@ pub fn format_phase_a_baseline_summary(summary: &PhaseABaselineSummary) -> Strin
 impl TranscriptBench {
     /// `new` 创建一个与 Go transcript benchmark 场景对齐的 transcript bench。
     pub fn new(item_count: usize, width: u16, palette: TerminalPalette) -> Self {
-        let mut transcript = Transcript::new(palette);
+        let mut transcript = Transcript::new(palette, None);
         transcript.set_gap(1);
         transcript.set_width(width.max(1));
 

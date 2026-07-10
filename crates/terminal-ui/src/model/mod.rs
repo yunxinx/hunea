@@ -1,7 +1,7 @@
 //! TUI model 状态与子域装配。
 
-use std::rc::Rc;
 use std::time::Instant;
+use std::{path::Path, rc::Rc};
 
 use ratatui::{
     buffer::Buffer,
@@ -64,6 +64,7 @@ use state::{DocumentRuntimeState, NoticeState, SelectionRuntimeState};
 /// `Model` 表示交互式 TUI 应用的状态。
 #[derive(Debug, Clone)]
 pub struct Model {
+    pub(super) working_dir: Option<Rc<Path>>,
     pub(super) startup_banner_options: StartupBannerOptions,
     pub(super) startup_banner_entrance: StartupBannerEntranceState,
     pub(super) style_mode: StyleMode,
@@ -174,6 +175,7 @@ impl Model {
         options: ModelOptions,
     ) -> Self {
         let palette = default_palette();
+        let working_dir = options.working_dir.map(Rc::<Path>::from);
         let style_mode = options.style_mode.normalized();
         let status_line_items = options.status_line_items;
         let status_line_2_items = options.status_line_2_items;
@@ -183,7 +185,12 @@ impl Model {
                 .as_ref()
                 .map(|selection| selection.model_id.clone());
         }
-        let mut transcript = Transcript::new(palette);
+        if startup_banner_options.work_dir.is_none() {
+            startup_banner_options.work_dir = working_dir
+                .as_deref()
+                .map(|path| path.display().to_string());
+        }
+        let mut transcript = Transcript::new(palette, working_dir.clone());
         transcript.set_gap(1);
         transcript.append_startup_banner(startup_banner_options.clone());
         let transcript_render = Rc::new(index_only_render_result(
@@ -220,6 +227,7 @@ impl Model {
                 });
 
         Self {
+            working_dir,
             startup_banner_options,
             startup_banner_entrance: StartupBannerEntranceState::default(),
             style_mode,
@@ -483,7 +491,7 @@ impl Model {
 
     pub(crate) fn reset_to_initial_tui_state(&mut self) {
         self.startup_banner_entrance.complete();
-        let mut transcript = Transcript::new(self.palette);
+        let mut transcript = Transcript::new(self.palette, self.working_dir.clone());
         transcript.set_gap(1);
         if self.has_window {
             transcript.set_width(self.width);

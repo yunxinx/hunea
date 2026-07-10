@@ -9,7 +9,8 @@ use runtime_domain::{
 };
 
 use super::{
-    AppEvent, Model, ModelOptions, STARTUP_PROBE_TIMEOUT, StartupBannerOptions, StyleMode, theme,
+    AppEvent, Model, ModelOptions, STARTUP_PROBE_TIMEOUT, StartupBannerOptions, StyleMode,
+    transcript::prewarm_markdown_highlighting,
 };
 
 mod conversation;
@@ -150,21 +151,17 @@ pub fn run_with_runtime_coordinator(
     options: ModelOptions,
     runtime_coordinator: &mut impl RuntimeCoordinator,
 ) -> Result<Model> {
+    spawn_markdown_highlighting_prewarm();
     let mut model = Model::new_with_options(startup_banner_options, options);
 
     let (mut terminal, mut terminal_session) = TerminalSession::enter()?;
 
     let background_probe = terminal_probe::query_background(STARTUP_PROBE_TIMEOUT);
-    if let Some(detection) = startup_palette_detection(background_probe) {
-        apply_model_event_without_effect(
-            &mut model,
-            AppEvent::DetectedPalette {
-                palette: detection.palette,
-                has_dark_background: detection.has_dark_background,
-            },
-            "startup palette detection",
-        );
-    }
+    apply_model_event_without_effect(
+        &mut model,
+        startup_palette_event(background_probe),
+        "startup palette detection",
+    );
     let area = terminal.size()?;
     apply_model_event_without_effect(
         &mut model,
@@ -186,7 +183,6 @@ pub fn run_with_runtime_coordinator(
         model.show_toast(crate::toast::ToastSeverity::Error, message);
     }
 
-    let startup_deadline = Instant::now() + STARTUP_PROBE_TIMEOUT;
     let mut render_needed = true;
     let mut mouse_mode = TerminalMouseMode::for_mouse_capture(true);
     let mut external_io = ExternalIoRuntime::new();
@@ -215,20 +211,6 @@ pub fn run_with_runtime_coordinator(
         }
 
         let now = Instant::now();
-        if !model.has_palette() && now >= startup_deadline {
-            let effect = model.update(AppEvent::StartupReadyTimeout);
-            apply_effect_if_needed(
-                &mut terminal,
-                &mut terminal_session,
-                &mut model,
-                runtime_coordinator,
-                &mut external_io,
-                effect,
-            )?;
-            render_needed = true;
-            continue;
-        }
-
         if let Some(timeout_event) = model.timeout_event(now) {
             let effect = model.update(timeout_event);
             apply_effect_if_needed(
@@ -245,8 +227,7 @@ pub fn run_with_runtime_coordinator(
 
         let has_background_work =
             runtime_coordinator.has_background_runtime() || external_io.has_pending_work();
-        let wait_plan =
-            event_pipeline::terminal_wait_plan(&model, startup_deadline, now, has_background_work);
+        let wait_plan = event_pipeline::terminal_wait_plan(&model, now, has_background_work);
         let first_event = match wait_for_terminal_event(wait_plan)? {
             Some(event) => event,
             None => {
@@ -276,12 +257,23 @@ pub fn run_with_runtime_coordinator(
     Ok(model)
 }
 
-fn startup_palette_detection(
+fn spawn_markdown_highlighting_prewarm() {
+    let _ = std::thread::Builder::new()
+        .name("hunea-syntax-prewarm".to_string())
+        .spawn(prewarm_markdown_highlighting);
+}
+
+fn startup_palette_event(
     background_probe: terminal_probe::TerminalBackgroundProbeResult,
-) -> Option<theme::PaletteDetection> {
-    background_probe
-        .background
-        .map(palette_detection_from_background)
+) -> AppEvent {
+    let Some(background) = background_probe.background else {
+        return AppEvent::StartupReadyTimeout;
+    };
+    let detection = palette_detection_from_background(background);
+    AppEvent::DetectedPalette {
+        palette: detection.palette,
+        has_dark_background: detection.has_dark_background,
+    }
 }
 
 fn apply_model_event_without_effect(model: &mut Model, event: AppEvent, context: &str) {

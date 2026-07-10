@@ -1,11 +1,9 @@
-use std::{
-    ops::Range,
-    path::{Path, PathBuf},
-};
+use std::{ops::Range, path::Path};
 
 use crate::{
     theme::{
-        TerminalPalette, command_accent_text_style, quote_text_style, table_header_text_style,
+        TerminalColorCapability, TerminalPalette, command_accent_text_style, quote_text_style,
+        table_header_text_style,
     },
     transcript::{
         markdown_blocks::{MarkdownBlockKind, should_insert_markdown_block_spacing},
@@ -75,9 +73,9 @@ pub(super) enum ImageRenderMode {
     AltTextOnly,
 }
 
-pub(super) struct MarkdownRenderer {
+pub(super) struct MarkdownRenderer<'cwd> {
     palette: TerminalPalette,
-    cwd: Option<PathBuf>,
+    cwd: Option<&'cwd Path>,
     width: usize,
     should_highlight_code: bool,
     image_render_mode: ImageRenderMode,
@@ -96,14 +94,14 @@ pub(super) struct MarkdownRenderer {
     pending_spacing_after: Option<MarkdownBlockKind>,
 }
 
-impl MarkdownRenderer {
-    pub(super) fn new(palette: TerminalPalette, cwd: Option<&Path>, width: usize) -> Self {
+impl<'cwd> MarkdownRenderer<'cwd> {
+    pub(super) fn new(palette: TerminalPalette, cwd: Option<&'cwd Path>, width: usize) -> Self {
         Self::new_with_options(palette, cwd, width, true, ImageRenderMode::Link)
     }
 
     pub(super) fn new_reasoning(
         palette: TerminalPalette,
-        cwd: Option<&Path>,
+        cwd: Option<&'cwd Path>,
         width: usize,
     ) -> Self {
         Self::new_with_options(palette, cwd, width, true, ImageRenderMode::AltTextOnly)
@@ -111,7 +109,7 @@ impl MarkdownRenderer {
 
     pub(super) fn new_for_metrics(
         palette: TerminalPalette,
-        cwd: Option<&Path>,
+        cwd: Option<&'cwd Path>,
         width: usize,
     ) -> Self {
         Self::new_with_options(palette, cwd, width, false, ImageRenderMode::Link)
@@ -119,7 +117,7 @@ impl MarkdownRenderer {
 
     pub(super) fn new_reasoning_for_metrics(
         palette: TerminalPalette,
-        cwd: Option<&Path>,
+        cwd: Option<&'cwd Path>,
         width: usize,
     ) -> Self {
         Self::new_with_options(palette, cwd, width, false, ImageRenderMode::AltTextOnly)
@@ -127,14 +125,14 @@ impl MarkdownRenderer {
 
     fn new_with_options(
         palette: TerminalPalette,
-        cwd: Option<&Path>,
+        cwd: Option<&'cwd Path>,
         width: usize,
         should_highlight_code: bool,
         image_render_mode: ImageRenderMode,
     ) -> Self {
         Self {
             palette,
-            cwd: cwd.map(Path::to_path_buf),
+            cwd,
             width: width.max(1),
             should_highlight_code,
             image_render_mode,
@@ -237,17 +235,14 @@ impl MarkdownRenderer {
             Tag::Link { dest_url, .. } => self.link_stack.push(LinkState {
                 destination: dest_url.to_string(),
                 rendered_text: String::new(),
-                local_target_display: render_local_link_target(&dest_url, self.cwd.as_deref()),
+                local_target_display: render_local_link_target(&dest_url, self.cwd),
             }),
             Tag::Image { dest_url, .. } => {
                 if matches!(self.image_render_mode, ImageRenderMode::Link) {
                     self.link_stack.push(LinkState {
                         destination: dest_url.to_string(),
                         rendered_text: String::new(),
-                        local_target_display: render_local_link_target(
-                            &dest_url,
-                            self.cwd.as_deref(),
-                        ),
+                        local_target_display: render_local_link_target(&dest_url, self.cwd),
                     });
                 }
             }
@@ -415,8 +410,8 @@ impl MarkdownRenderer {
             let highlighted = self
                 .should_highlight_code
                 .then(|| {
-                    highlight_code_chunks(&code, &lang, self.highlighted_code_style()).map(
-                        |lines| {
+                    highlight_code_chunks(&code, &lang, self.highlighted_code_style(), self.palette)
+                        .map(|lines| {
                             lines
                                 .into_iter()
                                 .map(|line| {
@@ -428,8 +423,7 @@ impl MarkdownRenderer {
                                         .collect::<Vec<_>>()
                                 })
                                 .collect::<Vec<_>>()
-                        },
-                    )
+                        })
                 })
                 .flatten();
 
@@ -844,7 +838,7 @@ impl MarkdownRenderer {
             return self.quote_style();
         }
 
-        if self.palette.uses_terminal_default_colors() {
+        if self.palette.color_capability() == TerminalColorCapability::TerminalDefault {
             Style::new()
         } else {
             Style::new().fg(self.palette.main)
@@ -852,7 +846,7 @@ impl MarkdownRenderer {
     }
 
     fn secondary_style(&self) -> Style {
-        if self.palette.uses_terminal_default_colors() {
+        if self.palette.color_capability() == TerminalColorCapability::TerminalDefault {
             Style::new()
         } else {
             Style::new().fg(self.palette.secondary)
@@ -864,7 +858,7 @@ impl MarkdownRenderer {
     }
 
     fn code_style(&self) -> Style {
-        if self.palette.uses_terminal_default_colors() {
+        if self.palette.color_capability() == TerminalColorCapability::TerminalDefault {
             Style::new()
         } else {
             let mut style = Style::new().fg(self.palette.main);
@@ -881,7 +875,7 @@ impl MarkdownRenderer {
     }
 
     fn highlighted_code_style(&self) -> Style {
-        if self.palette.uses_terminal_default_colors() {
+        if self.palette.color_capability() == TerminalColorCapability::TerminalDefault {
             Style::new()
         } else {
             Style::new().fg(self.palette.main)

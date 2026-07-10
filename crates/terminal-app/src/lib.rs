@@ -167,6 +167,7 @@ pub fn run_with_writer<W: Write>(
         load_models_and_phrases(working_dir, data_dir_resolution)?;
     let mut model_options =
         model_options_from_config_and_models(tui_config, &loaded_models, &loaded_phrases);
+    model_options.working_dir = working_dir.map(std::path::Path::to_path_buf);
     let mut runtime_options = AppRuntimeOptions {
         loaded_models: loaded_models.clone(),
         hunea_config_dir: data_dir_resolution.config_dir().to_path_buf(),
@@ -211,6 +212,7 @@ pub fn run_with_config_writer<W: Write>(
         load_models_and_phrases(working_dir, data_dir_resolution)?;
     let mut model_options =
         model_options_from_app_config_and_models(config, &loaded_models, &loaded_phrases);
+    model_options.working_dir = working_dir.map(std::path::Path::to_path_buf);
     let mut runtime_options =
         runtime_options_from_app_config_and_models(config, &loaded_models, data_dir_resolution);
     attach_default_session_persistence(

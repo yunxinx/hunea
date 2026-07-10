@@ -1106,7 +1106,7 @@ fn standard_benchmark_fast_estimates_match_exact_line_counts() {
 
     for index in 0..30 {
         let (sender, content) = standard_benchmark_message(index);
-        let mut transcript = Transcript::new(palette);
+        let mut transcript = Transcript::new(palette, None);
         transcript.set_gap(0);
         transcript.set_width(width);
         transcript.append_message_with_style_mode(sender, content, StyleMode::Cx);

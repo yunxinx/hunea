@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use ratatui::text::Line;
 
 use crate::{
@@ -20,9 +22,10 @@ pub(super) fn render_assistant_message(
     content: &str,
     width: u16,
     palette: TerminalPalette,
+    working_dir: Option<&Path>,
 ) -> Vec<Line<'static>> {
     let width = assistant_message_content_width(width);
-    let rendered = render_markdown_lines(content, width, palette);
+    let rendered = render_markdown_lines(content, width, palette, working_dir);
     if rendered.is_empty() {
         return wrap_assistant_text(content, width, 0)
             .into_iter()
@@ -37,6 +40,7 @@ pub(super) fn render_assistant_message_metrics(
     content: &str,
     width: u16,
     palette: TerminalPalette,
+    working_dir: Option<&Path>,
 ) -> (usize, usize) {
     let width = assistant_message_content_width(width);
     if !content.contains('\t')
@@ -45,7 +49,7 @@ pub(super) fn render_assistant_message_metrics(
         return metrics.into_tuple();
     }
 
-    let metrics = render_markdown_metrics(content, width, palette);
+    let metrics = render_markdown_metrics(content, width, palette, working_dir);
     if metrics.0 > 0 {
         return metrics;
     }
@@ -59,15 +63,16 @@ pub(super) fn estimate_assistant_message_metrics_fast(
     width: u16,
     palette: TerminalPalette,
     previous_metrics: Option<TranscriptItemMetrics>,
+    working_dir: Option<&Path>,
 ) -> TranscriptFastEstimate {
     let width = assistant_message_content_width(width);
     let uses_tab_exact_estimate = content.contains('\t');
     let (content_line_count, estimated_char_len) = if uses_tab_exact_estimate {
-        let metrics = estimate_markdown_metrics_for_tabs(content, width, palette);
+        let metrics = estimate_markdown_metrics_for_tabs(content, width, palette, working_dir);
         if metrics.0 > 0 {
             metrics
         } else {
-            let rendered = render_markdown_lines(content, width, palette);
+            let rendered = render_markdown_lines(content, width, palette, working_dir);
             (rendered.len().max(1), lines_to_plain_text(&rendered).len())
         }
     } else if let Some(metrics) = estimate_common_markdown_metrics_fast(content, width) {

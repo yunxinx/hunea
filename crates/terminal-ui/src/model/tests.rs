@@ -24,6 +24,7 @@ use runtime_domain::prompt_assembly::{
     PromptAssemblyManagerSnapshot, PromptAssemblySelectionState,
 };
 use runtime_domain::provider::ProviderKind;
+use runtime_domain::session::{TranscriptReplayItem, TranscriptReplayRole};
 use std::path::{Path, PathBuf};
 
 mod message_history;
@@ -55,6 +56,105 @@ fn progressive_exactization_fixture() -> Model {
     model.set_palette(default_palette(), true);
     model.sync_transcript_render();
     model
+}
+
+#[test]
+fn model_working_directory_drives_banner_and_transcript_across_reset() {
+    let working_dir = PathBuf::from("/workspace/project");
+    let mut model = Model::new_with_options(
+        StartupBannerOptions::default(),
+        ModelOptions {
+            working_dir: Some(working_dir.clone()),
+            ..ModelOptions::default()
+        },
+    );
+
+    assert_eq!(
+        model.startup_banner_options.work_dir.as_deref(),
+        Some("/workspace/project")
+    );
+    assert_model_transcript_uses_working_directory(&mut model);
+
+    model.reset_to_initial_tui_state();
+    assert_model_transcript_uses_working_directory(&mut model);
+}
+
+#[test]
+fn explicit_startup_banner_directory_overrides_model_working_directory_copy() {
+    let model = Model::new_with_options(
+        StartupBannerOptions {
+            work_dir: Some("custom banner directory".to_string()),
+            ..StartupBannerOptions::default()
+        },
+        ModelOptions {
+            working_dir: Some(PathBuf::from("/workspace/project")),
+            ..ModelOptions::default()
+        },
+    );
+
+    assert_eq!(
+        model.startup_banner_options.work_dir.as_deref(),
+        Some("custom banner directory")
+    );
+}
+
+fn assert_model_transcript_uses_working_directory(model: &mut Model) {
+    model.transcript_mut().clear();
+    model.transcript_mut().append_message(
+        Sender::Assistant,
+        "[report](</workspace/project/reports/current.md>)",
+    );
+
+    assert_eq!(
+        model.transcript_plain_items(),
+        vec!["reports/current.md".to_string()]
+    );
+    assert_eq!(
+        model.terminal_replay_items(false),
+        vec!["reports/current.md".to_string()]
+    );
+}
+
+#[test]
+fn reasoning_markdown_uses_the_model_working_directory() {
+    let mut model = Model::new_with_options(
+        StartupBannerOptions::default(),
+        ModelOptions {
+            working_dir: Some(PathBuf::from("/workspace/project")),
+            ..ModelOptions::default()
+        },
+    );
+    model.transcript_mut().clear();
+    model.transcript_mut().append_reasoning_message(
+        "[report](</workspace/project/reports/current.md>)",
+        ReasoningDisplayMode::Expanded,
+        None,
+    );
+
+    assert_eq!(
+        model.transcript_plain_items(),
+        vec!["reports/current.md".to_string()]
+    );
+}
+
+#[test]
+fn replay_transcripts_inherit_the_model_working_directory() {
+    let model = Model::new_with_options(
+        StartupBannerOptions::default(),
+        ModelOptions {
+            working_dir: Some(PathBuf::from("/workspace/project")),
+            ..ModelOptions::default()
+        },
+    );
+    let transcript = model.transcript_from_replay_items([TranscriptReplayItem::Message {
+        role: TranscriptReplayRole::Assistant,
+        content: "[report](</workspace/project/reports/current.md>)".to_string(),
+    }]);
+
+    assert_eq!(
+        transcript.plain_items(),
+        vec!["reports/current.md".to_string()]
+    );
 }
 
 #[test]

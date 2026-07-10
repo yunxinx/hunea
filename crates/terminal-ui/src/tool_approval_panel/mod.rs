@@ -258,9 +258,12 @@ fn header_line(model: &Model) -> Line<'static> {
 fn append_command_lines(model: &Model, width: usize, lines: &mut Vec<Line<'static>>) {
     let command_width = width.saturating_sub(2).max(1);
     let base_style = primary_text_style(model.palette).add_modifier(Modifier::BOLD);
-    if let Some(highlighted) =
-        highlight_code_chunks(&model.tool_approval_panel.title, "bash", base_style)
-    {
+    if let Some(highlighted) = highlight_code_chunks(
+        &model.tool_approval_panel.title,
+        "bash",
+        base_style,
+        model.palette,
+    ) {
         let command_lines = wrap_highlight_chunks(&highlighted, command_width);
         if command_lines.is_empty() {
             lines.push(Line::styled("  ", base_style));

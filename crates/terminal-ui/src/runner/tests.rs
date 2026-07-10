@@ -15,7 +15,7 @@ use crate::{
     AppEffect, AppEvent, ReasoningDisplayMode, Sender, StatusLineItem,
     runtime::RuntimeEventApply,
     test_helpers::{branch_choice, render_model_buffer, rendered_rows},
-    theme::default_palette,
+    theme::{TerminalBackgroundColor, TerminalColorCapability, default_palette},
     transcript::TranscriptItem,
 };
 use crossterm::event::{
@@ -2120,10 +2120,38 @@ fn ready_input_batch_coalesces_preview_wheel_burst_to_single_page_delta() {
 }
 
 #[test]
-fn startup_probe_without_background_leaves_palette_for_startup_timeout() {
-    assert!(
-        startup_palette_detection(terminal_probe::TerminalBackgroundProbeResult::unavailable())
-            .is_none()
+fn startup_probe_without_background_immediately_selects_terminal_default_palette() {
+    let event = startup_palette_event(terminal_probe::TerminalBackgroundProbeResult::unavailable());
+    assert_eq!(event, AppEvent::StartupReadyTimeout);
+
+    let mut model = Model::new(StartupBannerOptions::default());
+    assert_eq!(model.update(event), None);
+    assert!(model.has_palette());
+    assert_eq!(
+        model.palette().color_capability(),
+        TerminalColorCapability::TerminalDefault
+    );
+}
+
+#[test]
+fn startup_probe_with_background_immediately_selects_explicit_palette() {
+    let event = startup_palette_event(terminal_probe::TerminalBackgroundProbeResult {
+        background: Some(TerminalBackgroundColor::from_rgb(18, 24, 32)),
+    });
+    assert!(matches!(
+        &event,
+        AppEvent::DetectedPalette {
+            palette,
+            has_dark_background: true,
+        } if palette.color_capability() == TerminalColorCapability::ExplicitRgb
+    ));
+
+    let mut model = Model::new(StartupBannerOptions::default());
+    assert_eq!(model.update(event), None);
+    assert!(model.has_palette());
+    assert_eq!(
+        model.palette().color_capability(),
+        TerminalColorCapability::ExplicitRgb
     );
 }
 

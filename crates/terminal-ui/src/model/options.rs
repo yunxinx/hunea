@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use runtime_domain::{
     model_catalog::{ModelCatalog, ModelSelection},
     phrases::StatusPhraseOrder,
@@ -24,6 +26,7 @@ pub enum EscRewindMode {
 /// `ModelOptions` 表示创建 TUI 模型时可配置的样式与状态行选项。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelOptions {
+    pub working_dir: Option<PathBuf>,
     pub style_mode: StyleMode,
     pub status_line_items: Vec<StatusLineItem>,
     pub status_line_2_items: Vec<StatusLineItem>,
@@ -54,6 +57,7 @@ pub struct ModelOptions {
 impl Default for ModelOptions {
     fn default() -> Self {
         Self {
+            working_dir: None,
             style_mode: StyleMode::default(),
             status_line_items: Vec::new(),
             status_line_2_items: Vec::new(),

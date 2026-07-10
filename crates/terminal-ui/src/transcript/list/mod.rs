@@ -2,6 +2,7 @@
 
 use std::{
     collections::{BTreeSet, HashMap},
+    path::Path,
     rc::Rc,
     time::{Duration, Instant},
 };
@@ -60,6 +61,7 @@ pub(crate) enum TranscriptItem {
 #[derive(Debug, Clone)]
 pub(crate) struct Transcript {
     items: Rc<Vec<Rc<TranscriptItem>>>,
+    working_dir: Option<Rc<Path>>,
     gap: usize,
     width: u16,
     palette: TerminalPalette,
@@ -73,6 +75,7 @@ pub(crate) struct Transcript {
 impl PartialEq for Transcript {
     fn eq(&self, other: &Self) -> bool {
         self.items == other.items
+            && self.working_dir == other.working_dir
             && self.gap == other.gap
             && self.width == other.width
             && self.palette == other.palette
@@ -85,9 +88,10 @@ impl Eq for Transcript {}
 
 impl Transcript {
     /// `new` 创建一个空 transcript。
-    pub(crate) fn new(palette: TerminalPalette) -> Self {
+    pub(crate) fn new(palette: TerminalPalette, working_dir: Option<Rc<Path>>) -> Self {
         Self {
             items: Rc::new(Vec::new()),
+            working_dir,
             gap: 1,
             width: DEFAULT_RENDER_WIDTH as u16,
             palette,
@@ -145,7 +149,7 @@ impl Transcript {
     /// `append_message` 追加一条消息项。
     #[cfg(test)]
     pub(crate) fn append_message(&mut self, sender: Sender, content: impl Into<String>) {
-        self.push_item(TranscriptItem::Message(MessageItem::new(sender, content)));
+        self.append_message_with_style_mode(sender, content, StyleMode::Cx);
     }
 
     /// `append_message_with_style_mode` 追加一条带样式模式的消息项。
@@ -172,6 +176,7 @@ impl Transcript {
                 content,
                 style_mode,
                 source_message,
+                self.working_dir.clone(),
             ),
         ));
     }
@@ -212,7 +217,8 @@ impl Transcript {
             return;
         }
 
-        let mut item = ReasoningMessageItem::new(content, display_mode, duration);
+        let mut item =
+            ReasoningMessageItem::new(content, display_mode, duration, self.working_dir.clone());
         let _ = item.set_render_mode(self.reasoning_render_mode);
         self.push_item(TranscriptItem::Reasoning(item));
     }

@@ -654,7 +654,7 @@ impl ToolResultItem {
         &self,
         content_line: &str,
         width: usize,
-        _palette: TerminalPalette,
+        palette: TerminalPalette,
     ) -> Vec<Vec<Span<'static>>> {
         let Some(parsed) = ParsedToolResultLine::parse(content_line) else {
             return self.wrap_plain_content(content_line, width);
@@ -664,7 +664,7 @@ impl ToolResultItem {
             return self.wrap_plain_result_content(&parsed.non_shell_display_text(), width);
         }
 
-        self.wrap_shell_result_content(parsed, width)
+        self.wrap_shell_result_content(parsed, width, palette)
     }
 
     fn wrap_plain_content(&self, content_line: &str, width: usize) -> Vec<Vec<Span<'static>>> {
@@ -689,6 +689,7 @@ impl ToolResultItem {
         &self,
         parsed: ParsedToolResultLine<'_>,
         width: usize,
+        palette: TerminalPalette,
     ) -> Vec<Vec<Span<'static>>> {
         let mut chunks = vec![HighlightChunk {
             text: parsed.verb.to_string(),
@@ -700,22 +701,23 @@ impl ToolResultItem {
                 text: " ".to_string(),
                 style: Style::new(),
             });
-            chunks.extend(self.shell_command_chunks(parsed.body));
+            chunks.extend(self.shell_command_chunks(parsed.body, palette));
         }
 
         wrap_highlight_chunks(&[chunks], width)
     }
 
-    fn shell_command_chunks(&self, command: &str) -> Vec<HighlightChunk> {
-        self.shell_command_chunks_with_style(command, Style::new())
+    fn shell_command_chunks(&self, command: &str, palette: TerminalPalette) -> Vec<HighlightChunk> {
+        self.shell_command_chunks_with_style(command, Style::new(), palette)
     }
 
     fn shell_command_chunks_with_style(
         &self,
         command: &str,
         base_style: Style,
+        palette: TerminalPalette,
     ) -> Vec<HighlightChunk> {
-        highlight_code_chunks(command, "bash", base_style)
+        highlight_code_chunks(command, "bash", base_style, palette)
             .map(|highlighted| highlighted.into_iter().flatten().collect::<Vec<_>>())
             .filter(|chunks| !chunks.is_empty())
             .unwrap_or_else(|| {
@@ -869,7 +871,7 @@ impl ToolResultItem {
                 },
             ];
             if looks_like_shell_command(&title) {
-                chunks.extend(self.shell_command_chunks(&title));
+                chunks.extend(self.shell_command_chunks(&title, palette));
             } else {
                 chunks.push(HighlightChunk {
                     text: title,
@@ -881,7 +883,7 @@ impl ToolResultItem {
 
         if let Some(command) = execute_tool_call_shell_command(call) {
             if looks_like_shell_command(&command) {
-                return self.shell_command_chunks_with_style(&command, title_style);
+                return self.shell_command_chunks_with_style(&command, title_style, palette);
             }
 
             return vec![HighlightChunk {
@@ -891,7 +893,7 @@ impl ToolResultItem {
         }
 
         if looks_like_shell_command(&title) {
-            return self.shell_command_chunks_with_style(&title, title_style);
+            return self.shell_command_chunks_with_style(&title, title_style, palette);
         }
 
         vec![HighlightChunk {
@@ -914,7 +916,7 @@ impl ToolResultItem {
                 self.wrap_runtime_secondary_text_detail_block(logical_lines, width, palette)
             }
             RuntimeToolActivityDetailBlock::ExecuteTranscript(transcript) => {
-                self.wrap_runtime_execute_transcript(transcript, width)
+                self.wrap_runtime_execute_transcript(transcript, width, palette)
             }
             RuntimeToolActivityDetailBlock::ExecuteFooter(footer) => {
                 self.wrap_runtime_execute_footer(footer, width, palette)
@@ -986,20 +988,26 @@ impl ToolResultItem {
         &self,
         transcript: &RuntimeExecuteTranscriptBlock,
         width: usize,
+        palette: TerminalPalette,
     ) -> Vec<Line<'static>> {
-        let mut lines = self.wrap_runtime_execute_command_line(&transcript.command, width);
+        let mut lines = self.wrap_runtime_execute_command_line(&transcript.command, width, palette);
         for output_line in &transcript.output_lines {
             lines.extend(self.wrap_runtime_plain_transcript_line(output_line, width));
         }
         lines
     }
 
-    fn wrap_runtime_execute_command_line(&self, command: &str, width: usize) -> Vec<Line<'static>> {
+    fn wrap_runtime_execute_command_line(
+        &self,
+        command: &str,
+        width: usize,
+        palette: TerminalPalette,
+    ) -> Vec<Line<'static>> {
         let mut chunks = vec![HighlightChunk {
             text: "$ ".to_string(),
             style: Style::new(),
         }];
-        chunks.extend(self.shell_command_chunks(command));
+        chunks.extend(self.shell_command_chunks(command, palette));
 
         wrap_highlight_chunks(&[chunks], width.max(1))
             .into_iter()

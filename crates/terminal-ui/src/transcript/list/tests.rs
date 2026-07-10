@@ -24,7 +24,7 @@ use runtime_domain::session::{
 #[test]
 fn active_tool_block_uses_frame_context_time() {
     let palette = default_palette();
-    let mut transcript = Transcript::new(palette);
+    let mut transcript = Transcript::new(palette, None);
     transcript.append_runtime_tool_activity(RuntimeToolActivity {
         activity_id: "call-1".to_string(),
         title: "WriteFile: TEMP.md".to_string(),
@@ -59,7 +59,7 @@ fn active_tool_block_uses_frame_context_time() {
 
 #[test]
 fn render_returns_content_lines_and_line_count() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.items = Rc::new(vec![
         Rc::new(TranscriptItem::Message(MessageItem::new(
             Sender::Assistant,
@@ -89,7 +89,7 @@ fn render_returns_content_lines_and_line_count() {
 
 #[test]
 fn item_metrics_index_maps_offsets_and_item_ranges_without_full_render_result() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.items = Rc::new(vec![
         Rc::new(TranscriptItem::Message(MessageItem::new(
             Sender::Assistant,
@@ -128,7 +128,7 @@ fn item_metrics_index_maps_offsets_and_item_ranges_without_full_render_result() 
 #[test]
 fn item_metrics_index_matches_materialized_block_metrics_for_mixed_item_types() {
     let palette = default_palette();
-    let mut transcript = Transcript::new(palette);
+    let mut transcript = Transcript::new(palette, None);
     transcript.set_gap(1);
     transcript.set_width(18);
     transcript.append_startup_banner(StartupBannerOptions {
@@ -170,7 +170,7 @@ fn item_metrics_index_matches_materialized_block_metrics_for_mixed_item_types() 
 
 #[test]
 fn tool_result_is_display_only_and_not_assistant_message() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.append_tool_result("Ran cargo test", ToolResultKind::Ran);
 
     assert_eq!(transcript.source_messages(), Vec::<(Sender, String)>::new());
@@ -184,7 +184,7 @@ fn tool_result_is_display_only_and_not_assistant_message() {
 
 #[test]
 fn tool_activity_uses_compact_and_detailed_rendering_modes() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.append_runtime_tool_activity(RuntimeToolActivity {
         activity_id: "call-1".to_string(),
         title: "Shell: cargo check".to_string(),
@@ -220,7 +220,7 @@ fn tool_activity_uses_compact_and_detailed_rendering_modes() {
 
 #[test]
 fn assistant_display_trims_outer_blank_lines_without_mutating_source_content() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_tool_activity_render_mode(ToolActivityRenderMode::Detailed);
     transcript.append_message(Sender::Assistant, "文件已创建成功。\n\n");
     transcript.append_runtime_tool_activity(RuntimeToolActivity {
@@ -253,7 +253,7 @@ fn assistant_display_trims_outer_blank_lines_without_mutating_source_content() {
 
 #[test]
 fn single_exploration_tool_activity_renders_as_standalone_transcript_item() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
 
     transcript.append_runtime_tool_activity(RuntimeToolActivity {
         activity_id: "call-list-root".to_string(),
@@ -274,7 +274,7 @@ fn single_exploration_tool_activity_renders_as_standalone_transcript_item() {
 
 #[test]
 fn exploration_tool_activities_coalesce_into_single_transcript_item() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
 
     transcript.append_runtime_tool_activity(RuntimeToolActivity {
         activity_id: "call-list-root".to_string(),
@@ -322,7 +322,7 @@ fn exploration_tool_activities_coalesce_into_single_transcript_item() {
 
 #[test]
 fn skill_usage_and_regular_exploration_render_as_separate_transcript_items() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
 
     transcript.append_runtime_tool_activity(RuntimeToolActivity {
         activity_id: "call-skill-code-review".to_string(),
@@ -365,7 +365,7 @@ fn skill_usage_and_regular_exploration_render_as_separate_transcript_items() {
 
 #[test]
 fn exploration_group_keeps_activity_ids_and_coalesces_adjacent_reads() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
 
     let search_index = transcript.append_runtime_tool_activity(RuntimeToolActivity {
         activity_id: "call-search".to_string(),
@@ -433,7 +433,7 @@ fn exploration_group_keeps_activity_ids_and_coalesces_adjacent_reads() {
 
 #[test]
 fn exploration_group_coalesces_adjacent_lists() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
 
     for path in ["crates", "docs", ".docs", ".agents", ".hunea"] {
         transcript.append_runtime_tool_activity(RuntimeToolActivity {
@@ -483,7 +483,7 @@ fn exploration_group_coalesces_adjacent_lists() {
 #[test]
 fn appending_message_closes_completed_exploration_group() {
     let palette = default_palette();
-    let mut transcript = Transcript::new(palette);
+    let mut transcript = Transcript::new(palette, None);
 
     transcript.append_runtime_tool_activity(RuntimeToolActivity {
         activity_id: "call-list-src".to_string(),
@@ -511,7 +511,7 @@ fn appending_message_closes_completed_exploration_group() {
 #[test]
 fn appending_non_exploration_tool_activity_closes_previous_exploration_group() {
     let palette = default_palette();
-    let mut transcript = Transcript::new(palette);
+    let mut transcript = Transcript::new(palette, None);
 
     transcript.append_runtime_tool_activity(RuntimeToolActivity {
         activity_id: "call-read-cargo".to_string(),
@@ -559,7 +559,7 @@ fn tool_result_marker_color(transcript: &Transcript, item_index: usize) -> Optio
 
 #[test]
 fn snippet_reasoning_is_display_only_and_not_clickable() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.append_assistant_message_with_reasoning(
         "结论",
         "这段内容不能保留",
@@ -586,7 +586,7 @@ fn snippet_reasoning_is_display_only_and_not_clickable() {
 
 #[test]
 fn snippet_reasoning_without_duration_is_not_appended() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.append_assistant_message_with_reasoning(
         "结论",
         "这段内容不能保留",
@@ -604,7 +604,7 @@ fn snippet_reasoning_without_duration_is_not_appended() {
 
 #[test]
 fn expanded_simplified_reasoning_switches_between_compact_and_detailed_modes() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.append_assistant_message_with_reasoning(
         "结论",
         (1..=14)
@@ -635,7 +635,7 @@ fn expanded_simplified_reasoning_switches_between_compact_and_detailed_modes() {
 
 #[test]
 fn truncate_before_item_removes_selected_and_later_history() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.append_message(Sender::User, "first question");
     transcript.append_message(Sender::Assistant, "first answer");
     transcript.append_message(Sender::User, "second question");
@@ -658,7 +658,7 @@ fn truncate_before_item_removes_selected_and_later_history() {
 
 #[test]
 fn remove_items_deletes_selected_history_and_keeps_order() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.append_message(Sender::User, "first question");
     transcript.append_message(Sender::Assistant, "first answer");
     transcript.append_message(Sender::User, "second question");
@@ -681,7 +681,7 @@ fn remove_items_deletes_selected_history_and_keeps_order() {
 
 #[test]
 fn item_metrics_index_tracks_invalidation_boundaries() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.items = Rc::new(vec![
         Rc::new(TranscriptItem::Message(MessageItem::new(
             Sender::Assistant,
@@ -719,7 +719,7 @@ fn item_metrics_index_tracks_invalidation_boundaries() {
 
 #[test]
 fn render_append_path_keeps_gap_anchor_on_previous_item() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(static_message(
         "first",
     )))]);
@@ -736,7 +736,7 @@ fn render_append_path_keeps_gap_anchor_on_previous_item() {
 
 #[test]
 fn render_append_path_marks_append_start_line() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(static_message(
         "first",
     )))]);
@@ -751,7 +751,7 @@ fn render_append_path_marks_append_start_line() {
 
 #[test]
 fn render_builds_gap_anchor_between_visible_blocks() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.items = Rc::new(vec![
         Rc::new(TranscriptItem::Message(static_message("one"))),
         Rc::new(TranscriptItem::Message(static_message("two"))),
@@ -771,7 +771,7 @@ fn render_builds_gap_anchor_between_visible_blocks() {
 fn render_perf_smoke_for_large_cached_transcript() {
     use std::hint::black_box;
 
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_width(72);
 
     for index in 0..64 {
@@ -789,7 +789,7 @@ fn render_perf_smoke_for_large_cached_transcript() {
 
 #[test]
 fn cached_render_result_can_be_reused_when_item_cache_keys_are_stable() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(static_message(
         "cached",
     )))]);
@@ -801,7 +801,7 @@ fn cached_render_result_can_be_reused_when_item_cache_keys_are_stable() {
 
 #[test]
 fn cached_render_result_becomes_stale_after_item_content_changes() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(static_message(
         "one",
     )))]);
@@ -814,7 +814,7 @@ fn cached_render_result_becomes_stale_after_item_content_changes() {
 
 #[test]
 fn render_cache_hit_reuses_underlying_result_storage() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(static_message(
         "cached",
     )))]);
@@ -827,7 +827,7 @@ fn render_cache_hit_reuses_underlying_result_storage() {
 
 #[test]
 fn render_cache_hit_does_not_rehash_message_content() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(static_message(
         "cached",
     )))]);
@@ -844,7 +844,7 @@ fn render_cache_hit_does_not_rehash_message_content() {
 
 #[test]
 fn append_does_not_preallocate_dense_render_cache_slots() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
 
     for index in 0..64 {
         transcript.append_message(Sender::Assistant, format!("item {index}"));
@@ -859,7 +859,7 @@ fn append_does_not_preallocate_dense_render_cache_slots() {
 
 #[test]
 fn assistant_render_blocks_use_generated_anchors_without_eager_plain_text_cache() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_width(12);
     transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(static_message(
         "alpha beta gamma delta epsilon",
@@ -885,7 +885,7 @@ fn assistant_render_blocks_use_generated_anchors_without_eager_plain_text_cache(
 
 #[test]
 fn generated_anchor_blocks_still_round_trip_plain_text_and_anchor_lookup() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_width(12);
     transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(static_message(
         "alpha beta gamma delta epsilon",
@@ -905,7 +905,7 @@ fn generated_anchor_blocks_still_round_trip_plain_text_and_anchor_lookup() {
 
 #[test]
 fn user_render_blocks_project_lines_without_eager_styled_line_storage() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_width(16);
     transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(
         MessageItem::new_with_style_mode(
@@ -931,7 +931,7 @@ fn user_render_blocks_project_lines_without_eager_styled_line_storage() {
 
 #[test]
 fn projected_user_render_block_reuses_plain_line_lengths_during_cache_population() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_width(16);
     transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(
         MessageItem::new_with_style_mode(
@@ -959,7 +959,7 @@ fn projected_user_render_block_reuses_plain_line_lengths_during_cache_population
 
 #[test]
 fn projected_user_blocks_still_round_trip_plain_text_and_anchor_lookup() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_width(16);
     transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(
         MessageItem::new_with_style_mode(
@@ -1012,7 +1012,7 @@ fn projected_assistant_markdown_avoids_eager_styled_line_materialization() {
         ));
     }
 
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_width(80);
     transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(MessageItem::new(
         Sender::Assistant,
@@ -1065,7 +1065,7 @@ fn projected_assistant_fenced_code_page_matches_eager_inside_wrapped_line() {
     }
     markdown.push_str("```\n");
 
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_width(38);
     transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(MessageItem::new(
         Sender::Assistant,
@@ -1106,7 +1106,7 @@ fn projected_assistant_ordered_lists_match_eager_renderer() {
         ));
     }
 
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_width(76);
     transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(MessageItem::new(
         Sender::Assistant,
@@ -1138,7 +1138,7 @@ fn projected_assistant_heading_followed_by_list_matches_eager_spacing() {
         ));
     }
 
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_width(80);
     transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(MessageItem::new(
         Sender::Assistant,
@@ -1193,7 +1193,7 @@ fn projected_assistant_list_followed_by_heading_matches_eager_spacing() {
         ));
     }
 
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_width(80);
     transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(MessageItem::new(
         Sender::Assistant,
@@ -1245,7 +1245,7 @@ fn projected_assistant_paragraphs_separated_by_blank_line_match_eager_spacing() 
         ));
     }
 
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_width(80);
     transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(MessageItem::new(
         Sender::Assistant,
@@ -1297,7 +1297,7 @@ fn projected_assistant_blank_separated_list_items_match_eager_spacing() {
         ));
     }
 
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_width(80);
     transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(MessageItem::new(
         Sender::Assistant,
@@ -1354,7 +1354,7 @@ fn projected_assistant_list_continuation_lines_match_parser_block_boundaries() {
         ));
     }
 
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_width(80);
     transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(MessageItem::new(
         Sender::Assistant,
@@ -1417,7 +1417,7 @@ fn projected_assistant_fenced_code_does_not_close_on_info_text_line() {
     }
     markdown.push_str("```\n");
 
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_width(70);
     transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(MessageItem::new(
         Sender::Assistant,
@@ -1451,7 +1451,7 @@ fn projected_assistant_fenced_code_accepts_longer_closing_fence() {
         markdown.push_str("````\n\n");
     }
 
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_width(72);
     transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(MessageItem::new(
         Sender::Assistant,
@@ -1483,7 +1483,7 @@ fn assistant_projection_falls_back_for_empty_fenced_code_blocks() {
         ));
     }
 
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_width(80);
     transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(MessageItem::new(
         Sender::Assistant,
@@ -1515,7 +1515,7 @@ fn assistant_projection_falls_back_for_unclosed_fenced_code_blocks() {
         ));
     }
 
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_width(72);
     transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(MessageItem::new(
         Sender::Assistant,
@@ -1547,7 +1547,7 @@ fn assistant_projection_falls_back_for_indented_markdown_blocks() {
         ));
     }
 
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_width(80);
     transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(MessageItem::new(
         Sender::Assistant,
@@ -1579,7 +1579,7 @@ fn assistant_projection_falls_back_for_complex_markdown_blocks() {
         ));
     }
 
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_width(80);
     transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(MessageItem::new(
         Sender::Assistant,
@@ -1612,7 +1612,7 @@ fn assistant_projection_falls_back_for_stateful_fenced_code_highlighting() {
     }
     markdown.push_str("     */\n}\n```\n");
 
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_width(64);
     transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(MessageItem::new(
         Sender::Assistant,
@@ -1659,7 +1659,7 @@ fn precomputed_render_cache_key_changes_with_message_content_and_style() {
 
 #[test]
 fn render_refreshes_after_item_content_changes() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(static_message(
         "one",
     )))]);
@@ -1675,7 +1675,7 @@ fn render_refreshes_after_item_content_changes() {
 
 #[test]
 fn render_viewport_refreshes_after_item_content_changes() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(static_message(
         "one\ntwo",
     )))]);
@@ -1691,7 +1691,7 @@ fn render_viewport_refreshes_after_item_content_changes() {
 
 #[test]
 fn item_metrics_index_keeps_recent_render_block_cache_bounded() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_gap(0);
     transcript.set_width(32);
 
@@ -1708,7 +1708,7 @@ fn item_metrics_index_keeps_recent_render_block_cache_bounded() {
 
 #[test]
 fn item_metrics_index_avoids_linear_recent_cache_bookkeeping_for_large_batches() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_gap(0);
     transcript.set_width(32);
 
@@ -1732,7 +1732,7 @@ fn item_metrics_index_avoids_linear_recent_cache_bookkeeping_for_large_batches()
 
 #[test]
 fn progressive_metrics_resize_keeps_assistant_markdown_on_fast_estimate_path() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_width(80);
 
     for index in 0..4 {
@@ -1770,7 +1770,7 @@ fn progressive_metrics_resize_keeps_assistant_markdown_on_fast_estimate_path() {
 
 #[test]
 fn progressive_metrics_assistant_estimate_skips_exact_markdown_metrics_on_cold_resume() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_width(80);
     transcript.append_message(
         Sender::Assistant,
@@ -1789,7 +1789,7 @@ fn progressive_metrics_assistant_estimate_skips_exact_markdown_metrics_on_cold_r
 
 #[test]
 fn progressive_metrics_resize_keeps_assistant_line_count_equal_to_exact_metrics() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_gap(0);
     transcript.set_width(10);
     transcript.append_message(Sender::Assistant, "foo  bar baz");
@@ -1806,7 +1806,7 @@ fn progressive_metrics_resize_keeps_assistant_line_count_equal_to_exact_metrics(
 
 #[test]
 fn progressive_metrics_keep_plain_text_prefix_sums_equal_to_exact_for_tabs() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_gap(0);
     transcript.set_width(9);
     transcript.append_message(Sender::Assistant, "a\tb");
@@ -1831,7 +1831,7 @@ fn progressive_metrics_keep_plain_text_prefix_sums_equal_to_exact_for_tabs() {
 
 #[test]
 fn progressive_metrics_resize_defers_tabbed_markdown_prefix_sum_exactization() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_gap(0);
     transcript.set_width(20);
     transcript.append_message(Sender::Assistant, "- item with a tab\tand tail");
@@ -1870,7 +1870,7 @@ fn progressive_metrics_resize_defers_tabbed_markdown_prefix_sum_exactization() {
 
 #[test]
 fn progressive_metrics_breakdown_counts_assistant_semantic_resize_reuse() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_width(80);
     transcript.append_message(Sender::Assistant, "make the handler return early");
 
@@ -1885,7 +1885,7 @@ fn progressive_metrics_breakdown_counts_assistant_semantic_resize_reuse() {
 
 #[test]
 fn progressive_metrics_resize_keeps_reused_assistant_metrics_estimated() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_width(80);
     transcript.append_message(
         Sender::Assistant,
@@ -1908,7 +1908,7 @@ fn progressive_metrics_resize_keeps_reused_assistant_metrics_estimated() {
 
 #[test]
 fn exactize_line_window_keeps_incremental_index_self_consistent() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_gap(1);
     transcript.set_width(20);
     transcript.append_message(Sender::Assistant, "prefix");
@@ -1943,7 +1943,7 @@ fn exactize_line_window_keeps_incremental_index_self_consistent() {
 
 #[test]
 fn metrics_rebuild_keeps_screen_block_cache_cold_until_render_materialization() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_gap(0);
     transcript.set_width(32);
 
@@ -1967,7 +1967,7 @@ fn metrics_rebuild_keeps_screen_block_cache_cold_until_render_materialization() 
 
 #[test]
 fn retained_block_memory_summary_counts_result_owned_blocks_after_full_render() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_gap(0);
     transcript.set_width(32);
 
@@ -2002,7 +2002,7 @@ fn retained_block_memory_summary_counts_result_owned_blocks_after_full_render() 
 
 #[test]
 fn render_viewport_prewarms_overscan_neighbors_once_metrics_are_warm() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_gap(0);
     transcript.set_width(32);
 
@@ -2038,7 +2038,7 @@ fn render_viewport_prewarms_overscan_neighbors_once_metrics_are_warm() {
 
 #[test]
 fn render_viewport_keeps_large_visible_window_warm() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_gap(0);
     transcript.set_width(32);
 
@@ -2068,7 +2068,7 @@ fn render_viewport_keeps_large_visible_window_warm() {
 
 #[test]
 fn finish_recent_render_block_batch_evicts_all_warmed_blocks_when_visible_window_is_empty() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_gap(0);
     transcript.set_width(32);
 
@@ -2099,7 +2099,7 @@ fn finish_recent_render_block_batch_evicts_all_warmed_blocks_when_visible_window
 
 #[test]
 fn cloned_transcript_does_not_reuse_screen_blocks_from_a_different_palette() {
-    let mut original = Transcript::new(default_palette());
+    let mut original = Transcript::new(default_palette(), None);
     original.set_width(20);
     original.items = Rc::new(vec![Rc::new(TranscriptItem::Message(MessageItem::new(
         Sender::User,
@@ -2122,7 +2122,7 @@ fn cloned_transcript_does_not_reuse_screen_blocks_from_a_different_palette() {
 
 #[test]
 fn palette_change_invalidates_item_metrics_when_render_shape_changes() {
-    let mut transcript = Transcript::new(default_palette());
+    let mut transcript = Transcript::new(default_palette(), None);
     transcript.set_width(20);
     transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(MessageItem::new(
         Sender::User,

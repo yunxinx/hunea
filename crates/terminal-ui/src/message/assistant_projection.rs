@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashMap, ops::Range, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, ops::Range, path::Path, rc::Rc};
 
 use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag};
 use ratatui::text::Line;
@@ -31,6 +31,7 @@ type AssistantProjectionPageCache =
 #[derive(Debug)]
 pub(crate) struct AssistantMessageRenderProjection {
     source: Rc<str>,
+    working_dir: Option<Rc<Path>>,
     width: usize,
     palette: TerminalPalette,
     blocks: Vec<AssistantProjectedBlock>,
@@ -79,6 +80,16 @@ struct FencedCodePageRender<'a> {
     page_end: usize,
     width: usize,
     palette: TerminalPalette,
+    working_dir: Option<&'a Path>,
+}
+
+#[derive(Clone, Copy)]
+struct AssistantProjectionRenderContext<'a> {
+    source: &'a str,
+    pages: &'a AssistantProjectionPageCache,
+    width: usize,
+    palette: TerminalPalette,
+    working_dir: Option<&'a Path>,
 }
 
 #[derive(Debug)]
@@ -127,14 +138,14 @@ impl AssistantMessageRenderProjection {
 
     pub(crate) fn line_at(&self, index: usize) -> Option<Line<'static>> {
         let (block_index, block) = self.block_for_line(index)?;
-        block.line_at(
-            &self.source,
-            &self.pages,
-            block_index,
-            self.width,
-            self.palette,
-            index - block.start_line,
-        )
+        let context = AssistantProjectionRenderContext {
+            source: self.source.as_ref(),
+            pages: &self.pages,
+            width: self.width,
+            palette: self.palette,
+            working_dir: self.working_dir.as_deref(),
+        };
+        block.line_at(context, block_index, index - block.start_line)
     }
 
     pub(crate) fn plain_line_at(&self, index: usize) -> Option<String> {
@@ -195,9 +206,10 @@ impl AssistantProjectedBlock {
         range: Range<usize>,
         width: usize,
         palette: TerminalPalette,
+        working_dir: Option<&Path>,
     ) -> Option<Self> {
         let snippet = &source[range.clone()];
-        let (line_count, char_len) = render_markdown_metrics(snippet, width, palette);
+        let (line_count, char_len) = render_markdown_metrics(snippet, width, palette, working_dir);
         (line_count > 0).then(|| Self {
             start_line,
             line_count: line_count.saturating_add(leading_blank_lines),
@@ -254,11 +266,8 @@ impl AssistantProjectedBlock {
 
     fn line_at(
         &self,
-        source: &str,
-        pages: &AssistantProjectionPageCache,
+        context: AssistantProjectionRenderContext<'_>,
         block_index: usize,
-        width: usize,
-        palette: TerminalPalette,
         relative_line: usize,
     ) -> Option<Line<'static>> {
         if relative_line >= self.line_count {
@@ -267,21 +276,18 @@ impl AssistantProjectedBlock {
 
         let page_index = relative_line / ASSISTANT_PROJECTION_PAGE_LINES;
         let page_offset = relative_line % ASSISTANT_PROJECTION_PAGE_LINES;
-        let page = self.materialized_page(source, pages, block_index, page_index, width, palette);
+        let page = self.materialized_page(context, block_index, page_index);
         page.get(page_offset).cloned()
     }
 
     fn materialized_page(
         &self,
-        source: &str,
-        pages: &AssistantProjectionPageCache,
+        context: AssistantProjectionRenderContext<'_>,
         block_index: usize,
         page_index: usize,
-        width: usize,
-        palette: TerminalPalette,
     ) -> AssistantProjectionPage {
         let cache_key = (block_index, page_index);
-        if let Some(page) = pages.borrow().get(&cache_key) {
+        if let Some(page) = context.pages.borrow().get(&cache_key) {
             return Rc::clone(page);
         }
 
@@ -301,8 +307,13 @@ impl AssistantProjectedBlock {
                     .map(|_| Line::raw(""))
                     .collect(),
                 AssistantProjectedBlockKind::MarkdownSnippet { range } => {
-                    let snippet = &source[range.clone()];
-                    let lines = render_markdown_lines(snippet, width, palette);
+                    let snippet = &context.source[range.clone()];
+                    let lines = render_markdown_lines(
+                        snippet,
+                        context.width,
+                        context.palette,
+                        context.working_dir,
+                    );
                     let end = content_end.min(lines.len());
                     if content_start >= end {
                         Vec::new()
@@ -316,21 +327,25 @@ impl AssistantProjectedBlock {
                     line_ranges,
                     line_prefix_sums,
                 } => render_fenced_code_page(FencedCodePageRender {
-                    source,
+                    source: context.source,
                     marker,
                     info_range,
                     line_ranges,
                     line_prefix_sums,
                     page_start: content_start,
                     page_end: content_end,
-                    width,
-                    palette,
+                    width: context.width,
+                    palette: context.palette,
+                    working_dir: context.working_dir,
                 }),
             });
         }
 
         let page = Rc::new(lines);
-        pages.borrow_mut().insert(cache_key, Rc::clone(&page));
+        context
+            .pages
+            .borrow_mut()
+            .insert(cache_key, Rc::clone(&page));
         page
     }
 
@@ -354,13 +369,19 @@ pub(super) fn render_assistant_message_projection(
     content: Rc<str>,
     width: u16,
     palette: TerminalPalette,
+    working_dir: Option<Rc<Path>>,
 ) -> Option<AssistantMessageRenderProjection> {
     if content.len() < ASSISTANT_PROJECTION_MIN_BYTES || content.contains('\t') {
         return None;
     }
 
     let width = assistant_message_content_width(width);
-    let blocks = build_common_markdown_projection_blocks(content.as_ref(), width, palette)?;
+    let blocks = build_common_markdown_projection_blocks(
+        content.as_ref(),
+        width,
+        palette,
+        working_dir.as_deref(),
+    )?;
     let line_count = blocks
         .last()
         .map(|block| block.start_line + block.line_count)
@@ -369,6 +390,7 @@ pub(super) fn render_assistant_message_projection(
 
     Some(AssistantMessageRenderProjection {
         source: content,
+        working_dir,
         width,
         palette,
         blocks,
@@ -382,6 +404,7 @@ fn build_common_markdown_projection_blocks(
     content: &str,
     width: usize,
     palette: TerminalPalette,
+    working_dir: Option<&Path>,
 ) -> Option<Vec<AssistantProjectedBlock>> {
     if contains_table_structure(content) {
         return None;
@@ -439,6 +462,7 @@ fn build_common_markdown_projection_blocks(
                     parser_block.range,
                     width,
                     palette,
+                    working_dir,
                 )?;
                 push_optional_block(&mut blocks, &mut line_cursor, block);
             }
@@ -450,6 +474,7 @@ fn build_common_markdown_projection_blocks(
                     parser_block.range,
                     width,
                     palette,
+                    working_dir,
                 )?;
                 push_optional_block(&mut blocks, &mut line_cursor, block);
             }
@@ -704,11 +729,16 @@ fn render_fenced_code_page(request: FencedCodePageRender<'_>) -> Vec<Line<'stati
     snippet.push('\n');
     snippet.push_str(request.marker);
 
-    render_markdown_lines(&snippet, request.width, request.palette)
-        .into_iter()
-        .skip(first_offset)
-        .take(page_line_count)
-        .collect()
+    render_markdown_lines(
+        &snippet,
+        request.width,
+        request.palette,
+        request.working_dir,
+    )
+    .into_iter()
+    .skip(first_offset)
+    .take(page_line_count)
+    .collect()
 }
 
 fn estimated_page_bytes(lines: &[Line<'static>]) -> usize {

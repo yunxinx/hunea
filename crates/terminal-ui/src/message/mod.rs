@@ -1,6 +1,7 @@
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
+    path::Path,
     rc::Rc,
 };
 
@@ -65,6 +66,7 @@ pub struct MessageItem {
     sender: Sender,
     content: Rc<str>,
     source_message: Option<ComposerSourceMessage>,
+    working_dir: Option<Rc<Path>>,
     style_mode: StyleMode,
     render_cache_key: u64,
 }
@@ -88,7 +90,7 @@ impl MessageItem {
         content: impl Into<String>,
         style_mode: StyleMode,
     ) -> Self {
-        Self::new_with_style_mode_and_source(sender, content, style_mode, None)
+        Self::new_with_style_mode_and_source(sender, content, style_mode, None, None)
     }
 
     /// `new_with_style_mode_and_source` 创建一条带指定源消息的消息项。
@@ -97,6 +99,7 @@ impl MessageItem {
         content: impl Into<String>,
         style_mode: StyleMode,
         source_message: Option<ComposerSourceMessage>,
+        working_dir: Option<Rc<Path>>,
     ) -> Self {
         let style_mode = style_mode.normalized();
         let content = content.into();
@@ -107,6 +110,7 @@ impl MessageItem {
             sender,
             content,
             source_message,
+            working_dir,
             style_mode,
             render_cache_key,
         }
@@ -126,6 +130,7 @@ impl MessageItem {
                 markdown_display_content(self.content.as_ref()),
                 width,
                 palette,
+                self.working_dir.as_deref(),
             ),
         }
     }
@@ -162,6 +167,7 @@ impl MessageItem {
                 markdown_display_content(self.content.as_ref()),
                 width,
                 palette,
+                self.working_dir.as_deref(),
             )),
         }
     }
@@ -206,6 +212,7 @@ impl MessageItem {
                 markdown_display_content(self.content.as_ref()),
                 width,
                 palette,
+                self.working_dir.as_deref(),
             ),
         }
     }
@@ -231,6 +238,7 @@ impl MessageItem {
                 width,
                 palette,
                 previous_metrics,
+                self.working_dir.as_deref(),
             ),
         }
     }
@@ -296,6 +304,7 @@ impl MessageItem {
                     markdown_display_content_rc(&self.content),
                     width,
                     palette,
+                    self.working_dir.clone(),
                 )
             })
             .flatten()

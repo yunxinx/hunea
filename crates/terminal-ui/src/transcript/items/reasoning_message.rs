@@ -1,6 +1,8 @@
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
+    path::Path,
+    rc::Rc,
     time::Duration,
 };
 
@@ -55,15 +57,17 @@ pub struct ReasoningMessageItem {
     render_mode: ReasoningRenderMode,
     has_toggle_header: bool,
     duration: Option<Duration>,
+    working_dir: Option<Rc<Path>>,
     render_cache_key: u64,
 }
 
 impl ReasoningMessageItem {
     /// `new` 创建一条思维链展示项。
-    pub fn new(
+    pub(crate) fn new(
         content: impl Into<String>,
         display_mode: ReasoningDisplayMode,
         duration: Option<Duration>,
+        working_dir: Option<Rc<Path>>,
     ) -> Self {
         let content = if matches!(display_mode, ReasoningDisplayMode::Snippet) {
             String::new()
@@ -86,6 +90,7 @@ impl ReasoningMessageItem {
             render_mode,
             has_toggle_header,
             duration,
+            working_dir,
             render_cache_key,
         }
     }
@@ -283,7 +288,12 @@ impl ReasoningMessageItem {
     ) -> Vec<Line<'static>> {
         let content = self.display_content();
         let content_width = assistant_message_content_width(width);
-        let markdown_lines = render_reasoning_markdown_lines(content, content_width, palette);
+        let markdown_lines = render_reasoning_markdown_lines(
+            content,
+            content_width,
+            palette,
+            self.working_dir.as_deref(),
+        );
         let lines = if markdown_lines.is_empty() {
             self.wrapped_lines(width)
                 .into_iter()
@@ -311,7 +321,12 @@ impl ReasoningMessageItem {
 
         let content = self.display_content();
         let content_width = assistant_message_content_width(width);
-        let markdown_metrics = render_reasoning_markdown_metrics(content, content_width, palette);
+        let markdown_metrics = render_reasoning_markdown_metrics(
+            content,
+            content_width,
+            palette,
+            self.working_dir.as_deref(),
+        );
         if markdown_metrics.0 > 0 {
             return markdown_metrics;
         }
@@ -491,6 +506,8 @@ fn format_reasoning_duration(duration: Duration) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use ratatui::style::Modifier;
 
     use super::*;
@@ -502,7 +519,7 @@ mod tests {
     #[test]
     fn reasoning_message_renders_expanded_content_without_header() {
         let palette = default_palette();
-        let item = ReasoningMessageItem::new("先分析", ReasoningDisplayMode::Expanded, None);
+        let item = ReasoningMessageItem::new("先分析", ReasoningDisplayMode::Expanded, None, None);
         let lines = item.render_lines(80, palette);
 
         assert_eq!(
@@ -522,7 +539,7 @@ mod tests {
 
     #[test]
     fn reasoning_message_collapses_to_clickable_header() {
-        let item = ReasoningMessageItem::new("先分析", ReasoningDisplayMode::Collapsed, None);
+        let item = ReasoningMessageItem::new("先分析", ReasoningDisplayMode::Collapsed, None, None);
         let lines = item.render_lines(80, default_palette());
 
         assert_eq!(
@@ -535,7 +552,8 @@ mod tests {
 
     #[test]
     fn reasoning_message_toggle_changes_rendered_lines_and_cache_key() {
-        let mut item = ReasoningMessageItem::new("先分析", ReasoningDisplayMode::Collapsed, None);
+        let mut item =
+            ReasoningMessageItem::new("先分析", ReasoningDisplayMode::Collapsed, None, None);
         let collapsed_key = item.render_cache_key();
 
         item.toggle();
@@ -556,6 +574,7 @@ mod tests {
             "先分析",
             ReasoningDisplayMode::Collapsed,
             Some(Duration::from_secs(3)),
+            None,
         );
 
         assert_eq!(
@@ -573,6 +592,7 @@ mod tests {
             "先分析",
             ReasoningDisplayMode::Collapsed,
             Some(Duration::from_millis(120)),
+            None,
         );
 
         item.toggle();
@@ -595,6 +615,7 @@ mod tests {
             "这段内容不能进入 transcript",
             ReasoningDisplayMode::Snippet,
             Some(Duration::from_secs(16)),
+            None,
         );
 
         assert_eq!(
@@ -614,6 +635,7 @@ mod tests {
             "这段内容不能进入 transcript",
             ReasoningDisplayMode::Snippet,
             Some(Duration::from_millis(120)),
+            None,
         );
 
         assert_eq!(
@@ -631,11 +653,13 @@ mod tests {
             "第一段思维链",
             ReasoningDisplayMode::Snippet,
             Some(Duration::from_secs(3)),
+            None,
         );
         let same_hint_item = ReasoningMessageItem::new(
             "第二段思维链",
             ReasoningDisplayMode::Snippet,
             Some(Duration::from_secs(3)),
+            None,
         );
         let original_key = item.render_cache_key();
 
@@ -653,11 +677,34 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_render_cache_key_ignores_transcript_owned_working_directory() {
+        let item_in_first_transcript = ReasoningMessageItem::new(
+            "[report](reports/current.md)",
+            ReasoningDisplayMode::Expanded,
+            None,
+            Some(Rc::from(PathBuf::from("/workspace/first"))),
+        );
+        let item_in_second_transcript = ReasoningMessageItem::new(
+            "[report](reports/current.md)",
+            ReasoningDisplayMode::Expanded,
+            None,
+            Some(Rc::from(PathBuf::from("/workspace/second"))),
+        );
+
+        assert_eq!(
+            item_in_first_transcript.render_cache_key(),
+            item_in_second_transcript.render_cache_key(),
+            "working_dir is immutable transcript context, not reasoning item identity"
+        );
+    }
+
+    #[test]
     fn reasoning_message_expanded_content_renders_markdown_with_reasoning_style() {
         let palette = default_palette();
         let item = ReasoningMessageItem::new(
             "# Plan\n\nUse **bold** and `code`.\n\n| Key | Value |\n| --- | --- |\n| a | b |",
             ReasoningDisplayMode::Expanded,
+            None,
             None,
         );
 
@@ -708,7 +755,7 @@ mod tests {
             ReasoningDisplayMode::Expanded,
             ReasoningDisplayMode::ExpandedSimplified,
         ] {
-            let item = ReasoningMessageItem::new(source_content, display_mode, None);
+            let item = ReasoningMessageItem::new(source_content, display_mode, None, None);
 
             assert_eq!(rendered_plain_lines(&item), vec!["think".to_string()]);
             assert_eq!(item.measure_render_metrics(80, palette), (1, "think".len()));
@@ -721,6 +768,7 @@ mod tests {
         let item = ReasoningMessageItem::new(
             "line 1\nline 2",
             ReasoningDisplayMode::ExpandedSimplified,
+            None,
             None,
         );
 
@@ -739,12 +787,14 @@ mod tests {
             numbered_lines(12),
             ReasoningDisplayMode::ExpandedSimplified,
             None,
+            None,
         );
 
         for line_count in 9..=11 {
             let item = ReasoningMessageItem::new(
                 numbered_lines(line_count),
                 ReasoningDisplayMode::ExpandedSimplified,
+                None,
                 None,
             );
             assert_eq!(
@@ -784,6 +834,7 @@ mod tests {
                 .join("\n"),
             ReasoningDisplayMode::ExpandedSimplified,
             Some(Duration::from_secs(8)),
+            None,
         );
 
         let plain_lines = item
@@ -819,6 +870,7 @@ mod tests {
                 .join("\n"),
             ReasoningDisplayMode::ExpandedSimplified,
             Some(Duration::from_secs(8)),
+            None,
         );
 
         assert!(item.set_render_mode(ReasoningRenderMode::Detailed));
@@ -842,6 +894,7 @@ mod tests {
         let item = ReasoningMessageItem::new(
             "- [x] task\n\nenergy $E = mc^2$ now\n\n![diagram](image.png)\n\n<kbd>Ctrl</kbd>",
             ReasoningDisplayMode::Expanded,
+            None,
             None,
         );
 

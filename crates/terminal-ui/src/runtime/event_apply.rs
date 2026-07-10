@@ -438,7 +438,8 @@ impl Model {
         I: IntoIterator<Item = T>,
         T: TranscriptReplayItemSource,
     {
-        let mut transcript = crate::transcript::Transcript::new(self.palette);
+        let mut transcript =
+            crate::transcript::Transcript::new(self.palette, self.working_dir.clone());
         transcript.set_gap(1);
         if self.has_window {
             transcript.set_width(self.width);

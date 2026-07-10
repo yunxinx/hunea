@@ -8,8 +8,8 @@ pub(crate) use palette::{
     context_budget_slot_color, palette_detection_from_background,
 };
 pub use palette::{
-    PaletteDetection, TerminalPalette, default_palette, detect_palette, palette_from_background,
-    terminal_default_palette, try_detect_palette,
+    PaletteDetection, TerminalColorCapability, TerminalPalette, default_palette, detect_palette,
+    palette_from_background, terminal_default_palette, try_detect_palette,
 };
 pub(crate) use styles::{
     SurfaceHalf, subtle_rule_line, surface_half_block_line, surface_half_block_plain_line,

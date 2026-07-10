@@ -29,13 +29,13 @@ pub(crate) fn render_markdown_lines(
     markdown: &str,
     width: usize,
     palette: TerminalPalette,
+    working_dir: Option<&Path>,
 ) -> Vec<Line<'static>> {
-    let cwd = std::env::current_dir().ok();
     render_markdown_lines_with_cwd(
         markdown,
         width,
         palette,
-        cwd.as_deref(),
+        working_dir,
         MarkdownProfile::Assistant,
     )
 }
@@ -90,13 +90,13 @@ pub(crate) fn render_reasoning_markdown_lines(
     markdown: &str,
     width: usize,
     palette: TerminalPalette,
+    working_dir: Option<&Path>,
 ) -> Vec<Line<'static>> {
-    let cwd = std::env::current_dir().ok();
     render_markdown_lines_with_cwd(
         markdown,
         width,
         palette,
-        cwd.as_deref(),
+        working_dir,
         MarkdownProfile::Reasoning,
     )
 }
@@ -105,41 +105,58 @@ pub(crate) fn render_markdown_metrics(
     markdown: &str,
     width: usize,
     palette: TerminalPalette,
+    working_dir: Option<&Path>,
 ) -> (usize, usize) {
     #[cfg(test)]
     RENDER_MARKDOWN_METRICS_CALL_COUNT.with(|count| count.set(count.get() + 1));
 
-    measure_markdown_metrics(markdown, width, palette)
+    measure_markdown_metrics(markdown, width, palette, working_dir)
 }
 
 pub(crate) fn render_reasoning_markdown_metrics(
     markdown: &str,
     width: usize,
     palette: TerminalPalette,
+    working_dir: Option<&Path>,
 ) -> (usize, usize) {
-    measure_markdown_metrics_with_profile(markdown, width, palette, MarkdownProfile::Reasoning)
+    measure_markdown_metrics_with_profile(
+        markdown,
+        width,
+        palette,
+        working_dir,
+        MarkdownProfile::Reasoning,
+    )
 }
 
 pub(crate) fn estimate_markdown_metrics_for_tabs(
     markdown: &str,
     width: usize,
     palette: TerminalPalette,
+    working_dir: Option<&Path>,
 ) -> (usize, usize) {
-    measure_markdown_metrics(markdown, width, palette)
+    measure_markdown_metrics(markdown, width, palette, working_dir)
 }
 
 fn measure_markdown_metrics(
     markdown: &str,
     width: usize,
     palette: TerminalPalette,
+    working_dir: Option<&Path>,
 ) -> (usize, usize) {
-    measure_markdown_metrics_with_profile(markdown, width, palette, MarkdownProfile::Assistant)
+    measure_markdown_metrics_with_profile(
+        markdown,
+        width,
+        palette,
+        working_dir,
+        MarkdownProfile::Assistant,
+    )
 }
 
 fn measure_markdown_metrics_with_profile(
     markdown: &str,
     width: usize,
     palette: TerminalPalette,
+    working_dir: Option<&Path>,
     profile: MarkdownProfile,
 ) -> (usize, usize) {
     let width = width.max(1);
@@ -151,8 +168,7 @@ fn measure_markdown_metrics_with_profile(
         .map(std::borrow::Cow::as_ref)
         .unwrap_or(markdown);
     let source_bounds = markdown_source_bounds(markdown);
-    let cwd = std::env::current_dir().ok();
-    let mut renderer = profile.metrics_renderer(palette, cwd.as_deref(), width);
+    let mut renderer = profile.metrics_renderer(palette, working_dir, width);
     let options = profile.options();
 
     renderer.render(
@@ -198,24 +214,24 @@ impl MarkdownProfile {
         matches!(self, Self::Assistant)
     }
 
-    fn renderer(
+    fn renderer<'a>(
         self,
         palette: TerminalPalette,
-        cwd: Option<&Path>,
+        cwd: Option<&'a Path>,
         width: usize,
-    ) -> MarkdownRenderer {
+    ) -> MarkdownRenderer<'a> {
         match self {
             Self::Assistant => MarkdownRenderer::new(palette, cwd, width),
             Self::Reasoning => MarkdownRenderer::new_reasoning(palette, cwd, width),
         }
     }
 
-    fn metrics_renderer(
+    fn metrics_renderer<'a>(
         self,
         palette: TerminalPalette,
-        cwd: Option<&Path>,
+        cwd: Option<&'a Path>,
         width: usize,
-    ) -> MarkdownRenderer {
+    ) -> MarkdownRenderer<'a> {
         match self {
             Self::Assistant => MarkdownRenderer::new_for_metrics(palette, cwd, width),
             Self::Reasoning => MarkdownRenderer::new_reasoning_for_metrics(palette, cwd, width),

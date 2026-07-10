@@ -16,15 +16,14 @@ pub(super) enum TerminalWaitPlan {
 
 pub(super) fn terminal_wait_plan(
     model: &Model,
-    startup_deadline: Instant,
     now: Instant,
     has_background_work: bool,
 ) -> TerminalWaitPlan {
-    let deadline = next_pipeline_deadline(model, startup_deadline, now, has_background_work);
+    let deadline = next_pipeline_deadline(model, now, has_background_work);
     match deadline {
         Some(deadline) => TerminalWaitPlan::Poll {
             duration: deadline.saturating_duration_since(now),
-            render_on_timeout: render_on_timeout(model, startup_deadline, now, deadline),
+            render_on_timeout: render_on_timeout(model, now, deadline),
         },
         None => TerminalWaitPlan::Block,
     }
@@ -43,15 +42,10 @@ impl TerminalWaitPlan {
 
 fn next_pipeline_deadline(
     model: &Model,
-    startup_deadline: Instant,
     now: Instant,
     has_background_work: bool,
 ) -> Option<Instant> {
-    let mut next_deadline = if model.has_palette() {
-        None
-    } else {
-        Some(startup_deadline)
-    };
+    let mut next_deadline: Option<Instant> = None;
 
     if let Some(model_deadline) = model.next_timeout_deadline() {
         next_deadline = Some(match next_deadline {
@@ -90,16 +84,7 @@ fn next_animation_deadline(model: &Model, now: Instant) -> Option<Instant> {
     .min()
 }
 
-fn render_on_timeout(
-    model: &Model,
-    startup_deadline: Instant,
-    now: Instant,
-    deadline: Instant,
-) -> bool {
-    if !model.has_palette() && deadline == startup_deadline {
-        return false;
-    }
-
+fn render_on_timeout(model: &Model, now: Instant, deadline: Instant) -> bool {
     if model
         .next_timeout_deadline()
         .is_some_and(|model_deadline| model_deadline == deadline)
@@ -130,7 +115,7 @@ mod tests {
         let now = Instant::now();
 
         assert_eq!(
-            terminal_wait_plan(&model, now + Duration::from_secs(10), now, false),
+            terminal_wait_plan(&model, now, false),
             TerminalWaitPlan::Block
         );
     }
@@ -142,7 +127,7 @@ mod tests {
         let now = Instant::now();
 
         assert_eq!(
-            terminal_wait_plan(&model, now + Duration::from_secs(10), now, true),
+            terminal_wait_plan(&model, now, true),
             TerminalWaitPlan::Poll {
                 duration: BACKGROUND_EVENT_POLL_INTERVAL,
                 render_on_timeout: false,
@@ -158,7 +143,7 @@ mod tests {
         model.start_startup_banner_entrance_for_test(now);
 
         assert_eq!(
-            terminal_wait_plan(&model, now + Duration::from_secs(10), now, false),
+            terminal_wait_plan(&model, now, false),
             TerminalWaitPlan::Poll {
                 duration: Duration::from_millis(16),
                 render_on_timeout: true,
@@ -175,24 +160,10 @@ mod tests {
         model.advance_toast_at(now);
 
         assert_eq!(
-            terminal_wait_plan(&model, now + Duration::from_secs(10), now, false),
+            terminal_wait_plan(&model, now, false),
             TerminalWaitPlan::Poll {
                 duration: crate::toast::TOAST_FRAME_INTERVAL,
                 render_on_timeout: true,
-            }
-        );
-    }
-
-    #[test]
-    fn startup_deadline_wins_over_background_poll() {
-        let model = Model::new(StartupBannerOptions::default());
-        let now = Instant::now();
-
-        assert_eq!(
-            terminal_wait_plan(&model, now + Duration::from_millis(10), now, true),
-            TerminalWaitPlan::Poll {
-                duration: Duration::from_millis(10),
-                render_on_timeout: false,
             }
         );
     }
@@ -209,7 +180,7 @@ mod tests {
             .saturating_duration_since(now);
 
         assert_eq!(
-            terminal_wait_plan(&model, now + Duration::from_secs(10), now, false),
+            terminal_wait_plan(&model, now, false),
             TerminalWaitPlan::Poll {
                 duration,
                 render_on_timeout: true,
@@ -240,7 +211,7 @@ mod tests {
             .expect("active tool activity should have a start time");
 
         assert_eq!(
-            terminal_wait_plan(&model, now + Duration::from_secs(10), now, false),
+            terminal_wait_plan(&model, now, false),
             TerminalWaitPlan::Poll {
                 duration: TOOL_ACTIVITY_ACTIVE_MARKER_BLINK_INTERVAL,
                 render_on_timeout: true,
@@ -268,7 +239,7 @@ mod tests {
         let now = Instant::now();
 
         assert_eq!(
-            terminal_wait_plan(&model, now + Duration::from_secs(10), now, true),
+            terminal_wait_plan(&model, now, true),
             TerminalWaitPlan::Poll {
                 duration: BACKGROUND_EVENT_POLL_INTERVAL,
                 render_on_timeout: false,
@@ -301,7 +272,7 @@ mod tests {
             started_at + TOOL_ACTIVITY_ACTIVE_MARKER_BLINK_INTERVAL - Duration::from_millis(10);
 
         assert_eq!(
-            terminal_wait_plan(&model, now + Duration::from_secs(10), now, false),
+            terminal_wait_plan(&model, now, false),
             TerminalWaitPlan::Poll {
                 duration: Duration::from_millis(10),
                 render_on_timeout: true,
@@ -316,7 +287,7 @@ mod tests {
         let now = Instant::now();
 
         assert_eq!(
-            terminal_wait_plan(&model, now + Duration::from_secs(10), now, true),
+            terminal_wait_plan(&model, now, true),
             TerminalWaitPlan::Poll {
                 duration: BACKGROUND_EVENT_POLL_INTERVAL,
                 render_on_timeout: false,

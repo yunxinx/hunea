@@ -1,7 +1,8 @@
 use super::*;
 use crate::{
-    AppEffect, AppEvent, Sender, StartupBannerOptions, overlay_input_result::OverlayInputResult,
-    theme::default_palette,
+    AppEffect, AppEvent, Sender, StartupBannerOptions,
+    overlay_input_result::OverlayInputResult,
+    theme::{default_palette, terminal_default_palette},
 };
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{buffer::Buffer, layout::Rect};
@@ -1092,6 +1093,31 @@ fn shell_command_lines_use_highlighted_styles() {
     assert!(
         foregrounds.len() > 1,
         "shell command should have syntax-highlighted spans, got: {command_line:?}"
+    );
+}
+
+#[test]
+fn terminal_default_approval_command_does_not_emit_syntect_rgb_foregrounds() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.palette = terminal_default_palette();
+    open_preview_panel(&mut model);
+
+    let command_line = build_panel_lines(&model, 72)
+        .into_iter()
+        .find(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+                .contains("sed -n")
+        })
+        .expect("command line should render");
+
+    assert!(
+        command_line
+            .spans
+            .iter()
+            .all(|span| { !matches!(span.style.fg, Some(ratatui::style::Color::Rgb(_, _, _))) })
     );
 }
 

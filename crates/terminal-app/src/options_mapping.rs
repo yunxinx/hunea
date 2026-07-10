@@ -119,6 +119,7 @@ fn model_options_from_configs(
     loaded_phrases: &LoadedStatusPhrases,
 ) -> ModelOptions {
     ModelOptions {
+        working_dir: None,
         style_mode: style_mode_from_config(tui_config.user_input_style),
         status_line_items: status_line_items_from_config(&tui_config.status_line),
         status_line_2_items: status_line_items_from_config(&tui_config.status_line_2),

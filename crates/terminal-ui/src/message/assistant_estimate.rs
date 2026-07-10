@@ -303,7 +303,12 @@ mod tests {
         assert_eq!(
             estimate_common_markdown_metrics_fast(markdown, width)
                 .map(|metrics| metrics.into_tuple()),
-            Some(render_markdown_metrics(markdown, width, default_palette()))
+            Some(render_markdown_metrics(
+                markdown,
+                width,
+                default_palette(),
+                None,
+            ))
         );
     }
 
@@ -341,11 +346,12 @@ mod tests {
             "inline Markdown inside heading/list text should use the renderer-backed exact path"
         );
         assert_eq!(
-            render_assistant_message_metrics(markdown, width as u16, palette),
+            render_assistant_message_metrics(markdown, width as u16, palette, None),
             render_markdown_metrics(
                 markdown,
                 assistant_message_content_width(width as u16),
-                palette
+                palette,
+                None,
             )
         );
     }
@@ -380,8 +386,8 @@ mod tests {
         let palette = default_palette();
 
         assert_eq!(
-            render_assistant_message_metrics(markdown, width as u16, palette),
-            render_markdown_metrics(markdown, width, palette)
+            render_assistant_message_metrics(markdown, width as u16, palette, None),
+            render_markdown_metrics(markdown, width, palette, None)
         );
     }
 
@@ -394,7 +400,7 @@ mod tests {
         assert_eq!(
             estimate_common_markdown_metrics_fast(markdown, width)
                 .map(AssistantMarkdownMetrics::into_tuple),
-            Some(render_markdown_metrics(markdown, width, palette))
+            Some(render_markdown_metrics(markdown, width, palette, None))
         );
     }
 
@@ -407,7 +413,7 @@ mod tests {
         assert_eq!(
             estimate_common_markdown_metrics_fast(markdown, width)
                 .map(AssistantMarkdownMetrics::into_tuple),
-            Some(render_markdown_metrics(markdown, width, palette))
+            Some(render_markdown_metrics(markdown, width, palette, None))
         );
     }
 
@@ -434,11 +440,12 @@ mod tests {
         let palette = default_palette();
 
         assert_eq!(
-            render_assistant_message_metrics(markdown, width as u16, palette),
+            render_assistant_message_metrics(markdown, width as u16, palette, None),
             render_markdown_metrics(
                 markdown,
                 assistant_message_content_width(width as u16),
-                palette
+                palette,
+                None,
             )
         );
     }
@@ -450,11 +457,12 @@ mod tests {
         let palette = default_palette();
 
         assert_eq!(
-            render_assistant_message_metrics(markdown, width as u16, palette),
+            render_assistant_message_metrics(markdown, width as u16, palette, None),
             render_markdown_metrics(
                 markdown,
                 assistant_message_content_width(width as u16),
-                palette
+                palette,
+                None,
             )
         );
     }

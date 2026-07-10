@@ -144,7 +144,8 @@ where
     }
 }
 
-fn draw_terminal_commands<'a, W, I>(writer: &mut W, commands: I) -> io::Result<()>
+/// 将 terminal diff command 编码为 ANSI 输出，并在结束时恢复默认 SGR 状态。
+pub(crate) fn draw_terminal_commands<'a, W, I>(writer: &mut W, commands: I) -> io::Result<()>
 where
     W: Write,
     I: Iterator<Item = TerminalDrawCommand<'a>>,

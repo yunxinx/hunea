@@ -24,6 +24,17 @@ use super::{
 };
 use crate::runner::terminal_surface::TerminalSurface;
 
+mod tail;
+mod terminal_surface;
+
+#[cfg(feature = "bench-support")]
+pub use tail::{StreamActivityTailBench, TailLayoutSummary};
+#[cfg(feature = "bench-support")]
+pub use terminal_surface::{
+    TerminalCommandSummary, TerminalFlushBench, TerminalFlushSummary, TerminalGridBench,
+    TerminalGridScenario,
+};
+
 /// `TextRenderSummary` 收敛一类文本渲染 benchmark 的稳定输出特征。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextRenderSummary {
@@ -227,6 +238,19 @@ pub fn markdown_document_fixture() -> String {
     sections.join("\n")
 }
 
+/// `large_rust_code_block_fixture` 构造可按代码行数扩展的 fenced Rust markdown。
+pub fn large_rust_code_block_fixture(line_count: usize) -> String {
+    let mut markdown = String::from("```rust\nfn benchmark_values() -> usize {\n");
+    for index in 0..line_count {
+        let _ = writeln!(
+            markdown,
+            "    let value_{index}: usize = {index}; // syntax benchmark line {index}"
+        );
+    }
+    markdown.push_str("    0\n}\n```\n");
+    markdown
+}
+
 /// `prompt_prose_fixture` 返回与 Go benchmark 对齐的 prose prompt 文本。
 pub fn prompt_prose_fixture() -> String {
     "the composer should preserve wrapped words and cursor anchors across resize ".repeat(8)
@@ -258,6 +282,20 @@ pub fn composer_draft_fixture() -> String {
         "benchmark final line with emoji 👨‍👩‍👧 and trailing text".to_string(),
     ]
     .join("\n")
+}
+
+/// `large_composer_draft_fixture` 构造达到目标字节数的多语言长草稿。
+pub fn large_composer_draft_fixture(min_bytes: usize) -> String {
+    let mut draft = String::with_capacity(min_bytes);
+    let mut line_index = 0usize;
+    while draft.len() < min_bytes {
+        let _ = writeln!(
+            draft,
+            "line {line_index:04}\tcomposer viewport keeps 中文宽字 and emoji 👨‍👩‍👧 aligned while the draft wraps across the terminal"
+        );
+        line_index += 1;
+    }
+    draft
 }
 
 /// `rendered_block_fixture` 返回 transcript 列表 benchmark 使用的稳定块文本。
@@ -1142,3 +1180,5 @@ fn benchmark_composer_draft_for_document() -> String {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod visual_baseline;

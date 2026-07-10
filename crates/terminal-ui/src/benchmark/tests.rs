@@ -1,4 +1,99 @@
+use super::tail::StreamActivityTailBench;
+use super::terminal_surface::{TerminalFlushBench, TerminalGridBench, TerminalGridScenario};
 use super::*;
+
+#[test]
+fn single_cell_terminal_diff_emits_one_put() {
+    let bench = TerminalGridBench::new(TerminalGridScenario::SingleCell, 24, 6);
+
+    let summary = bench.diff();
+
+    assert_eq!(summary.command_count, 1);
+    assert_eq!(summary.put_count, 1);
+    assert_eq!(summary.clear_to_end_count, 0);
+    assert_eq!(summary.wide_prefill_cells, 0);
+}
+
+#[test]
+fn full_screen_terminal_diff_emits_visible_grid() {
+    let bench = TerminalGridBench::new(TerminalGridScenario::FullScreen, 12, 4);
+
+    let summary = bench.diff();
+
+    assert_eq!(summary.command_count, 48);
+    assert_eq!(summary.put_count, 48);
+    assert_eq!(summary.clear_to_end_count, 0);
+}
+
+#[test]
+fn scroll_one_line_terminal_diff_changes_every_row() {
+    let bench = TerminalGridBench::new(TerminalGridScenario::ScrollOneLine, 12, 4);
+
+    let summary = bench.diff();
+
+    assert_eq!(summary.command_count, 48);
+    assert_eq!(summary.put_count, 48);
+    assert_eq!(summary.clear_to_end_count, 0);
+}
+
+#[test]
+fn terminal_flush_summary_matches_diff_and_writes_ansi() {
+    let mut bench = TerminalFlushBench::new(TerminalGridScenario::SingleCell, 24, 6);
+
+    let summary = bench.diff_and_flush();
+
+    assert_eq!(summary.commands.command_count, 1);
+    assert_eq!(summary.commands.put_count, 1);
+    assert!(summary.output_bytes > 1);
+}
+
+#[test]
+fn large_rust_code_block_fixture_is_fenced_and_scales_with_lines() {
+    let small = large_rust_code_block_fixture(8);
+    let large = large_rust_code_block_fixture(32);
+
+    assert!(small.starts_with("```rust\n"));
+    assert!(small.ends_with("```\n"));
+    assert_eq!(small.matches("let value_").count(), 8);
+    assert_eq!(large.matches("let value_").count(), 32);
+    assert!(large.len() > small.len());
+}
+
+#[test]
+fn large_rust_code_block_fixture_wraps_lines_in_function_body() {
+    let markdown = large_rust_code_block_fixture(4);
+
+    assert!(markdown.contains("fn benchmark_values() -> usize {\n"));
+    assert!(markdown.ends_with("    0\n}\n```\n"));
+}
+
+#[test]
+fn large_composer_draft_fixture_reaches_requested_size_with_wide_text() {
+    let draft = large_composer_draft_fixture(8 * 1024);
+
+    assert!(draft.len() >= 8 * 1024);
+    assert!(draft.contains('\t'));
+    assert!(draft.contains("中文"));
+    assert!(draft.contains("👨‍👩‍👧"));
+    assert!(draft.lines().count() > 32);
+}
+
+#[test]
+fn stream_activity_tail_bench_advances_real_frame_deadline() {
+    let mut bench = StreamActivityTailBench::new(8 * 1024, 64, 16);
+    let initial_frame_time = bench.frame_time();
+
+    let first = bench.rebuild_next_activity_frame();
+    let first_frame_time = bench.frame_time();
+    let second = bench.rebuild_next_activity_frame();
+
+    assert!(first_frame_time > initial_frame_time);
+    assert!(bench.frame_time() > first_frame_time);
+    assert_eq!(first, second);
+    assert!(first.line_count >= first.composer_line_count);
+    assert!(first.composer_line_count > 32);
+    assert!(first.plain_text_len >= 8 * 1024);
+}
 
 #[test]
 fn cold_resume_stress_fixture_keeps_transcript_render_cold_before_measurement() {

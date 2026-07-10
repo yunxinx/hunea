@@ -1,0 +1,65 @@
+size=64x18
+cursor=24,13
+cells:
+00|▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄|
+01|›·请检查宽字符：界面·👨‍👩‍👧·········································|
+02|▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀|
+03|································································|
+04|··##·Render·review··············································|
+05|································································|
+06|··Wide·glyphs·stay·aligned·beside·code.·························|
+07|································································|
+08|··fn·display_width(label:·&str)·->·usize·{······················|
+09|······label.chars().count()·····································|
+10|··}·····························································|
+11|································································|
+12|▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄|
+13|›·继续·review：中文·+·👨‍👩‍👧········································|
+14|▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀|
+15|································································|
+16|································································|
+17|································································|
+styles:
+00|00..63 fg=Rgb(46, 46, 46) bg=Reset underline=Reset modifiers=NONE diff=None
+01|00..00 fg=Rgb(166, 166, 166) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+01|01..02 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+01|04..04 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+01|06..06 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+01|08..08 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+01|10..10 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+01|12..12 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+01|14..14 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+01|16..16 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+01|18..18 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+01|20..21 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+01|23..63 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+02|00..63 fg=Rgb(46, 46, 46) bg=Reset underline=Reset modifiers=NONE diff=None
+04|02..17 fg=Rgb(245, 245, 245) bg=Reset underline=Reset modifiers=BOLD diff=None
+06|02..33 fg=Rgb(245, 245, 245) bg=Reset underline=Reset modifiers=NONE diff=None
+06|34..37 fg=Cyan bg=Reset underline=Reset modifiers=NONE diff=None
+06|38..38 fg=Rgb(245, 245, 245) bg=Reset underline=Reset modifiers=NONE diff=None
+08|02..03 fg=Rgb(180, 142, 173) bg=Reset underline=Reset modifiers=NONE diff=None
+08|04..04 fg=Rgb(192, 197, 206) bg=Reset underline=Reset modifiers=NONE diff=None
+08|05..17 fg=Rgb(143, 161, 179) bg=Reset underline=Reset modifiers=NONE diff=None
+08|18..18 fg=Rgb(192, 197, 206) bg=Reset underline=Reset modifiers=NONE diff=None
+08|19..23 fg=Rgb(191, 97, 106) bg=Reset underline=Reset modifiers=NONE diff=None
+08|24..26 fg=Rgb(192, 197, 206) bg=Reset underline=Reset modifiers=NONE diff=None
+08|27..29 fg=Rgb(180, 142, 173) bg=Reset underline=Reset modifiers=NONE diff=None
+08|30..34 fg=Rgb(192, 197, 206) bg=Reset underline=Reset modifiers=NONE diff=None
+08|35..39 fg=Rgb(180, 142, 173) bg=Reset underline=Reset modifiers=NONE diff=None
+08|40..41 fg=Rgb(192, 197, 206) bg=Reset underline=Reset modifiers=NONE diff=None
+09|02..11 fg=Rgb(192, 197, 206) bg=Reset underline=Reset modifiers=NONE diff=None
+09|12..16 fg=Rgb(150, 181, 180) bg=Reset underline=Reset modifiers=NONE diff=None
+09|17..19 fg=Rgb(192, 197, 206) bg=Reset underline=Reset modifiers=NONE diff=None
+09|20..24 fg=Rgb(150, 181, 180) bg=Reset underline=Reset modifiers=NONE diff=None
+09|25..26 fg=Rgb(192, 197, 206) bg=Reset underline=Reset modifiers=NONE diff=None
+10|02..02 fg=Rgb(192, 197, 206) bg=Reset underline=Reset modifiers=NONE diff=None
+12|00..63 fg=Rgb(46, 46, 46) bg=Reset underline=Reset modifiers=NONE diff=None
+13|00..02 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+13|04..04 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+13|06..13 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+13|15..15 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+13|17..17 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+13|19..22 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+13|24..63 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+14|00..63 fg=Rgb(46, 46, 46) bg=Reset underline=Reset modifiers=NONE diff=None

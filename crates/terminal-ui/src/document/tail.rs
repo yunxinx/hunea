@@ -74,6 +74,28 @@ struct DocumentTailRows {
 }
 
 impl DocumentTailRows {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            lines: Vec::with_capacity(capacity),
+            text_lines: Vec::with_capacity(capacity),
+            anchors: Vec::with_capacity(capacity),
+            selectable: Vec::with_capacity(capacity),
+        }
+    }
+
+    fn push(
+        &mut self,
+        line: Line<'static>,
+        text_line: String,
+        anchor: DocumentLineAnchor,
+        selectable: SelectableLineRange,
+    ) {
+        self.lines.push(line);
+        self.text_lines.push(text_line);
+        self.anchors.push(anchor);
+        self.selectable.push(selectable);
+    }
+
     fn len(&self) -> usize {
         self.lines.len()
     }
@@ -83,10 +105,12 @@ impl DocumentTailRows {
     }
 
     fn push_empty(&mut self) {
-        self.lines.push(Line::raw(""));
-        self.text_lines.push(String::new());
-        self.anchors.push(DocumentLineAnchor::default());
-        self.selectable.push(SelectableLineRange::default());
+        self.push(
+            Line::raw(""),
+            String::new(),
+            DocumentLineAnchor::default(),
+            SelectableLineRange::default(),
+        );
     }
 }
 
@@ -309,34 +333,7 @@ fn compose_document_stable_tail_layout(
         &input.status_line_2,
         input.status_line_gap_before,
     );
-    let mut lines = Vec::with_capacity(
-        extra_gap
-            + usize::from(has_composer_padding) * 2
-            + input.command_panel.lines.len()
-            + input.tool_approval_panel.lines.len()
-            + input.model_panel.lines.len()
-            + input.context_budget.lines.len()
-            + status_line_rows,
-    );
-    let mut text_lines = Vec::with_capacity(
-        extra_gap
-            + usize::from(has_composer_padding) * 2
-            + input.command_panel.plain_lines.len()
-            + input.tool_approval_panel.plain_lines.len()
-            + input.model_panel.plain_lines.len()
-            + input.context_budget.plain_lines.len()
-            + status_line_rows,
-    );
-    let mut anchors = Vec::with_capacity(
-        extra_gap
-            + usize::from(has_composer_padding) * 2
-            + input.command_panel.lines.len()
-            + input.tool_approval_panel.lines.len()
-            + input.model_panel.lines.len()
-            + input.context_budget.lines.len()
-            + status_line_rows,
-    );
-    let mut selectable = Vec::with_capacity(
+    let mut rows = DocumentTailRows::with_capacity(
         extra_gap
             + usize::from(has_composer_padding) * 2
             + input.command_panel.lines.len()
@@ -347,74 +344,38 @@ fn compose_document_stable_tail_layout(
     );
 
     if input.transcript_has_content {
-        append_transcript_gap(&mut lines, &mut text_lines, &mut anchors, &mut selectable);
+        append_transcript_gap(&mut rows);
     }
-    let activity_insert_at = lines.len();
+    let activity_insert_at = rows.len();
 
     if input.model_panel.has_content {
-        append_model_panel(
-            &input.model_panel,
-            &mut lines,
-            &mut text_lines,
-            &mut anchors,
-            &mut selectable,
-        );
+        append_model_panel(&input.model_panel, &mut rows);
 
-        return compose_document_panel_stable_tail_layout(
-            DocumentTailRows {
-                lines,
-                text_lines,
-                anchors,
-                selectable,
-            },
-            activity_insert_at,
-        );
+        return compose_document_panel_stable_tail_layout(rows, activity_insert_at);
     }
 
     if input.context_budget.has_content {
         append_inline_panel(
             &input.context_budget,
             DocumentAnchorRegion::ContextBudgetPanel,
-            &mut lines,
-            &mut text_lines,
-            &mut anchors,
-            &mut selectable,
+            &mut rows,
         );
 
-        return compose_document_panel_stable_tail_layout(
-            DocumentTailRows {
-                lines,
-                text_lines,
-                anchors,
-                selectable,
-            },
-            activity_insert_at,
-        );
+        return compose_document_panel_stable_tail_layout(rows, activity_insert_at);
     }
 
     if input.tool_approval_panel.has_content {
         append_inline_panel(
             &input.tool_approval_panel,
             DocumentAnchorRegion::ToolApprovalPanel,
-            &mut lines,
-            &mut text_lines,
-            &mut anchors,
-            &mut selectable,
+            &mut rows,
         );
 
-        return compose_document_panel_stable_tail_layout(
-            DocumentTailRows {
-                lines,
-                text_lines,
-                anchors,
-                selectable,
-            },
-            activity_insert_at,
-        );
+        return compose_document_panel_stable_tail_layout(rows, activity_insert_at);
     }
 
     let composer_line_count = input.composer_document.line_count();
-    let composer_slot = SlotFrame::new(lines.len(), has_composer_padding, composer_line_count);
+    let composer_slot = SlotFrame::new(rows.len(), has_composer_padding, composer_line_count);
     if let (Some(line), Some(text_line)) = (
         input.composer_document.frame_decoration_top_line.clone(),
         input
@@ -422,17 +383,19 @@ fn compose_document_stable_tail_layout(
             .frame_decoration_top_plain_line
             .clone(),
     ) {
-        lines.push(line);
-        text_lines.push(text_line);
-        anchors.push(DocumentLineAnchor {
-            region: DocumentAnchorRegion::ComposerPadding,
-            gap_index: 0,
-            ..DocumentLineAnchor::default()
-        });
-        selectable.push(SelectableLineRange::default());
+        rows.push(
+            line,
+            text_line,
+            DocumentLineAnchor {
+                region: DocumentAnchorRegion::ComposerPadding,
+                gap_index: 0,
+                ..DocumentLineAnchor::default()
+            },
+            SelectableLineRange::default(),
+        );
     }
 
-    let composer_insert_at = lines.len();
+    let composer_insert_at = rows.len();
 
     if let (Some(line), Some(text_line)) = (
         input.composer_document.frame_decoration_bottom_line.clone(),
@@ -441,33 +404,33 @@ fn compose_document_stable_tail_layout(
             .frame_decoration_bottom_plain_line
             .clone(),
     ) {
-        lines.push(line);
-        text_lines.push(text_line);
-        anchors.push(DocumentLineAnchor {
-            region: DocumentAnchorRegion::ComposerPadding,
-            gap_index: 1,
-            ..DocumentLineAnchor::default()
-        });
-        selectable.push(SelectableLineRange::default());
+        rows.push(
+            line,
+            text_line,
+            DocumentLineAnchor {
+                region: DocumentAnchorRegion::ComposerPadding,
+                gap_index: 1,
+                ..DocumentLineAnchor::default()
+            },
+            SelectableLineRange::default(),
+        );
     }
 
     if input.command_panel.has_content {
         for index in 0..input.command_panel.lines.len() {
-            lines.push(input.command_panel.lines[index].clone());
-            text_lines.push(
+            rows.push(
+                input.command_panel.lines[index].clone(),
                 input
                     .command_panel
                     .plain_lines
                     .get(index)
                     .cloned()
                     .unwrap_or_default(),
-            );
-            anchors.push(DocumentLineAnchor {
-                region: DocumentAnchorRegion::CommandPanel,
-                gap_index: index,
-                ..DocumentLineAnchor::default()
-            });
-            selectable.push(
+                DocumentLineAnchor {
+                    region: DocumentAnchorRegion::CommandPanel,
+                    gap_index: index,
+                    ..DocumentLineAnchor::default()
+                },
                 input
                     .command_panel
                     .selectable
@@ -480,41 +443,24 @@ fn compose_document_stable_tail_layout(
 
     if input.status_line.has_content || input.status_line_2.has_content {
         for gap_index in 0..input.status_line_gap_before {
-            lines.push(Line::raw(""));
-            text_lines.push(String::new());
-            anchors.push(DocumentLineAnchor {
-                region: DocumentAnchorRegion::ComposerStatusGap,
-                gap_index,
-                ..DocumentLineAnchor::default()
-            });
-            selectable.push(SelectableLineRange::default());
+            rows.push(
+                Line::raw(""),
+                String::new(),
+                DocumentLineAnchor {
+                    region: DocumentAnchorRegion::ComposerStatusGap,
+                    gap_index,
+                    ..DocumentLineAnchor::default()
+                },
+                SelectableLineRange::default(),
+            );
         }
 
-        append_status_line(
-            input.status_line,
-            0,
-            &mut lines,
-            &mut text_lines,
-            &mut anchors,
-            &mut selectable,
-        );
-        append_status_line(
-            input.status_line_2,
-            1,
-            &mut lines,
-            &mut text_lines,
-            &mut anchors,
-            &mut selectable,
-        );
+        append_status_line(input.status_line, 0, &mut rows);
+        append_status_line(input.status_line_2, 1, &mut rows);
     }
 
     DocumentStableTailLayout {
-        rows: DocumentTailRows {
-            lines,
-            text_lines,
-            anchors,
-            selectable,
-        },
+        rows,
         composer_document: Some(input.composer_document),
         composer_insert_at,
         activity_insert_at,
@@ -554,21 +500,18 @@ fn compose_document_tail_activity_segment(
     if activity.has_content
         && let Some(line) = activity.line
     {
-        rows.lines.push(line);
-        rows.text_lines.push(activity.plain_line);
-        rows.anchors.push(DocumentLineAnchor {
-            region: DocumentAnchorRegion::StreamActivity,
-            ..DocumentLineAnchor::default()
-        });
-        rows.selectable.push(activity.selectable);
+        rows.push(
+            line,
+            activity.plain_line,
+            DocumentLineAnchor {
+                region: DocumentAnchorRegion::StreamActivity,
+                ..DocumentLineAnchor::default()
+            },
+            activity.selectable,
+        );
     }
     if activity.has_content && adds_composer_gap {
-        append_stream_activity_composer_gap(
-            &mut rows.lines,
-            &mut rows.text_lines,
-            &mut rows.anchors,
-            &mut rows.selectable,
-        );
+        append_stream_activity_composer_gap(&mut rows);
     }
     DocumentTailActivitySegment { rows }
 }
@@ -892,99 +835,78 @@ fn stream_activity_composer_gap_line_count() -> usize {
     1
 }
 
-fn append_transcript_gap(
-    lines: &mut Vec<Line<'static>>,
-    text_lines: &mut Vec<String>,
-    anchors: &mut Vec<DocumentLineAnchor>,
-    selectable: &mut Vec<SelectableLineRange>,
-) {
+fn append_transcript_gap(rows: &mut DocumentTailRows) {
     for gap_index in 0..transcript_composer_gap_line_count() {
-        lines.push(Line::raw(""));
-        text_lines.push(String::new());
-        anchors.push(DocumentLineAnchor {
-            region: DocumentAnchorRegion::TranscriptComposerGap,
-            gap_index,
-            ..DocumentLineAnchor::default()
-        });
-        selectable.push(SelectableLineRange::default());
+        rows.push(
+            Line::raw(""),
+            String::new(),
+            DocumentLineAnchor {
+                region: DocumentAnchorRegion::TranscriptComposerGap,
+                gap_index,
+                ..DocumentLineAnchor::default()
+            },
+            SelectableLineRange::default(),
+        );
     }
 }
 
-fn append_stream_activity_composer_gap(
-    lines: &mut Vec<Line<'static>>,
-    text_lines: &mut Vec<String>,
-    anchors: &mut Vec<DocumentLineAnchor>,
-    selectable: &mut Vec<SelectableLineRange>,
-) {
+fn append_stream_activity_composer_gap(rows: &mut DocumentTailRows) {
     for gap_index in 0..stream_activity_composer_gap_line_count() {
-        lines.push(Line::raw(""));
-        text_lines.push(String::new());
-        anchors.push(DocumentLineAnchor {
-            region: DocumentAnchorRegion::StreamActivityComposerGap,
-            gap_index,
-            ..DocumentLineAnchor::default()
-        });
-        selectable.push(SelectableLineRange::default());
+        rows.push(
+            Line::raw(""),
+            String::new(),
+            DocumentLineAnchor {
+                region: DocumentAnchorRegion::StreamActivityComposerGap,
+                gap_index,
+                ..DocumentLineAnchor::default()
+            },
+            SelectableLineRange::default(),
+        );
     }
 }
 
-fn append_model_panel(
-    model_panel: &ModelPanelRenderResult,
-    lines: &mut Vec<Line<'static>>,
-    text_lines: &mut Vec<String>,
-    anchors: &mut Vec<DocumentLineAnchor>,
-    selectable: &mut Vec<SelectableLineRange>,
-) {
-    append_inline_panel(
-        model_panel,
-        DocumentAnchorRegion::ModelPanel,
-        lines,
-        text_lines,
-        anchors,
-        selectable,
-    );
+fn append_model_panel(model_panel: &ModelPanelRenderResult, rows: &mut DocumentTailRows) {
+    append_inline_panel(model_panel, DocumentAnchorRegion::ModelPanel, rows);
 }
 
 fn append_inline_panel(
     panel: &InlinePanelRenderResult,
     region: DocumentAnchorRegion,
-    lines: &mut Vec<Line<'static>>,
-    text_lines: &mut Vec<String>,
-    anchors: &mut Vec<DocumentLineAnchor>,
-    selectable: &mut Vec<SelectableLineRange>,
+    rows: &mut DocumentTailRows,
 ) {
     for index in 0..panel.lines.len() {
-        lines.push(panel.lines[index].clone());
-        text_lines.push(panel.plain_lines.get(index).cloned().unwrap_or_default());
-        anchors.push(DocumentLineAnchor {
-            region,
-            gap_index: index,
-            ..DocumentLineAnchor::default()
-        });
-        selectable.push(panel.selectable.get(index).copied().unwrap_or_default());
+        rows.push(
+            panel.lines[index].clone(),
+            panel.plain_lines.get(index).cloned().unwrap_or_default(),
+            DocumentLineAnchor {
+                region,
+                gap_index: index,
+                ..DocumentLineAnchor::default()
+            },
+            panel.selectable.get(index).copied().unwrap_or_default(),
+        );
     }
 }
 
 fn append_status_line(
     status_line: StatusLineRenderResult,
     status_line_index: usize,
-    lines: &mut Vec<Line<'static>>,
-    text_lines: &mut Vec<String>,
-    anchors: &mut Vec<DocumentLineAnchor>,
-    selectable: &mut Vec<SelectableLineRange>,
+    rows: &mut DocumentTailRows,
 ) {
     if !status_line.has_content {
         return;
     }
 
     if let Some(line) = status_line.line {
-        lines.push(line);
-        text_lines.push(status_line.plain_line);
-        anchors.push(DocumentLineAnchor {
-            region: DocumentAnchorRegion::StatusLine,
-            gap_index: status_line_index,
-            ..DocumentLineAnchor::default()
-        });
-        selectable.push(status_line.selectable);
+        rows.push(
+            line,
+            status_line.plain_line,
+            DocumentLineAnchor {
+                region: DocumentAnchorRegion::StatusLine,
+                gap_index: status_line_index,
+                ..DocumentLineAnchor::default()
+            },
+            status_line.selectable,
+        );
     }
 }

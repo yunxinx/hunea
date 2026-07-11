@@ -48,7 +48,13 @@ impl LoopEventWaker {
         }
         match self.state.sender.try_send(LoopEvent::BackgroundReady) {
             Ok(()) => {}
-            Err(mpsc::TrySendError::Full(_) | mpsc::TrySendError::Disconnected(_)) => {
+            Err(mpsc::TrySendError::Full(_)) => {
+                // 队列已满意味着主循环已有事件可处理，因此不会在等待阶段睡死；runner
+                // 必须在每轮顶部无条件 drain runtime payload。若未来改为仅收到
+                // `BackgroundReady` 才 drain，这里就不能再安全地丢弃 wake marker。
+                self.state.is_pending.store(false, Ordering::Release);
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {
                 self.state.is_pending.store(false, Ordering::Release);
             }
         }

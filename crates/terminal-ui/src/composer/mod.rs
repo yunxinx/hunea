@@ -115,7 +115,6 @@ impl Composer {
             cursor_revision: 1,
             layout_snapshot: ComposerLayoutSnapshot::build(
                 "",
-                content_revision,
                 composer_content_width(width),
                 usize::from(prompt_width()),
             ),
@@ -1288,7 +1287,6 @@ impl Composer {
     fn refresh_layout_snapshot(&mut self) {
         self.layout_snapshot = ComposerLayoutSnapshot::build(
             &self.value,
-            self.content_revision,
             self.content_width(),
             usize::from(prompt_width()),
         );

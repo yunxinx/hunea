@@ -7,14 +7,6 @@ use std::rc::Rc;
 
 use crate::transcript::wrap_prompt_visual_lines;
 
-/// `ComposerLayoutKey` 唯一标识一次 composer 全文 soft-wrap 的输入。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) struct ComposerLayoutKey {
-    pub(crate) content_revision: usize,
-    pub(crate) content_width: usize,
-    pub(crate) prompt_width: usize,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VisualLine {
     pub(crate) text: String,
@@ -28,23 +20,12 @@ pub(crate) struct VisualLine {
 /// `ComposerLayoutSnapshot` 保存当前 content/width revision 的不可变视觉几何。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ComposerLayoutSnapshot {
-    key: ComposerLayoutKey,
     visual_lines: Vec<VisualLine>,
 }
 
 impl ComposerLayoutSnapshot {
-    pub(crate) fn build(
-        value: &str,
-        content_revision: usize,
-        content_width: usize,
-        prompt_width: usize,
-    ) -> Rc<Self> {
+    pub(crate) fn build(value: &str, content_width: usize, prompt_width: usize) -> Rc<Self> {
         Rc::new(Self {
-            key: ComposerLayoutKey {
-                content_revision,
-                content_width,
-                prompt_width,
-            },
             visual_lines: visual_lines_for_text(value, content_width, prompt_width),
         })
     }

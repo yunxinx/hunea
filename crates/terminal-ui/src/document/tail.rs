@@ -710,7 +710,7 @@ impl DocumentTailLayout {
                 .stable
                 .composer_document
                 .as_ref()
-                .map_or(0, composer::ComposerDocumentSnapshot::plain_text_len);
+                .map_or(0, composer::ComposerDocumentSnapshot::text_bytes_len);
             return stable_rows + activity_rows + composer_rows + line_count.saturating_sub(1);
         }
         let plain_text_len = range

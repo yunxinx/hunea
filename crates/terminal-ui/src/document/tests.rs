@@ -135,6 +135,26 @@ fn segmented_tail_accessors_cross_activity_boundaries_without_flattening() {
 }
 
 #[test]
+fn tail_full_range_plain_text_len_matches_line_materialization_for_multiline_composer() {
+    let mut model = ready_document_model(40, 8);
+    model
+        .composer_mut()
+        .set_text_for_test("draft one\ndraft two\ndraft three");
+    model.sync_composer_height();
+    model.show_stream_activity_with_header("Working");
+    let context = FrameRenderContext::capture();
+    let layout = model.build_document_layout(context);
+    let tail_start = layout.transcript_line_count;
+    let tail_line_count = layout.tail.line_count();
+    let text_lines = layout.line_texts_for_range(tail_start, tail_line_count, context);
+
+    assert_eq!(
+        layout.plain_text_len_for_range(tail_start, tail_line_count, context),
+        text_lines.join("\n").len(),
+    );
+}
+
+#[test]
 fn model_panel_activity_segment_has_no_composer_gap_or_slot_offset() {
     let mut model = ready_document_model(60, 24);
     model.show_stream_activity_with_header("Working");

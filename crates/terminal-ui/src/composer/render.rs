@@ -167,8 +167,10 @@ impl ComposerDocumentSnapshot {
         self.layout.line_count()
     }
 
-    pub(crate) fn plain_text_len(&self) -> usize {
+    /// 返回所有 visual line 的内容字节数，不包含行间换行分隔符。
+    pub(crate) fn text_bytes_len(&self) -> usize {
         self.plain_text_len
+            .saturating_sub(self.line_count().saturating_sub(1))
     }
 
     pub(crate) fn anchor_at(&self, index: usize) -> Option<LineAnchor> {

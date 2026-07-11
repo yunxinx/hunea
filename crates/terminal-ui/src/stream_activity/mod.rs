@@ -757,7 +757,14 @@ fn activity_content_spans(
     motion_mode: crate::MotionMode,
 ) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
-    spans.push(activity_glyph_span_at(palette, activity.started_at, now));
+    spans.push(if motion_mode.allows_animation() {
+        activity_glyph_span_at(palette, activity.started_at, now)
+    } else {
+        Span::styled(
+            STREAM_ACTIVITY_GLYPH,
+            activity_glyph_style_for_intensity(palette, 0.5),
+        )
+    });
     spans.push(Span::raw(" "));
     if motion_mode.allows_animation() {
         spans.extend(shimmer_spans_at(

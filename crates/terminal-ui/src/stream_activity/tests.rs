@@ -100,6 +100,41 @@ fn stream_activity_glyph_uses_breathing_style() {
 }
 
 #[test]
+fn reduced_motion_keeps_activity_glyph_style_static_while_elapsed_advances() {
+    let mut model = Model::new_with_options(
+        StartupBannerOptions::default(),
+        crate::ModelOptions {
+            motion_mode: crate::MotionMode::Reduced,
+            ..crate::ModelOptions::default()
+        },
+    );
+    model.set_palette(default_palette(), true);
+    model.show_stream_activity_with_header("Working");
+    let started_at = model.stream_activity.as_ref().unwrap().started_at;
+    let first = model.current_stream_activity_render_result_at(started_at);
+    let second =
+        model.current_stream_activity_render_result_at(started_at + Duration::from_secs(1));
+    let first_glyph = first
+        .line
+        .expect("activity line should render")
+        .spans
+        .into_iter()
+        .next()
+        .expect("activity glyph should render");
+    let second_glyph = second
+        .line
+        .expect("activity line should render")
+        .spans
+        .into_iter()
+        .next()
+        .expect("activity glyph should render");
+
+    assert_ne!(first.plain_line, second.plain_line);
+    assert_eq!(first_glyph.style, second_glyph.style);
+    assert!(!first_glyph.style.add_modifier.contains(Modifier::DIM));
+}
+
+#[test]
 fn clear_stream_activity_completes_open_exploration_marker() {
     let palette = default_palette();
     let mut model = Model::new(StartupBannerOptions::default());

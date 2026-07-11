@@ -209,10 +209,13 @@ fn reduced_motion_disables_decorative_deadlines_and_keeps_semantic_timeouts() {
     );
 
     model.show_stream_activity_with_header("Working");
-    let first = model.current_stream_activity_render_result_at(now);
-    let second = model.current_stream_activity_render_result_at(now + Duration::from_secs(2));
-    assert_eq!(first.plain_line, second.plain_line);
-    assert_eq!(model.stream_activity_next_frame_deadline_at(now), None);
+    let activity_now = Instant::now();
+    let first = model.current_stream_activity_render_result_at(activity_now);
+    let second =
+        model.current_stream_activity_render_result_at(activity_now + Duration::from_secs(2));
+    assert!(first.plain_line.contains("(0s"));
+    assert!(second.plain_line.contains("(2s"));
+    assert!(model.stream_activity_next_frame_deadline_at(now).is_some());
 
     model.show_toast(ToastSeverity::Info, "Saved");
     assert_eq!(model.toast_next_frame_deadline_at(now), None);

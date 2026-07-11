@@ -20,6 +20,7 @@ use super::{
 };
 
 const STREAM_ACTIVITY_FRAME_INTERVAL: Duration = Duration::from_millis(80);
+const STREAM_ACTIVITY_ELAPSED_TICK_INTERVAL: Duration = Duration::from_secs(1);
 const STREAM_ACTIVITY_TOKEN_TICK_INTERVAL: Duration = Duration::from_millis(33);
 const STREAM_ACTIVITY_GLYPH: &str = "•";
 const STREAM_ACTIVITY_GLYPH_BREATH_PERIOD_SECS: f32 = 1.6;
@@ -348,11 +349,7 @@ impl Model {
         } else {
             usize::from(self.width)
         };
-        let render_now = if self.motion_mode.allows_animation() {
-            activity.active_now(now)
-        } else {
-            activity.started_at
-        };
+        let render_now = activity.active_now(now);
         let (text, spans) =
             render_activity_content(activity, self.palette, render_now, width, self.motion_mode);
         if text.is_empty() {
@@ -374,9 +371,14 @@ impl Model {
 
     pub(crate) fn stream_activity_frame_key(&self, now: Instant) -> StreamActivityFrameKey {
         if !self.motion_mode.allows_animation() {
+            let frame_index = self
+                .stream_activity
+                .as_ref()
+                .map(|activity| activity.elapsed_at(activity.active_now(now)).as_secs() as usize)
+                .unwrap_or(0);
             return StreamActivityFrameKey {
                 revision: self.stream_activity_revision,
-                frame_index: 0,
+                frame_index,
             };
         }
         let frame_index = self
@@ -391,13 +393,17 @@ impl Model {
     }
 
     pub(crate) fn stream_activity_next_frame_deadline_at(&self, now: Instant) -> Option<Instant> {
-        if !self.motion_mode.allows_animation() {
-            return None;
-        }
         let activity = self
             .stream_activity
             .as_ref()
             .filter(|activity| !activity.is_paused())?;
+        if !self.motion_mode.allows_animation() {
+            return next_animation_frame_deadline(
+                activity.started_at,
+                now,
+                STREAM_ACTIVITY_ELAPSED_TICK_INTERVAL,
+            );
+        }
         next_animation_frame_deadline(activity.started_at, now, activity.frame_interval_at(now))
     }
 
@@ -527,8 +533,8 @@ impl StreamActivityState {
         format!("({})", segments.join(" • "))
     }
 
-    fn reduced_segment(&self) -> String {
-        let mut segments = vec![self.elapsed_text_at(self.started_at)];
+    fn reduced_segment_at(&self, now: Instant) -> String {
+        let mut segments = vec![self.elapsed_text_at(now)];
         if self.is_thinking {
             segments.push("thinking".to_string());
         }
@@ -716,7 +722,7 @@ fn render_activity_content(
     let elapsed_text = if motion_mode.allows_animation() {
         activity.elapsed_segment_at(now)
     } else {
-        activity.reduced_segment()
+        activity.reduced_segment_at(now)
     };
     let text = format!(
         "{STREAM_ACTIVITY_GLYPH} {} {elapsed_text}",

@@ -406,6 +406,31 @@ fn stream_activity_next_frame_deadline_is_anchored_to_started_at() {
 }
 
 #[test]
+fn reduced_motion_elapsed_uses_origin_anchored_second_deadlines() {
+    let mut model = Model::new_with_options(
+        StartupBannerOptions::default(),
+        crate::ModelOptions {
+            motion_mode: crate::MotionMode::Reduced,
+            ..crate::ModelOptions::default()
+        },
+    );
+    model.show_stream_activity_with_header("Working");
+    let started_at = model.stream_activity.as_ref().unwrap().started_at;
+    let now = started_at + Duration::from_millis(250);
+
+    assert_eq!(
+        model.stream_activity_next_frame_deadline_at(now),
+        Some(started_at + Duration::from_secs(1)),
+    );
+    assert!(
+        model
+            .current_stream_activity_render_result_at(started_at + Duration::from_secs(2))
+            .plain_line
+            .contains("Working (2s")
+    );
+}
+
+#[test]
 fn document_layout_rebuilds_when_stream_activity_tick_changes() {
     let mut model = Model::new(StartupBannerOptions::default());
     model.transcript_mut().clear();

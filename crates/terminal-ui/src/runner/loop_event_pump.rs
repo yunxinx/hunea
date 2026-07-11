@@ -13,11 +13,12 @@ use std::{
 
 use crossterm::event::{Event, EventStream, KeyCode, MouseEventKind};
 use futures_util::{Stream, StreamExt};
-use tokio::sync::mpsc as tokio_mpsc;
+use tokio::sync::{Notify, mpsc as tokio_mpsc};
 
 use super::input::TerminalInputCoalescing;
 
 const MAX_READY_TERMINAL_EVENTS_PER_FRAME: usize = 4096;
+const LOOP_EVENT_CHANNEL_CAPACITY: usize = 1024;
 const PAGE_SCROLL_BURST_QUIET_PERIOD: Duration = Duration::from_millis(24);
 const PAGE_SCROLL_BURST_MAX_READ_PERIOD: Duration = Duration::from_millis(96);
 
@@ -29,7 +30,7 @@ pub(super) enum LoopEvent {
 }
 
 struct LoopEventWakeState {
-    sender: mpsc::Sender<LoopEvent>,
+    sender: mpsc::SyncSender<LoopEvent>,
     is_pending: AtomicBool,
 }
 
@@ -45,8 +46,11 @@ impl LoopEventWaker {
         if self.state.is_pending.swap(true, Ordering::AcqRel) {
             return;
         }
-        if self.state.sender.send(LoopEvent::BackgroundReady).is_err() {
-            self.state.is_pending.store(false, Ordering::Release);
+        match self.state.sender.try_send(LoopEvent::BackgroundReady) {
+            Ok(()) => {}
+            Err(mpsc::TrySendError::Full(_) | mpsc::TrySendError::Disconnected(_)) => {
+                self.state.is_pending.store(false, Ordering::Release);
+            }
         }
     }
 
@@ -56,7 +60,7 @@ impl LoopEventWaker {
 
     #[cfg(test)]
     pub(super) fn disconnected_for_test() -> Self {
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = mpsc::sync_channel(1);
         drop(receiver);
         Self {
             state: Arc::new(LoopEventWakeState {
@@ -70,6 +74,7 @@ impl LoopEventWaker {
 pub(super) struct LoopEventPump {
     receiver: mpsc::Receiver<LoopEvent>,
     pending_events: VecDeque<LoopEvent>,
+    capacity_available: Arc<Notify>,
     waker: LoopEventWaker,
     input_control_sender: Option<tokio_mpsc::UnboundedSender<TerminalInputCommand>>,
     input_thread: Option<JoinHandle<()>>,
@@ -87,7 +92,7 @@ impl LoopEventPump {
     pub(super) fn wait(&mut self, timeout: Option<Duration>) -> io::Result<Option<LoopEvent>> {
         let event = match self.pending_events.pop_front() {
             Some(event) => Some(event),
-            None => receive_loop_event(&self.receiver, timeout)?,
+            None => self.receive(timeout)?,
         };
         if matches!(event, Some(LoopEvent::BackgroundReady)) {
             self.waker.mark_delivered();
@@ -108,7 +113,7 @@ impl LoopEventPump {
             let timeout = page_scroll_burst.poll_duration();
             let next_event = match self.pending_events.pop_front() {
                 Some(event) => Some(event),
-                None => receive_loop_event(&self.receiver, Some(timeout))?,
+                None => self.receive(Some(timeout))?,
             };
             match next_event {
                 Some(LoopEvent::Terminal(event)) => {
@@ -163,22 +168,46 @@ impl LoopEventPump {
             .retain(|event| !matches!(event, LoopEvent::Terminal(_)));
         loop {
             match self.receiver.try_recv() {
-                Ok(LoopEvent::Terminal(_)) => {}
-                Ok(event) => self.pending_events.push_back(event),
+                Ok(LoopEvent::Terminal(_)) => self.capacity_available.notify_one(),
+                Ok(event) => {
+                    self.capacity_available.notify_one();
+                    self.pending_events.push_back(event);
+                }
                 Err(mpsc::TryRecvError::Empty) => return Ok(()),
                 Err(mpsc::TryRecvError::Disconnected) => return Err(loop_channel_closed()),
             }
         }
     }
 
-    fn start_with_source_factory<F, S>(mut source_factory: F) -> io::Result<Self>
+    fn receive(&self, timeout: Option<Duration>) -> io::Result<Option<LoopEvent>> {
+        let event = receive_loop_event(&self.receiver, timeout)?;
+        if event.is_some() {
+            self.capacity_available.notify_one();
+        }
+        Ok(event)
+    }
+
+    fn start_with_source_factory<F, S>(source_factory: F) -> io::Result<Self>
     where
         F: FnMut() -> S + Send + 'static,
         S: Stream<Item = io::Result<Event>> + Send + 'static,
     {
-        let (event_sender, receiver) = mpsc::channel();
+        Self::start_with_source_factory_and_capacity(source_factory, LOOP_EVENT_CHANNEL_CAPACITY)
+    }
+
+    fn start_with_source_factory_and_capacity<F, S>(
+        mut source_factory: F,
+        channel_capacity: usize,
+    ) -> io::Result<Self>
+    where
+        F: FnMut() -> S + Send + 'static,
+        S: Stream<Item = io::Result<Event>> + Send + 'static,
+    {
+        let (event_sender, receiver) = mpsc::sync_channel(channel_capacity);
         let (input_control_sender, input_control_receiver) = tokio_mpsc::unbounded_channel();
         let (startup_sender, startup_receiver) = mpsc::sync_channel(1);
+        let capacity_available = Arc::new(Notify::new());
+        let input_capacity_available = Arc::clone(&capacity_available);
         let waker = LoopEventWaker {
             state: Arc::new(LoopEventWakeState {
                 sender: event_sender.clone(),
@@ -206,6 +235,7 @@ impl LoopEventPump {
                     initial_source,
                     input_control_receiver,
                     event_sender,
+                    input_capacity_available,
                 ));
             })?;
         startup_receiver.recv().map_err(|_| {
@@ -218,6 +248,7 @@ impl LoopEventPump {
         Ok(Self {
             receiver,
             pending_events: VecDeque::new(),
+            capacity_available,
             waker,
             input_control_sender: Some(input_control_sender),
             input_thread: Some(input_thread),
@@ -225,8 +256,14 @@ impl LoopEventPump {
     }
 
     #[cfg(test)]
-    pub(super) fn channel_for_test() -> (Self, mpsc::Sender<LoopEvent>) {
-        let (sender, receiver) = mpsc::channel();
+    pub(super) fn channel_for_test() -> (Self, mpsc::SyncSender<LoopEvent>) {
+        Self::channel_for_test_with_capacity(LOOP_EVENT_CHANNEL_CAPACITY)
+    }
+
+    #[cfg(test)]
+    fn channel_for_test_with_capacity(capacity: usize) -> (Self, mpsc::SyncSender<LoopEvent>) {
+        let (sender, receiver) = mpsc::sync_channel(capacity);
+        let capacity_available = Arc::new(Notify::new());
         let waker = LoopEventWaker {
             state: Arc::new(LoopEventWakeState {
                 sender: sender.clone(),
@@ -237,6 +274,7 @@ impl LoopEventPump {
             Self {
                 receiver,
                 pending_events: VecDeque::new(),
+                capacity_available,
                 waker,
                 input_control_sender: None,
                 input_thread: None,
@@ -252,6 +290,18 @@ impl LoopEventPump {
         S: Stream<Item = io::Result<Event>> + Send + 'static,
     {
         Self::start_with_source_factory(source_factory)
+    }
+
+    #[cfg(test)]
+    fn start_with_source_factory_and_capacity_for_test<F, S>(
+        source_factory: F,
+        channel_capacity: usize,
+    ) -> io::Result<Self>
+    where
+        F: FnMut() -> S + Send + 'static,
+        S: Stream<Item = io::Result<Event>> + Send + 'static,
+    {
+        Self::start_with_source_factory_and_capacity(source_factory, channel_capacity)
     }
 }
 
@@ -284,29 +334,40 @@ enum TerminalInputCommand {
 enum TerminalInputAction {
     Command(Option<TerminalInputCommand>),
     Event(Option<io::Result<Event>>),
+    CapacityAvailable,
 }
 
 async fn run_terminal_input_loop<F, S>(
     mut source_factory: F,
     initial_source: S,
     mut control_receiver: tokio_mpsc::UnboundedReceiver<TerminalInputCommand>,
-    event_sender: mpsc::Sender<LoopEvent>,
+    event_sender: mpsc::SyncSender<LoopEvent>,
+    capacity_available: Arc<Notify>,
 ) where
     F: FnMut() -> S,
     S: Stream<Item = io::Result<Event>> + Send + 'static,
 {
     let mut source: Option<TerminalEventSource> = Some(Box::pin(initial_source));
+    let mut pending_event = None;
     loop {
-        let action = match source.as_mut() {
-            Some(active_source) => tokio::select! {
+        let action = if pending_event.is_some() {
+            tokio::select! {
                 command = control_receiver.recv() => TerminalInputAction::Command(command),
-                event = active_source.next() => TerminalInputAction::Event(event),
-            },
-            None => TerminalInputAction::Command(control_receiver.recv().await),
+                () = capacity_available.notified() => TerminalInputAction::CapacityAvailable,
+            }
+        } else {
+            match source.as_mut() {
+                Some(active_source) => tokio::select! {
+                    command = control_receiver.recv() => TerminalInputAction::Command(command),
+                    event = active_source.next() => TerminalInputAction::Event(event),
+                },
+                None => TerminalInputAction::Command(control_receiver.recv().await),
+            }
         };
 
         match action {
             TerminalInputAction::Command(Some(TerminalInputCommand::Pause(ack))) => {
+                pending_event = None;
                 source = None;
                 let _ = ack.send(Ok(()));
             }
@@ -323,22 +384,61 @@ async fn run_terminal_input_loop<F, S>(
             }
             TerminalInputAction::Command(None) => break,
             TerminalInputAction::Event(Some(Ok(event))) => {
-                if event_sender.send(LoopEvent::Terminal(event)).is_err() {
+                if !try_queue_loop_event(
+                    &event_sender,
+                    LoopEvent::Terminal(event),
+                    &mut pending_event,
+                ) {
                     break;
                 }
             }
             TerminalInputAction::Event(Some(Err(error))) => {
-                let _ = event_sender.send(LoopEvent::TerminalInputFailed(error));
-                break;
+                source = None;
+                if !try_queue_loop_event(
+                    &event_sender,
+                    LoopEvent::TerminalInputFailed(error),
+                    &mut pending_event,
+                ) {
+                    break;
+                }
             }
             TerminalInputAction::Event(None) => {
-                let _ = event_sender.send(LoopEvent::TerminalInputFailed(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "terminal input stream ended",
-                )));
-                break;
+                source = None;
+                if !try_queue_loop_event(
+                    &event_sender,
+                    LoopEvent::TerminalInputFailed(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "terminal input stream ended",
+                    )),
+                    &mut pending_event,
+                ) {
+                    break;
+                }
+            }
+            TerminalInputAction::CapacityAvailable => {
+                let Some(event) = pending_event.take() else {
+                    continue;
+                };
+                if !try_queue_loop_event(&event_sender, event, &mut pending_event) {
+                    break;
+                }
             }
         }
+    }
+}
+
+fn try_queue_loop_event(
+    sender: &mpsc::SyncSender<LoopEvent>,
+    event: LoopEvent,
+    pending_event: &mut Option<LoopEvent>,
+) -> bool {
+    match sender.try_send(event) {
+        Ok(()) => true,
+        Err(mpsc::TrySendError::Full(event)) => {
+            *pending_event = Some(event);
+            true
+        }
+        Err(mpsc::TrySendError::Disconnected(_)) => false,
     }
 }
 
@@ -411,7 +511,7 @@ mod tests {
         pin::Pin,
         sync::{
             Arc,
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         task::{Context, Poll},
         thread,
@@ -462,6 +562,111 @@ mod tests {
                 .expect("wake after delivery should be readable"),
             Some(LoopEvent::BackgroundReady)
         ));
+    }
+
+    #[test]
+    fn background_wake_returns_immediately_when_loop_queue_is_full() {
+        let (mut pump, event_sender) = LoopEventPump::channel_for_test_with_capacity(1);
+        event_sender
+            .send(LoopEvent::Terminal(Event::Key(KeyEvent::from(
+                KeyCode::Char('x'),
+            ))))
+            .expect("test terminal event should fill queue");
+
+        let waker = pump.waker();
+        let (finished_sender, finished_receiver) = mpsc::sync_channel(1);
+        thread::spawn(move || {
+            waker.wake();
+            let _ = finished_sender.send(());
+        });
+        finished_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("full queue must not block a background producer");
+        assert!(matches!(
+            pump.wait(Some(Duration::ZERO))
+                .expect("queued terminal event should remain readable"),
+            Some(LoopEvent::Terminal(_))
+        ));
+        pump.waker().wake();
+        assert!(matches!(
+            pump.wait(Some(Duration::ZERO))
+                .expect("wake should retry after queue capacity returns"),
+            Some(LoopEvent::BackgroundReady)
+        ));
+    }
+
+    #[test]
+    fn full_terminal_queue_stops_polling_source_until_capacity_returns() {
+        let poll_count = Arc::new(AtomicUsize::new(0));
+        let factory_poll_count = Arc::clone(&poll_count);
+        let mut pump = LoopEventPump::start_with_source_factory_and_capacity_for_test(
+            move || AlwaysReadyKeyStream {
+                poll_count: Arc::clone(&factory_poll_count),
+                was_dropped: Arc::new(AtomicBool::new(false)),
+            },
+            2,
+        )
+        .expect("bounded input pump should start");
+
+        thread::sleep(Duration::from_millis(20));
+        assert_eq!(
+            poll_count.load(Ordering::SeqCst),
+            3,
+            "two queued events plus one pending event is the bounded maximum"
+        );
+
+        assert!(matches!(
+            pump.wait(Some(Duration::from_secs(1)))
+                .expect("first queued event should be readable"),
+            Some(LoopEvent::Terminal(_))
+        ));
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while poll_count.load(Ordering::SeqCst) == 3 && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert_eq!(poll_count.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn pausing_full_terminal_queue_preempts_capacity_wait() {
+        let was_dropped = Arc::new(AtomicBool::new(false));
+        let factory_was_dropped = Arc::clone(&was_dropped);
+        let mut pump = LoopEventPump::start_with_source_factory_and_capacity_for_test(
+            move || AlwaysReadyKeyStream {
+                poll_count: Arc::new(AtomicUsize::new(0)),
+                was_dropped: Arc::clone(&factory_was_dropped),
+            },
+            1,
+        )
+        .expect("bounded input pump should start");
+
+        thread::sleep(Duration::from_millis(20));
+        pump.pause_terminal_input()
+            .expect("pause should preempt a pending full-queue event");
+
+        assert!(was_dropped.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn dropping_full_terminal_queue_preempts_capacity_wait() {
+        let (finished_sender, finished_receiver) = mpsc::sync_channel(1);
+        thread::spawn(move || {
+            let pump = LoopEventPump::start_with_source_factory_and_capacity_for_test(
+                move || AlwaysReadyKeyStream {
+                    poll_count: Arc::new(AtomicUsize::new(0)),
+                    was_dropped: Arc::new(AtomicBool::new(false)),
+                },
+                1,
+            )
+            .expect("bounded input pump should start");
+            thread::sleep(Duration::from_millis(20));
+            drop(pump);
+            let _ = finished_sender.send(());
+        });
+
+        finished_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("pump drop should not block behind a full terminal queue");
     }
 
     #[test]
@@ -617,6 +822,26 @@ mod tests {
 
     struct CountingPendingStream {
         dropped_sources: Arc<AtomicUsize>,
+    }
+
+    struct AlwaysReadyKeyStream {
+        poll_count: Arc<AtomicUsize>,
+        was_dropped: Arc<AtomicBool>,
+    }
+
+    impl Stream for AlwaysReadyKeyStream {
+        type Item = io::Result<Event>;
+
+        fn poll_next(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            self.poll_count.fetch_add(1, Ordering::SeqCst);
+            Poll::Ready(Some(Ok(Event::Key(KeyEvent::from(KeyCode::Char('x'))))))
+        }
+    }
+
+    impl Drop for AlwaysReadyKeyStream {
+        fn drop(&mut self) {
+            self.was_dropped.store(true, Ordering::SeqCst);
+        }
     }
 
     impl Stream for CountingPendingStream {

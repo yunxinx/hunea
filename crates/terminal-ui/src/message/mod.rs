@@ -28,7 +28,9 @@ mod user_estimate;
 mod user_projection;
 
 pub(crate) use self::assistant::{assistant_message_content_width, assistant_message_visual_inset};
-pub(crate) use self::assistant_projection::AssistantMessageRenderProjection;
+pub(crate) use self::assistant_projection::{
+    AssistantMessageRenderProjection, AssistantProjectionFallbackReason, AssistantProjectionOutcome,
+};
 #[cfg(test)]
 use self::user_estimate::{
     estimate_hard_wrap_line_count, estimate_hard_wrap_visible_text,
@@ -297,17 +299,18 @@ impl MessageItem {
         &self,
         width: u16,
         palette: TerminalPalette,
-    ) -> Option<AssistantMessageRenderProjection> {
-        (self.sender == Sender::Assistant)
-            .then(|| {
-                assistant_projection::render_assistant_message_projection(
-                    markdown_display_content_rc(&self.content),
-                    width,
-                    palette,
-                    self.working_dir.clone(),
-                )
-            })
-            .flatten()
+    ) -> AssistantProjectionOutcome {
+        if self.sender != Sender::Assistant {
+            return AssistantProjectionOutcome::Fallback(
+                AssistantProjectionFallbackReason::NotAssistant,
+            );
+        }
+        assistant_projection::render_assistant_message_projection(
+            markdown_display_content_rc(&self.content),
+            width,
+            palette,
+            self.working_dir.clone(),
+        )
     }
 
     #[cfg(test)]

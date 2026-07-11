@@ -85,6 +85,15 @@ fn transcript_benches(c: &mut Criterion) {
         );
     }
 
+    for item_count in [512_usize, 4096_usize] {
+        let mut bench = benchmark::AssistantProjectionBench::long_list(item_count, 72, palette);
+        group.throughput(Throughput::Elements(item_count as u64));
+        group.bench_function(
+            BenchmarkId::new("assistant_projection/materialize_next_page", item_count),
+            |b| b.iter(|| black_box(bench.materialize_next_page())),
+        );
+    }
+
     group.finish();
 }
 

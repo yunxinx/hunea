@@ -198,8 +198,7 @@ impl Model {
             items: self.transcript.items_snapshot(),
             warmed_item_block_cache: self.transcript.cached_screen_blocks_snapshot(),
             item_block_cache: Rc::new(RefCell::new(HashMap::new())),
-            item_text_lines_cache: Rc::new(RefCell::new(HashMap::new())),
-            selectable_cache: Rc::new(RefCell::new(HashMap::new())),
+            selection_semantic_cache: Rc::new(RefCell::new(Default::default())),
         }
     }
 

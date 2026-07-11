@@ -3,6 +3,7 @@ mod cache;
 mod layout;
 mod line_access;
 mod manual_scroll;
+mod selection_semantic_cache;
 mod slot_frame;
 mod slot_viewport;
 mod sync;

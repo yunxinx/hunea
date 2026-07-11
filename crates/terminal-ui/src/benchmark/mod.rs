@@ -12,6 +12,8 @@ use ratatui::{
     layout::{Position, Size},
 };
 
+#[cfg(feature = "bench-support")]
+use super::message::AssistantProjectionOutcome;
 use super::{
     Model, ModelOptions, Sender, StartupBannerOptions, StyleMode,
     composer::Composer,
@@ -184,6 +186,51 @@ pub struct PhaseABaselineSummary {
 pub struct TranscriptBench {
     transcript: Transcript,
     next_index: usize,
+}
+
+/// `AssistantProjectionBench` 测量长Markdown在有界page store上的顺序物化。
+#[cfg(feature = "bench-support")]
+#[derive(Debug)]
+pub struct AssistantProjectionBench {
+    projection: super::message::AssistantMessageRenderProjection,
+    next_line: usize,
+}
+
+#[cfg(feature = "bench-support")]
+impl AssistantProjectionBench {
+    pub fn long_list(item_count: usize, width: u16, palette: TerminalPalette) -> Self {
+        let markdown = format!(
+            "# Projected list\n\n{}",
+            "- projected item with enough text to exercise wrapping\n".repeat(item_count)
+        );
+        let message = super::message::MessageItem::new_with_style_mode_and_source(
+            Sender::Assistant,
+            markdown,
+            StyleMode::Cx,
+            None,
+            None,
+        );
+        let AssistantProjectionOutcome::Projected(projection) =
+            message.render_assistant_projection(width, palette)
+        else {
+            panic!("long-list benchmark fixture must remain projectable");
+        };
+        Self {
+            projection: *projection,
+            next_line: 0,
+        }
+    }
+
+    pub fn materialize_next_page(&mut self) -> usize {
+        if self.next_line >= self.projection.line_count() {
+            self.next_line = 0;
+        }
+        let line = self.next_line;
+        self.next_line = self.next_line.saturating_add(64);
+        self.projection
+            .line_at(line)
+            .map_or(0, |line| line.spans.len())
+    }
 }
 
 /// `DocumentBench` 封装 unified document benchmark 所需的状态。

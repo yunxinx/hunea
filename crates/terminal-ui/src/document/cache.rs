@@ -15,7 +15,10 @@ use crate::{
     transcript::{self, CachedRenderBlock, TranscriptItem, TranscriptItemMetricsIndex},
 };
 
-use super::{slot_frame::SlotFrame, tail::DocumentTailLayout};
+use super::{
+    selection_semantic_cache::SelectionSemanticCache, slot_frame::SlotFrame,
+    tail::DocumentTailLayout,
+};
 
 /// `DocumentTranscriptKey` 描述 transcript->document 中间快照的命中条件。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -34,8 +37,7 @@ pub(crate) struct DocumentTranscriptSnapshot {
     pub(super) items: Rc<Vec<Rc<TranscriptItem>>>,
     pub(super) warmed_item_block_cache: Rc<RefCell<HashMap<usize, Rc<CachedRenderBlock>>>>,
     pub(super) item_block_cache: Rc<RefCell<HashMap<usize, Rc<CachedRenderBlock>>>>,
-    pub(super) item_text_lines_cache: Rc<RefCell<HashMap<usize, Vec<String>>>>,
-    pub(super) selectable_cache: Rc<RefCell<HashMap<usize, Vec<SelectableLineRange>>>>,
+    pub(super) selection_semantic_cache: Rc<RefCell<SelectionSemanticCache>>,
 }
 
 impl Default for DocumentTranscriptSnapshot {
@@ -47,8 +49,7 @@ impl Default for DocumentTranscriptSnapshot {
             items: Rc::new(Vec::new()),
             warmed_item_block_cache: Rc::new(RefCell::new(HashMap::new())),
             item_block_cache: Rc::new(RefCell::new(HashMap::new())),
-            item_text_lines_cache: Rc::new(RefCell::new(HashMap::new())),
-            selectable_cache: Rc::new(RefCell::new(HashMap::new())),
+            selection_semantic_cache: Rc::new(RefCell::new(SelectionSemanticCache::default())),
         }
     }
 }
@@ -167,12 +168,13 @@ impl DocumentLayout {
                 index: render.index.clone(),
                 warmed_item_block_cache: Rc::new(RefCell::new(HashMap::new())),
                 item_block_cache: Rc::new(RefCell::new(item_block_cache)),
-                item_text_lines_cache: Rc::new(RefCell::new(
-                    transcript_plain_lines
-                        .iter()
-                        .enumerate()
-                        .map(|(index, line)| (index, vec![(*line).to_string()]))
-                        .collect(),
+                selection_semantic_cache: Rc::new(RefCell::new(
+                    SelectionSemanticCache::from_plain_lines(
+                        transcript_plain_lines
+                            .iter()
+                            .enumerate()
+                            .map(|(index, line)| (index, vec![(*line).to_string()])),
+                    ),
                 )),
                 ..DocumentTranscriptSnapshot::default()
             }),

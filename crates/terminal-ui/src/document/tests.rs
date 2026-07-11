@@ -770,8 +770,7 @@ fn transcript_plain_text_len_for_range_avoids_plain_line_and_anchor_materializat
         items: Rc::new(Vec::new()),
         warmed_item_block_cache: Rc::new(RefCell::new(HashMap::new())),
         item_block_cache: Rc::new(RefCell::new(HashMap::from([(0, Rc::clone(&block))]))),
-        item_text_lines_cache: Rc::new(RefCell::new(HashMap::new())),
-        selectable_cache: Rc::new(RefCell::new(HashMap::new())),
+        selection_semantic_cache: Rc::new(RefCell::new(Default::default())),
     };
 
     assert_eq!(
@@ -835,8 +834,7 @@ fn rendered_transcript_anchor_resolve_uses_direct_line_when_item_shape_is_stable
         items: Rc::new(Vec::new()),
         warmed_item_block_cache: Rc::new(RefCell::new(HashMap::new())),
         item_block_cache: Rc::new(RefCell::new(HashMap::from([(0, Rc::clone(&block))]))),
-        item_text_lines_cache: Rc::new(RefCell::new(HashMap::new())),
-        selectable_cache: Rc::new(RefCell::new(HashMap::new())),
+        selection_semantic_cache: Rc::new(RefCell::new(Default::default())),
     });
     let layout = compose_document_layout(
         DocumentLayoutKey::default(),
@@ -1490,7 +1488,11 @@ fn viewport_anchor_reads_keep_long_transcript_selectable_ranges_lazy() {
 
     let layout = model.build_document_layout(crate::frame_time::FrameRenderContext::capture());
     assert!(
-        layout.transcript.selectable_cache.borrow().is_empty(),
+        layout
+            .transcript
+            .selection_semantic_cache
+            .borrow()
+            .is_empty(),
         "selectable ranges should start empty before anchor-only reads"
     );
 
@@ -1511,7 +1513,11 @@ fn viewport_anchor_reads_keep_long_transcript_selectable_ranges_lazy() {
         .expect("long transcript line should expose a viewport anchor");
 
     assert!(
-        layout.transcript.selectable_cache.borrow().is_empty(),
+        layout
+            .transcript
+            .selection_semantic_cache
+            .borrow()
+            .is_empty(),
         "scroll anchor capture must not materialize whole-item selectable ranges"
     );
 }
@@ -1526,7 +1532,11 @@ fn document_viewport_materialization_keeps_transcript_selectable_ranges_lazy() {
 
     let layout = model.build_document_layout(crate::frame_time::FrameRenderContext::capture());
     assert!(
-        layout.transcript.selectable_cache.borrow().is_empty(),
+        layout
+            .transcript
+            .selection_semantic_cache
+            .borrow()
+            .is_empty(),
         "transcript selectable cache should start empty before any selection-aware read"
     );
 
@@ -1534,7 +1544,11 @@ fn document_viewport_materialization_keeps_transcript_selectable_ranges_lazy() {
 
     assert_eq!(viewport.plain_lines.len(), 1);
     assert!(
-        layout.transcript.selectable_cache.borrow().is_empty(),
+        layout
+            .transcript
+            .selection_semantic_cache
+            .borrow()
+            .is_empty(),
         "plain viewport materialization should not populate transcript selectable ranges"
     );
 }
@@ -1551,12 +1565,10 @@ fn document_line_access_computes_transcript_selectable_ranges_lazily() {
     assert_eq!(
         layout
             .transcript
-            .selectable_cache
+            .selection_semantic_cache
             .borrow()
-            .get(&0)
-            .cloned()
-            .unwrap_or_default()
-            .len(),
+            .get(0)
+            .map_or(0, |entry| entry.selectable_ranges.len()),
         0
     );
 
@@ -1574,19 +1586,55 @@ fn document_line_access_computes_transcript_selectable_ranges_lazily() {
         line.selectable.has_content(),
         "line_at should compute a selectable range, got {:?}, cache={:?}",
         line,
-        layout.transcript.selectable_cache.borrow()
+        layout.transcript.selection_semantic_cache.borrow()
     );
     assert_eq!(
         layout
             .transcript
-            .selectable_cache
+            .selection_semantic_cache
             .borrow()
-            .get(&0)
-            .cloned()
-            .unwrap_or_default()
-            .len(),
+            .get(0)
+            .map_or(0, |entry| entry.selectable_ranges.len()),
         3
     );
+}
+
+#[test]
+fn transcript_selection_semantic_cache_stays_bounded_across_long_history() {
+    const EXPECTED_MAX_SELECTION_SEMANTIC_ITEMS: usize = 32;
+    let mut model = ready_document_model(48, 8);
+    for index in 0..(EXPECTED_MAX_SELECTION_SEMANTIC_ITEMS + 17) {
+        model
+            .transcript_mut()
+            .append_message(Sender::User, format!("selectable item {index}"));
+    }
+    model.sync_transcript_render();
+
+    let layout = model.build_document_layout(FrameRenderContext::capture());
+    for position in layout.transcript.index.visible_items.iter() {
+        let _ =
+            (position.start_line..position.start_line + position.total_line_count).find(|line| {
+                layout
+                    .line_at(*line, FrameRenderContext::capture())
+                    .is_some_and(|line| line.selectable.has_content())
+            });
+    }
+
+    assert!(
+        layout.transcript.selection_semantic_cache.borrow().len()
+            <= EXPECTED_MAX_SELECTION_SEMANTIC_ITEMS,
+        "selection semantic entries must have a fixed residency bound"
+    );
+    for position in layout.transcript.index.visible_items.iter() {
+        if let Some(entry) = layout
+            .transcript
+            .selection_semantic_cache
+            .borrow()
+            .get(position.item_index)
+        {
+            assert_eq!(entry.plain_lines.len(), entry.selectable_ranges.len());
+        }
+    }
 }
 
 fn ready_document_model(width: u16, height: u16) -> Model {

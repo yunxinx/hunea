@@ -14,6 +14,7 @@ use crate::{
     },
 };
 
+use super::selection_semantic_cache::SelectionSemanticEntry;
 use super::{
     DocumentAnchorRegion, DocumentLayout, DocumentLayoutLine, DocumentLineAnchor,
     DocumentTranscriptItemLines, DocumentTranscriptSnapshot,
@@ -421,46 +422,48 @@ impl DocumentTranscriptSnapshot {
             return SelectableLineRange::default();
         }
 
-        if let Some(item_ranges) = self.selectable_ranges_for_item(anchor.transcript.item_index)
-            && anchor.transcript.item_anchor.rendered_line < item_ranges.len()
+        if let Some(semantics) = self.selection_semantics_for_item(anchor.transcript.item_index)
+            && anchor.transcript.item_anchor.rendered_line < semantics.selectable_ranges.len()
         {
-            return item_ranges[anchor.transcript.item_anchor.rendered_line];
+            return semantics.selectable_ranges[anchor.transcript.item_anchor.rendered_line];
+        }
+
+        if let Some(semantics) = self.selection_semantics_for_item(anchor.transcript.item_index)
+            && let Some(cached_plain_line) = semantics
+                .plain_lines
+                .get(anchor.transcript.item_anchor.rendered_line)
+        {
+            return normalize_transcript_selectable_range(
+                cached_plain_line,
+                usize::from(self.width.max(1)),
+                true,
+            );
         }
 
         normalize_transcript_selectable_range(plain_line, usize::from(self.width.max(1)), true)
     }
 
-    fn selectable_ranges_for_item(&self, item_index: usize) -> Option<Vec<SelectableLineRange>> {
-        if let Some(ranges) = self.selectable_cache.borrow().get(&item_index).cloned() {
-            return Some(ranges);
-        }
-
-        let plain_lines = self.item_text_lines(item_index)?;
+    fn selection_semantics_for_item(
+        &self,
+        item_index: usize,
+    ) -> Option<Rc<SelectionSemanticEntry>> {
         let item = self.items.get(item_index)?.as_ref();
-        let ranges =
-            item.render_selectable_line_ranges(self.width.max(1), self.palette, &plain_lines);
-        self.selectable_cache
-            .borrow_mut()
-            .insert(item_index, ranges.clone());
-        Some(ranges)
-    }
-
-    fn item_text_lines(&self, item_index: usize) -> Option<Vec<String>> {
-        if let Some(lines) = self
-            .item_text_lines_cache
-            .borrow()
-            .get(&item_index)
-            .cloned()
-        {
-            return Some(lines);
-        }
-
-        let item = self.items.get(item_index)?.as_ref();
-        let lines = item.render_plain_lines(self.width.max(1), self.palette);
-        self.item_text_lines_cache
-            .borrow_mut()
-            .insert(item_index, lines.clone());
-        Some(lines)
+        Some(
+            self.selection_semantic_cache
+                .borrow_mut()
+                .get_or_insert_with(item_index, || {
+                    let plain_lines = item.render_plain_lines(self.width.max(1), self.palette);
+                    let selectable_ranges = item.render_selectable_line_ranges(
+                        self.width.max(1),
+                        self.palette,
+                        &plain_lines,
+                    );
+                    SelectionSemanticEntry {
+                        plain_lines,
+                        selectable_ranges,
+                    }
+                }),
+        )
     }
 }
 

@@ -1176,7 +1176,12 @@ fn projected_assistant_heading_followed_by_list_matches_eager_spacing() {
             .map(|index| {
                 render
                     .line_at(index)
-                    .expect("projected assistant block should materialize every visible line")
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "projected assistant block should materialize line {index} of {}",
+                            render.line_count
+                        )
+                    })
                     .plain_line
             })
             .collect::<Vec<_>>(),
@@ -1228,7 +1233,12 @@ fn projected_assistant_list_followed_by_heading_matches_eager_spacing() {
             .map(|index| {
                 render
                     .line_at(index)
-                    .expect("projected assistant block should materialize every visible line")
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "projected assistant block should materialize line {index} of {}",
+                            render.line_count
+                        )
+                    })
                     .plain_line
             })
             .collect::<Vec<_>>(),

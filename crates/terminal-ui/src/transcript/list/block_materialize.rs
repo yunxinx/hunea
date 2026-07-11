@@ -103,23 +103,27 @@ pub(crate) fn materialize_transcript_item_render_block(
         };
     }
 
-    if let TranscriptItem::Message(message) = item
-        && let Some(projection) = message.render_assistant_projection(width, palette)
-    {
-        let line_count = projection.line_count();
-        let plain_text_char_len = projection.plain_text_char_len();
-        return CachedRenderBlock {
-            cache_key,
-            width,
-            palette,
-            lines: Rc::new(Vec::new()),
-            projected_user: None,
-            projected_assistant: Some(Rc::new(projection)),
-            line_count,
-            plain_text_char_len,
-            plain_line_byte_lens: Rc::new(Vec::new()),
-            anchors: CachedLineAnchors::GeneratedRenderedLines,
-        };
+    if let TranscriptItem::Message(message) = item {
+        match message.render_assistant_projection(width, palette) {
+            crate::message::AssistantProjectionOutcome::Projected(projection) => {
+                let projection = *projection;
+                let line_count = projection.line_count();
+                let plain_text_char_len = projection.plain_text_char_len();
+                return CachedRenderBlock {
+                    cache_key,
+                    width,
+                    palette,
+                    lines: Rc::new(Vec::new()),
+                    projected_user: None,
+                    projected_assistant: Some(Rc::new(projection)),
+                    line_count,
+                    plain_text_char_len,
+                    plain_line_byte_lens: Rc::new(Vec::new()),
+                    anchors: CachedLineAnchors::GeneratedRenderedLines,
+                };
+            }
+            crate::message::AssistantProjectionOutcome::Fallback(_reason) => {}
+        }
     }
 
     let lines = match item {

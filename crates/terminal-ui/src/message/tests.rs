@@ -42,6 +42,7 @@ fn assistant_projection_materializes_pages_with_the_message_working_directory() 
     );
     let projection = item
         .render_assistant_projection(80, default_palette())
+        .into_projection()
         .expect("long structured Markdown should use assistant projection");
     let lines = (0..projection.line_count())
         .filter_map(|index| projection.plain_line_at(index))
@@ -52,6 +53,74 @@ fn assistant_projection_materializes_pages_with_the_message_working_directory() 
         lines
             .iter()
             .all(|line| line != "/workspace/project/reports/current.md")
+    );
+}
+
+#[test]
+fn assistant_projection_evicts_old_materialized_pages() {
+    const EXPECTED_MAX_CACHED_PAGES: usize = 8;
+    let markdown = format!(
+        "# Long list\n\n{}",
+        "- projected item with enough text to wrap across the viewport\n".repeat(900)
+    );
+    let item = MessageItem::new(Sender::Assistant, markdown);
+    let projection = item
+        .render_assistant_projection(32, default_palette())
+        .into_projection()
+        .expect("long structured Markdown should use assistant projection");
+
+    for line in (0..projection.line_count()).step_by(64) {
+        let _ = projection.line_at(line);
+    }
+
+    assert!(
+        projection.cached_page_count_for_test() <= EXPECTED_MAX_CACHED_PAGES,
+        "materialized assistant pages must have a fixed residency bound"
+    );
+}
+
+#[test]
+fn assistant_projection_reports_stable_fallback_reasons() {
+    let cases = [
+        ("# short", AssistantProjectionFallbackReason::BelowThreshold),
+        (
+            &format!("# tab\n\n{}\tvalue", "plain text ".repeat(500)),
+            AssistantProjectionFallbackReason::Tab,
+        ),
+        (
+            &format!(
+                "# table\n\n| Name | Value |\n| --- | --- |\n{}",
+                "| alpha | beta |\n".repeat(300)
+            ),
+            AssistantProjectionFallbackReason::Table,
+        ),
+    ];
+
+    for (markdown, expected) in cases {
+        let item = MessageItem::new(Sender::Assistant, markdown);
+        assert_eq!(
+            item.render_assistant_projection(80, default_palette())
+                .fallback_reason(),
+            Some(expected),
+        );
+    }
+}
+
+#[test]
+fn assistant_projection_bounds_each_markdown_materialization_unit() {
+    let markdown = format!(
+        "# Long list\n\n{}",
+        "- projected item with enough text to wrap over multiple columns\n".repeat(900)
+    );
+    let item = MessageItem::new(Sender::Assistant, markdown);
+    let projection = item
+        .render_assistant_projection(32, default_palette())
+        .into_projection()
+        .expect("long lists should remain projectable through item-sized units");
+
+    assert!(
+        projection.max_markdown_materialization_lines_for_test() <= 64,
+        "a page miss must never render an unbounded Markdown snippet"
     );
 }
 
@@ -453,6 +522,7 @@ fn assistant_render_projection_stays_smaller_than_eager_styled_line_cache_for_co
 
     let projection = item
         .render_assistant_projection(width, palette)
+        .into_projection()
         .expect("common long assistant Markdown should produce a render projection");
     let eager_lines = item.render_lines(width, palette);
     let eager_line_count = eager_lines.len();

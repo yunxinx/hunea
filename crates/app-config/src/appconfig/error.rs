@@ -29,6 +29,10 @@ pub enum AppConfigError {
         path: Option<PathBuf>,
         value: String,
     },
+    InvalidMotionMode {
+        path: Option<PathBuf>,
+        value: String,
+    },
     InvalidStatusLineItem {
         path: Option<PathBuf>,
         value: String,
@@ -100,6 +104,18 @@ impl fmt::Display for AppConfigError {
             ),
             Self::InvalidStyleMode { path: None, value } => {
                 write!(f, "unknown tui.user_input_style {:?}", value)
+            }
+            Self::InvalidMotionMode {
+                path: Some(path),
+                value,
+            } => write!(
+                f,
+                "validate config file {}: unknown tui.motion {:?}",
+                path.display(),
+                value
+            ),
+            Self::InvalidMotionMode { path: None, value } => {
+                write!(f, "unknown tui.motion {:?}", value)
             }
             Self::InvalidStatusLineItem {
                 path: Some(path),
@@ -262,6 +278,7 @@ impl std::error::Error for AppConfigError {
             Self::Edit { source, .. } => Some(source),
             Self::Write { source, .. } => Some(source),
             Self::InvalidStyleMode { .. }
+            | Self::InvalidMotionMode { .. }
             | Self::InvalidStatusLineItem { .. }
             | Self::InvalidExternalEditorCommand { .. }
             | Self::ExternalEditorMustWait { .. }

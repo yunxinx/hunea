@@ -141,12 +141,14 @@ fn request_copy_selection_exactizes_the_selected_transcript_range_on_demand() {
         18,
         default_palette(),
         crate::frame_time::FrameRenderContext::capture(),
+        crate::MotionMode::Full,
     );
     let end_block = materialize_transcript_item_render_block(
         model.transcript.item(2).expect("item 2 should exist"),
         18,
         default_palette(),
         crate::frame_time::FrameRenderContext::capture(),
+        crate::MotionMode::Full,
     );
     let start = SelectionPoint::new(
         DocumentLineAnchor {
@@ -231,6 +233,7 @@ fn request_copy_selection_exactizes_transcript_tail_when_selection_crosses_into_
         18,
         default_palette(),
         crate::frame_time::FrameRenderContext::capture(),
+        crate::MotionMode::Full,
     );
     let start = SelectionPoint::new(
         DocumentLineAnchor {

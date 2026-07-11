@@ -103,6 +103,13 @@ fn config_error_rows(error: &appconfig::AppConfigError) -> Vec<(&'static str, St
             "Unknown user input style",
             "cx, cc, ms",
         ),
+        AppConfigError::InvalidMotionMode { path, value } => validation_rows(
+            path,
+            "tui.motion",
+            value,
+            "Unknown motion mode",
+            "full, reduced",
+        ),
         AppConfigError::InvalidStatusLineItem { path, value } => validation_rows(
             path,
             "tui.status_line",

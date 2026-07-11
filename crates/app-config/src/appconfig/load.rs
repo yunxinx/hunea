@@ -90,7 +90,7 @@ fn load_from_config_paths(
 #[cfg(test)]
 mod tests {
     use super::{load_from_paths, load_with_resolution};
-    use crate::appconfig::{AppConfigError, UserInputStyle};
+    use crate::appconfig::{AppConfigError, MotionMode, UserInputStyle};
     use runtime_domain::paths::DataDirResolution;
     use std::{
         fs,
@@ -147,6 +147,36 @@ mod tests {
             .expect("cc should be accepted as a valid style mode");
 
         assert_eq!(config.tui.user_input_style, UserInputStyle::Cc);
+    }
+
+    #[test]
+    fn load_defaults_motion_to_full_and_accepts_reduced() {
+        let default_working_dir = temp_test_dir("load-default-motion-working");
+        let default_config = load_from_paths(Some(default_working_dir.as_path()), None)
+            .expect("missing motion config should use full motion");
+        assert_eq!(default_config.tui.motion, MotionMode::Full);
+
+        let reduced_working_dir = temp_test_dir("load-reduced-motion-working");
+        write_config(
+            &reduced_working_dir.join(".hunea").join("config.toml"),
+            "[tui]\nmotion = \"reduced\"\n",
+        );
+        let reduced_config = load_from_paths(Some(reduced_working_dir.as_path()), None)
+            .expect("reduced motion should be accepted");
+        assert_eq!(reduced_config.tui.motion, MotionMode::Reduced);
+    }
+
+    #[test]
+    fn load_rejects_unknown_motion_mode() {
+        let working_dir = temp_test_dir("load-rejects-motion-working");
+        write_config(
+            &working_dir.join(".hunea").join("config.toml"),
+            "[tui]\nmotion = \"sometimes\"\n",
+        );
+
+        let error = load_from_paths(Some(working_dir.as_path()), None)
+            .expect_err("unknown motion mode should be rejected");
+        assert!(error.to_string().contains("unknown tui.motion"));
     }
 
     #[test]

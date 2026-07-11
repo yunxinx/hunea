@@ -195,6 +195,7 @@ impl Model {
                 self.width
             },
             palette: self.palette,
+            motion_mode: self.motion_mode,
             items: self.transcript.items_snapshot(),
             warmed_item_block_cache: self.transcript.cached_screen_blocks_snapshot(),
             item_block_cache: Rc::new(RefCell::new(HashMap::new())),

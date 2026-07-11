@@ -45,16 +45,27 @@ fn active_tool_block_uses_frame_context_time() {
         80,
         palette,
         FrameRenderContext::new(started_at),
+        crate::MotionMode::Full,
     );
     let hidden = materialize_transcript_item_render_block(
         item,
         80,
         palette,
         FrameRenderContext::new(started_at + TOOL_ACTIVITY_ACTIVE_MARKER_BLINK_INTERVAL),
+        crate::MotionMode::Full,
     );
 
     assert_eq!(visible.line_at(0).unwrap().spans[0].content, "● ");
     assert_eq!(hidden.line_at(0).unwrap().spans[0].content, "  ");
+
+    let reduced = materialize_transcript_item_render_block(
+        item,
+        80,
+        palette,
+        FrameRenderContext::new(started_at + TOOL_ACTIVITY_ACTIVE_MARKER_BLINK_INTERVAL),
+        crate::MotionMode::Reduced,
+    );
+    assert_eq!(reduced.line_at(0).unwrap().spans[0].content, "● ");
 }
 
 #[test]
@@ -153,6 +164,7 @@ fn item_metrics_index_matches_materialized_block_metrics_for_mixed_item_types() 
             transcript.render_width(),
             palette,
             FrameRenderContext::capture(),
+            crate::MotionMode::Full,
         );
         let metrics = index.metrics[item_index];
 

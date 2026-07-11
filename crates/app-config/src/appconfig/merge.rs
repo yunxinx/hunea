@@ -3,7 +3,9 @@ use std::{fs, io, path::Path};
 use super::{
     error::AppConfigError,
     file_config::{FileConfig, FileRuntimeConfig},
-    types::{Config, EscRewindMode, ReasoningContentDisplay, RuntimeConfig, UserInputStyle},
+    types::{
+        Config, EscRewindMode, MotionMode, ReasoningContentDisplay, RuntimeConfig, UserInputStyle,
+    },
     validate::{
         normalize_request_retry_delays, validate_branch_picker_list_rows,
         validate_composer_undo_limit, validate_external_editor, validate_file_picker_popup_height,
@@ -67,6 +69,16 @@ pub(super) fn merge_config_file(
                 }
                 other => other,
             })?;
+    }
+
+    if let Some(motion) = file_config.tui.motion {
+        config.tui.motion = MotionMode::parse(&motion).map_err(|error| match error {
+            AppConfigError::InvalidMotionMode { value, .. } => AppConfigError::InvalidMotionMode {
+                path: Some(path.to_path_buf()),
+                value,
+            },
+            other => other,
+        })?;
     }
 
     if let Some(items) = file_config.tui.status_line {

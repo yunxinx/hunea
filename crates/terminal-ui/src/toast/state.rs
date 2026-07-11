@@ -107,6 +107,22 @@ impl ToastState {
         }
     }
 
+    pub(super) fn show_static(
+        &mut self,
+        severity: ToastSeverity,
+        text: impl Into<String>,
+        now: Instant,
+    ) {
+        let notice = ToastNotice::new(severity, text);
+        self.pending = None;
+        self.visible_token = self.visible_token.saturating_add(1);
+        self.phase = ToastPhase::Visible {
+            until: now + notice.severity.hold_duration(),
+            notice,
+            token: self.visible_token,
+        };
+    }
+
     pub(super) fn next_timeout_deadline(&self) -> Option<Instant> {
         match self.phase {
             ToastPhase::Visible { until, .. } => Some(until),
@@ -123,14 +139,16 @@ impl ToastState {
         }
     }
 
-    pub(super) fn handle_visible_timeout(&mut self, token: usize) {
+    pub(super) fn handle_visible_timeout(&mut self, token: usize, allows_animation: bool) {
         match mem::replace(&mut self.phase, ToastPhase::Idle) {
             ToastPhase::Visible {
                 notice,
                 token: current_token,
                 ..
             } if current_token == token => {
-                self.start_exiting(notice);
+                if allows_animation {
+                    self.start_exiting(notice);
+                }
             }
             phase => {
                 self.phase = phase;

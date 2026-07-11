@@ -68,6 +68,7 @@ pub struct Model {
     pub(super) startup_banner_options: StartupBannerOptions,
     pub(super) startup_banner_entrance: StartupBannerEntranceState,
     pub(super) style_mode: StyleMode,
+    pub(super) motion_mode: crate::MotionMode,
     pub(super) status_line_items: Vec<StatusLineItem>,
     pub(super) status_line_2_items: Vec<StatusLineItem>,
     pub(super) external_editor: Vec<String>,
@@ -178,6 +179,7 @@ impl Model {
         let palette = default_palette();
         let working_dir = options.working_dir.map(Rc::<Path>::from);
         let style_mode = options.style_mode.normalized();
+        let motion_mode = options.motion_mode;
         let status_line_items = options.status_line_items;
         let status_line_2_items = options.status_line_2_items;
         let selected_model = options.selected_model;
@@ -192,6 +194,7 @@ impl Model {
                 .map(|path| path.display().to_string());
         }
         let mut transcript = Transcript::new(palette, working_dir.clone());
+        transcript.set_motion_mode(motion_mode);
         transcript.set_gap(1);
         transcript.append_startup_banner(startup_banner_options.clone());
         let transcript_render = Rc::new(index_only_render_result(
@@ -227,11 +230,12 @@ impl Model {
                     diagnostics: Vec::new(),
                 });
 
-        Self {
+        let mut model = Self {
             working_dir,
             startup_banner_options,
             startup_banner_entrance: StartupBannerEntranceState::default(),
             style_mode,
+            motion_mode,
             status_line_items: status_line_items.clone(),
             status_line_2_items,
             external_editor: options.external_editor,
@@ -324,7 +328,11 @@ impl Model {
             status_line_revision: 1,
             stream_activity_revision: 1,
             quitting: false,
+        };
+        if !motion_mode.allows_animation() {
+            model.startup_banner_entrance.complete();
         }
+        model
     }
 
     /// `render_to_buffer` 将当前模型渲染到指定屏幕缓冲区。
@@ -494,6 +502,7 @@ impl Model {
     pub(crate) fn reset_to_initial_tui_state(&mut self) {
         self.startup_banner_entrance.complete();
         let mut transcript = Transcript::new(self.palette, self.working_dir.clone());
+        transcript.set_motion_mode(self.motion_mode);
         transcript.set_gap(1);
         if self.has_window {
             transcript.set_width(self.width);
@@ -540,6 +549,9 @@ impl Model {
         &self,
         now: Instant,
     ) -> Option<Instant> {
+        if !self.motion_mode.allows_animation() {
+            return None;
+        }
         if !self.startup_banner_entrance_target_renderable() {
             return None;
         }
@@ -553,6 +565,9 @@ impl Model {
         buffer: &mut ratatui::buffer::Buffer,
         area: ratatui::layout::Rect,
     ) {
+        if !self.motion_mode.allows_animation() {
+            return;
+        }
         let slide_fill_color = self.palette.surface.unwrap_or_else(|| {
             startup_banner_entrance_fallback_fill_color(self.has_dark_background)
         });

@@ -65,6 +65,7 @@ pub(crate) struct Transcript {
     gap: usize,
     width: u16,
     palette: TerminalPalette,
+    motion_mode: crate::MotionMode,
     tool_activity_render_mode: ToolActivityRenderMode,
     reasoning_render_mode: ReasoningRenderMode,
     items_version: usize,
@@ -79,6 +80,7 @@ impl PartialEq for Transcript {
             && self.gap == other.gap
             && self.width == other.width
             && self.palette == other.palette
+            && self.motion_mode == other.motion_mode
             && self.tool_activity_render_mode == other.tool_activity_render_mode
             && self.reasoning_render_mode == other.reasoning_render_mode
     }
@@ -95,12 +97,21 @@ impl Transcript {
             gap: 1,
             width: DEFAULT_RENDER_WIDTH as u16,
             palette,
+            motion_mode: crate::MotionMode::Full,
             tool_activity_render_mode: ToolActivityRenderMode::Compact,
             reasoning_render_mode: ReasoningRenderMode::Compact,
             items_version: 1,
             metrics_cache: TranscriptItemMetricsCache::default(),
             screen_cache: ScreenRenderCache::default(),
         }
+    }
+
+    pub(crate) fn set_motion_mode(&mut self, motion_mode: crate::MotionMode) {
+        if self.motion_mode == motion_mode {
+            return;
+        }
+        self.motion_mode = motion_mode;
+        self.screen_cache.invalidate_all();
     }
 
     /// `set_gap` 设置项与项之间的空行数。

@@ -192,6 +192,35 @@ fn startup_banner_entrance_runs_only_once_across_banner_rebuilds() {
 }
 
 #[test]
+fn reduced_motion_disables_decorative_deadlines_and_keeps_semantic_timeouts() {
+    let mut model = Model::new_with_options(
+        StartupBannerOptions::default(),
+        ModelOptions {
+            motion_mode: crate::MotionMode::Reduced,
+            ..ModelOptions::default()
+        },
+    );
+    let now = Instant::now();
+
+    assert!(model.startup_banner_entrance_completed_for_test());
+    assert_eq!(
+        model.startup_banner_entrance_next_frame_deadline_at(now),
+        None
+    );
+
+    model.show_stream_activity_with_header("Working");
+    let first = model.current_stream_activity_render_result_at(now);
+    let second = model.current_stream_activity_render_result_at(now + Duration::from_secs(2));
+    assert_eq!(first.plain_line, second.plain_line);
+    assert_eq!(model.stream_activity_next_frame_deadline_at(now), None);
+
+    model.show_toast(ToastSeverity::Info, "Saved");
+    assert_eq!(model.toast_next_frame_deadline_at(now), None);
+    assert!(model.toast_timeout_deadline().is_some());
+    assert_eq!(model.active_toast_text_for_test(), Some("Saved"));
+}
+
+#[test]
 fn selection_copy_completion_uses_toast_not_status_notice() {
     let mut model = Model::new(StartupBannerOptions::default());
 

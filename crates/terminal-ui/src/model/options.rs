@@ -7,7 +7,7 @@ use runtime_domain::{
 };
 
 use crate::{
-    ReasoningDisplayMode,
+    MotionMode, ReasoningDisplayMode,
     composer::DEFAULT_COMPOSER_UNDO_LIMIT,
     entry_tree::BRANCH_PICKER_LIST_ROWS_DEFAULT,
     file_picker::{FILE_PICKER_POPUP_MAX_HEIGHT, FILE_PICKER_POPUP_MIN_HEIGHT},
@@ -28,6 +28,7 @@ pub enum EscRewindMode {
 pub struct ModelOptions {
     pub working_dir: Option<PathBuf>,
     pub style_mode: StyleMode,
+    pub motion_mode: MotionMode,
     pub status_line_items: Vec<StatusLineItem>,
     pub status_line_2_items: Vec<StatusLineItem>,
     pub external_editor: Vec<String>,
@@ -59,6 +60,7 @@ impl Default for ModelOptions {
         Self {
             working_dir: None,
             style_mode: StyleMode::default(),
+            motion_mode: MotionMode::default(),
             status_line_items: Vec::new(),
             status_line_2_items: Vec::new(),
             external_editor: Vec::new(),

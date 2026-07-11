@@ -159,6 +159,31 @@ mod tests {
     }
 
     #[test]
+    fn reduced_motion_stream_blocks_and_toast_waits_only_for_semantic_timeout() {
+        let mut model = Model::new_with_options(
+            StartupBannerOptions::default(),
+            crate::ModelOptions {
+                motion_mode: crate::MotionMode::Reduced,
+                ..crate::ModelOptions::default()
+            },
+        );
+        model.update(crate::AppEvent::StartupReadyTimeout);
+        model.show_stream_activity("working");
+        let now = Instant::now();
+        assert_eq!(loop_wait_plan(&model, now), LoopWaitPlan::Block);
+
+        model.show_toast(crate::toast::ToastSeverity::Info, "Saved");
+        let plan = loop_wait_plan(&model, now);
+        assert!(matches!(
+            plan,
+            LoopWaitPlan::Wait {
+                render_on_timeout: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn active_tool_activity_deadline_requests_render_on_timeout() {
         let mut model = Model::new(StartupBannerOptions::default());
         model.update(crate::AppEvent::StartupReadyTimeout);

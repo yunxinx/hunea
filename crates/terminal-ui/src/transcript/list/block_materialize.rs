@@ -65,6 +65,7 @@ impl Transcript {
             width,
             self.palette,
             context,
+            self.motion_mode,
         ));
         if !has_dynamic_render {
             self.screen_cache.store_item_block(index, Rc::clone(&block));
@@ -79,6 +80,7 @@ pub(crate) fn materialize_transcript_item_render_block(
     width: u16,
     palette: TerminalPalette,
     context: crate::frame_time::FrameRenderContext,
+    motion_mode: crate::MotionMode,
 ) -> CachedRenderBlock {
     let cache_key = item.render_cache_key();
 
@@ -128,7 +130,14 @@ pub(crate) fn materialize_transcript_item_render_block(
 
     let lines = match item {
         TranscriptItem::ToolResult(tool_result) => {
-            tool_result.render_lines_at(width, palette, context.now())
+            let now = if motion_mode.allows_animation() {
+                context.now()
+            } else {
+                tool_result
+                    .active_marker_started_at()
+                    .unwrap_or(context.now())
+            };
+            tool_result.render_lines_at(width, palette, now)
         }
         _ => item.render_lines(width, palette),
     };

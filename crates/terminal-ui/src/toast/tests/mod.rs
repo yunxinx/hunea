@@ -22,7 +22,7 @@ fn start_notice_exit(
     show_notice(state, notice);
     let visible_at = complete_current_enter(state, started_at, bounds, palette);
     let token = state.timeout_token();
-    state.handle_visible_timeout(token);
+    state.handle_visible_timeout(token, true);
     state.advance_at(visible_at);
     visible_at
 }

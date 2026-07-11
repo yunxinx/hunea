@@ -370,6 +370,7 @@ impl DocumentTranscriptSnapshot {
             self.width.max(1),
             self.palette,
             context,
+            self.motion_mode,
         ));
         self.item_block_cache
             .borrow_mut()
@@ -391,6 +392,7 @@ impl DocumentTranscriptSnapshot {
             self.width.max(1),
             self.palette,
             context,
+            self.motion_mode,
         )))
     }
 

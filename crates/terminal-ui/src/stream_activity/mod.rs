@@ -348,8 +348,13 @@ impl Model {
         } else {
             usize::from(self.width)
         };
+        let render_now = if self.motion_mode.allows_animation() {
+            activity.active_now(now)
+        } else {
+            activity.started_at
+        };
         let (text, spans) =
-            render_activity_content(activity, self.palette, activity.active_now(now), width);
+            render_activity_content(activity, self.palette, render_now, width, self.motion_mode);
         if text.is_empty() {
             return StatusLineRenderResult::default();
         }
@@ -368,6 +373,12 @@ impl Model {
     }
 
     pub(crate) fn stream_activity_frame_key(&self, now: Instant) -> StreamActivityFrameKey {
+        if !self.motion_mode.allows_animation() {
+            return StreamActivityFrameKey {
+                revision: self.stream_activity_revision,
+                frame_index: 0,
+            };
+        }
         let frame_index = self
             .stream_activity
             .as_ref()
@@ -380,6 +391,9 @@ impl Model {
     }
 
     pub(crate) fn stream_activity_next_frame_deadline_at(&self, now: Instant) -> Option<Instant> {
+        if !self.motion_mode.allows_animation() {
+            return None;
+        }
         let activity = self
             .stream_activity
             .as_ref()
@@ -388,6 +402,9 @@ impl Model {
     }
 
     pub(crate) fn tool_activity_frame_key(&self, now: Instant) -> usize {
+        if !self.motion_mode.allows_animation() {
+            return usize::from(self.transcript.active_tool_activity_started_at().is_some());
+        }
         self.transcript
             .active_tool_activity_started_at()
             .map(|started_at| {
@@ -400,6 +417,9 @@ impl Model {
     }
 
     pub(crate) fn tool_activity_next_frame_deadline_at(&self, now: Instant) -> Option<Instant> {
+        if !self.motion_mode.allows_animation() {
+            return None;
+        }
         let started_at = self.transcript.active_tool_activity_started_at()?;
         next_animation_frame_deadline(started_at, now, TOOL_ACTIVITY_ACTIVE_MARKER_BLINK_INTERVAL)
     }
@@ -500,6 +520,26 @@ impl StreamActivityState {
         }
         if let Some(token_text) = token_text {
             segments.push(token_text);
+        }
+        if let Some(hint) = self.interrupt_hint.as_deref() {
+            segments.push(hint.to_string());
+        }
+        format!("({})", segments.join(" • "))
+    }
+
+    fn reduced_segment(&self) -> String {
+        let mut segments = vec![self.elapsed_text_at(self.started_at)];
+        if self.is_thinking {
+            segments.push("thinking".to_string());
+        }
+        if let Some(progress) = self.output_tokens.as_ref()
+            && progress.target > 0
+        {
+            segments.push(format!(
+                "{} {} tokens",
+                progress.direction.glyph(),
+                format_token_count(progress.target)
+            ));
         }
         if let Some(hint) = self.interrupt_hint.as_deref() {
             segments.push(hint.to_string());
@@ -671,8 +711,13 @@ fn render_activity_content(
     palette: TerminalPalette,
     now: Instant,
     content_width: usize,
+    motion_mode: crate::MotionMode,
 ) -> (String, Vec<Span<'static>>) {
-    let elapsed_text = activity.elapsed_segment_at(now);
+    let elapsed_text = if motion_mode.allows_animation() {
+        activity.elapsed_segment_at(now)
+    } else {
+        activity.reduced_segment()
+    };
     let text = format!(
         "{STREAM_ACTIVITY_GLYPH} {} {elapsed_text}",
         activity.display_header()
@@ -685,14 +730,14 @@ fn render_activity_content(
     if truncated_text == text {
         return (
             text,
-            activity_content_spans(activity, palette, now, elapsed_text),
+            activity_content_spans(activity, palette, now, elapsed_text, motion_mode),
         );
     }
 
     (
         truncated_text.clone(),
         truncate_activity_spans(
-            activity_content_spans(activity, palette, now, elapsed_text),
+            activity_content_spans(activity, palette, now, elapsed_text, motion_mode),
             content_width,
         ),
     )
@@ -703,16 +748,24 @@ fn activity_content_spans(
     palette: TerminalPalette,
     now: Instant,
     elapsed_text: String,
+    motion_mode: crate::MotionMode,
 ) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     spans.push(activity_glyph_span_at(palette, activity.started_at, now));
     spans.push(Span::raw(" "));
-    spans.extend(shimmer_spans_at(
-        activity.display_header(),
-        palette,
-        activity.started_at,
-        now,
-    ));
+    if motion_mode.allows_animation() {
+        spans.extend(shimmer_spans_at(
+            activity.display_header(),
+            palette,
+            activity.started_at,
+            now,
+        ));
+    } else {
+        spans.push(Span::styled(
+            activity.display_header().to_string(),
+            secondary_text_style(palette),
+        ));
+    }
     spans.push(Span::raw(" "));
     spans.push(Span::styled(
         elapsed_text,

@@ -15,6 +15,7 @@ pub(super) struct FileConfig {
 #[serde(deny_unknown_fields)]
 pub(super) struct FileTuiConfig {
     pub(super) user_input_style: Option<String>,
+    pub(super) motion: Option<String>,
     pub(super) status_line: Option<Vec<String>>,
     pub(super) status_line_2: Option<Vec<String>>,
     pub(super) external_editor: Option<Vec<String>>,

@@ -39,6 +39,7 @@ mod message_revisit;
 mod modal_layer;
 mod model;
 mod model_panel;
+mod motion;
 mod overlay_input_result;
 mod path_resolve;
 mod picker_scrollbar;
@@ -85,6 +86,7 @@ pub mod theme;
 
 pub use external_editor::ExternalEditorLaunch;
 pub use model::{EscRewindMode, Model, ModelOptions, RequestMetrics};
+pub use motion::MotionMode;
 pub use runner::{
     LoopEventWaker, NoopRuntimeCoordinator, RuntimeCoordinator, run, run_with_options,
     run_with_runtime_coordinator, run_with_style_mode,

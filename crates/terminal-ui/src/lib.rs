@@ -8,6 +8,7 @@ mod benchmark;
 pub mod benchmark;
 
 mod attached_prompt_picker_row;
+mod bounded_lru_cache;
 mod command_panel;
 mod composer;
 mod composer_inline_picker;

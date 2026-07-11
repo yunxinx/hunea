@@ -1,16 +1,11 @@
-use std::{
-    cell::RefCell,
-    collections::{HashMap, VecDeque},
-    ops::Range,
-    path::Path,
-    rc::Rc,
-};
+use std::{cell::RefCell, ops::Range, path::Path, rc::Rc};
 
 use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag};
 use ratatui::text::Line;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
+    bounded_lru_cache::BoundedLruCache,
     display_width::grapheme_width,
     markdown_source::{MarkdownSourceBounds, markdown_source_bounds},
     styled_text::{line_plain_text_len, line_to_plain_text},
@@ -33,35 +28,26 @@ type AssistantProjectionPage = Rc<Vec<Line<'static>>>;
 type AssistantProjectionPageKey = (usize, usize);
 type AssistantProjectionPageCache = RefCell<AssistantProjectionPageStore>;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct AssistantProjectionPageStore {
-    pages: HashMap<AssistantProjectionPageKey, AssistantProjectionPage>,
-    recent: VecDeque<AssistantProjectionPageKey>,
+    pages: BoundedLruCache<AssistantProjectionPageKey, AssistantProjectionPage>,
+}
+
+impl Default for AssistantProjectionPageStore {
+    fn default() -> Self {
+        Self {
+            pages: BoundedLruCache::new(MAX_ASSISTANT_PROJECTION_PAGES),
+        }
+    }
 }
 
 impl AssistantProjectionPageStore {
     fn get(&mut self, key: AssistantProjectionPageKey) -> Option<AssistantProjectionPage> {
-        let page = self.pages.get(&key).cloned()?;
-        self.touch(key);
-        Some(page)
+        self.pages.get_cloned(&key)
     }
 
     fn insert(&mut self, key: AssistantProjectionPageKey, page: AssistantProjectionPage) {
         self.pages.insert(key, page);
-        self.touch(key);
-        while self.pages.len() > MAX_ASSISTANT_PROJECTION_PAGES {
-            let Some(oldest) = self.recent.pop_front() else {
-                break;
-            };
-            self.pages.remove(&oldest);
-        }
-    }
-
-    fn touch(&mut self, key: AssistantProjectionPageKey) {
-        if let Some(position) = self.recent.iter().position(|candidate| *candidate == key) {
-            self.recent.remove(position);
-        }
-        self.recent.push_back(key);
     }
 }
 
@@ -246,7 +232,7 @@ impl AssistantMessageRenderProjection {
             .values()
             .map(|page| estimated_page_bytes(page.as_slice()))
             .sum::<usize>();
-        let page_map_bytes = pages.pages.capacity()
+        let page_map_bytes = pages.pages.storage_capacity()
             * (std::mem::size_of::<AssistantProjectionPageKey>()
                 + std::mem::size_of::<AssistantProjectionPage>());
 

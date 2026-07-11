@@ -1,9 +1,6 @@
-use std::{
-    collections::{HashMap, VecDeque},
-    rc::Rc,
-};
+use std::rc::Rc;
 
-use crate::selection::SelectableLineRange;
+use crate::{bounded_lru_cache::BoundedLruCache, selection::SelectableLineRange};
 
 pub(super) const MAX_SELECTION_SEMANTIC_ITEMS: usize = 32;
 
@@ -13,10 +10,17 @@ pub(super) struct SelectionSemanticEntry {
     pub(super) selectable_ranges: Vec<SelectableLineRange>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(super) struct SelectionSemanticCache {
-    entries: HashMap<usize, Rc<SelectionSemanticEntry>>,
-    recent: VecDeque<usize>,
+    entries: BoundedLruCache<usize, Rc<SelectionSemanticEntry>>,
+}
+
+impl Default for SelectionSemanticCache {
+    fn default() -> Self {
+        Self {
+            entries: BoundedLruCache::new(MAX_SELECTION_SEMANTIC_ITEMS),
+        }
+    }
 }
 
 impl SelectionSemanticCache {
@@ -25,28 +29,13 @@ impl SelectionSemanticCache {
         item_index: usize,
         build: impl FnOnce() -> SelectionSemanticEntry,
     ) -> Rc<SelectionSemanticEntry> {
-        if let Some(entry) = self.entries.get(&item_index).cloned() {
-            self.touch(item_index);
+        if let Some(entry) = self.entries.get_cloned(&item_index) {
             return entry;
         }
 
         let entry = Rc::new(build());
         self.entries.insert(item_index, Rc::clone(&entry));
-        self.touch(item_index);
-        while self.entries.len() > MAX_SELECTION_SEMANTIC_ITEMS {
-            let Some(oldest) = self.recent.pop_front() else {
-                break;
-            };
-            self.entries.remove(&oldest);
-        }
         entry
-    }
-
-    fn touch(&mut self, item_index: usize) {
-        if let Some(position) = self.recent.iter().position(|index| *index == item_index) {
-            self.recent.remove(position);
-        }
-        self.recent.push_back(item_index);
     }
 
     #[cfg(test)]
@@ -61,7 +50,7 @@ impl SelectionSemanticCache {
 
     #[cfg(test)]
     pub(super) fn get(&self, item_index: usize) -> Option<Rc<SelectionSemanticEntry>> {
-        self.entries.get(&item_index).cloned()
+        self.entries.peek_cloned(&item_index)
     }
 
     #[cfg(test)]
@@ -75,7 +64,6 @@ impl SelectionSemanticCache {
                     plain_lines,
                 }),
             );
-            cache.recent.push_back(item_index);
         }
         cache
     }

@@ -100,7 +100,9 @@ fn row_clear_from(row: &[Cell], trailing_bg: Color) -> usize {
     while column < row.len() {
         let cell = &row[column];
         let width = usize::from(cell.cell_width()).max(1);
-        if !cell_is_skipped(cell) && cell_requires_visible_cell(cell, trailing_bg) {
+        if !cell_is_skipped(cell)
+            && (cell_is_always_updated(cell) || cell_requires_visible_cell(cell, trailing_bg))
+        {
             content_end = column.saturating_add(width).min(row.len());
         }
         column += width;
@@ -282,6 +284,39 @@ mod tests {
             command,
             super::TerminalDrawCommand::Put { x: 0, y: 0, cell, .. }
                 if cell.symbol() == "x"
+        )));
+    }
+
+    #[test]
+    fn terminal_grid_diff_always_updates_blank_cell_on_empty_row() {
+        let mut previous = Buffer::empty(Rect::new(0, 0, 3, 1));
+        let mut current = previous.clone();
+        previous[(1, 0)].set_diff_option(CellDiffOption::AlwaysUpdate);
+        current[(1, 0)].set_diff_option(CellDiffOption::AlwaysUpdate);
+
+        let diff = super::diff_terminal_buffers(&previous, &current);
+
+        assert!(diff.iter().any(|command| matches!(
+            command,
+            super::TerminalDrawCommand::Put { x: 1, y: 0, cell, .. }
+                if cell.symbol() == " "
+        )));
+    }
+
+    #[test]
+    fn terminal_grid_diff_always_updates_blank_after_visible_content() {
+        let mut previous = Buffer::empty(Rect::new(0, 0, 4, 1));
+        previous[(0, 0)].set_symbol("x");
+        let mut current = previous.clone();
+        previous[(2, 0)].set_diff_option(CellDiffOption::AlwaysUpdate);
+        current[(2, 0)].set_diff_option(CellDiffOption::AlwaysUpdate);
+
+        let diff = super::diff_terminal_buffers(&previous, &current);
+
+        assert!(diff.iter().any(|command| matches!(
+            command,
+            super::TerminalDrawCommand::Put { x: 2, y: 0, cell, .. }
+                if cell.symbol() == " "
         )));
     }
 

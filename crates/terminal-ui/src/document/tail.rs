@@ -22,7 +22,12 @@ use crate::{
 
 use super::{DocumentAnchorRegion, DocumentLineAnchor, slot_frame::SlotFrame};
 
-/// `DocumentStableTailLayoutKey` 描述稳定 tail rows 的命中条件。
+/// `DocumentStableTailLayoutKey` 描述稳定 tail rows 的完整命中条件。
+///
+/// 新增任何会改变 stable tail geometry、text、style 或 panel state 的状态时，必须把
+/// 对应值加入此 key，或确保它被 key 中已有的 revision 完整覆盖；否则缓存会静默复用
+/// 陈旧布局。cursor 与 stream activity 属于瞬态 tail，分别由 `DocumentTailLayoutKey`
+/// 的独立字段负责。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct DocumentStableTailLayoutKey {
     pub(crate) transcript_has_content: bool,
@@ -201,6 +206,8 @@ impl Model {
     }
 
     fn current_document_stable_tail_layout_key(&self) -> DocumentStableTailLayoutKey {
+        // 此处是 stable tail 失效清单的唯一构造入口；修改 stable tail 渲染输入时必须
+        // 同步更新该清单或复用一个已在清单中的 revision。
         DocumentStableTailLayoutKey {
             transcript_has_content: self.transcript_render.line_count > 0,
             palette_version: self.palette_version,

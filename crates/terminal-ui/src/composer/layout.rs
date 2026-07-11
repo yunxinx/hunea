@@ -3,17 +3,59 @@ thread_local! {
     static COMPOSER_VISUAL_LINES_CALL_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+use std::rc::Rc;
+
 use crate::transcript::wrap_prompt_visual_lines;
 
-#[derive(Debug, Clone)]
+/// `ComposerLayoutKey` 唯一标识一次 composer 全文 soft-wrap 的输入。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct ComposerLayoutKey {
+    pub(crate) content_revision: usize,
+    pub(crate) content_width: usize,
+    pub(crate) prompt_width: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VisualLine {
     pub(crate) text: String,
     pub(crate) logical_line: usize,
     pub(crate) logical_line_start_char: usize,
     pub(crate) visible_start_char: usize,
     pub(crate) end_char: usize,
-    pub(crate) column_offsets: Vec<usize>,
     pub(crate) is_continuation: bool,
+}
+
+/// `ComposerLayoutSnapshot` 保存当前 content/width revision 的不可变视觉几何。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ComposerLayoutSnapshot {
+    key: ComposerLayoutKey,
+    visual_lines: Vec<VisualLine>,
+}
+
+impl ComposerLayoutSnapshot {
+    pub(crate) fn build(
+        value: &str,
+        content_revision: usize,
+        content_width: usize,
+        prompt_width: usize,
+    ) -> Rc<Self> {
+        Rc::new(Self {
+            key: ComposerLayoutKey {
+                content_revision,
+                content_width,
+                prompt_width,
+            },
+            visual_lines: visual_lines_for_text(value, content_width, prompt_width),
+        })
+    }
+
+    pub(crate) fn visual_lines(&self) -> &[VisualLine] {
+        &self.visual_lines
+    }
+
+    pub(crate) fn line_count(&self) -> usize {
+        self.visual_lines.len().max(1)
+    }
 }
 
 pub(crate) fn visual_line_count(value: &str, width: usize, line_prefix_width: usize) -> usize {
@@ -81,7 +123,6 @@ fn visual_lines_for_text_with_options(
                 .unwrap_or(0),
             visible_start_char: wrapped_line.visible_start_char,
             end_char: wrapped_line.end_char,
-            column_offsets: wrapped_line.column_offsets,
             is_continuation,
         });
     }
@@ -93,7 +134,6 @@ fn visual_lines_for_text_with_options(
             logical_line_start_char: 0,
             visible_start_char: 0,
             end_char: 0,
-            column_offsets: Vec::new(),
             is_continuation: false,
         });
     }

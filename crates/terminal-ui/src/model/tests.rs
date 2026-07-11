@@ -2475,13 +2475,13 @@ fn composer_cursor_only_layout_refresh_reuses_long_composer_document() {
     model.sync_composer_height();
     let initial = model.build_document_layout(crate::frame_time::FrameRenderContext::capture());
 
-    crate::composer::reset_render_document_call_count();
+    crate::composer::reset_visual_lines_call_count();
     model.composer_mut().move_to_begin();
     model.sync_document_viewport_for_composer_cursor();
     let updated = model.build_document_layout(crate::frame_time::FrameRenderContext::capture());
 
     assert_eq!(
-        crate::composer::render_document_call_count(),
+        crate::composer::visual_lines_call_count(),
         0,
         "cursor-only layout refresh should reuse the cached long composer document"
     );

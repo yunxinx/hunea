@@ -140,6 +140,7 @@ impl Model {
             document_viewport_height: self.document_viewport_height(),
             composer_viewport_height: self.composer.viewport_height(),
             composer_content_revision: self.composer.content_revision(),
+            composer_presentation_revision: self.composer.presentation_revision(),
             composer_cursor_revision: self.composer.cursor_revision(),
             composer_width: self.composer.content_width(),
             command_panel_selected: self.command_panel_selected,

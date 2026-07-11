@@ -281,10 +281,9 @@ impl Model {
         viewport: &DocumentViewport,
         token_start: usize,
     ) -> Option<FloatingAnchor> {
-        let composer_anchors = document.tail.composer_anchors();
-        let (x, composer_y) = self
-            .composer
-            .visual_position_for_char_in_anchors(token_start, composer_anchors)?;
+        let (x, composer_y) = document
+            .tail
+            .composer_visual_position_for_char(token_start)?;
         let document_y = document
             .composer_slot
             .content_start_line

@@ -342,14 +342,16 @@ pub fn render_composer_document_with_input(
     composer.set_width(width);
     composer.reset_text_and_move_to_end(value);
 
-    let document = composer.render_document(palette);
+    let document = composer.document_snapshot(palette);
+    let range = document.range(0, document.line_count());
+    let (cursor_x, cursor_y) = composer.cursor_visual_position();
     ComposerRenderSummary {
-        line_count: document.lines.len(),
-        plain_text_len: plain_lines_len(&document.plain_lines),
-        anchor_count: document.anchors.len(),
-        selectable_count: document.selectable_ranges.len(),
-        cursor_x: document.cursor_x,
-        cursor_y: document.cursor_y,
+        line_count: range.lines.len(),
+        plain_text_len: plain_lines_len(&range.plain_lines),
+        anchor_count: document.line_count(),
+        selectable_count: range.selectable_ranges.len(),
+        cursor_x,
+        cursor_y,
     }
 }
 

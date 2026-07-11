@@ -71,6 +71,7 @@ pub(crate) struct DocumentLayoutKey {
     pub(super) document_viewport_height: usize,
     pub(super) composer_viewport_height: usize,
     pub(super) composer_content_revision: usize,
+    pub(super) composer_presentation_revision: usize,
     pub(super) composer_cursor_revision: usize,
     pub(super) composer_width: usize,
     pub(super) command_panel_selected: usize,

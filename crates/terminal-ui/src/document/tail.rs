@@ -10,7 +10,7 @@ use crate::{
     frame_time::FrameRenderContext,
     inline_panel::InlinePanelRenderResult,
     model_panel::ModelPanelRenderResult,
-    selection::{SelectableLineRange, selectable_range_for_plain_line},
+    selection::SelectableLineRange,
     status_line::{
         StatusLineRenderResult, status_line_gap_before as configured_status_line_gap_before,
         status_line_pair_height,
@@ -32,6 +32,7 @@ pub(crate) struct DocumentStableTailLayoutKey {
     pub(crate) document_viewport_height: usize,
     pub(crate) composer_viewport_height: usize,
     pub(crate) composer_content_revision: usize,
+    pub(crate) composer_presentation_revision: usize,
     pub(crate) composer_width: usize,
     pub(crate) command_panel_selected: usize,
     pub(crate) command_panel_scroll: usize,
@@ -88,7 +89,8 @@ impl DocumentTailRows {
 #[derive(Debug, Default)]
 pub(crate) struct DocumentStableTailLayout {
     rows: DocumentTailRows,
-    composer_anchors: Vec<composer::LineAnchor>,
+    composer_document: Option<composer::ComposerDocumentSnapshot>,
+    composer_insert_at: usize,
     activity_insert_at: usize,
     adds_activity_composer_gap: bool,
     composer_slot: SlotFrame,
@@ -112,6 +114,11 @@ pub(crate) struct DocumentTailLayout {
     stable_cursor_y: usize,
 }
 
+enum DocumentTailLineSource<'a> {
+    Rows(&'a DocumentTailRows, usize),
+    Composer(&'a composer::ComposerDocumentSnapshot, usize),
+}
+
 /// `DocumentStableTailLayoutCache` 缓存最近一次稳定 tail rows。
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DocumentStableTailLayoutCache {
@@ -132,16 +139,7 @@ pub(crate) struct DocumentTailLayoutCache {
 #[derive(Debug)]
 pub(crate) struct DocumentStableTailLayoutInput {
     pub(crate) transcript_has_content: bool,
-    pub(crate) composer_lines: Vec<Line<'static>>,
-    pub(crate) composer_text_lines: Vec<String>,
-    pub(crate) composer_anchors: Vec<composer::LineAnchor>,
-    pub(crate) composer_selectable: Vec<SelectableLineRange>,
-    pub(crate) composer_frame_decoration_top_line: Option<Line<'static>>,
-    pub(crate) composer_frame_decoration_top_text_line: Option<String>,
-    pub(crate) composer_frame_decoration_bottom_line: Option<Line<'static>>,
-    pub(crate) composer_frame_decoration_bottom_text_line: Option<String>,
-    pub(crate) composer_cursor_x: u16,
-    pub(crate) composer_cursor_y: usize,
+    pub(crate) composer_document: composer::ComposerDocumentSnapshot,
     pub(crate) command_panel: CommandPanelRenderResult,
     pub(crate) tool_approval_panel: ToolApprovalPanelRenderResult,
     pub(crate) model_panel: ModelPanelRenderResult,
@@ -211,6 +209,7 @@ impl Model {
             document_viewport_height: self.document_viewport_height(),
             composer_viewport_height: self.composer.viewport_height(),
             composer_content_revision: self.composer.content_revision(),
+            composer_presentation_revision: self.composer.presentation_revision(),
             composer_width: self.composer.content_width(),
             command_panel_selected: self.command_panel_selected,
             command_panel_scroll: self.command_panel_scroll,
@@ -264,36 +263,19 @@ impl Model {
             return (tail.fallback_cursor_x, tail.fallback_cursor_y);
         }
 
-        self.composer
-            .cursor_visual_position_for_anchors(&tail.composer_anchors)
-            .map(|(cursor_x, cursor_y)| {
-                (
-                    cursor_x,
-                    tail.composer_slot
-                        .content_start_line
-                        .saturating_add(cursor_y),
-                )
-            })
-            .unwrap_or((tail.fallback_cursor_x, tail.fallback_cursor_y))
+        let (cursor_x, cursor_y) = self.composer.cursor_visual_position();
+        (
+            cursor_x,
+            tail.composer_slot
+                .content_start_line
+                .saturating_add(cursor_y),
+        )
     }
 
     fn current_document_stable_tail_layout_input(&mut self) -> DocumentStableTailLayoutInput {
-        let composer_document = self.composer.render_document(self.palette);
-
         DocumentStableTailLayoutInput {
             transcript_has_content: self.transcript_render.line_count > 0,
-            composer_lines: composer_document.lines,
-            composer_text_lines: composer_document.plain_lines,
-            composer_anchors: composer_document.anchors,
-            composer_selectable: composer_document.selectable_ranges,
-            composer_frame_decoration_top_line: composer_document.frame_decoration_top_line,
-            composer_frame_decoration_top_text_line: composer_document
-                .frame_decoration_top_plain_line,
-            composer_frame_decoration_bottom_line: composer_document.frame_decoration_bottom_line,
-            composer_frame_decoration_bottom_text_line: composer_document
-                .frame_decoration_bottom_plain_line,
-            composer_cursor_x: composer_document.cursor_x,
-            composer_cursor_y: composer_document.cursor_y,
+            composer_document: self.composer.document_snapshot(self.palette),
             command_panel: self.current_inline_command_panel_render_result(),
             tool_approval_panel: self.current_inline_tool_approval_panel_render_result(),
             model_panel: self.current_inline_model_panel_render_result(),
@@ -310,8 +292,11 @@ fn compose_document_stable_tail_layout(
 ) -> DocumentStableTailLayout {
     let extra_gap =
         usize::from(input.transcript_has_content) * transcript_composer_gap_line_count();
-    let has_composer_padding = input.composer_frame_decoration_top_line.is_some()
-        && input.composer_frame_decoration_bottom_line.is_some();
+    let has_composer_padding = input.composer_document.frame_decoration_top_line.is_some()
+        && input
+            .composer_document
+            .frame_decoration_bottom_line
+            .is_some();
     let status_line_rows = status_line_pair_height(
         &input.status_line,
         &input.status_line_2,
@@ -319,7 +304,6 @@ fn compose_document_stable_tail_layout(
     );
     let mut lines = Vec::with_capacity(
         extra_gap
-            + input.composer_lines.len()
             + usize::from(has_composer_padding) * 2
             + input.command_panel.lines.len()
             + input.tool_approval_panel.lines.len()
@@ -329,7 +313,6 @@ fn compose_document_stable_tail_layout(
     );
     let mut text_lines = Vec::with_capacity(
         extra_gap
-            + input.composer_text_lines.len()
             + usize::from(has_composer_padding) * 2
             + input.command_panel.plain_lines.len()
             + input.tool_approval_panel.plain_lines.len()
@@ -339,7 +322,6 @@ fn compose_document_stable_tail_layout(
     );
     let mut anchors = Vec::with_capacity(
         extra_gap
-            + input.composer_anchors.len()
             + usize::from(has_composer_padding) * 2
             + input.command_panel.lines.len()
             + input.tool_approval_panel.lines.len()
@@ -349,7 +331,6 @@ fn compose_document_stable_tail_layout(
     );
     let mut selectable = Vec::with_capacity(
         extra_gap
-            + input.composer_selectable.len()
             + usize::from(has_composer_padding) * 2
             + input.command_panel.lines.len()
             + input.tool_approval_panel.lines.len()
@@ -379,7 +360,6 @@ fn compose_document_stable_tail_layout(
                 anchors,
                 selectable,
             },
-            input.composer_anchors,
             activity_insert_at,
         );
     }
@@ -401,7 +381,6 @@ fn compose_document_stable_tail_layout(
                 anchors,
                 selectable,
             },
-            input.composer_anchors,
             activity_insert_at,
         );
     }
@@ -423,20 +402,18 @@ fn compose_document_stable_tail_layout(
                 anchors,
                 selectable,
             },
-            input.composer_anchors,
             activity_insert_at,
         );
     }
 
-    let composer_document_anchors = document_anchors_for_composer(&input.composer_anchors);
-    let composer_slot = SlotFrame::new(
-        lines.len(),
-        has_composer_padding,
-        input.composer_text_lines.len(),
-    );
+    let composer_line_count = input.composer_document.line_count();
+    let composer_slot = SlotFrame::new(lines.len(), has_composer_padding, composer_line_count);
     if let (Some(line), Some(text_line)) = (
-        input.composer_frame_decoration_top_line,
-        input.composer_frame_decoration_top_text_line,
+        input.composer_document.frame_decoration_top_line.clone(),
+        input
+            .composer_document
+            .frame_decoration_top_plain_line
+            .clone(),
     ) {
         lines.push(line);
         text_lines.push(text_line);
@@ -448,17 +425,14 @@ fn compose_document_stable_tail_layout(
         selectable.push(SelectableLineRange::default());
     }
 
-    lines.extend(input.composer_lines);
-    text_lines.extend(input.composer_text_lines);
-    anchors.extend(composer_document_anchors);
-    selectable.extend(ensure_selectable_ranges(
-        &text_lines[text_lines.len() - input.composer_selectable.len()..],
-        &input.composer_selectable,
-    ));
+    let composer_insert_at = lines.len();
 
     if let (Some(line), Some(text_line)) = (
-        input.composer_frame_decoration_bottom_line,
-        input.composer_frame_decoration_bottom_text_line,
+        input.composer_document.frame_decoration_bottom_line.clone(),
+        input
+            .composer_document
+            .frame_decoration_bottom_plain_line
+            .clone(),
     ) {
         lines.push(line);
         text_lines.push(text_line);
@@ -527,18 +501,6 @@ fn compose_document_stable_tail_layout(
         );
     }
 
-    let composer_slot = if lines.is_empty() {
-        SlotFrame::new(0, false, 1)
-    } else {
-        composer_slot
-    };
-    if lines.is_empty() {
-        lines.push(Line::raw(""));
-        text_lines.push(String::new());
-        anchors.push(DocumentLineAnchor::default());
-        selectable.push(SelectableLineRange::default());
-    }
-
     DocumentStableTailLayout {
         rows: DocumentTailRows {
             lines,
@@ -546,27 +508,29 @@ fn compose_document_stable_tail_layout(
             anchors,
             selectable,
         },
-        composer_anchors: input.composer_anchors,
+        composer_document: Some(input.composer_document),
+        composer_insert_at,
         activity_insert_at,
         adds_activity_composer_gap: true,
         composer_slot,
-        fallback_cursor_x: input.composer_cursor_x,
-        fallback_cursor_y: composer_slot.content_start_line + input.composer_cursor_y,
+        fallback_cursor_x: 0,
+        fallback_cursor_y: composer_slot.content_start_line,
     }
 }
 
 fn compose_document_panel_stable_tail_layout(
     mut rows: DocumentTailRows,
-    composer_anchors: Vec<composer::LineAnchor>,
     activity_insert_at: usize,
 ) -> DocumentStableTailLayout {
     if rows.is_empty() {
         rows.push_empty();
     }
     let fallback_cursor_y = rows.len().saturating_add(1);
+    let composer_insert_at = rows.len();
     DocumentStableTailLayout {
         rows,
-        composer_anchors,
+        composer_document: None,
+        composer_insert_at,
         activity_insert_at,
         adds_activity_composer_gap: false,
         composer_slot: SlotFrame::empty(),
@@ -631,41 +595,63 @@ fn compose_document_tail_layout(
 
 impl DocumentTailLayout {
     pub(crate) fn line_count(&self) -> usize {
-        self.stable.rows.len() + self.activity.rows.len()
+        self.stable_line_count() + self.activity.rows.len()
     }
 
     pub(crate) fn line_at(&self, index: usize) -> Option<Line<'static>> {
-        let (rows, index) = self.row_source(index)?;
-        rows.lines.get(index).cloned()
+        match self.line_source(index)? {
+            DocumentTailLineSource::Rows(rows, index) => rows.lines.get(index).cloned(),
+            DocumentTailLineSource::Composer(document, index) => {
+                document.range(index, 1).lines.into_iter().next()
+            }
+        }
     }
 
     pub(crate) fn text_line_at(&self, index: usize) -> Option<String> {
-        let (rows, index) = self.row_source(index)?;
-        rows.text_lines.get(index).cloned()
+        match self.line_source(index)? {
+            DocumentTailLineSource::Rows(rows, index) => rows.text_lines.get(index).cloned(),
+            DocumentTailLineSource::Composer(document, index) => {
+                document.range(index, 1).plain_lines.into_iter().next()
+            }
+        }
     }
 
     pub(crate) fn anchor_at(&self, index: usize) -> Option<DocumentLineAnchor> {
-        let (rows, index) = self.row_source(index)?;
-        rows.anchors.get(index).copied()
+        match self.line_source(index)? {
+            DocumentTailLineSource::Rows(rows, index) => rows.anchors.get(index).copied(),
+            DocumentTailLineSource::Composer(document, index) => {
+                document
+                    .anchor_at(index)
+                    .map(|composer| DocumentLineAnchor {
+                        region: DocumentAnchorRegion::Composer,
+                        composer,
+                        ..DocumentLineAnchor::default()
+                    })
+            }
+        }
     }
 
     pub(crate) fn selectable_at(&self, index: usize) -> Option<SelectableLineRange> {
-        let (rows, index) = self.row_source(index)?;
-        rows.selectable.get(index).copied()
+        match self.line_source(index)? {
+            DocumentTailLineSource::Rows(rows, index) => rows.selectable.get(index).copied(),
+            DocumentTailLineSource::Composer(document, index) => document
+                .range(index, 1)
+                .selectable_ranges
+                .into_iter()
+                .next(),
+        }
     }
 
     pub(crate) fn line_index_for_anchor(&self, target: DocumentLineAnchor) -> Option<usize> {
-        let insert_at = self.stable.activity_insert_at;
-        if let Some(index) = self
-            .stable
-            .rows
-            .anchors
-            .iter()
-            .take(insert_at)
-            .position(|anchor| *anchor == target)
+        if target.region == DocumentAnchorRegion::Composer
+            && let Some(document) = self.stable.composer_document.as_ref()
         {
-            return Some(index);
+            let composer_index = document.line_index_for_anchor(target.composer)?;
+            let stable_index = self.stable.composer_insert_at + composer_index;
+            return Some(self.final_index_for_stable_index(stable_index));
         }
+
+        let insert_at = self.stable.activity_insert_at;
         if let Some(index) = self
             .activity
             .rows
@@ -678,29 +664,25 @@ impl DocumentTailLayout {
         self.stable
             .rows
             .anchors
-            .get(insert_at..)?
             .iter()
-            .position(|anchor| *anchor == target)
-            .map(|index| insert_at + self.activity.rows.len() + index)
+            .enumerate()
+            .find_map(|(row_index, anchor)| {
+                (*anchor == target).then(|| {
+                    let stable_index = self.stable_index_for_row_index(row_index);
+                    self.final_index_for_stable_index(stable_index)
+                })
+            })
     }
 
     pub(crate) fn lines_for_range(&self, start: usize, count: usize) -> Vec<Line<'static>> {
         let range = self.range_indices(start, count);
-        let mut lines = Vec::with_capacity(range.len());
-        self.for_each_range_segment(range, |rows, range| {
-            lines.extend_from_slice(&rows.lines[range]);
-        });
-        lines
+        range.filter_map(|index| self.line_at(index)).collect()
     }
 
     #[cfg(test)]
     pub(crate) fn text_lines_for_range(&self, start: usize, count: usize) -> Vec<String> {
         let range = self.range_indices(start, count);
-        let mut text_lines = Vec::with_capacity(range.len());
-        self.for_each_range_segment(range, |rows, range| {
-            text_lines.extend_from_slice(&rows.text_lines[range]);
-        });
-        text_lines
+        range.filter_map(|index| self.text_line_at(index)).collect()
     }
 
     pub(crate) fn plain_text_len_for_range(&self, start: usize, count: usize) -> usize {
@@ -709,64 +691,122 @@ impl DocumentTailLayout {
         if line_count == 0 {
             return 0;
         }
-        let mut plain_text_len = 0;
-        self.for_each_range_segment(range, |rows, range| {
-            plain_text_len += rows.text_lines[range]
+        if range.start == 0 && range.end == self.line_count() {
+            let stable_rows = self
+                .stable
+                .rows
+                .text_lines
                 .iter()
                 .map(String::len)
                 .sum::<usize>();
-        });
+            let activity_rows = self
+                .activity
+                .rows
+                .text_lines
+                .iter()
+                .map(String::len)
+                .sum::<usize>();
+            let composer_rows = self
+                .stable
+                .composer_document
+                .as_ref()
+                .map_or(0, composer::ComposerDocumentSnapshot::plain_text_len);
+            return stable_rows + activity_rows + composer_rows + line_count.saturating_sub(1);
+        }
+        let plain_text_len = range
+            .filter_map(|index| self.text_line_at(index))
+            .map(|line| line.len())
+            .sum::<usize>();
         plain_text_len + line_count.saturating_sub(1)
     }
 
-    pub(crate) fn composer_anchors(&self) -> &[composer::LineAnchor] {
-        &self.stable.composer_anchors
+    pub(crate) fn composer_visual_position_for_char(
+        &self,
+        char_index: usize,
+    ) -> Option<(u16, usize)> {
+        self.stable
+            .composer_document
+            .as_ref()?
+            .visual_position_for_char(char_index)
     }
 
-    fn row_source(&self, index: usize) -> Option<(&DocumentTailRows, usize)> {
+    fn line_source(&self, index: usize) -> Option<DocumentTailLineSource<'_>> {
         let insert_at = self.stable.activity_insert_at;
         let activity_end = insert_at.saturating_add(self.activity.rows.len());
         if index < insert_at {
-            return (index < self.stable.rows.len()).then_some((&self.stable.rows, index));
+            return self.stable_line_source(index);
         }
         if index < activity_end {
-            return Some((&self.activity.rows, index - insert_at));
+            return Some(DocumentTailLineSource::Rows(
+                &self.activity.rows,
+                index - insert_at,
+            ));
         }
         let stable_index = index.saturating_sub(self.activity.rows.len());
-        (stable_index < self.stable.rows.len()).then_some((&self.stable.rows, stable_index))
+        self.stable_line_source(stable_index)
+    }
+
+    fn stable_line_source(&self, index: usize) -> Option<DocumentTailLineSource<'_>> {
+        let composer_line_count = self
+            .stable
+            .composer_document
+            .as_ref()
+            .map_or(0, composer::ComposerDocumentSnapshot::line_count);
+        if index < self.stable.composer_insert_at {
+            return self
+                .stable
+                .rows
+                .lines
+                .get(index)
+                .map(|_| DocumentTailLineSource::Rows(&self.stable.rows, index));
+        }
+        if index < self.stable.composer_insert_at + composer_line_count {
+            return self.stable.composer_document.as_ref().map(|document| {
+                DocumentTailLineSource::Composer(document, index - self.stable.composer_insert_at)
+            });
+        }
+        let row_index = index.saturating_sub(composer_line_count);
+        self.stable
+            .rows
+            .lines
+            .get(row_index)
+            .map(|_| DocumentTailLineSource::Rows(&self.stable.rows, row_index))
+    }
+
+    fn stable_line_count(&self) -> usize {
+        self.stable.rows.len()
+            + self
+                .stable
+                .composer_document
+                .as_ref()
+                .map_or(0, composer::ComposerDocumentSnapshot::line_count)
+    }
+
+    fn stable_index_for_row_index(&self, row_index: usize) -> usize {
+        if row_index < self.stable.composer_insert_at {
+            row_index
+        } else {
+            row_index
+                + self
+                    .stable
+                    .composer_document
+                    .as_ref()
+                    .map_or(0, composer::ComposerDocumentSnapshot::line_count)
+        }
+    }
+
+    fn final_index_for_stable_index(&self, stable_index: usize) -> usize {
+        if stable_index < self.stable.activity_insert_at {
+            stable_index
+        } else {
+            stable_index + self.activity.rows.len()
+        }
     }
 
     fn range_indices(&self, start: usize, count: usize) -> std::ops::Range<usize> {
         let start = start.min(self.line_count());
         let end = start.saturating_add(count).min(self.line_count());
         start..end
-    }
-
-    fn for_each_range_segment(
-        &self,
-        range: std::ops::Range<usize>,
-        mut visit: impl FnMut(&DocumentTailRows, std::ops::Range<usize>),
-    ) {
-        let insert_at = self.stable.activity_insert_at;
-        let activity_line_count = self.activity.rows.len();
-        let activity_end = insert_at.saturating_add(activity_line_count);
-
-        if range.start < insert_at {
-            visit(&self.stable.rows, range.start..range.end.min(insert_at));
-        }
-        if range.end > insert_at && range.start < activity_end {
-            visit(
-                &self.activity.rows,
-                range.start.max(insert_at) - insert_at..range.end.min(activity_end) - insert_at,
-            );
-        }
-        if range.end > activity_end {
-            visit(
-                &self.stable.rows,
-                range.start.max(activity_end) - activity_line_count
-                    ..range.end - activity_line_count,
-            );
-        }
     }
 
     #[cfg(test)]
@@ -798,6 +838,7 @@ impl DocumentTailLayout {
         cursor_x: u16,
         cursor_y: usize,
     ) -> Self {
+        let composer_insert_at = lines.len();
         let stable = Rc::new(DocumentStableTailLayout {
             activity_insert_at: lines.len(),
             rows: DocumentTailRows {
@@ -806,7 +847,8 @@ impl DocumentTailLayout {
                 anchors,
                 selectable,
             },
-            composer_anchors: Vec::new(),
+            composer_document: None,
+            composer_insert_at,
             composer_slot,
             fallback_cursor_x: cursor_x,
             fallback_cursor_y: cursor_y,
@@ -821,22 +863,6 @@ impl DocumentTailLayout {
             stable_cursor_y: cursor_y,
         }
     }
-}
-
-pub(crate) fn ensure_selectable_ranges(
-    text_lines: &[String],
-    ranges: &[SelectableLineRange],
-) -> Vec<SelectableLineRange> {
-    text_lines
-        .iter()
-        .enumerate()
-        .map(|(index, line)| {
-            ranges
-                .get(index)
-                .copied()
-                .unwrap_or_else(|| selectable_range_for_plain_line(line))
-        })
-        .collect()
 }
 
 pub(crate) fn offset_slot_frame(slot: SlotFrame, offset: usize) -> SlotFrame {
@@ -954,16 +980,4 @@ fn append_status_line(
         });
         selectable.push(status_line.selectable);
     }
-}
-
-fn document_anchors_for_composer(line_anchors: &[composer::LineAnchor]) -> Vec<DocumentLineAnchor> {
-    line_anchors
-        .iter()
-        .copied()
-        .map(|composer| DocumentLineAnchor {
-            region: DocumentAnchorRegion::Composer,
-            composer,
-            ..DocumentLineAnchor::default()
-        })
-        .collect()
 }

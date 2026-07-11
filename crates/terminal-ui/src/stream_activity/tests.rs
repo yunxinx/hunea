@@ -451,7 +451,7 @@ fn stream_activity_frame_reuses_the_long_composer_document() {
     let initial_context = crate::frame_time::FrameRenderContext::new(started_at);
     let initial = model.build_document_tail_layout(initial_context);
 
-    crate::composer::reset_render_document_call_count();
+    crate::composer::reset_visual_lines_call_count();
     let next_frame = model
         .stream_activity_next_frame_deadline_at(started_at)
         .expect("active stream should expose its next frame");
@@ -459,7 +459,7 @@ fn stream_activity_frame_reuses_the_long_composer_document() {
         model.build_document_tail_layout(crate::frame_time::FrameRenderContext::new(next_frame));
 
     assert_eq!(
-        crate::composer::render_document_call_count(),
+        crate::composer::visual_lines_call_count(),
         0,
         "activity-only frames must reuse the stable composer document"
     );
@@ -484,7 +484,7 @@ fn stream_activity_state_updates_reuse_the_stable_tail_layout() {
     let initial =
         model.build_document_tail_layout(crate::frame_time::FrameRenderContext::capture());
 
-    crate::composer::reset_render_document_call_count();
+    crate::composer::reset_visual_lines_call_count();
     model.set_stream_activity_thinking(true);
     model.set_stream_activity_output_tokens(42);
     let updated =
@@ -495,7 +495,7 @@ fn stream_activity_state_updates_reuse_the_stable_tail_layout() {
         "activity state changes must rebuild the lightweight final tail view"
     );
     assert_eq!(
-        crate::composer::render_document_call_count(),
+        crate::composer::visual_lines_call_count(),
         0,
         "activity state changes must not rerender the stable composer document"
     );

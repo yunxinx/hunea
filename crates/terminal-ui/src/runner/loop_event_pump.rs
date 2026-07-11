@@ -1,9 +1,10 @@
 use std::{
     collections::VecDeque,
     io,
+    panic::{AssertUnwindSafe, catch_unwind},
     pin::Pin,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
@@ -16,6 +17,7 @@ use futures_util::{Stream, StreamExt};
 use tokio::sync::{Notify, mpsc as tokio_mpsc};
 
 use super::input::TerminalInputCoalescing;
+use crate::terminal_lifecycle::TerminalPanicRestoreSuppressionGuard;
 
 const MAX_READY_TERMINAL_EVENTS_PER_FRAME: usize = 4096;
 const LOOP_EVENT_CHANNEL_CAPACITY: usize = 1024;
@@ -84,6 +86,7 @@ pub(super) struct LoopEventPump {
     waker: LoopEventWaker,
     input_control_sender: Option<tokio_mpsc::UnboundedSender<TerminalInputCommand>>,
     input_thread: Option<JoinHandle<()>>,
+    input_failure: Arc<Mutex<Option<io::Error>>>,
 }
 
 impl LoopEventPump {
@@ -96,12 +99,18 @@ impl LoopEventPump {
     }
 
     pub(super) fn wait(&mut self, timeout: Option<Duration>) -> io::Result<Option<LoopEvent>> {
+        if let Some(error) = self.take_input_failure() {
+            return Ok(Some(LoopEvent::TerminalInputFailed(error)));
+        }
         let event = match self.pending_events.pop_front() {
             Some(event) => Some(event),
             None => self.receive(timeout)?,
         };
         if matches!(event, Some(LoopEvent::BackgroundReady)) {
             self.waker.mark_delivered();
+        }
+        if let Some(error) = self.take_input_failure() {
+            return Ok(Some(LoopEvent::TerminalInputFailed(error)));
         }
         Ok(event)
     }
@@ -193,6 +202,13 @@ impl LoopEventPump {
         Ok(event)
     }
 
+    fn take_input_failure(&self) -> Option<io::Error> {
+        self.input_failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
     fn start_with_source_factory<F, S>(source_factory: F) -> io::Result<Self>
     where
         F: FnMut() -> S + Send + 'static,
@@ -214,15 +230,19 @@ impl LoopEventPump {
         let (startup_sender, startup_receiver) = mpsc::sync_channel(1);
         let capacity_available = Arc::new(Notify::new());
         let input_capacity_available = Arc::clone(&capacity_available);
+        let input_failure = Arc::new(Mutex::new(None));
+        let thread_input_failure = Arc::clone(&input_failure);
         let waker = LoopEventWaker {
             state: Arc::new(LoopEventWakeState {
                 sender: event_sender.clone(),
                 is_pending: AtomicBool::new(false),
             }),
         };
+        let input_exit_waker = waker.clone();
         let input_thread = thread::Builder::new()
             .name("hunea-terminal-input".to_string())
             .spawn(move || {
+                let _panic_restore_suppression = TerminalPanicRestoreSuppressionGuard::enter();
                 let runtime = match tokio::runtime::Builder::new_current_thread().build() {
                     Ok(runtime) => runtime,
                     Err(error) => {
@@ -236,13 +256,24 @@ impl LoopEventPump {
                 if startup_sender.send(Ok(())).is_err() {
                     return;
                 }
-                runtime.block_on(run_terminal_input_loop(
-                    source_factory,
-                    initial_source,
-                    input_control_receiver,
-                    event_sender,
-                    input_capacity_available,
-                ));
+                let input_result = catch_unwind(AssertUnwindSafe(|| {
+                    runtime.block_on(run_terminal_input_loop(
+                        source_factory,
+                        initial_source,
+                        input_control_receiver,
+                        event_sender,
+                        input_capacity_available,
+                    ));
+                }));
+                if let Err(panic_payload) = input_result {
+                    // panic payload 的析构也可能 panic；输入线程只需报告具名失败。
+                    std::mem::forget(panic_payload);
+                    *thread_input_failure
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(io::Error::other("terminal input thread panicked"));
+                    input_exit_waker.wake();
+                }
             })?;
         startup_receiver.recv().map_err(|_| {
             io::Error::new(
@@ -258,6 +289,7 @@ impl LoopEventPump {
             waker,
             input_control_sender: Some(input_control_sender),
             input_thread: Some(input_thread),
+            input_failure,
         })
     }
 
@@ -284,30 +316,10 @@ impl LoopEventPump {
                 waker,
                 input_control_sender: None,
                 input_thread: None,
+                input_failure: Arc::new(Mutex::new(None)),
             },
             sender,
         )
-    }
-
-    #[cfg(test)]
-    fn start_with_source_factory_for_test<F, S>(source_factory: F) -> io::Result<Self>
-    where
-        F: FnMut() -> S + Send + 'static,
-        S: Stream<Item = io::Result<Event>> + Send + 'static,
-    {
-        Self::start_with_source_factory(source_factory)
-    }
-
-    #[cfg(test)]
-    fn start_with_source_factory_and_capacity_for_test<F, S>(
-        source_factory: F,
-        channel_capacity: usize,
-    ) -> io::Result<Self>
-    where
-        F: FnMut() -> S + Send + 'static,
-        S: Stream<Item = io::Result<Event>> + Send + 'static,
-    {
-        Self::start_with_source_factory_and_capacity(source_factory, channel_capacity)
     }
 }
 
@@ -605,7 +617,7 @@ mod tests {
     fn full_terminal_queue_stops_polling_source_until_capacity_returns() {
         let poll_count = Arc::new(AtomicUsize::new(0));
         let factory_poll_count = Arc::clone(&poll_count);
-        let mut pump = LoopEventPump::start_with_source_factory_and_capacity_for_test(
+        let mut pump = LoopEventPump::start_with_source_factory_and_capacity(
             move || AlwaysReadyKeyStream {
                 poll_count: Arc::clone(&factory_poll_count),
                 was_dropped: Arc::new(AtomicBool::new(false)),
@@ -614,7 +626,10 @@ mod tests {
         )
         .expect("bounded input pump should start");
 
-        thread::sleep(Duration::from_millis(20));
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while poll_count.load(Ordering::SeqCst) < 3 && Instant::now() < deadline {
+            thread::yield_now();
+        }
         assert_eq!(
             poll_count.load(Ordering::SeqCst),
             3,
@@ -637,7 +652,7 @@ mod tests {
     fn pausing_full_terminal_queue_preempts_capacity_wait() {
         let was_dropped = Arc::new(AtomicBool::new(false));
         let factory_was_dropped = Arc::clone(&was_dropped);
-        let mut pump = LoopEventPump::start_with_source_factory_and_capacity_for_test(
+        let mut pump = LoopEventPump::start_with_source_factory_and_capacity(
             move || AlwaysReadyKeyStream {
                 poll_count: Arc::new(AtomicUsize::new(0)),
                 was_dropped: Arc::clone(&factory_was_dropped),
@@ -657,7 +672,7 @@ mod tests {
     fn dropping_full_terminal_queue_preempts_capacity_wait() {
         let (finished_sender, finished_receiver) = mpsc::sync_channel(1);
         thread::spawn(move || {
-            let pump = LoopEventPump::start_with_source_factory_and_capacity_for_test(
+            let pump = LoopEventPump::start_with_source_factory_and_capacity(
                 move || AlwaysReadyKeyStream {
                     poll_count: Arc::new(AtomicUsize::new(0)),
                     was_dropped: Arc::new(AtomicBool::new(false)),
@@ -757,9 +772,8 @@ mod tests {
 
     #[test]
     fn terminal_input_eof_becomes_a_named_loop_error() {
-        let mut pump =
-            LoopEventPump::start_with_source_factory_for_test(futures_util::stream::empty)
-                .expect("fake terminal input thread should start");
+        let mut pump = LoopEventPump::start_with_source_factory(futures_util::stream::empty)
+            .expect("fake terminal input thread should start");
 
         let event = pump
             .wait(Some(Duration::from_secs(1)))
@@ -774,12 +788,29 @@ mod tests {
     }
 
     #[test]
+    fn terminal_input_thread_panic_becomes_a_named_loop_error() {
+        let mut pump = LoopEventPump::start_with_source_factory(|| PanickingStream)
+            .expect("fake terminal input thread should start");
+
+        let event = pump
+            .wait(Some(Duration::from_secs(1)))
+            .expect("terminal input panic should be delivered");
+
+        assert!(matches!(
+            event,
+            Some(LoopEvent::TerminalInputFailed(error))
+                if error.kind() == io::ErrorKind::Other
+                    && error.to_string() == "terminal input thread panicked"
+        ));
+    }
+
+    #[test]
     fn pausing_and_resuming_replaces_the_terminal_event_source() {
         let created_sources = Arc::new(AtomicUsize::new(0));
         let dropped_sources = Arc::new(AtomicUsize::new(0));
         let factory_created_sources = Arc::clone(&created_sources);
         let factory_dropped_sources = Arc::clone(&dropped_sources);
-        let mut pump = LoopEventPump::start_with_source_factory_for_test(move || {
+        let mut pump = LoopEventPump::start_with_source_factory(move || {
             factory_created_sources.fetch_add(1, Ordering::SeqCst);
             CountingPendingStream {
                 dropped_sources: Arc::clone(&factory_dropped_sources),
@@ -828,6 +859,16 @@ mod tests {
 
     struct CountingPendingStream {
         dropped_sources: Arc<AtomicUsize>,
+    }
+
+    struct PanickingStream;
+
+    impl Stream for PanickingStream {
+        type Item = io::Result<Event>;
+
+        fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            panic!("terminal input stream panic")
+        }
     }
 
     struct AlwaysReadyKeyStream {

@@ -1,4 +1,4 @@
-use std::{fmt, io, io::Write, panic};
+use std::{cell::Cell, fmt, io, io::Write, panic};
 
 use crossterm::{
     Command,
@@ -7,6 +7,31 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+
+thread_local! {
+    static SUPPRESS_TERMINAL_PANIC_RESTORE: Cell<bool> = const { Cell::new(false) };
+}
+
+pub(crate) struct TerminalPanicRestoreSuppressionGuard {
+    previous: bool,
+}
+
+impl TerminalPanicRestoreSuppressionGuard {
+    pub(crate) fn enter() -> Self {
+        let previous = SUPPRESS_TERMINAL_PANIC_RESTORE.with(|suppressed| {
+            let previous = suppressed.get();
+            suppressed.set(true);
+            previous
+        });
+        Self { previous }
+    }
+}
+
+impl Drop for TerminalPanicRestoreSuppressionGuard {
+    fn drop(&mut self) {
+        SUPPRESS_TERMINAL_PANIC_RESTORE.with(|suppressed| suppressed.set(self.previous));
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TerminalLifecycleOperation {
@@ -375,6 +400,10 @@ fn run_terminal_panic_hook(restore: impl FnOnce() -> io::Result<()>, previous_ho
 pub fn install_terminal_panic_hook() {
     let previous_hook = panic::take_hook();
     panic::set_hook(Box::new(move |panic_info| {
+        if SUPPRESS_TERMINAL_PANIC_RESTORE.with(Cell::get) {
+            previous_hook(panic_info);
+            return;
+        }
         run_terminal_panic_hook(restore_terminal_after_panic, || previous_hook(panic_info));
     }));
 }

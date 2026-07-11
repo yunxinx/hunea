@@ -274,13 +274,13 @@ fn keycap_selection_highlights_the_full_wide_grapheme() {
         " "
     );
     assert!(
-        after[(
+        !after[(
             u16::try_from(column + 1).unwrap(),
             u16::try_from(row).unwrap()
         )]
             .modifier
             .contains(Modifier::REVERSED),
-        "hidden tail cell must carry selection style so wide keycaps are highlighted as two columns"
+        "Ratatui hidden tail must stay unstyled; TerminalSurface prefill owns the second selected column"
     );
 }
 

@@ -18,7 +18,8 @@ pub use conversation::{
     ProviderConversationError,
 };
 pub use event_notifier::{
-    RuntimeEventExitNotification, RuntimeEventNotifier, RuntimeEventNotifierInstallError,
+    NotifyingSender, RuntimeEventExitNotification, RuntimeEventNotifier,
+    RuntimeEventNotifierInstallError,
 };
 pub use llm::ProviderRequestError;
 pub use llm::ProviderRequestMetrics;

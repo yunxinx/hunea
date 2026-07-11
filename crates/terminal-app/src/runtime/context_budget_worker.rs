@@ -9,7 +9,9 @@ use conversation_runtime::context_budget::{
     ContextBudgetProbe, build_context_budget_snapshot_with_cancellation,
     context_budget_tool_definitions,
 };
-use conversation_runtime::{ConversationItem, RuntimeEventNotifier, ToolDefinition};
+use conversation_runtime::{
+    ConversationItem, NotifyingSender, RuntimeEventNotifier, ToolDefinition,
+};
 use runtime_domain::{
     context_budget::{ContextBudgetSnapshot, ContextTokenLimit},
     prompt_assembly::PromptPreludeSnapshot,
@@ -109,6 +111,7 @@ impl ContextBudgetWorker {
         let current_generation = Arc::new(AtomicU64::new(0));
         let (worker_tx, worker_rx) = mpsc::channel();
         let (result_tx, result_rx) = mpsc::channel();
+        let result_tx = NotifyingSender::new(result_tx, event_notifier.clone());
         let worker_generation = Arc::clone(&current_generation);
         let worker_event_notifier = event_notifier.clone();
         // `/context` 投影偏 CPU 密集且会合并快速请求；专用线程避免占用 Tokio
@@ -117,12 +120,7 @@ impl ContextBudgetWorker {
             .name("context-budget-worker".to_string())
             .spawn(move || {
                 let _exit_notification = worker_event_notifier.notify_on_drop();
-                worker_loop(
-                    worker_rx,
-                    result_tx,
-                    worker_generation,
-                    worker_event_notifier,
-                );
+                worker_loop(worker_rx, result_tx, worker_generation);
             })
             .map_err(|error| ContextBudgetWorkerInitError {
                 detail: error.to_string(),
@@ -320,9 +318,8 @@ impl ContextBudgetWorker {
 
 fn worker_loop(
     worker_rx: mpsc::Receiver<WorkerControl>,
-    result_tx: mpsc::Sender<ContextBudgetTaskEnvelope>,
+    result_tx: NotifyingSender<ContextBudgetTaskEnvelope>,
     current_generation: Arc<AtomicU64>,
-    event_notifier: RuntimeEventNotifier,
 ) {
     while let Ok(control) = worker_rx.recv() {
         match coalesce_worker_controls(control, worker_rx.try_iter()) {
@@ -340,7 +337,6 @@ fn worker_loop(
                 {
                     break;
                 }
-                event_notifier.notify();
             }
             WorkerLoopAction::Shutdown => break,
         }

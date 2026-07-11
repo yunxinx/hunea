@@ -6,7 +6,7 @@ use std::{
     thread,
 };
 
-use conversation_runtime::{ProviderConversation, RuntimeEventNotifier};
+use conversation_runtime::{NotifyingSender, ProviderConversation, RuntimeEventNotifier};
 use runtime_domain::session::{
     MessageHistoryEntryId, PromptAssemblyCommandFailureKind, RuntimeEvent, SessionLoadRequestId,
     SessionPickerRow, SessionResumePayload, SessionTreePayload,
@@ -50,28 +50,7 @@ pub(super) enum SessionStoreWorkerEvent {
     },
 }
 
-#[derive(Clone)]
-struct SessionStoreWorkerEventSender {
-    sender: Sender<SessionStoreWorkerEvent>,
-    notifier: RuntimeEventNotifier,
-}
-
-#[derive(Debug)]
-struct SessionStoreWorkerEventSendError;
-
-impl SessionStoreWorkerEventSender {
-    fn new(sender: Sender<SessionStoreWorkerEvent>, notifier: RuntimeEventNotifier) -> Self {
-        Self { sender, notifier }
-    }
-
-    fn send(&self, event: SessionStoreWorkerEvent) -> Result<(), SessionStoreWorkerEventSendError> {
-        self.sender
-            .send(event)
-            .map_err(|_| SessionStoreWorkerEventSendError)?;
-        self.notifier.notify();
-        Ok(())
-    }
-}
+type SessionStoreWorkerEventSender = NotifyingSender<SessionStoreWorkerEvent>;
 
 enum SessionStoreCommand {
     ListSessions {
@@ -501,7 +480,7 @@ fn run_session_worker(
     command_receiver: Receiver<SessionStoreCommand>,
     event_sender: SessionStoreWorkerEventSender,
 ) {
-    let _exit_notification = event_sender.notifier.notify_on_drop();
+    let _exit_notification = event_sender.notify_on_drop();
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

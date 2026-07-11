@@ -1,4 +1,4 @@
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, mpsc};
 
 type RuntimeEventCallback = dyn Fn() + Send + Sync + 'static;
 
@@ -20,6 +20,29 @@ pub struct RuntimeEventNotifierInstallError;
 #[must_use = "必须持有到 worker scope 结束，才能在退出时发送通知"]
 pub struct RuntimeEventExitNotification {
     notifier: RuntimeEventNotifier,
+}
+
+/// `NotifyingSender` 保证 payload 成功入队后才通知外层事件循环。
+#[derive(Clone)]
+pub struct NotifyingSender<T> {
+    sender: mpsc::Sender<T>,
+    notifier: RuntimeEventNotifier,
+}
+
+impl<T> NotifyingSender<T> {
+    pub fn new(sender: mpsc::Sender<T>, notifier: RuntimeEventNotifier) -> Self {
+        Self { sender, notifier }
+    }
+
+    pub fn send(&self, payload: T) -> Result<(), mpsc::SendError<T>> {
+        self.sender.send(payload)?;
+        self.notifier.notify();
+        Ok(())
+    }
+
+    pub fn notify_on_drop(&self) -> RuntimeEventExitNotification {
+        self.notifier.notify_on_drop()
+    }
 }
 
 impl RuntimeEventNotifier {

@@ -6,7 +6,7 @@ use std::{
 use runtime_domain::model_catalog::ModelProviderRefreshEvent;
 
 use super::{ProviderSyncRequest, sync_provider_models_once};
-use crate::RuntimeEventNotifier;
+use crate::{NotifyingSender, RuntimeEventNotifier};
 
 /// `ModelRefreshWorker` 管理 provider 模型列表刷新 worker。
 pub struct ModelRefreshWorker {
@@ -25,6 +25,7 @@ impl ModelRefreshWorker {
     pub fn start(&mut self, request: ProviderSyncRequest) {
         let (sender, receiver) = mpsc::channel();
         let event_notifier = self.event_notifier.clone();
+        let sender = NotifyingSender::new(sender, event_notifier.clone());
         thread::spawn(move || {
             let _exit_notification = event_notifier.notify_on_drop();
             let provider_id = request.provider_id.clone();
@@ -38,9 +39,7 @@ impl ModelRefreshWorker {
                     message,
                 },
             };
-            if sender.send(event).is_ok() {
-                event_notifier.notify();
-            }
+            let _ = sender.send(event);
         });
         self.receiver = Some(receiver);
     }

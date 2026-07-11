@@ -25,7 +25,7 @@ use super::{
     TurnExecutionError, turn::run_prepared_conversation_with_progress,
 };
 use crate::PreparedConversationRequest;
-use crate::RuntimeEventNotifier;
+use crate::{NotifyingSender, RuntimeEventNotifier};
 
 mod context_repair;
 mod event_apply;
@@ -71,28 +71,7 @@ impl ConversationWorkerEvent {
     }
 }
 
-#[derive(Clone)]
-struct ConversationWorkerEventSender {
-    sender: mpsc::Sender<ConversationWorkerEvent>,
-    notifier: RuntimeEventNotifier,
-}
-
-#[derive(Debug)]
-struct ConversationWorkerEventSendError;
-
-impl ConversationWorkerEventSender {
-    fn new(sender: mpsc::Sender<ConversationWorkerEvent>, notifier: RuntimeEventNotifier) -> Self {
-        Self { sender, notifier }
-    }
-
-    fn send(&self, event: ConversationWorkerEvent) -> Result<(), ConversationWorkerEventSendError> {
-        self.sender
-            .send(event)
-            .map_err(|_| ConversationWorkerEventSendError)?;
-        self.notifier.notify();
-        Ok(())
-    }
-}
+type ConversationWorkerEventSender = NotifyingSender<ConversationWorkerEvent>;
 
 /// `ConversationWorker` 管理对话请求的后台 worker 与取消状态。
 pub struct ConversationWorker {
@@ -136,7 +115,7 @@ impl ConversationWorker {
         let permission_broker = ConversationPermissionBroker::default();
         let thread_permission_broker = permission_broker.clone();
         thread::spawn(move || {
-            let _exit_notification = sender.notifier.notify_on_drop();
+            let _exit_notification = sender.notify_on_drop();
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build();

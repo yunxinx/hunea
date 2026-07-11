@@ -10,6 +10,8 @@ use runtime_domain::{envinfo, paths::DataDirResolution, phrases};
 use session_store::{LocalSessionStore, SessionHeader, SessionId, SessionStore};
 use terminal_ui::{self, StartupBannerOptions};
 
+pub use terminal_ui::install_terminal_panic_hook;
+
 mod dynamic_environment;
 mod options_mapping;
 mod precheck;

@@ -8,6 +8,7 @@ fn main() -> Result<ExitCode> {
     }
 
     color_eyre::install()?;
+    terminal_app::install_terminal_panic_hook();
     match terminal_app::run_for_cli() {
         Ok(()) => Ok(ExitCode::SUCCESS),
         Err(terminal_app::AppRunError::Config(error)) => {

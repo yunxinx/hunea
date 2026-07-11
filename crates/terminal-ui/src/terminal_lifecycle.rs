@@ -1,4 +1,4 @@
-use std::{fmt, io, io::Write};
+use std::{fmt, io, io::Write, panic};
 
 use crossterm::{
     Command,
@@ -125,6 +125,19 @@ struct TerminalLifecycleState {
     must_disable_mouse_capture: bool,
     must_disable_bracketed_paste: bool,
     must_show_cursor: bool,
+}
+
+impl TerminalLifecycleState {
+    fn emergency_restore_state() -> Self {
+        Self {
+            must_disable_raw_mode: true,
+            must_leave_alternate_screen: true,
+            must_disable_alternate_scroll: true,
+            must_disable_mouse_capture: true,
+            must_disable_bracketed_paste: true,
+            must_show_cursor: true,
+        }
+    }
 }
 
 impl TerminalLifecycleState {
@@ -346,6 +359,26 @@ impl TerminalLifecycleState {
     }
 }
 
+fn restore_terminal_after_panic() -> io::Result<()> {
+    let mut state = TerminalLifecycleState::emergency_restore_state();
+    state.restore_all_with(&mut CrosstermTerminalLifecycleOperations::new(
+        &mut io::stdout(),
+    ))
+}
+
+fn run_terminal_panic_hook(restore: impl FnOnce() -> io::Result<()>, previous_hook: impl FnOnce()) {
+    let _ = restore();
+    previous_hook();
+}
+
+/// 安装 panic hook，在既有报告 hook 输出前先 best-effort 恢复终端模式。
+pub fn install_terminal_panic_hook() {
+    let previous_hook = panic::take_hook();
+    panic::set_hook(Box::new(move |panic_info| {
+        run_terminal_panic_hook(restore_terminal_after_panic, || previous_hook(panic_info));
+    }));
+}
+
 fn record_first_error(first_error: &mut Option<io::Error>, error: io::Error) {
     if first_error.is_none() {
         *first_error = Some(error);
@@ -437,14 +470,44 @@ impl Drop for TerminalLifecycleGuard {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::VecDeque, io};
+    use std::{cell::RefCell, collections::VecDeque, io};
 
     use crossterm::Command;
 
     use super::{
         DisableAlternateScroll, EnableAlternateScroll, TerminalLifecycleOperation,
-        TerminalLifecycleOperations, TerminalLifecycleState,
+        TerminalLifecycleOperations, TerminalLifecycleState, run_terminal_panic_hook,
     };
+
+    #[test]
+    fn terminal_panic_hook_restores_before_calling_previous_hook() {
+        let calls = RefCell::new(Vec::new());
+
+        run_terminal_panic_hook(
+            || {
+                calls.borrow_mut().push("restore");
+                Ok(())
+            },
+            || calls.borrow_mut().push("previous_hook"),
+        );
+
+        assert_eq!(*calls.borrow(), vec!["restore", "previous_hook"]);
+    }
+
+    #[test]
+    fn terminal_panic_hook_calls_previous_hook_when_restore_fails() {
+        let calls = RefCell::new(Vec::new());
+
+        run_terminal_panic_hook(
+            || {
+                calls.borrow_mut().push("restore");
+                Err(io::Error::other("restore failed"))
+            },
+            || calls.borrow_mut().push("previous_hook"),
+        );
+
+        assert_eq!(*calls.borrow(), vec!["restore", "previous_hook"]);
+    }
 
     #[derive(Debug, Default)]
     struct FakeTerminalLifecycleOperations {

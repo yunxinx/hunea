@@ -150,6 +150,8 @@ where
     W: Write,
     I: Iterator<Item = TerminalDrawCommand<'a>>,
 {
+    const PREFILL_SPACES: &str = "                                ";
+
     let mut style = TerminalStyleState::default();
     let mut last_pos: Option<Position> = None;
 
@@ -172,7 +174,13 @@ where
             } => {
                 style.queue_cell(writer, cell)?;
                 if prefill_width > 1 {
-                    queue!(writer, Print(" ".repeat(prefill_width)), MoveTo(x, y))?;
+                    let mut remaining = prefill_width;
+                    while remaining > 0 {
+                        let chunk_width = remaining.min(PREFILL_SPACES.len());
+                        queue!(writer, Print(&PREFILL_SPACES[..chunk_width]))?;
+                        remaining -= chunk_width;
+                    }
+                    queue!(writer, MoveTo(x, y))?;
                 }
                 queue!(writer, Print(cell.symbol()))?;
             }

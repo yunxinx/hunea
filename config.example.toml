@@ -9,6 +9,12 @@
 # 修改配置后需要重启 hunea 才会生效。
 
 [tui]
+# `motion` 控制 TUI 的装饰性动画。
+# - "full"：启用完整动画，是默认值。
+# - "reduced"：关闭 entrance、toast transition、stream activity tick 与 tool marker blink；
+#   toast 的信息展示时限仍然保留。
+motion = "full"
+
 # 可选值：
 # `user_input_style` 控制“输入中的用户内容”和“发送后的用户消息”的展示风格。
 # - "cx"：当前 framed 样式。composer 与用户消息会在足够高的窗口里显示 surface frame。

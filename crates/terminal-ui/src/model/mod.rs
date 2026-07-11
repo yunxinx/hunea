@@ -34,7 +34,6 @@ use super::{
     message_revisit::MessageRevisitState,
     model_panel::ModelPanelState,
     render_frame::RenderFrame,
-    selection::project_wide_selection_styles,
     skill_picker::SkillPickerState,
     startup_banner::StartupBannerEntranceState,
     status_line::StatusLineItem,
@@ -353,7 +352,6 @@ impl Model {
             buffer,
         );
         view::render(self, &mut frame);
-        project_wide_selection_styles(frame.buffer_mut());
         frame.cursor_position()
     }
 

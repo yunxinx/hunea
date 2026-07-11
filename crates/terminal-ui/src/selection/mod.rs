@@ -17,7 +17,7 @@ pub(super) use self::range::{
     SelectableLineRange, normalize_transcript_selectable_range, selectable_range_for_plain_line,
     selection_columns_for_line, selection_ends_before_line_content, word_selection_columns,
 };
-pub(super) use self::render::{apply_selection_to_line, project_wide_selection_styles};
+pub(super) use self::render::apply_selection_to_line;
 pub(super) use self::state::{
     AutoScrollDirection, MousePosition, ResolvedSelectionPoint, SELECTION_AUTO_SCROLL_INTERVAL,
     SelectionClickState, SelectionPoint, SelectionState,

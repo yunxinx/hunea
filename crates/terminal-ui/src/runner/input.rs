@@ -27,8 +27,20 @@ pub(super) fn coalesced_input_actions_with_options(
     let mut actions = Vec::new();
     let mut pending_wheel_delta = 0_isize;
     let mut pending_alternate_scroll_delta = 0_isize;
+    let mut pending_resize = None;
 
     for event in events {
+        if let Event::Resize(width, height) = event {
+            flush_pending_scroll_deltas(
+                &mut actions,
+                &mut pending_wheel_delta,
+                &mut pending_alternate_scroll_delta,
+                options,
+            );
+            pending_resize = Some((width, height));
+            continue;
+        }
+        flush_pending_resize(&mut actions, &mut pending_resize);
         push_regular_event(
             event,
             &mut actions,
@@ -44,7 +56,21 @@ pub(super) fn coalesced_input_actions_with_options(
         &mut pending_alternate_scroll_delta,
         options,
     );
+    flush_pending_resize(&mut actions, &mut pending_resize);
     actions
+}
+
+fn flush_pending_resize(
+    actions: &mut Vec<TerminalInputAction>,
+    pending_resize: &mut Option<(u16, u16)>,
+) {
+    let Some((width, height)) = pending_resize.take() else {
+        return;
+    };
+    actions.push(TerminalInputAction::App(AppEvent::Resized {
+        width,
+        height,
+    }));
 }
 
 fn push_regular_event(
@@ -143,18 +169,7 @@ fn push_regular_event(
             );
             actions.push(TerminalInputAction::App(AppEvent::Paste(text)));
         }
-        Event::Resize(width, height) => {
-            flush_pending_scroll_deltas(
-                actions,
-                pending_wheel_delta,
-                pending_alternate_scroll_delta,
-                options,
-            );
-            actions.push(TerminalInputAction::App(AppEvent::Resized {
-                width,
-                height,
-            }));
-        }
+        Event::Resize(_, _) => unreachable!("resize events are coalesced before regular input"),
         _ => {
             flush_pending_scroll_deltas(
                 actions,

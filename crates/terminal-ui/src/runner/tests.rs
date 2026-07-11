@@ -2120,6 +2120,48 @@ fn ready_input_batch_coalesces_preview_wheel_burst_to_single_page_delta() {
 }
 
 #[test]
+fn ready_input_batch_coalesces_adjacent_resize_burst_to_last_size() {
+    let actions = coalesced_input_actions([
+        Event::Resize(80, 24),
+        Event::Resize(100, 30),
+        Event::Resize(120, 40),
+    ]);
+
+    assert_eq!(
+        actions,
+        vec![TerminalInputAction::App(AppEvent::Resized {
+            width: 120,
+            height: 40,
+        })]
+    );
+}
+
+#[test]
+fn ready_input_batch_keeps_resize_order_across_key_boundary() {
+    let actions = coalesced_input_actions([
+        Event::Resize(80, 24),
+        Event::Resize(100, 30),
+        Event::Key(KeyEvent::from(KeyCode::Char('x'))),
+        Event::Resize(120, 40),
+    ]);
+
+    assert_eq!(
+        actions,
+        vec![
+            TerminalInputAction::App(AppEvent::Resized {
+                width: 100,
+                height: 30,
+            }),
+            TerminalInputAction::App(AppEvent::Key(KeyEvent::from(KeyCode::Char('x')))),
+            TerminalInputAction::App(AppEvent::Resized {
+                width: 120,
+                height: 40,
+            }),
+        ]
+    );
+}
+
+#[test]
 fn startup_probe_without_background_immediately_selects_terminal_default_palette() {
     let event = startup_palette_event(terminal_probe::TerminalBackgroundProbeResult::unavailable());
     assert_eq!(event, AppEvent::StartupReadyTimeout);

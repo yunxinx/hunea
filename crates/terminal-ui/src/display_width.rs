@@ -6,6 +6,11 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 /// 调用方必须传入已经过 TUI 文本净化的可见文本；这个模块只负责宽度语义，
 /// 不解析 ANSI/OSC 等跨字符控制序列。
 pub(crate) fn display_width(text: &str) -> usize {
+    if let [byte] = text.as_bytes()
+        && (byte.is_ascii_graphic() || *byte == b' ')
+    {
+        return 1;
+    }
     UnicodeWidthStr::width(text)
 }
 
@@ -36,6 +41,13 @@ mod tests {
     #[test]
     fn display_width_counts_keycap_as_wide_grapheme() {
         assert_eq!(display_width("2️⃣"), 2);
+    }
+
+    #[test]
+    fn display_width_preserves_unicode_width_semantics_for_ascii_controls() {
+        for control in ["\0", "\n", "\u{7f}"] {
+            assert_eq!(display_width(control), UnicodeWidthStr::width(control));
+        }
     }
 
     #[test]

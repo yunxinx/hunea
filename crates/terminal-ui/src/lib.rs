@@ -1,6 +1,7 @@
 #[cfg(not(feature = "bench-support"))]
 #[doc(hidden)]
-// 默认构建仍编译 benchmark helper 以校验性能路径；其公开入口只在 bench-support 下使用。
+// benchmark 同时是内部性能路径的编译期消费者；移出普通构建前必须先把这些
+// benchmark-only 查询从生产 API 逐一 feature-gate，避免掩盖真实 dead-code 变化。
 #[allow(dead_code)]
 mod benchmark;
 #[cfg(feature = "bench-support")]

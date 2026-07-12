@@ -140,10 +140,7 @@ fn push_regular_event(
             }
         },
         Event::Key(key) => {
-            if options.has_page_scroll_burst_coalescing
-                && key.modifiers.is_empty()
-                && matches!(key.code, KeyCode::Up | KeyCode::Down)
-            {
+            if options.has_page_scroll_burst_coalescing && is_page_scroll_burst_key(&key) {
                 flush_pending_wheel_delta(actions, pending_wheel_delta, options);
                 if key.code == KeyCode::Up {
                     *pending_alternate_scroll_delta -= 1;
@@ -179,6 +176,10 @@ fn push_regular_event(
             );
         }
     }
+}
+
+pub(super) fn is_page_scroll_burst_key(key: &KeyEvent) -> bool {
+    key.modifiers.is_empty() && matches!(key.code, KeyCode::Up | KeyCode::Down)
 }
 
 fn flush_pending_scroll_deltas(

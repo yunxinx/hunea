@@ -12,11 +12,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crossterm::event::{Event, EventStream, KeyCode, MouseEventKind};
+use crossterm::event::{Event, EventStream, MouseEventKind};
 use futures_util::{Stream, StreamExt};
 use tokio::sync::{Notify, mpsc as tokio_mpsc};
 
-use super::input::TerminalInputCoalescing;
+use super::input::{TerminalInputCoalescing, is_page_scroll_burst_key};
 use crate::terminal_lifecycle::TerminalPanicRestoreSuppressionGuard;
 
 const MAX_READY_TERMINAL_EVENTS_PER_FRAME: usize = 4096;
@@ -523,9 +523,7 @@ fn is_page_scroll_event(event: &Event) -> bool {
             mouse.kind,
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
         ),
-        Event::Key(key) => {
-            key.modifiers.is_empty() && matches!(key.code, KeyCode::Up | KeyCode::Down)
-        }
+        Event::Key(key) => is_page_scroll_burst_key(key),
         _ => false,
     }
 }
@@ -660,16 +658,22 @@ mod tests {
     fn pausing_full_terminal_queue_preempts_capacity_wait() {
         let was_dropped = Arc::new(AtomicBool::new(false));
         let factory_was_dropped = Arc::clone(&was_dropped);
+        let poll_count = Arc::new(AtomicUsize::new(0));
+        let factory_poll_count = Arc::clone(&poll_count);
         let mut pump = LoopEventPump::start_with_source_factory_and_capacity(
             move || AlwaysReadyKeyStream {
-                poll_count: Arc::new(AtomicUsize::new(0)),
+                poll_count: Arc::clone(&factory_poll_count),
                 was_dropped: Arc::clone(&factory_was_dropped),
             },
             1,
         )
         .expect("bounded input pump should start");
 
-        thread::sleep(Duration::from_millis(20));
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while poll_count.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert!(poll_count.load(Ordering::SeqCst) >= 2);
         pump.pause_terminal_input()
             .expect("pause should preempt a pending full-queue event");
 
@@ -680,15 +684,20 @@ mod tests {
     fn dropping_full_terminal_queue_preempts_capacity_wait() {
         let (finished_sender, finished_receiver) = mpsc::sync_channel(1);
         thread::spawn(move || {
+            let poll_count = Arc::new(AtomicUsize::new(0));
+            let factory_poll_count = Arc::clone(&poll_count);
             let pump = LoopEventPump::start_with_source_factory_and_capacity(
                 move || AlwaysReadyKeyStream {
-                    poll_count: Arc::new(AtomicUsize::new(0)),
+                    poll_count: Arc::clone(&factory_poll_count),
                     was_dropped: Arc::new(AtomicBool::new(false)),
                 },
                 1,
             )
             .expect("bounded input pump should start");
-            thread::sleep(Duration::from_millis(20));
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while poll_count.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
+                thread::yield_now();
+            }
             drop(pump);
             let _ = finished_sender.send(());
         });

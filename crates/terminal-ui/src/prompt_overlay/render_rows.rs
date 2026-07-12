@@ -179,9 +179,9 @@ pub(super) fn prompt_overlay_inactive_row_line(
         PromptOverlayInactiveRow::ExtraPromptShadowedDetail { source } => {
             prompt_overlay_extra_shadowed_detail_row_text(source, content_width)
         }
-        PromptOverlayInactiveRow::DiscoveredSkill {
-            shadowed_count: _, ..
-        } => prompt_overlay_skill_row_text(row, content_width),
+        PromptOverlayInactiveRow::DiscoveredSkill { .. } => {
+            prompt_overlay_skill_row_text(row, content_width)
+        }
         PromptOverlayInactiveRow::DiscoveredSkillShadowedDetail { .. } => {
             prompt_overlay_skill_row_text(row, content_width)
         }

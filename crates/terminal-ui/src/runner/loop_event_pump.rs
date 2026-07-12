@@ -106,11 +106,14 @@ impl LoopEventPump {
             Some(event) => Some(event),
             None => self.receive(timeout)?,
         };
+        if let Some(error) = self.take_input_failure() {
+            if let Some(event) = event {
+                self.pending_events.push_front(event);
+            }
+            return Ok(Some(LoopEvent::TerminalInputFailed(error)));
+        }
         if matches!(event, Some(LoopEvent::BackgroundReady)) {
             self.waker.mark_delivered();
-        }
-        if let Some(error) = self.take_input_failure() {
-            return Ok(Some(LoopEvent::TerminalInputFailed(error)));
         }
         Ok(event)
     }
@@ -135,7 +138,12 @@ impl LoopEventPump {
                     page_scroll_burst.observe(&event, options);
                     events.push(event);
                 }
-                Some(LoopEvent::TerminalInputFailed(error)) => return Err(error),
+                Some(LoopEvent::TerminalInputFailed(error)) => {
+                    for event in events.into_iter().rev() {
+                        self.pending_events.push_front(LoopEvent::Terminal(event));
+                    }
+                    return Err(error);
+                }
                 Some(event @ LoopEvent::BackgroundReady) => {
                     self.pending_events.push_front(event);
                     break;

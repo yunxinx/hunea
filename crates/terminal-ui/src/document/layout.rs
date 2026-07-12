@@ -77,20 +77,21 @@ impl Model {
             return Rc::clone(&self.document_runtime.viewport_cache.viewport);
         }
 
-        let mut viewport = compose_document_viewport(
-            layout,
-            self.document_runtime.viewport_state.resolved_offset(),
-            viewport_height,
-            context,
-        );
-        if uses_bottom_follow {
-            viewport = compose_bottom_follow_document_viewport(
+        let mut viewport = if uses_bottom_follow {
+            compose_bottom_follow_document_viewport(
                 layout,
                 viewport_height,
                 self.bottom_follow_presentation(layout),
                 context,
-            );
-        }
+            )
+        } else {
+            compose_document_viewport(
+                layout,
+                self.document_runtime.viewport_state.resolved_offset(),
+                viewport_height,
+                context,
+            )
+        };
         apply_selection_to_viewport(
             &mut viewport,
             layout,

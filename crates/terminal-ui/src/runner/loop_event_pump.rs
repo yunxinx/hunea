@@ -17,7 +17,6 @@ use futures_util::{Stream, StreamExt};
 use tokio::sync::{Notify, mpsc as tokio_mpsc};
 
 use super::input::{TerminalInputCoalescing, is_page_scroll_burst_key};
-use crate::terminal_lifecycle::TerminalPanicRestoreSuppressionGuard;
 
 const MAX_READY_TERMINAL_EVENTS_PER_FRAME: usize = 4096;
 const LOOP_EVENT_CHANNEL_CAPACITY: usize = 1024;
@@ -250,7 +249,6 @@ impl LoopEventPump {
         let input_thread = thread::Builder::new()
             .name("hunea-terminal-input".to_string())
             .spawn(move || {
-                let _panic_restore_suppression = TerminalPanicRestoreSuppressionGuard::enter();
                 let runtime = match tokio::runtime::Builder::new_current_thread().build() {
                     Ok(runtime) => runtime,
                     Err(error) => {

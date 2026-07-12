@@ -69,6 +69,7 @@ mod style_mode;
 mod styled_text;
 mod terminal_grid;
 mod terminal_lifecycle;
+mod terminal_panic;
 pub mod terminal_session;
 mod terminal_text;
 #[cfg(test)]
@@ -102,7 +103,7 @@ pub use startup_banner::{
 };
 pub use status_line::StatusLineItem;
 pub use style_mode::StyleMode;
-pub use terminal_lifecycle::install_terminal_panic_hook;
+pub use terminal_panic::install_terminal_panic_hook;
 pub use terminal_session::MinimalTerminalSession;
 pub use transcript::ReasoningDisplayMode;
 pub use update::{AppEffect, AppEvent, STARTUP_PROBE_TIMEOUT};

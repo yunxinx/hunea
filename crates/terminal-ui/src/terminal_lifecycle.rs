@@ -1,4 +1,4 @@
-use std::{cell::Cell, fmt, io, io::Write, panic};
+use std::{fmt, io, io::Write};
 
 use crossterm::{
     Command,
@@ -8,30 +8,9 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 
-thread_local! {
-    static SUPPRESS_TERMINAL_PANIC_RESTORE: Cell<bool> = const { Cell::new(false) };
-}
-
-pub(crate) struct TerminalPanicRestoreSuppressionGuard {
-    previous: bool,
-}
-
-impl TerminalPanicRestoreSuppressionGuard {
-    pub(crate) fn enter() -> Self {
-        let previous = SUPPRESS_TERMINAL_PANIC_RESTORE.with(|suppressed| {
-            let previous = suppressed.get();
-            suppressed.set(true);
-            previous
-        });
-        Self { previous }
-    }
-}
-
-impl Drop for TerminalPanicRestoreSuppressionGuard {
-    fn drop(&mut self) {
-        SUPPRESS_TERMINAL_PANIC_RESTORE.with(|suppressed| suppressed.set(self.previous));
-    }
-}
+use crate::terminal_panic::{
+    TerminalPanicRestoreClaim, TerminalPanicRestoreRegistry, terminal_panic_restore_registry,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TerminalLifecycleOperation {
@@ -162,6 +141,15 @@ impl TerminalLifecycleState {
             must_disable_bracketed_paste: true,
             must_show_cursor: true,
         }
+    }
+
+    fn has_restore_obligations(&self) -> bool {
+        self.must_disable_raw_mode
+            || self.must_leave_alternate_screen
+            || self.must_disable_alternate_scroll
+            || self.must_disable_mouse_capture
+            || self.must_disable_bracketed_paste
+            || self.must_show_cursor
     }
 }
 
@@ -384,28 +372,11 @@ impl TerminalLifecycleState {
     }
 }
 
-fn restore_terminal_after_panic() -> io::Result<()> {
+pub(crate) fn restore_terminal_after_panic() -> io::Result<()> {
     let mut state = TerminalLifecycleState::emergency_restore_state();
     state.restore_all_with(&mut CrosstermTerminalLifecycleOperations::new(
         &mut io::stdout(),
     ))
-}
-
-fn run_terminal_panic_hook(restore: impl FnOnce() -> io::Result<()>, previous_hook: impl FnOnce()) {
-    let _ = restore();
-    previous_hook();
-}
-
-/// 安装 panic hook，在既有报告 hook 输出前先 best-effort 恢复终端模式。
-pub fn install_terminal_panic_hook() {
-    let previous_hook = panic::take_hook();
-    panic::set_hook(Box::new(move |panic_info| {
-        if SUPPRESS_TERMINAL_PANIC_RESTORE.with(Cell::get) {
-            previous_hook(panic_info);
-            return;
-        }
-        run_terminal_panic_hook(restore_terminal_after_panic, || previous_hook(panic_info));
-    }));
 }
 
 fn record_first_error(first_error: &mut Option<io::Error>, error: io::Error) {
@@ -422,9 +393,11 @@ fn finish_cleanup(first_error: Option<io::Error>) -> io::Result<()> {
 }
 
 /// `TerminalLifecycleGuard` 在正常路径与 Drop 之间共享未完成的恢复 obligation。
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct TerminalLifecycleGuard {
     state: TerminalLifecycleState,
+    panic_restore_registry: &'static TerminalPanicRestoreRegistry,
+    panic_restore_claim: Option<TerminalPanicRestoreClaim>,
 }
 
 impl TerminalLifecycleGuard {
@@ -432,16 +405,16 @@ impl TerminalLifecycleGuard {
     where
         W: Write,
     {
-        self.state
-            .activate_main_with(&mut CrosstermTerminalLifecycleOperations::new(writer))
+        self.activate_main_with_operations(&mut CrosstermTerminalLifecycleOperations::new(writer))
     }
 
     pub(crate) fn activate_minimal<W>(&mut self, writer: &mut W) -> io::Result<()>
     where
         W: Write,
     {
-        self.state
-            .activate_minimal_with(&mut CrosstermTerminalLifecycleOperations::new(writer))
+        self.activate_minimal_with_operations(&mut CrosstermTerminalLifecycleOperations::new(
+            writer,
+        ))
     }
 
     pub(crate) fn apply_mouse_mode<W>(
@@ -453,7 +426,7 @@ impl TerminalLifecycleGuard {
     where
         W: Write,
     {
-        self.state.apply_mouse_mode_with(
+        self.apply_mouse_mode_with_operations(
             &mut CrosstermTerminalLifecycleOperations::new(writer),
             has_mouse_capture,
             has_alternate_scroll,
@@ -464,30 +437,129 @@ impl TerminalLifecycleGuard {
         &mut self,
         hide_cursor: impl FnOnce() -> io::Result<()>,
     ) -> io::Result<()> {
-        self.state.hide_cursor_with(hide_cursor)
+        self.ensure_panic_restore_claim()?;
+        let result = self.state.hide_cursor_with(hide_cursor);
+        self.sync_panic_restore_claim();
+        result
     }
 
     pub(crate) fn show_cursor_with(
         &mut self,
         show_cursor: impl FnOnce() -> io::Result<()>,
     ) -> io::Result<()> {
-        self.state.show_cursor_with(show_cursor)
+        self.ensure_claim_for_existing_obligations()?;
+        let result = self.state.show_cursor_with(show_cursor);
+        self.sync_panic_restore_claim();
+        result
     }
 
     pub(crate) fn restore_modes<W>(&mut self, writer: &mut W) -> io::Result<()>
     where
         W: Write,
     {
-        self.state
-            .restore_modes_with(&mut CrosstermTerminalLifecycleOperations::new(writer))
+        self.restore_modes_with_operations(&mut CrosstermTerminalLifecycleOperations::new(writer))
     }
 
     pub(crate) fn restore_all<W>(&mut self, writer: &mut W) -> io::Result<()>
     where
         W: Write,
     {
-        self.state
-            .restore_all_with(&mut CrosstermTerminalLifecycleOperations::new(writer))
+        self.restore_all_with_operations(&mut CrosstermTerminalLifecycleOperations::new(writer))
+    }
+
+    fn activate_main_with_operations(
+        &mut self,
+        operations: &mut impl TerminalLifecycleOperations,
+    ) -> io::Result<()> {
+        self.ensure_panic_restore_claim()?;
+        let result = self.state.activate_main_with(operations);
+        self.sync_panic_restore_claim();
+        result
+    }
+
+    fn activate_minimal_with_operations(
+        &mut self,
+        operations: &mut impl TerminalLifecycleOperations,
+    ) -> io::Result<()> {
+        self.ensure_panic_restore_claim()?;
+        let result = self.state.activate_minimal_with(operations);
+        self.sync_panic_restore_claim();
+        result
+    }
+
+    fn apply_mouse_mode_with_operations(
+        &mut self,
+        operations: &mut impl TerminalLifecycleOperations,
+        has_mouse_capture: bool,
+        has_alternate_scroll: bool,
+    ) -> io::Result<()> {
+        self.ensure_panic_restore_claim()?;
+        let result =
+            self.state
+                .apply_mouse_mode_with(operations, has_mouse_capture, has_alternate_scroll);
+        self.sync_panic_restore_claim();
+        result
+    }
+
+    fn restore_modes_with_operations(
+        &mut self,
+        operations: &mut impl TerminalLifecycleOperations,
+    ) -> io::Result<()> {
+        self.ensure_claim_for_existing_obligations()?;
+        let result = self.state.restore_modes_with(operations);
+        self.sync_panic_restore_claim();
+        result
+    }
+
+    fn restore_all_with_operations(
+        &mut self,
+        operations: &mut impl TerminalLifecycleOperations,
+    ) -> io::Result<()> {
+        self.ensure_claim_for_existing_obligations()?;
+        let result = self.state.restore_all_with(operations);
+        self.sync_panic_restore_claim();
+        result
+    }
+
+    fn ensure_claim_for_existing_obligations(&mut self) -> io::Result<()> {
+        if self.state.has_restore_obligations() {
+            self.ensure_panic_restore_claim()?;
+        }
+        Ok(())
+    }
+
+    fn ensure_panic_restore_claim(&mut self) -> io::Result<()> {
+        if self.panic_restore_claim.is_none() {
+            self.panic_restore_claim = Some(self.panic_restore_registry.claim_current_thread()?);
+        }
+        Ok(())
+    }
+
+    fn sync_panic_restore_claim(&mut self) {
+        if !self.state.has_restore_obligations() {
+            self.panic_restore_claim = None;
+        }
+    }
+
+    #[cfg(test)]
+    fn with_registry_for_test(
+        panic_restore_registry: &'static TerminalPanicRestoreRegistry,
+    ) -> Self {
+        Self {
+            state: TerminalLifecycleState::default(),
+            panic_restore_registry,
+            panic_restore_claim: None,
+        }
+    }
+}
+
+impl Default for TerminalLifecycleGuard {
+    fn default() -> Self {
+        Self {
+            state: TerminalLifecycleState::default(),
+            panic_restore_registry: terminal_panic_restore_registry(),
+            panic_restore_claim: None,
+        }
     }
 }
 
@@ -499,44 +571,15 @@ impl Drop for TerminalLifecycleGuard {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, collections::VecDeque, io};
+    use std::{collections::VecDeque, io};
 
     use crossterm::Command;
 
     use super::{
-        DisableAlternateScroll, EnableAlternateScroll, TerminalLifecycleOperation,
-        TerminalLifecycleOperations, TerminalLifecycleState, run_terminal_panic_hook,
+        DisableAlternateScroll, EnableAlternateScroll, TerminalLifecycleGuard,
+        TerminalLifecycleOperation, TerminalLifecycleOperations, TerminalLifecycleState,
     };
-
-    #[test]
-    fn terminal_panic_hook_restores_before_calling_previous_hook() {
-        let calls = RefCell::new(Vec::new());
-
-        run_terminal_panic_hook(
-            || {
-                calls.borrow_mut().push("restore");
-                Ok(())
-            },
-            || calls.borrow_mut().push("previous_hook"),
-        );
-
-        assert_eq!(*calls.borrow(), vec!["restore", "previous_hook"]);
-    }
-
-    #[test]
-    fn terminal_panic_hook_calls_previous_hook_when_restore_fails() {
-        let calls = RefCell::new(Vec::new());
-
-        run_terminal_panic_hook(
-            || {
-                calls.borrow_mut().push("restore");
-                Err(io::Error::other("restore failed"))
-            },
-            || calls.borrow_mut().push("previous_hook"),
-        );
-
-        assert_eq!(*calls.borrow(), vec!["restore", "previous_hook"]);
-    }
+    use crate::terminal_panic::TerminalPanicRestoreRegistry;
 
     #[derive(Debug, Default)]
     struct FakeTerminalLifecycleOperations {
@@ -570,6 +613,117 @@ mod tests {
             }
             Ok(())
         }
+    }
+
+    #[test]
+    fn lifecycle_obligations_exist_after_activation_and_clear_after_restore() {
+        let mut state = TerminalLifecycleState::default();
+        let mut operations = FakeTerminalLifecycleOperations::default();
+
+        state.activate_main_with(&mut operations).unwrap();
+        assert!(state.has_restore_obligations());
+        state.restore_all_with(&mut operations).unwrap();
+        assert!(!state.has_restore_obligations());
+    }
+
+    #[test]
+    fn failed_activation_keeps_unfinished_restore_obligations() {
+        let mut state = TerminalLifecycleState::default();
+        let mut operations = FakeTerminalLifecycleOperations::default();
+        operations.fail_next(TerminalLifecycleOperation::DisableAlternateScroll);
+        operations.fail_next(TerminalLifecycleOperation::DisableRawMode);
+
+        state
+            .activate_main_with(&mut operations)
+            .expect_err("alternate-scroll setup should fail");
+
+        assert!(state.has_restore_obligations());
+        assert!(state.must_disable_raw_mode);
+    }
+
+    #[test]
+    fn lifecycle_guard_claims_on_activation_and_releases_after_full_restore() {
+        let registry = Box::leak(Box::new(TerminalPanicRestoreRegistry::new()));
+        let mut guard = TerminalLifecycleGuard::with_registry_for_test(registry);
+        let mut operations = FakeTerminalLifecycleOperations::default();
+
+        guard
+            .activate_main_with_operations(&mut operations)
+            .unwrap();
+        assert!(registry.is_current_thread_owner());
+
+        guard.restore_all_with_operations(&mut operations).unwrap();
+        assert!(!registry.is_current_thread_owner());
+    }
+
+    #[test]
+    fn lifecycle_guard_rejects_another_thread_before_terminal_mutation() {
+        let registry = Box::leak(Box::new(TerminalPanicRestoreRegistry::new()));
+        let other_thread_registry: &'static TerminalPanicRestoreRegistry = registry;
+        let owner_claim = registry
+            .claim_current_thread()
+            .expect("test owner should acquire the lifecycle claim");
+
+        let (error, calls) = std::thread::spawn(move || {
+            let mut guard = TerminalLifecycleGuard::with_registry_for_test(other_thread_registry);
+            let mut operations = FakeTerminalLifecycleOperations::default();
+            let error = guard
+                .activate_main_with_operations(&mut operations)
+                .expect_err("another thread must not mutate an owned terminal lifecycle");
+            (error, operations.calls)
+        })
+        .join()
+        .expect("lifecycle claimant thread should finish");
+
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert!(calls.is_empty());
+        drop(owner_claim);
+    }
+
+    #[test]
+    fn lifecycle_guard_keeps_claim_when_failed_cleanup_leaves_obligations() {
+        let registry = Box::leak(Box::new(TerminalPanicRestoreRegistry::new()));
+        let mut guard = TerminalLifecycleGuard::with_registry_for_test(registry);
+        let mut operations = FakeTerminalLifecycleOperations::default();
+        operations.fail_next(TerminalLifecycleOperation::DisableAlternateScroll);
+        operations.fail_next(TerminalLifecycleOperation::DisableRawMode);
+
+        guard
+            .activate_main_with_operations(&mut operations)
+            .expect_err("activation and rollback should leave raw-mode cleanup pending");
+
+        assert!(registry.is_current_thread_owner());
+        assert!(guard.state.has_restore_obligations());
+
+        guard
+            .restore_all_with_operations(&mut operations)
+            .expect("second cleanup should clear the retained obligation");
+    }
+
+    #[test]
+    fn lifecycle_guard_releases_during_suspend_shape_and_reclaims_on_resume_shape() {
+        let registry = Box::leak(Box::new(TerminalPanicRestoreRegistry::new()));
+        let mut guard = TerminalLifecycleGuard::with_registry_for_test(registry);
+        let mut operations = FakeTerminalLifecycleOperations::default();
+
+        guard
+            .activate_main_with_operations(&mut operations)
+            .unwrap();
+        guard.hide_cursor_with(|| Ok(())).unwrap();
+        guard.show_cursor_with(|| Ok(())).unwrap();
+        guard
+            .restore_modes_with_operations(&mut operations)
+            .unwrap();
+        assert!(!registry.is_current_thread_owner());
+
+        guard
+            .activate_main_with_operations(&mut operations)
+            .unwrap();
+        assert!(registry.is_current_thread_owner());
+
+        guard
+            .restore_all_with_operations(&mut operations)
+            .expect("test cleanup should release the resumed lifecycle claim");
     }
 
     #[test]

@@ -423,11 +423,9 @@ impl RuntimeCoordinator for AppRuntimeCoordinator {
     }
 
     fn drain_runtime_events(&mut self) -> Vec<RuntimeEvent> {
-        if !self.pending_runtime_events.is_empty() {
-            return std::mem::take(&mut self.pending_runtime_events);
-        }
-
-        let mut events = Vec::new();
+        // 消费一次 wake 后必须观测所有 producer。deferred event 只建立跨 render 的
+        // 交付边界，不能让已经就绪且其 wake 可能被合并的 worker payload 留在 receiver。
+        let mut events = std::mem::take(&mut self.pending_runtime_events);
         self.drain_context_budget_events_into(&mut events);
         self.drain_session_store_events_into(&mut events);
         self.drain_dynamic_environment_events_into(&mut events);

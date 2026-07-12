@@ -3,7 +3,7 @@ use std::{sync::mpsc, time::Duration};
 use runtime_domain::{
     model_catalog::ProviderSyncRequest,
     provider::ProviderKind,
-    session::{RuntimeEvent, RuntimePermissionRequest, RuntimeTarget},
+    session::{RuntimeCommand, RuntimeEvent, RuntimePermissionRequest, RuntimeTarget},
 };
 
 use super::support::*;
@@ -62,4 +62,63 @@ fn render_barrier_deferral_rearms_the_coordinator_consumer() {
         .recv_timeout(Duration::from_secs(1))
         .expect("deferred runtime event should rearm the loop after the render barrier");
     assert_eq!(coordinator.pending_runtime_events, vec![deferred]);
+}
+
+#[test]
+fn deferred_event_does_not_skip_ready_worker_payloads() {
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        loaded_models: conversation_runtime::models::LoadedModelCatalog {
+            catalog: runtime_domain::model_catalog::ModelCatalog::new(vec![
+                runtime_domain::model_catalog::ModelProvider::new(
+                    "local",
+                    ProviderKind::OpenAiCompatible,
+                    "Local",
+                    Some("http://127.0.0.1:1234/v1".to_string()),
+                    runtime_domain::model_catalog::ModelSource::Configured,
+                    vec![runtime_domain::model_catalog::ModelEntry::new(
+                        "qwen3",
+                        None,
+                        runtime_domain::model_catalog::ModelSource::Configured,
+                    )],
+                ),
+            ]),
+            ..conversation_runtime::models::LoadedModelCatalog::default()
+        },
+        ..AppRuntimeOptions::default()
+    });
+    let (wake_sender, wake_receiver) = mpsc::channel();
+    coordinator
+        .runtime_event_notifier
+        .install(move || {
+            let _ = wake_sender.send(());
+        })
+        .expect("test notifier should install once");
+    let context_request_id = request_id(91);
+
+    RuntimeCoordinator::dispatch_runtime_command(
+        &mut coordinator,
+        RuntimeCommand::LoadContextBudgetSnapshot {
+            request_id: context_request_id,
+            selection: ModelSelection::new("local", "qwen3"),
+        },
+    )
+    .expect("context budget request should start");
+    wake_receiver
+        .recv_timeout(Duration::from_secs(1))
+        .expect("ready context budget payload should notify the consumer");
+
+    let deferred = RuntimeEvent::PermissionRequested {
+        target: RuntimeTarget::provider("local", "qwen3"),
+        request: RuntimePermissionRequest::new("permission-2", None, Vec::new()),
+    };
+    coordinator.defer_runtime_event_until_next_render(deferred.clone());
+
+    let events = RuntimeCoordinator::drain_runtime_events(&mut coordinator);
+
+    assert_eq!(events.first(), Some(&deferred));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RuntimeEvent::ContextBudgetSnapshotLoaded { request_id, .. }
+            if *request_id == context_request_id
+    )));
 }

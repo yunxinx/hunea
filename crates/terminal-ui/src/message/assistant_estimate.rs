@@ -137,7 +137,11 @@ fn estimate_common_markdown_metrics_fast_impl(
             block,
             separator_before_line,
         ));
-        add_wrapped_assistant_estimate_line(raw_line, width, &mut line_count, &mut char_len);
+        if matches!(block, MarkdownLineBlockKind::List(_)) {
+            add_wrapped_list_estimate_line(raw_line, width, &mut line_count, &mut char_len);
+        } else {
+            add_wrapped_assistant_estimate_line(raw_line, width, &mut line_count, &mut char_len);
+        }
         previous_block = Some(block);
         separator_before_line = MarkdownLineSeparator::Direct;
     }
@@ -152,6 +156,25 @@ fn estimate_common_markdown_metrics_fast_impl(
             .max(1),
         char_len,
     })
+}
+
+fn add_wrapped_list_estimate_line(
+    line: &str,
+    width: usize,
+    line_count: &mut usize,
+    char_len: &mut usize,
+) {
+    // eager renderer 为 list marker 和 continuation indent 保留列宽；普通 fast path
+    // 必须保守使用更窄内容宽度，否则长 item 会少算 visual rows。
+    let wrapped = wrap_assistant_text(line, width.saturating_sub(4).max(1), 0);
+    if wrapped.is_empty() {
+        *line_count = (*line_count).saturating_add(1);
+        return;
+    }
+    *line_count = (*line_count).saturating_add(wrapped.len());
+    *char_len = (*char_len)
+        .saturating_add(wrapped.iter().map(String::len).sum::<usize>())
+        .saturating_add(wrapped.len().saturating_sub(1) * 2);
 }
 
 fn add_wrapped_assistant_estimate_line(
@@ -414,6 +437,22 @@ mod tests {
             estimate_common_markdown_metrics_fast(markdown, width)
                 .map(AssistantMarkdownMetrics::into_tuple),
             Some(render_markdown_metrics(markdown, width, palette, None))
+        );
+    }
+
+    #[test]
+    fn common_markdown_fast_metrics_do_not_undercount_wrapped_list_items() {
+        let markdown =
+            "- this list item is deliberately long enough to wrap onto several continuation rows";
+        let width = 18;
+        let palette = default_palette();
+        let estimated = estimate_common_markdown_metrics_fast(markdown, width)
+            .expect("simple list should stay on the fast metrics path");
+        let exact = render_markdown_metrics(markdown, width, palette, None);
+
+        assert!(
+            estimated.line_count >= exact.0,
+            "fast list estimate must not undercount continuation rows: estimated={estimated:?}, exact={exact:?}"
         );
     }
 

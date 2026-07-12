@@ -52,7 +52,7 @@ pub(crate) struct DocumentStableTailLayoutKey {
     pub(crate) model_panel_revision: usize,
     pub(crate) context_budget_active: bool,
     pub(crate) context_budget_revision: usize,
-    pub(crate) selected_model: Option<String>,
+    pub(crate) selected_model_revision: usize,
     pub(crate) status_line_config: u8,
     pub(crate) status_line_2_config: u8,
     pub(crate) status_line_revision: usize,
@@ -260,10 +260,7 @@ impl Model {
                 .as_ref()
                 .map(|state| state.revision)
                 .unwrap_or_default(),
-            selected_model: self
-                .selected_model
-                .as_ref()
-                .map(|model| model.display_name()),
+            selected_model_revision: self.selected_model.revision(),
             status_line_config: self.status_line_config_bits(),
             status_line_2_config: self.status_line_2_config_bits(),
             status_line_revision: self.status_line_revision(),

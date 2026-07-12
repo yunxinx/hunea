@@ -848,7 +848,7 @@ impl Model {
         if content.trim().is_empty() {
             return None;
         }
-        if self.requires_model_selection && self.selected_model.is_none() {
+        if self.requires_model_selection && self.selected_model.selection().is_none() {
             self.show_toast(ToastSeverity::Error, "Select a model before sending");
             return None;
         }
@@ -856,7 +856,7 @@ impl Model {
             self.show_toast(ToastSeverity::Error, "Chat request is already running");
             return None;
         }
-        if let Some(selection) = self.selected_model.clone()
+        if let Some(selection) = self.selected_model.selection().cloned()
             && !self.validate_provider_selection(&selection)
         {
             return None;
@@ -890,7 +890,7 @@ impl Model {
         self.sync_composer_height();
         self.document_runtime.follow_bottom = true;
         self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
-        let selection = self.selected_model.clone()?;
+        let selection = self.selected_model.selection().cloned()?;
         self.conversation_turn_request_for_selection(&selection, source_message)
             .map(|request| AppEffect::SendConversationTurn {
                 request: Box::new(request),

@@ -19,7 +19,7 @@ use crate::{
         tracked_cached_render_block_access,
     },
 };
-use runtime_domain::session::RuntimeTarget;
+use runtime_domain::{model_catalog::ModelSelection, session::RuntimeTarget};
 
 #[test]
 fn document_layout_owns_the_exact_frame_key_used_by_viewport_cache() {
@@ -301,6 +301,28 @@ fn status_line_change_invalidates_the_stable_tail_layout() {
         (0..updated.line_count())
             .filter_map(|index| updated.text_line_at(index))
             .any(|line| line.contains("feature/stable-tail"))
+    );
+}
+
+#[test]
+fn selected_model_change_invalidates_the_stable_tail_layout_independently() {
+    let mut model = ready_document_model(40, 8);
+    let initial_status_line_revision = model.status_line_revision();
+    let initial = model.build_document_tail_layout(FrameRenderContext::capture());
+
+    model
+        .selected_model
+        .set(Some(ModelSelection::new("local", "qwen3")));
+    let updated = model.build_document_tail_layout(FrameRenderContext::capture());
+
+    assert_eq!(
+        model.status_line_revision(),
+        initial_status_line_revision,
+        "the test must isolate selected-model cache invalidation",
+    );
+    assert!(
+        !initial.shares_stable_layout_with(&updated),
+        "selected-model revision must invalidate the stable tail allocation",
     );
 }
 

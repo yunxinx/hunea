@@ -152,7 +152,7 @@ impl Model {
                     parts.push(sanitize_status_line_part(&self.current_dir));
                 }
                 StatusLineItem::CurrentModel => {
-                    if let Some(selection) = &self.selected_model {
+                    if let Some(selection) = self.selected_model.selection() {
                         parts.push(sanitize_status_line_part(
                             &self.model_selection_display_name(
                                 selection.provider_id.as_str(),

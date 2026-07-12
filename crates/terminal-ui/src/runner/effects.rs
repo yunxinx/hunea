@@ -270,7 +270,7 @@ pub(super) fn run_open_context_budget_effect(
     model: &mut Model,
     runtime_coordinator: &mut impl RuntimeCoordinator,
 ) {
-    let Some(selection) = model.selected_model.clone() else {
+    let Some(selection) = model.selected_model.selection().cloned() else {
         model.show_toast(
             crate::toast::ToastSeverity::Error,
             "Select a model before opening context budget",

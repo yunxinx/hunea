@@ -145,7 +145,7 @@ impl Model {
     }
 
     pub fn selected_model(&self) -> Option<ModelSelection> {
-        self.selected_model.clone()
+        self.selected_model.selection().cloned()
     }
 
     pub(crate) fn current_inline_model_panel_render_result(&self) -> ModelPanelRenderResult {
@@ -174,7 +174,7 @@ impl Model {
             return;
         }
 
-        if let Some(selection) = &self.selected_model
+        if let Some(selection) = self.selected_model.selection()
             && let Some(provider_index) = self
                 .model_catalog
                 .enabled_provider_index_for(&selection.provider_id)
@@ -360,7 +360,7 @@ impl Model {
             (provider_id, model_id)
         };
         let selection = ModelSelection::new(provider_id.clone(), model_id.clone());
-        self.selected_model = Some(selection.clone());
+        self.selected_model.set(Some(selection.clone()));
         self.bump_status_line_revision();
         self.show_toast(
             ToastSeverity::Info,
@@ -414,10 +414,10 @@ impl Model {
 
         if self
             .selected_model
-            .as_ref()
+            .selection()
             .is_some_and(|selection| !self.model_catalog.contains_selection(selection))
         {
-            self.selected_model = None;
+            self.selected_model.set(None);
             self.bump_status_line_revision();
         }
         self.sync_model_panel_to_selection();
@@ -587,7 +587,7 @@ fn current_model_line(model: &Model) -> Line<'static> {
         Span::styled("Current Model: ", primary_text_style(model.palette)),
     ];
 
-    let Some(selection) = &model.selected_model else {
+    let Some(selection) = model.selected_model.selection() else {
         spans.push(Span::styled("none", tertiary_text_style(model.palette)));
         return Line::from(spans);
     };
@@ -739,7 +739,7 @@ fn append_model_entry_lines(
     lines: &mut Vec<Line<'static>>,
 ) {
     let marker = if selected { "➜ " } else { "  " };
-    let active = model.selected_model.as_ref().is_some_and(|selection| {
+    let active = model.selected_model.selection().is_some_and(|selection| {
         selection.provider_id == provider.id && selection.model_id == entry.id
     });
     let style = if active && selected {

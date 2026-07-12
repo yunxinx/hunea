@@ -228,9 +228,11 @@ fn unrelated_runtime_commands_do_not_inject_context_budget_events() {
 #[test]
 fn open_context_budget_effect_dispatches_snapshot_load_with_request_id() {
     let mut model = Model::new(StartupBannerOptions::default());
-    model.selected_model = Some(runtime_domain::model_catalog::ModelSelection::new(
-        "local", "qwen3",
-    ));
+    model
+        .selected_model
+        .set(Some(runtime_domain::model_catalog::ModelSelection::new(
+            "local", "qwen3",
+        )));
     let mut runtime_coordinator = TestRuntimeCoordinator::default();
 
     super::effects::run_open_context_budget_effect(&mut model, &mut runtime_coordinator);
@@ -250,9 +252,11 @@ fn open_context_budget_effect_dispatches_snapshot_load_with_request_id() {
 #[test]
 fn open_context_budget_effect_dispatch_failure_uses_runtime_internal_error() {
     let mut model = Model::new(StartupBannerOptions::default());
-    model.selected_model = Some(runtime_domain::model_catalog::ModelSelection::new(
-        "local", "qwen3",
-    ));
+    model
+        .selected_model
+        .set(Some(runtime_domain::model_catalog::ModelSelection::new(
+            "local", "qwen3",
+        )));
     let mut runtime_coordinator = TestRuntimeCoordinator {
         next_runtime_error: Some("runtime unavailable".to_string()),
         ..TestRuntimeCoordinator::default()

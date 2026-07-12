@@ -11,7 +11,7 @@ use ratatui::{
 pub(super) use runtime_domain::session::{RuntimeToolActivity, RuntimeToolActivityUpdate};
 use runtime_domain::{
     envinfo,
-    model_catalog::{ModelCatalog, ModelSelection},
+    model_catalog::ModelCatalog,
     prompt_assembly::{
         PromptAssemblyCandidateInventorySnapshot, PromptAssemblyCoreSystemSnapshot,
         PromptAssemblyInput, PromptAssemblyManagerSnapshot, PromptAssemblyResolvedSnapshot,
@@ -57,8 +57,8 @@ mod state;
 pub use metrics::RequestMetrics;
 pub use options::{EscRewindMode, ModelOptions};
 use runtime_response::{RuntimeResponseBuffer, StreamedRuntimeReasoning};
-pub(crate) use state::PendingReasoningToggleClick;
 use state::{DocumentRuntimeState, NoticeState, SelectionRuntimeState};
+pub(crate) use state::{PendingReasoningToggleClick, SelectedModelState};
 
 /// `Model` 表示交互式 TUI 应用的状态。
 #[derive(Debug, Clone)]
@@ -74,7 +74,7 @@ pub struct Model {
     pub(super) external_editor_hint: String,
     pub(super) external_editor_helper_enabled: bool,
     pub(super) model_catalog: ModelCatalog,
-    pub(super) selected_model: Option<ModelSelection>,
+    pub(super) selected_model: SelectedModelState,
     pub(super) requires_model_selection: bool,
     pub(super) model_panel: ModelPanelState,
     pub(super) tool_approval_panel: ToolApprovalPanelState,
@@ -241,7 +241,7 @@ impl Model {
             external_editor_hint: options.external_editor_hint,
             external_editor_helper_enabled: options.show_external_editor_helper,
             model_catalog: options.model_catalog,
-            selected_model,
+            selected_model: SelectedModelState::new(selected_model),
             requires_model_selection: options.requires_model_selection,
             model_panel: ModelPanelState::default(),
             tool_approval_panel: ToolApprovalPanelState::default(),

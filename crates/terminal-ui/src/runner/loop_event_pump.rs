@@ -42,18 +42,28 @@ pub struct LoopEventWaker {
 }
 
 impl LoopEventWaker {
-    /// 合并重复 wake，并在 event pump 已关闭时安静返回。
+    /// 通常合并重复 wake，并在 event pump 已关闭时安静返回。
+    ///
+    /// 满队列恢复容量的竞态中允许无害的重复 marker，以保证不会丢失 wake。
     pub fn wake(&self) {
+        self.wake_with_full_queue_hook(|| {});
+    }
+
+    fn wake_with_full_queue_hook(&self, on_full_queue: impl FnOnce()) {
         if self.state.is_pending.swap(true, Ordering::AcqRel) {
             return;
         }
         match self.state.sender.try_send(LoopEvent::BackgroundReady) {
             Ok(()) => {}
             Err(mpsc::TrySendError::Full(_)) => {
-                // 队列已满意味着主循环已有事件可处理，因此不会在等待阶段睡死；runner
-                // 必须在每轮顶部无条件 drain runtime payload。若未来改为仅收到
-                // `BackgroundReady` 才 drain，这里就不能再安全地丢弃 wake marker。
+                // swap 与此处清除之间到达的 wake 会被合并进本次 pending，直接丢弃
+                // 会在主循环恰好排空队列后错失唤醒。清除后补发一次：若队列已有空位，
+                // marker 不丢；若仍满，主循环必有事件可消费，每轮顶部的无条件 drain
+                // 会观测到新 payload。重复 marker 只多一轮空 drain，无害。若未来改为
+                // 仅收到 `BackgroundReady` 才 drain，这里就不能再依赖队列非空兜底。
+                on_full_queue();
                 self.state.is_pending.store(false, Ordering::Release);
+                let _ = self.state.sender.try_send(LoopEvent::BackgroundReady);
             }
             Err(mpsc::TrySendError::Disconnected(_)) => {
                 self.state.is_pending.store(false, Ordering::Release);
@@ -155,18 +165,15 @@ impl LoopEventPump {
     }
 
     pub(super) fn pause_terminal_input(&mut self) -> io::Result<()> {
-        self.send_input_command(TerminalInputCommand::Pause)?;
+        self.send_input_command(TerminalInputCommandKind::Pause)?;
         self.discard_queued_terminal_input()
     }
 
     pub(super) fn resume_terminal_input(&mut self) -> io::Result<()> {
-        self.send_input_command(TerminalInputCommand::Resume)
+        self.send_input_command(TerminalInputCommandKind::Resume)
     }
 
-    fn send_input_command(
-        &self,
-        command: fn(mpsc::SyncSender<io::Result<()>>) -> TerminalInputCommand,
-    ) -> io::Result<()> {
+    fn send_input_command(&self, kind: TerminalInputCommandKind) -> io::Result<()> {
         let sender = self.input_control_sender.as_ref().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::BrokenPipe,
@@ -174,9 +181,14 @@ impl LoopEventPump {
             )
         })?;
         let (ack_sender, ack_receiver) = mpsc::sync_channel(1);
-        sender.send(command(ack_sender)).map_err(|_| {
-            io::Error::new(io::ErrorKind::BrokenPipe, "terminal input thread stopped")
-        })?;
+        sender
+            .send(TerminalInputCommand {
+                kind,
+                ack: ack_sender,
+            })
+            .map_err(|_| {
+                io::Error::new(io::ErrorKind::BrokenPipe, "terminal input thread stopped")
+            })?;
         ack_receiver.recv().map_err(|_| {
             io::Error::new(
                 io::ErrorKind::BrokenPipe,
@@ -337,7 +349,10 @@ impl Drop for LoopEventPump {
         if let Some(sender) = self.input_control_sender.take() {
             let (ack_sender, ack_receiver) = mpsc::sync_channel(1);
             if sender
-                .send(TerminalInputCommand::Shutdown(ack_sender))
+                .send(TerminalInputCommand {
+                    kind: TerminalInputCommandKind::Shutdown,
+                    ack: ack_sender,
+                })
                 .is_ok()
             {
                 let _ = ack_receiver.recv();
@@ -349,10 +364,16 @@ impl Drop for LoopEventPump {
 
 type TerminalEventSource = Pin<Box<dyn Stream<Item = io::Result<Event>> + Send>>;
 
-enum TerminalInputCommand {
-    Pause(mpsc::SyncSender<io::Result<()>>),
-    Resume(mpsc::SyncSender<io::Result<()>>),
-    Shutdown(mpsc::SyncSender<io::Result<()>>),
+struct TerminalInputCommand {
+    kind: TerminalInputCommandKind,
+    ack: mpsc::SyncSender<io::Result<()>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TerminalInputCommandKind {
+    Pause,
+    Resume,
+    Shutdown,
 }
 
 enum TerminalInputAction {
@@ -390,22 +411,24 @@ async fn run_terminal_input_loop<F, S>(
         };
 
         match action {
-            TerminalInputAction::Command(Some(TerminalInputCommand::Pause(ack))) => {
-                pending_event = None;
-                source = None;
-                let _ = ack.send(Ok(()));
-            }
-            TerminalInputAction::Command(Some(TerminalInputCommand::Resume(ack))) => {
-                if source.is_none() {
-                    source = Some(Box::pin(source_factory()));
+            TerminalInputAction::Command(Some(command)) => match command.kind {
+                TerminalInputCommandKind::Pause => {
+                    pending_event = None;
+                    source = None;
+                    let _ = command.ack.send(Ok(()));
                 }
-                let _ = ack.send(Ok(()));
-            }
-            TerminalInputAction::Command(Some(TerminalInputCommand::Shutdown(ack))) => {
-                drop(source.take());
-                let _ = ack.send(Ok(()));
-                break;
-            }
+                TerminalInputCommandKind::Resume => {
+                    if source.is_none() {
+                        source = Some(Box::pin(source_factory()));
+                    }
+                    let _ = command.ack.send(Ok(()));
+                }
+                TerminalInputCommandKind::Shutdown => {
+                    drop(source.take());
+                    let _ = command.ack.send(Ok(()));
+                    break;
+                }
+            },
             TerminalInputAction::Command(None) => break,
             TerminalInputAction::Event(Some(Ok(event))) => {
                 if !try_queue_loop_event(
@@ -613,6 +636,50 @@ mod tests {
         assert!(matches!(
             pump.wait(Some(Duration::ZERO))
                 .expect("wake should retry after queue capacity returns"),
+            Some(LoopEvent::BackgroundReady)
+        ));
+    }
+
+    #[test]
+    fn full_queue_retry_preserves_a_wake_coalesced_during_the_full_window() {
+        let (mut pump, event_sender) = LoopEventPump::channel_for_test_with_capacity(1);
+        event_sender
+            .send(LoopEvent::Terminal(Event::Key(KeyEvent::from(
+                KeyCode::Char('x'),
+            ))))
+            .expect("test terminal event should fill queue");
+
+        let waker = pump.waker();
+        let (full_queue_sender, full_queue_receiver) = mpsc::sync_channel(1);
+        let (retry_sender, retry_receiver) = mpsc::sync_channel(1);
+        let wake_thread = thread::spawn(move || {
+            waker.wake_with_full_queue_hook(|| {
+                full_queue_sender
+                    .send(())
+                    .expect("test should observe the full queue");
+                retry_receiver
+                    .recv()
+                    .expect("test should release the retry");
+            });
+        });
+
+        full_queue_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("first marker send should observe the full queue");
+        pump.waker().wake();
+        assert!(matches!(
+            pump.wait(Some(Duration::ZERO))
+                .expect("queued terminal event should be readable"),
+            Some(LoopEvent::Terminal(_))
+        ));
+        retry_sender
+            .send(())
+            .expect("retry should continue after capacity returns");
+        wake_thread.join().expect("wake thread should finish");
+
+        assert!(matches!(
+            pump.wait(Some(Duration::ZERO))
+                .expect("coalesced wake should be preserved by the retry"),
             Some(LoopEvent::BackgroundReady)
         ));
     }

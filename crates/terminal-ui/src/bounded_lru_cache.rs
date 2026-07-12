@@ -3,6 +3,10 @@ use std::{
     hash::Hash,
 };
 
+/// 小容量 LRU 缓存。
+///
+/// recency 用 `VecDeque` 线性扫描维护，`touch` 为 O(capacity)，仅适合几十以内的条目数；
+/// 命中通过 clone 返回，调用方应存放 `Rc` 等浅拷贝值，避免深拷贝大对象。
 #[derive(Debug)]
 pub(crate) struct BoundedLruCache<K, V> {
     values: HashMap<K, V>,

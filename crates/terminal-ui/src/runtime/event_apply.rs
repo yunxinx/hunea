@@ -474,7 +474,7 @@ impl Model {
             return;
         };
 
-        self.selected_model = Some(selection);
+        self.selected_model.set(Some(selection));
         self.requires_model_selection = true;
         self.bump_status_line_revision();
     }

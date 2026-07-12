@@ -1110,6 +1110,45 @@ fn projected_assistant_fenced_code_page_matches_eager_inside_wrapped_line() {
 }
 
 #[test]
+fn projected_assistant_fenced_code_preserves_an_all_blank_page() {
+    let mut markdown = String::from("```text\n");
+    for index in 0..64 {
+        markdown.push_str(&format!("line-{index:02}-{}\n", "x".repeat(60)));
+    }
+    for _ in 0..64 {
+        markdown.push('\n');
+    }
+    markdown.push_str("final-line\n```\n");
+
+    let mut transcript = Transcript::new(default_palette(), None);
+    transcript.set_width(80);
+    transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(MessageItem::new(
+        Sender::Assistant,
+        markdown,
+    )))]);
+
+    let expected_lines = transcript.items[0].render_lines(80, default_palette());
+    let render = transcript.render(crate::frame_time::FrameRenderContext::capture());
+    let block = render
+        .items
+        .first()
+        .expect("assistant item should produce a render block")
+        .block
+        .as_ref();
+
+    assert!(
+        block.lines.is_empty(),
+        "fixture must use the projection path"
+    );
+    assert_eq!(render.line_count, expected_lines.len());
+    assert_eq!(
+        render.lines_for_range(64, 64),
+        expected_lines[64..128].to_vec(),
+        "an all-blank fenced-code page must preserve every logical row"
+    );
+}
+
+#[test]
 fn projected_assistant_ordered_lists_match_eager_renderer() {
     let mut markdown = String::from("# Ordered assistant notes\n\n");
     for index in 0..50 {

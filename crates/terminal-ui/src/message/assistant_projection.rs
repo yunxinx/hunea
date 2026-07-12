@@ -902,7 +902,7 @@ fn render_fenced_code_page(request: FencedCodePageRender<'_>) -> Vec<Line<'stati
     snippet.push('\n');
     snippet.push_str(request.marker);
 
-    render_markdown_lines(
+    let lines = render_markdown_lines(
         &snippet,
         request.width,
         request.palette,
@@ -911,7 +911,45 @@ fn render_fenced_code_page(request: FencedCodePageRender<'_>) -> Vec<Line<'stati
     .into_iter()
     .skip(first_offset)
     .take(page_line_count)
-    .collect()
+    .collect::<Vec<_>>();
+    if lines.len() == page_line_count {
+        return lines;
+    }
+
+    // Markdown renderer 会规整整段空白 fenced content；projection 的坐标系则必须
+    // 为每个源码空行保留一行。仅在批量渲染破坏固定页长时按源码行回退，普通页仍走
+    // 单次批量渲染的热路径。
+    let mut source_lines = Vec::new();
+    for range in &request.line_ranges[first_line..=last_line] {
+        let source_line = &request.source[range.clone()];
+        if source_line.is_empty() {
+            source_lines.push(Line::raw(""));
+            continue;
+        }
+
+        let mut line_snippet = String::new();
+        line_snippet.push_str(request.marker);
+        line_snippet.push_str(&request.source[request.info_range.clone()]);
+        line_snippet.push('\n');
+        line_snippet.push_str(source_line);
+        line_snippet.push('\n');
+        line_snippet.push_str(request.marker);
+        let expected_line_count = hard_wrapped_line_count(source_line, request.width);
+        let mut rendered = render_markdown_lines(
+            &line_snippet,
+            request.width,
+            request.palette,
+            request.working_dir,
+        );
+        rendered.resize(expected_line_count, Line::raw(""));
+        source_lines.extend(rendered.into_iter().take(expected_line_count));
+    }
+
+    source_lines
+        .into_iter()
+        .skip(first_offset)
+        .take(page_line_count)
+        .collect()
 }
 
 fn estimated_page_bytes(lines: &[Line<'static>]) -> usize {

@@ -138,7 +138,11 @@ fn estimate_common_markdown_metrics_fast_impl(
             separator_before_line,
         ));
         if matches!(block, MarkdownLineBlockKind::List(_)) {
-            add_wrapped_list_estimate_line(raw_line, width, &mut line_count, &mut char_len);
+            let wrapped_line_count =
+                add_wrapped_list_estimate_line(raw_line, width, &mut line_count, &mut char_len);
+            if !allow_inexact && wrapped_line_count > 1 {
+                return None;
+            }
         } else {
             add_wrapped_assistant_estimate_line(raw_line, width, &mut line_count, &mut char_len);
         }
@@ -163,18 +167,19 @@ fn add_wrapped_list_estimate_line(
     width: usize,
     line_count: &mut usize,
     char_len: &mut usize,
-) {
+) -> usize {
     // eager renderer 为 list marker 和 continuation indent 保留列宽；普通 fast path
     // 必须保守使用更窄内容宽度，否则长 item 会少算 visual rows。
     let wrapped = wrap_assistant_text(line, width.saturating_sub(4).max(1), 0);
     if wrapped.is_empty() {
         *line_count = (*line_count).saturating_add(1);
-        return;
+        return 1;
     }
     *line_count = (*line_count).saturating_add(wrapped.len());
     *char_len = (*char_len)
         .saturating_add(wrapped.iter().map(String::len).sum::<usize>())
         .saturating_add(wrapped.len().saturating_sub(1) * 2);
+    wrapped.len()
 }
 
 fn add_wrapped_assistant_estimate_line(
@@ -453,6 +458,36 @@ mod tests {
         assert!(
             estimated.line_count >= exact.0,
             "fast list estimate must not undercount continuation rows: estimated={estimated:?}, exact={exact:?}"
+        );
+    }
+
+    #[test]
+    fn common_markdown_exact_fast_falls_back_for_wrapped_list_items() {
+        let markdown =
+            "- this list item is deliberately long enough to wrap onto several continuation rows";
+
+        assert_eq!(
+            estimate_common_markdown_metrics_exact_fast(markdown, 14),
+            None,
+            "exact-fast must not return a conservative approximation as final metrics"
+        );
+    }
+
+    #[test]
+    fn wrapped_list_final_metrics_match_renderer() {
+        let markdown =
+            "- this list item is deliberately long enough to wrap onto several continuation rows";
+        let width = 18;
+        let palette = default_palette();
+
+        assert_eq!(
+            render_assistant_message_metrics(markdown, width as u16, palette, None),
+            render_markdown_metrics(
+                markdown,
+                assistant_message_content_width(width as u16),
+                palette,
+                None,
+            )
         );
     }
 

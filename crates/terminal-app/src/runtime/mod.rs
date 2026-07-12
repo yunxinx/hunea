@@ -223,6 +223,8 @@ impl AppRuntimeCoordinator {
                 limit,
             } => self.record_message_history(entry_id, text, limit),
             RuntimeCommand::Reset => {
+                self.dynamic_environment_worker.cancel_pending();
+                self.pending_conversation_turn = None;
                 self.conversation_worker.reset_after_clear();
                 self.provider_conversation = fresh_provider_conversation(&self.options)?;
                 self.model_refresh.reset_after_clear();

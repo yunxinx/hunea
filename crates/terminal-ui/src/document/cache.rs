@@ -9,15 +9,14 @@ use crate::transcript::{
 use crate::{
     composer,
     selection::SelectableLineRange,
-    stream_activity::StreamActivityFrameKey,
-    style_mode::StyleMode,
     theme::TerminalPalette,
     transcript::{self, CachedRenderBlock, TranscriptItem, TranscriptItemMetricsIndex},
 };
 
 use super::{
-    selection_semantic_cache::SelectionSemanticCache, slot_frame::SlotFrame,
-    tail::DocumentTailLayout,
+    selection_semantic_cache::SelectionSemanticCache,
+    slot_frame::SlotFrame,
+    tail::{DocumentTailLayout, DocumentTailLayoutKey},
 };
 
 /// `DocumentTranscriptKey` 描述 transcript->document 中间快照的命中条件。
@@ -67,34 +66,8 @@ pub(crate) struct DocumentTranscriptCache {
 /// `DocumentLayoutKey` 描述影响统一文档布局的最小状态集合。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct DocumentLayoutKey {
-    pub(super) transcript_render_version: usize,
-    pub(super) palette_version: usize,
-    pub(super) style_mode: StyleMode,
-    pub(super) document_width: u16,
-    pub(super) document_viewport_height: usize,
-    pub(super) composer_viewport_height: usize,
-    pub(super) composer_content_revision: usize,
-    pub(super) composer_presentation_revision: usize,
-    pub(super) composer_cursor_revision: usize,
-    pub(super) composer_width: usize,
-    pub(super) command_panel_selected: usize,
-    pub(super) command_panel_scroll: usize,
-    pub(super) tool_approval_panel_active: bool,
-    pub(super) tool_approval_panel_selected: usize,
-    pub(super) tool_approval_panel_revision: usize,
-    pub(super) model_panel_active: bool,
-    pub(super) model_panel_provider_index: usize,
-    pub(super) model_panel_model_index: usize,
-    pub(super) model_panel_scroll: usize,
-    pub(super) model_panel_revision: usize,
-    pub(super) context_budget_active: bool,
-    pub(super) context_budget_revision: usize,
-    pub(super) selected_model: Option<String>,
-    pub(super) status_line_config: u8,
-    pub(super) status_line_2_config: u8,
-    pub(super) status_line_revision: usize,
-    pub(super) stream_activity_frame: StreamActivityFrameKey,
-    pub(super) tool_activity_frame: usize,
+    pub(super) transcript: DocumentTranscriptKey,
+    pub(super) tail: DocumentTailLayoutKey,
 }
 
 /// `DocumentLayout` 表示整份统一文档流的稳定布局。

@@ -1659,6 +1659,22 @@ fn transcript_selection_semantic_cache_stays_bounded_across_long_history() {
     }
 }
 
+#[test]
+fn document_layout_key_changes_when_fullscreen_modal_gates_inline_tail() {
+    let mut model = ready_document_model(80, 12);
+    model.composer_mut().insert_text("/model");
+    let context = FrameRenderContext::capture();
+    let before = model.current_document_layout_key(context);
+
+    model.open_transcript_overlay();
+
+    assert_ne!(
+        model.current_document_layout_key(context),
+        before,
+        "fullscreen modal gating must invalidate the cached inline tail"
+    );
+}
+
 fn ready_document_model(width: u16, height: u16) -> Model {
     let mut model = Model::new_with_style_mode(StartupBannerOptions::default(), StyleMode::Ms);
     model.transcript_mut().clear();

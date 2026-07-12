@@ -133,40 +133,18 @@ impl Model {
         context: FrameRenderContext,
     ) -> DocumentLayoutKey {
         DocumentLayoutKey {
+            transcript: self.current_document_transcript_key(context),
+            tail: self.current_document_tail_layout_key(context),
+        }
+    }
+
+    fn current_document_transcript_key(
+        &self,
+        context: FrameRenderContext,
+    ) -> DocumentTranscriptKey {
+        DocumentTranscriptKey {
             transcript_render_version: self.transcript_render_version,
-            palette_version: self.palette_version,
-            style_mode: self.style_mode,
             document_width: self.width,
-            document_viewport_height: self.document_viewport_height(),
-            composer_viewport_height: self.composer.viewport_height(),
-            composer_content_revision: self.composer.content_revision(),
-            composer_presentation_revision: self.composer.presentation_revision(),
-            composer_cursor_revision: self.composer.cursor_revision(),
-            composer_width: self.composer.content_width(),
-            command_panel_selected: self.command_panel_selected,
-            command_panel_scroll: self.command_panel_scroll,
-            tool_approval_panel_active: self.tool_approval_panel_active(),
-            tool_approval_panel_selected: self.tool_approval_panel.selected,
-            tool_approval_panel_revision: self.tool_approval_panel_revision,
-            model_panel_active: self.model_panel_active(),
-            model_panel_provider_index: self.model_panel.provider_index,
-            model_panel_model_index: self.model_panel.model_index,
-            model_panel_scroll: self.model_panel.scroll,
-            model_panel_revision: self.model_panel.revision,
-            context_budget_active: self.context_budget_active(),
-            context_budget_revision: self
-                .context_budget
-                .as_ref()
-                .map(|state| state.revision)
-                .unwrap_or_default(),
-            selected_model: self
-                .selected_model
-                .as_ref()
-                .map(|model| model.display_name()),
-            status_line_config: self.status_line_config_bits(),
-            status_line_2_config: self.status_line_2_config_bits(),
-            status_line_revision: self.status_line_revision(),
-            stream_activity_frame: self.stream_activity_frame_key(context.now()),
             tool_activity_frame: self.tool_activity_frame_key(context.now()),
         }
     }
@@ -441,11 +419,7 @@ impl Model {
         &mut self,
         context: FrameRenderContext,
     ) -> Rc<DocumentTranscriptSnapshot> {
-        let key = DocumentTranscriptKey {
-            transcript_render_version: self.transcript_render_version,
-            document_width: self.width,
-            tool_activity_frame: self.tool_activity_frame_key(context.now()),
-        };
+        let key = self.current_document_transcript_key(context);
         if self.document_runtime.transcript_cache.valid
             && self.document_runtime.transcript_cache.key == key
         {

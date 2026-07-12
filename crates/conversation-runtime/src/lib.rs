@@ -17,10 +17,7 @@ pub use conversation::{
     PreparedConversationRequest, PreparedTurnOptions, ProviderConversation,
     ProviderConversationError,
 };
-pub use event_notifier::{
-    NotifyingSender, RuntimeEventExitNotification, RuntimeEventNotifier,
-    RuntimeEventNotifierInstallError,
-};
+pub use event_notifier::{NotifyingSender, RuntimeEventExitNotification, RuntimeEventNotifier};
 pub use llm::ProviderRequestError;
 pub use llm::ProviderRequestMetrics;
 pub(crate) use llm::{ProviderProgress, list_provider_models};

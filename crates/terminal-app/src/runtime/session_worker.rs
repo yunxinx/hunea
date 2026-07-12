@@ -924,11 +924,9 @@ mod tests {
         let notification_count = Arc::new(AtomicUsize::new(0));
         let callback_count = Arc::clone(&notification_count);
         let notifier = RuntimeEventNotifier::default();
-        notifier
-            .install(move || {
-                callback_count.fetch_add(1, Ordering::SeqCst);
-            })
-            .expect("test notifier should install once");
+        notifier.replace_callback(move || {
+            callback_count.fetch_add(1, Ordering::SeqCst);
+        });
         let sender = SessionStoreWorkerEventSender::new(event_sender, notifier);
 
         sender

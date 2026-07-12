@@ -14,10 +14,9 @@ fn model_refresh_completion_notifies_the_coordinator_consumer() {
     let (wake_sender, wake_receiver) = mpsc::channel();
     coordinator
         .runtime_event_notifier
-        .install(move || {
+        .replace_callback(move || {
             let _ = wake_sender.send(());
-        })
-        .expect("test notifier should install once");
+        });
 
     RuntimeCoordinator::refresh_model_provider(
         &mut coordinator,
@@ -47,10 +46,9 @@ fn render_barrier_deferral_rearms_the_coordinator_consumer() {
     let (wake_sender, wake_receiver) = mpsc::channel();
     coordinator
         .runtime_event_notifier
-        .install(move || {
+        .replace_callback(move || {
             let _ = wake_sender.send(());
-        })
-        .expect("test notifier should install once");
+        });
     let deferred = RuntimeEvent::PermissionRequested {
         target: RuntimeTarget::provider("local", "qwen3"),
         request: RuntimePermissionRequest::new("permission-1", None, Vec::new()),
@@ -89,10 +87,9 @@ fn deferred_event_does_not_skip_ready_worker_payloads() {
     let (wake_sender, wake_receiver) = mpsc::channel();
     coordinator
         .runtime_event_notifier
-        .install(move || {
+        .replace_callback(move || {
             let _ = wake_sender.send(());
-        })
-        .expect("test notifier should install once");
+        });
     let context_request_id = request_id(91);
 
     RuntimeCoordinator::dispatch_runtime_command(

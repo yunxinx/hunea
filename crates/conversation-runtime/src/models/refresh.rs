@@ -90,11 +90,9 @@ mod tests {
     fn refresh_worker_wakes_after_its_event_is_available() {
         let (wake_sender, wake_receiver) = mpsc::channel();
         let notifier = RuntimeEventNotifier::default();
-        notifier
-            .install(move || {
-                let _ = wake_sender.send(());
-            })
-            .expect("test notifier should install once");
+        notifier.replace_callback(move || {
+            let _ = wake_sender.send(());
+        });
         let mut worker = ModelRefreshWorker::new(notifier);
 
         worker.start(ProviderSyncRequest {

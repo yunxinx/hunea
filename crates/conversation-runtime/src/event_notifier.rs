@@ -1,4 +1,4 @@
-use std::sync::{Arc, OnceLock, mpsc};
+use std::sync::{Arc, RwLock, mpsc};
 
 type RuntimeEventCallback = dyn Fn() + Send + Sync + 'static;
 
@@ -8,13 +8,8 @@ type RuntimeEventCallback = dyn Fn() + Send + Sync + 'static;
 /// event-loop 类型反向引入 conversation runtime。
 #[derive(Clone, Default)]
 pub struct RuntimeEventNotifier {
-    callback: Arc<OnceLock<Arc<RuntimeEventCallback>>>,
+    callback: Arc<RwLock<Option<Arc<RuntimeEventCallback>>>>,
 }
-
-/// 重复安装 runtime event callback 时返回的错误。
-#[derive(Debug, thiserror::Error)]
-#[error("runtime event notifier callback is already installed")]
-pub struct RuntimeEventNotifierInstallError;
 
 /// worker scope 退出时补发一次通知，使 receiver disconnect 能被立即观察。
 #[must_use = "必须持有到 worker scope 结束，才能在退出时发送通知"]
@@ -46,19 +41,30 @@ impl<T> NotifyingSender<T> {
 }
 
 impl RuntimeEventNotifier {
-    /// 安装唯一的 wake callback。
-    pub fn install(
-        &self,
-        callback: impl Fn() + Send + Sync + 'static,
-    ) -> Result<(), RuntimeEventNotifierInstallError> {
-        self.callback
-            .set(Arc::new(callback))
-            .map_err(|_| RuntimeEventNotifierInstallError)
+    /// 替换当前 event loop 的 wake callback。
+    ///
+    /// notifier clone 共享同一个 callback slot；新 runner 绑定后，后续通知会发往
+    /// 最新 callback。旧 callback 在锁外释放，避免其析构影响 notifier lock。
+    pub fn replace_callback(&self, callback: impl Fn() + Send + Sync + 'static) {
+        let callback: Arc<RuntimeEventCallback> = Arc::new(callback);
+        let previous = {
+            let mut callback_slot = self
+                .callback
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            callback_slot.replace(callback)
+        };
+        drop(previous);
     }
 
     /// 通知外层事件循环重新 drain worker receiver。
     pub fn notify(&self) {
-        if let Some(callback) = self.callback.get() {
+        let callback = self
+            .callback
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(callback) = callback {
             callback();
         }
     }

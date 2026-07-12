@@ -24,11 +24,9 @@ async fn conversation_worker_reports_interrupted_when_pre_cancelled() {
     let (sender, receiver) = mpsc::channel();
     let (wake_sender, wake_receiver) = mpsc::channel();
     let notifier = crate::RuntimeEventNotifier::default();
-    notifier
-        .install(move || {
-            let _ = wake_sender.send(());
-        })
-        .expect("test notifier should install once");
+    notifier.replace_callback(move || {
+        let _ = wake_sender.send(());
+    });
     let sender = ConversationWorkerEventSender::new(sender, notifier);
 
     run_conversation_worker(

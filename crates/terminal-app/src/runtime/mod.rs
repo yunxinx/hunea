@@ -420,8 +420,8 @@ impl RuntimeCoordinator for AppRuntimeCoordinator {
         waker: terminal_ui::LoopEventWaker,
     ) -> Result<(), String> {
         self.runtime_event_notifier
-            .install(move || waker.wake())
-            .map_err(|error| error.to_string())
+            .replace_callback(move || waker.wake());
+        Ok(())
     }
 
     fn drain_runtime_events(&mut self) -> Vec<RuntimeEvent> {

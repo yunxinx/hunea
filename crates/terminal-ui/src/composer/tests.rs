@@ -456,6 +456,49 @@ fn skill_binding_drops_immediately_after_manual_token_edit() {
 }
 
 #[test]
+fn reset_same_text_invalidates_cleared_structured_bindings() {
+    let mut composer = test_composer(80, 3, "$code");
+    assert!(composer.replace_current_skill_token(
+        "code-review",
+        std::path::Path::new("/tmp/code-review/SKILL.md"),
+        PromptSourceOrigin::Project,
+    ));
+    let value = composer.value().to_string();
+    let presentation_revision = composer.presentation_revision();
+
+    composer.reset_text_and_move_to_end(value);
+
+    assert!(composer.source_message().skill_bindings().is_empty());
+    assert_eq!(
+        composer.presentation_revision(),
+        presentation_revision + 1,
+        "binding-only reset must invalidate the cached composer presentation"
+    );
+}
+
+#[test]
+fn undo_same_text_invalidates_restored_structured_bindings() {
+    let mut composer = test_composer(80, 3, "$code");
+    assert!(composer.replace_current_skill_token(
+        "code-review",
+        std::path::Path::new("/tmp/code-review/SKILL.md"),
+        PromptSourceOrigin::Project,
+    ));
+    composer.push_undo_snapshot();
+    composer.clear_structured_bindings();
+    let presentation_revision = composer.presentation_revision();
+
+    composer.undo();
+
+    assert_eq!(composer.source_message().skill_bindings().len(), 1);
+    assert_eq!(
+        composer.presentation_revision(),
+        presentation_revision + 1,
+        "binding-only undo must invalidate the cached composer presentation"
+    );
+}
+
+#[test]
 fn bound_skill_token_renders_with_command_accent_before_submit() {
     let mut composer = test_composer(80, 3, "$code");
     assert!(composer.replace_current_skill_token(

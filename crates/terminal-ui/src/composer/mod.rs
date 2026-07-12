@@ -249,6 +249,7 @@ impl Composer {
     ) {
         let value = sanitized_owned_text(value.into());
         let changed = self.value != value;
+        let mut presentation_changed = false;
         match undo_mode {
             ComposerReplaceUndoMode::Record if changed => {
                 self.finish_grapheme_undo_group();
@@ -257,7 +258,7 @@ impl Composer {
             ComposerReplaceUndoMode::Reset => {
                 self.undo_history.clear();
                 self.has_active_grapheme_undo_group = false;
-                self.clear_structured_bindings();
+                presentation_changed = self.clear_structured_bindings();
             }
             ComposerReplaceUndoMode::Record => {}
         }
@@ -268,6 +269,8 @@ impl Composer {
                 self.reconcile_structured_bindings();
             }
             self.bump_content_revision();
+        } else if presentation_changed {
+            self.bump_presentation_revision();
         }
         self.set_cursor(total_chars(&self.value));
         self.sync_viewport_to_cursor();
@@ -1217,6 +1220,9 @@ impl Composer {
             return;
         };
 
+        let presentation_changed = self.skill_bindings != snapshot.skill_bindings
+            || self.custom_prompt_bindings != snapshot.custom_prompt_bindings
+            || self.image_attachments != snapshot.image_attachments;
         if self.value != snapshot.value {
             self.value = snapshot.value;
             self.skill_bindings = snapshot.skill_bindings;
@@ -1227,6 +1233,9 @@ impl Composer {
             self.skill_bindings = snapshot.skill_bindings;
             self.custom_prompt_bindings = snapshot.custom_prompt_bindings;
             self.image_attachments = snapshot.image_attachments;
+            if presentation_changed {
+                self.bump_presentation_revision();
+            }
         }
         self.set_cursor(snapshot.cursor.min(total_chars(&self.value)));
         self.sync_viewport_to_cursor();
@@ -1301,10 +1310,14 @@ impl Composer {
         self.cursor_revision = self.cursor_revision.saturating_add(1);
     }
 
-    fn clear_structured_bindings(&mut self) {
+    fn clear_structured_bindings(&mut self) -> bool {
+        let changed = !self.skill_bindings.is_empty()
+            || !self.custom_prompt_bindings.is_empty()
+            || !self.image_attachments.is_empty();
         self.skill_bindings.clear();
         self.custom_prompt_bindings.clear();
         self.image_attachments.clear();
+        changed
     }
 
     fn reconcile_structured_bindings(&mut self) {

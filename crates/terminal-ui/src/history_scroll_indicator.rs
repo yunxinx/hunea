@@ -107,8 +107,9 @@ impl Model {
             return false;
         }
 
-        let layout = self.build_document_layout();
-        let viewport = self.build_document_viewport(&layout);
+        let context = crate::frame_time::FrameRenderContext::capture();
+        let layout = self.build_document_layout(context);
+        let viewport = self.build_document_viewport(&layout, context);
         let Some(bounds) = self.current_history_scroll_indicator_bounds(&layout, &viewport) else {
             return false;
         };

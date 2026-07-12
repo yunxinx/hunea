@@ -1,25 +1,25 @@
-use std::time::Instant;
-
 use ratatui::{
     buffer::Buffer,
     layout::{Position, Rect},
     widgets::Widget,
 };
 
+use crate::frame_time::FrameRenderContext;
+
 /// `RenderFrame` 是 TUI 渲染树写入屏幕缓冲区的统一入口。
 pub(crate) struct RenderFrame<'a> {
     area: Rect,
     buffer: &'a mut Buffer,
-    now: Instant,
+    context: FrameRenderContext,
     cursor_position: Option<Position>,
 }
 
 impl<'a> RenderFrame<'a> {
-    pub(crate) fn new_at(now: Instant, area: Rect, buffer: &'a mut Buffer) -> Self {
+    pub(crate) fn new(context: FrameRenderContext, area: Rect, buffer: &'a mut Buffer) -> Self {
         Self {
             area,
             buffer,
-            now,
+            context,
             cursor_position: None,
         }
     }
@@ -36,8 +36,12 @@ impl<'a> RenderFrame<'a> {
         self.buffer
     }
 
-    pub(crate) const fn now(&self) -> Instant {
-        self.now
+    pub(crate) const fn context(&self) -> FrameRenderContext {
+        self.context
+    }
+
+    pub(crate) const fn now(&self) -> std::time::Instant {
+        self.context.now()
     }
 
     pub(crate) fn set_cursor_position<P: Into<Position>>(&mut self, position: P) {

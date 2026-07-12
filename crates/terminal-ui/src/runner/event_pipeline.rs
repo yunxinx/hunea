@@ -2,56 +2,46 @@ use std::time::{Duration, Instant};
 
 use crate::Model;
 
-/// 后台工作仍使用非唤醒式 receiver 时，主循环需要低频醒来 drain 一次。
-pub(super) const BACKGROUND_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(250);
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum TerminalWaitPlan {
+pub(super) enum LoopWaitPlan {
     Block,
-    Poll {
+    Wait {
         duration: Duration,
         render_on_timeout: bool,
     },
 }
 
-pub(super) fn terminal_wait_plan(
-    model: &Model,
-    startup_deadline: Instant,
-    now: Instant,
-    has_background_work: bool,
-) -> TerminalWaitPlan {
-    let deadline = next_pipeline_deadline(model, startup_deadline, now, has_background_work);
+pub(super) fn loop_wait_plan(model: &Model, now: Instant) -> LoopWaitPlan {
+    let deadline = next_pipeline_deadline(model, now);
     match deadline {
-        Some(deadline) => TerminalWaitPlan::Poll {
+        Some(deadline) => LoopWaitPlan::Wait {
             duration: deadline.saturating_duration_since(now),
-            render_on_timeout: render_on_timeout(model, startup_deadline, now, deadline),
+            render_on_timeout: render_on_timeout(model, now, deadline),
         },
-        None => TerminalWaitPlan::Block,
+        None => LoopWaitPlan::Block,
     }
 }
 
-impl TerminalWaitPlan {
+impl LoopWaitPlan {
+    pub(super) const fn timeout(self) -> Option<Duration> {
+        match self {
+            Self::Block => None,
+            Self::Wait { duration, .. } => Some(duration),
+        }
+    }
+
     pub(super) const fn render_on_timeout(self) -> bool {
         match self {
             Self::Block => false,
-            Self::Poll {
+            Self::Wait {
                 render_on_timeout, ..
             } => render_on_timeout,
         }
     }
 }
 
-fn next_pipeline_deadline(
-    model: &Model,
-    startup_deadline: Instant,
-    now: Instant,
-    has_background_work: bool,
-) -> Option<Instant> {
-    let mut next_deadline = if model.has_palette() {
-        None
-    } else {
-        Some(startup_deadline)
-    };
+fn next_pipeline_deadline(model: &Model, now: Instant) -> Option<Instant> {
+    let mut next_deadline: Option<Instant> = None;
 
     if let Some(model_deadline) = model.next_timeout_deadline() {
         next_deadline = Some(match next_deadline {
@@ -60,58 +50,29 @@ fn next_pipeline_deadline(
         });
     }
 
-    if let Some(activity_interval) = model.stream_activity_frame_interval_at(now) {
-        let activity_deadline = now + activity_interval;
+    if let Some(activity_deadline) = next_animation_deadline(model, now) {
         next_deadline = Some(match next_deadline {
             Some(deadline) => deadline.min(activity_deadline),
             None => activity_deadline,
-        });
-    }
-
-    if let Some(entrance_interval) = model.startup_banner_entrance_frame_interval_at(now) {
-        let entrance_deadline = now + entrance_interval;
-        next_deadline = Some(match next_deadline {
-            Some(deadline) => deadline.min(entrance_deadline),
-            None => entrance_deadline,
-        });
-    }
-
-    if let Some(toast_interval) = model.toast_frame_interval() {
-        let toast_deadline = now + toast_interval;
-        next_deadline = Some(match next_deadline {
-            Some(deadline) => deadline.min(toast_deadline),
-            None => toast_deadline,
-        });
-    }
-
-    if let Some(activity_deadline) = model.tool_activity_next_frame_deadline_at(now) {
-        next_deadline = Some(match next_deadline {
-            Some(deadline) => deadline.min(activity_deadline),
-            None => activity_deadline,
-        });
-    }
-
-    if has_background_work {
-        let background_deadline = now + BACKGROUND_EVENT_POLL_INTERVAL;
-        next_deadline = Some(match next_deadline {
-            Some(deadline) => deadline.min(background_deadline),
-            None => background_deadline,
         });
     }
 
     next_deadline
 }
 
-fn render_on_timeout(
-    model: &Model,
-    startup_deadline: Instant,
-    now: Instant,
-    deadline: Instant,
-) -> bool {
-    if !model.has_palette() && deadline == startup_deadline {
-        return false;
-    }
+fn next_animation_deadline(model: &Model, now: Instant) -> Option<Instant> {
+    [
+        model.stream_activity_next_frame_deadline_at(now),
+        model.startup_banner_entrance_next_frame_deadline_at(now),
+        model.toast_next_frame_deadline_at(now),
+        model.tool_activity_next_frame_deadline_at(now),
+    ]
+    .into_iter()
+    .flatten()
+    .min()
+}
 
+fn render_on_timeout(model: &Model, now: Instant, deadline: Instant) -> bool {
     if model
         .next_timeout_deadline()
         .is_some_and(|model_deadline| model_deadline == deadline)
@@ -119,18 +80,8 @@ fn render_on_timeout(
         return false;
     }
 
-    model
-        .stream_activity_frame_interval_at(now)
-        .is_some_and(|activity_interval| deadline <= now + activity_interval)
-        || model
-            .startup_banner_entrance_frame_interval_at(now)
-            .is_some_and(|entrance_interval| deadline <= now + entrance_interval)
-        || model
-            .toast_frame_interval()
-            .is_some_and(|toast_interval| deadline <= now + toast_interval)
-        || model
-            .tool_activity_next_frame_deadline_at(now)
-            .is_some_and(|activity_deadline| deadline <= activity_deadline)
+    next_animation_deadline(model, now)
+        .is_some_and(|animation_deadline| deadline == animation_deadline)
 }
 
 #[cfg(test)]
@@ -151,37 +102,19 @@ mod tests {
         model.update(crate::AppEvent::StartupReadyTimeout);
         let now = Instant::now();
 
-        assert_eq!(
-            terminal_wait_plan(&model, now + Duration::from_secs(10), now, false),
-            TerminalWaitPlan::Block
-        );
-    }
-
-    #[test]
-    fn background_runtime_keeps_low_frequency_poll_deadline() {
-        let mut model = Model::new(StartupBannerOptions::default());
-        model.update(crate::AppEvent::StartupReadyTimeout);
-        let now = Instant::now();
-
-        assert_eq!(
-            terminal_wait_plan(&model, now + Duration::from_secs(10), now, true),
-            TerminalWaitPlan::Poll {
-                duration: BACKGROUND_EVENT_POLL_INTERVAL,
-                render_on_timeout: false,
-            }
-        );
+        assert_eq!(loop_wait_plan(&model, now), LoopWaitPlan::Block);
     }
 
     #[test]
     fn startup_banner_entrance_deadline_requests_render_on_timeout() {
         let mut model = Model::new(StartupBannerOptions::default());
         model.update(crate::AppEvent::StartupReadyTimeout);
-        model.start_startup_banner_entrance_for_test(Instant::now());
         let now = Instant::now();
+        model.start_startup_banner_entrance_for_test(now);
 
         assert_eq!(
-            terminal_wait_plan(&model, now + Duration::from_secs(10), now, false),
-            TerminalWaitPlan::Poll {
+            loop_wait_plan(&model, now),
+            LoopWaitPlan::Wait {
                 duration: Duration::from_millis(16),
                 render_on_timeout: true,
             }
@@ -194,26 +127,13 @@ mod tests {
         model.update(crate::AppEvent::StartupReadyTimeout);
         model.show_toast(crate::toast::ToastSeverity::Info, "Saved");
         let now = Instant::now();
+        model.advance_toast_at(now);
 
         assert_eq!(
-            terminal_wait_plan(&model, now + Duration::from_secs(10), now, false),
-            TerminalWaitPlan::Poll {
+            loop_wait_plan(&model, now),
+            LoopWaitPlan::Wait {
                 duration: crate::toast::TOAST_FRAME_INTERVAL,
                 render_on_timeout: true,
-            }
-        );
-    }
-
-    #[test]
-    fn startup_deadline_wins_over_background_poll() {
-        let model = Model::new(StartupBannerOptions::default());
-        let now = Instant::now();
-
-        assert_eq!(
-            terminal_wait_plan(&model, now + Duration::from_millis(10), now, true),
-            TerminalWaitPlan::Poll {
-                duration: Duration::from_millis(10),
-                render_on_timeout: false,
             }
         );
     }
@@ -224,14 +144,53 @@ mod tests {
         model.update(crate::AppEvent::StartupReadyTimeout);
         model.show_stream_activity("working");
         let now = Instant::now();
+        let duration = model
+            .stream_activity_next_frame_deadline_at(now)
+            .expect("stream activity should schedule a frame")
+            .saturating_duration_since(now);
 
         assert_eq!(
-            terminal_wait_plan(&model, now + Duration::from_secs(10), now, false),
-            TerminalWaitPlan::Poll {
-                duration: Duration::from_millis(80),
+            loop_wait_plan(&model, now),
+            LoopWaitPlan::Wait {
+                duration,
                 render_on_timeout: true,
             }
         );
+    }
+
+    #[test]
+    fn reduced_motion_stream_waits_for_elapsed_second_boundary() {
+        let mut model = Model::new_with_options(
+            StartupBannerOptions::default(),
+            crate::ModelOptions {
+                motion_mode: crate::MotionMode::Reduced,
+                ..crate::ModelOptions::default()
+            },
+        );
+        model.update(crate::AppEvent::StartupReadyTimeout);
+        model.show_stream_activity("working");
+        let now = Instant::now();
+        let duration = model
+            .stream_activity_next_frame_deadline_at(now)
+            .expect("reduced motion elapsed should schedule a semantic tick")
+            .saturating_duration_since(now);
+        assert_eq!(
+            loop_wait_plan(&model, now),
+            LoopWaitPlan::Wait {
+                duration,
+                render_on_timeout: true,
+            }
+        );
+
+        model.show_toast(crate::toast::ToastSeverity::Info, "Saved");
+        let plan = loop_wait_plan(&model, now);
+        assert!(matches!(
+            plan,
+            LoopWaitPlan::Wait {
+                render_on_timeout: true,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -257,37 +216,9 @@ mod tests {
             .expect("active tool activity should have a start time");
 
         assert_eq!(
-            terminal_wait_plan(&model, now + Duration::from_secs(10), now, false),
-            TerminalWaitPlan::Poll {
+            loop_wait_plan(&model, now),
+            LoopWaitPlan::Wait {
                 duration: TOOL_ACTIVITY_ACTIVE_MARKER_BLINK_INTERVAL,
-                render_on_timeout: true,
-            }
-        );
-    }
-
-    #[test]
-    fn active_tool_activity_background_poll_still_requests_render_on_timeout() {
-        let mut model = Model::new(StartupBannerOptions::default());
-        model.update(crate::AppEvent::StartupReadyTimeout);
-        model
-            .transcript_mut()
-            .append_runtime_tool_activity(RuntimeToolActivity {
-                activity_id: "tool-1".to_string(),
-                title: "WriteFile: TEMP.md".to_string(),
-                kind: RuntimeToolKind::Other,
-                status: RuntimeToolActivityStatus::InProgress,
-                content: Vec::new(),
-                locations: Vec::new(),
-                raw_input: Some(r##"{"path":"TEMP.md","content":"body"}"##.into()),
-                raw_output: None,
-            });
-        model.sync_transcript_render();
-        let now = Instant::now();
-
-        assert_eq!(
-            terminal_wait_plan(&model, now + Duration::from_secs(10), now, true),
-            TerminalWaitPlan::Poll {
-                duration: BACKGROUND_EVENT_POLL_INTERVAL,
                 render_on_timeout: true,
             }
         );
@@ -318,25 +249,10 @@ mod tests {
             started_at + TOOL_ACTIVITY_ACTIVE_MARKER_BLINK_INTERVAL - Duration::from_millis(10);
 
         assert_eq!(
-            terminal_wait_plan(&model, now + Duration::from_secs(10), now, false),
-            TerminalWaitPlan::Poll {
+            loop_wait_plan(&model, now),
+            LoopWaitPlan::Wait {
                 duration: Duration::from_millis(10),
                 render_on_timeout: true,
-            }
-        );
-    }
-
-    #[test]
-    fn background_poll_deadline_does_not_request_render_without_events() {
-        let mut model = Model::new(StartupBannerOptions::default());
-        model.update(crate::AppEvent::StartupReadyTimeout);
-        let now = Instant::now();
-
-        assert_eq!(
-            terminal_wait_plan(&model, now + Duration::from_secs(10), now, true),
-            TerminalWaitPlan::Poll {
-                duration: BACKGROUND_EVENT_POLL_INTERVAL,
-                render_on_timeout: false,
             }
         );
     }

@@ -97,6 +97,20 @@ fn shell_result_removes_shell_prefix_and_highlights_command() {
 }
 
 #[test]
+fn terminal_default_shell_result_does_not_emit_syntect_rgb_foregrounds() {
+    let item = ToolResultItem::new("Ran Shell: cat Cargo.toml", ToolResultKind::Ran);
+    let lines = item.render_lines(80, terminal_default_palette());
+
+    assert!(
+        lines[0]
+            .spans
+            .iter()
+            .skip(2)
+            .all(|span| { !matches!(span.style.fg, Some(ratatui::style::Color::Rgb(_, _, _))) })
+    );
+}
+
+#[test]
 fn runtime_tool_activity_header_uses_title_only_and_strips_shell_prefix() {
     let palette = default_palette();
     let item = ToolResultItem::from_runtime_tool_activity(

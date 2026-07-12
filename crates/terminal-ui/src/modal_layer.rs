@@ -152,7 +152,10 @@ mod tests {
         model.open_session_picker_loading();
         assert_eq!(model.top_modal_layer(), Some(ModalLayer::SessionPicker));
 
-        model.open_session_preview("session-1".to_string(), Transcript::new(default_palette()));
+        model.open_session_preview(
+            "session-1".to_string(),
+            Transcript::new(default_palette(), None),
+        );
         assert_eq!(model.top_modal_layer(), Some(ModalLayer::SessionPreview));
 
         model.open_transcript_overlay();
@@ -174,7 +177,7 @@ mod tests {
         model.open_session_picker_loading();
         model.open_session_preview(
             "session-under-approval".to_string(),
-            Transcript::new(default_palette()),
+            Transcript::new(default_palette(), None),
         );
         model.open_transcript_overlay();
 
@@ -207,7 +210,7 @@ mod tests {
         model.set_window(80, 12);
         model.open_session_preview(
             "session-under-approval".to_string(),
-            Transcript::new(default_palette()),
+            Transcript::new(default_palette(), None),
         );
         open_fullscreen_tool_approval(&mut model);
 

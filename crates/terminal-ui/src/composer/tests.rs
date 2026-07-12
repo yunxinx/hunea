@@ -456,6 +456,49 @@ fn skill_binding_drops_immediately_after_manual_token_edit() {
 }
 
 #[test]
+fn reset_same_text_invalidates_cleared_structured_bindings() {
+    let mut composer = test_composer(80, 3, "$code");
+    assert!(composer.replace_current_skill_token(
+        "code-review",
+        std::path::Path::new("/tmp/code-review/SKILL.md"),
+        PromptSourceOrigin::Project,
+    ));
+    let value = composer.value().to_string();
+    let presentation_revision = composer.presentation_revision();
+
+    composer.reset_text_and_move_to_end(value);
+
+    assert!(composer.source_message().skill_bindings().is_empty());
+    assert_eq!(
+        composer.presentation_revision(),
+        presentation_revision + 1,
+        "binding-only reset must invalidate the cached composer presentation"
+    );
+}
+
+#[test]
+fn undo_same_text_invalidates_restored_structured_bindings() {
+    let mut composer = test_composer(80, 3, "$code");
+    assert!(composer.replace_current_skill_token(
+        "code-review",
+        std::path::Path::new("/tmp/code-review/SKILL.md"),
+        PromptSourceOrigin::Project,
+    ));
+    composer.push_undo_snapshot();
+    composer.clear_structured_bindings();
+    let presentation_revision = composer.presentation_revision();
+
+    composer.undo();
+
+    assert_eq!(composer.source_message().skill_bindings().len(), 1);
+    assert_eq!(
+        composer.presentation_revision(),
+        presentation_revision + 1,
+        "binding-only undo must invalidate the cached composer presentation"
+    );
+}
+
+#[test]
 fn bound_skill_token_renders_with_command_accent_before_submit() {
     let mut composer = test_composer(80, 3, "$code");
     assert!(composer.replace_current_skill_token(
@@ -465,7 +508,8 @@ fn bound_skill_token_renders_with_command_accent_before_submit() {
     ));
 
     let palette = default_palette();
-    let document = composer.render_document(palette);
+    let document = composer.document_snapshot(palette);
+    let document = document.range(0, document.line_count());
     let skill_span = document
         .lines
         .iter()
@@ -490,7 +534,8 @@ fn bound_skill_token_keeps_same_background_as_live_cx_input() {
     ));
 
     let palette = default_palette();
-    let document = composer.render_document(palette);
+    let document = composer.document_snapshot(palette);
+    let document = document.range(0, document.line_count());
     let skill_span = document
         .lines
         .iter()
@@ -583,7 +628,8 @@ fn highlighted_composer_contents(
     palette: crate::theme::TerminalPalette,
 ) -> Vec<String> {
     composer
-        .render_document(palette)
+        .document_snapshot(palette)
+        .range(0, composer.layout_snapshot().line_count())
         .lines
         .iter()
         .flat_map(|line| line.spans.iter())
@@ -628,8 +674,8 @@ fn cursor_position_for_line_anchor_click_does_not_rewrap_long_composer() {
     let mut composer = Composer::new(StyleMode::Cx);
     composer.set_width(80);
     composer.reset_text_and_move_to_end("中英 mixed long composer text ".repeat(120));
-    let document = composer.render_document(default_palette());
-    let anchor = document.anchors[0];
+    let document = composer.document_snapshot(default_palette());
+    let anchor = document.anchor_at(0).expect("first composer anchor");
 
     reset_visual_lines_call_count();
     let position = cursor_position_for_line_anchor_click(&composer, anchor, 10);
@@ -640,4 +686,52 @@ fn cursor_position_for_line_anchor_click_does_not_rewrap_long_composer() {
         0,
         "click hit-testing should use the clicked anchor segment instead of wrapping the full composer"
     );
+}
+
+#[test]
+fn cursor_and_viewport_queries_reuse_long_composer_geometry() {
+    use super::{reset_visual_lines_call_count, visual_lines_call_count};
+
+    let mut composer = Composer::new(StyleMode::Cx);
+    composer.set_width(80);
+    composer.set_height(6);
+    composer
+        .reset_text_and_move_to_end("draft line with 中英 mixed text and emoji 👨‍👩‍👧\n".repeat(1_400));
+
+    reset_visual_lines_call_count();
+    composer.handle_key(KeyEvent::from(KeyCode::Up));
+    composer.handle_key(KeyEvent::from(KeyCode::PageUp));
+    composer.sync_viewport_to_cursor();
+    let _ = composer.full_height();
+    let _ = composer.bottom_viewport_offset();
+
+    assert_eq!(
+        visual_lines_call_count(),
+        0,
+        "cursor movement and viewport queries must reuse the current content/width geometry"
+    );
+}
+
+#[test]
+fn composer_document_materializes_only_a_bounded_viewport_window() {
+    let mut composer = Composer::new(StyleMode::Cx);
+    composer.set_width(40);
+    composer.reset_text_and_move_to_end("bounded composer row\n".repeat(400));
+    let document = composer.document_snapshot(default_palette());
+
+    let visible = document.range(120, 4);
+    let first_window = document.materialized_window();
+    assert_eq!(visible.lines.len(), 4);
+    assert!(
+        first_window.1 <= 28,
+        "4 visible rows may retain at most 12 overscan rows per side"
+    );
+
+    let _ = document.range(122, 4);
+    assert_eq!(document.materialized_window(), first_window);
+
+    let _ = document.range(300, 4);
+    let second_window = document.materialized_window();
+    assert_ne!(second_window.0, first_window.0);
+    assert!(second_window.1 <= 28);
 }

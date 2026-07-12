@@ -4,7 +4,7 @@ use ratatui::{
     widgets::{Block, BorderType, Padding},
 };
 
-use super::TerminalPalette;
+use super::{TerminalColorCapability, TerminalPalette};
 
 /// `SurfaceHalf` 表示用半块字符模拟 surface 的哪一半。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,7 +117,7 @@ pub fn panel_block(palette: TerminalPalette) -> Block<'static> {
         .border_type(BorderType::Rounded)
         .padding(Padding::horizontal(2));
 
-    if palette.uses_terminal_default_colors() {
+    if palette.color_capability() == TerminalColorCapability::TerminalDefault {
         block
     } else {
         block.border_style(secondary_text_style(palette))

@@ -1,4 +1,7 @@
-use crate::transcript::{LineAnchor, LineAnchorKind};
+use crate::{
+    frame_time::FrameRenderContext,
+    transcript::{LineAnchor, LineAnchorKind},
+};
 
 use super::{
     DocumentAnchorRegion, DocumentLayout, DocumentLineAnchor, DocumentViewportAnchor,
@@ -16,6 +19,7 @@ pub(crate) fn canonical_rendered_transcript_anchor_text(text: &str) -> String {
 pub(crate) fn find_document_offset_for_viewport_anchor(
     layout: &DocumentLayout,
     anchor: &DocumentViewportAnchor,
+    context: FrameRenderContext,
 ) -> Option<usize> {
     if matches!(anchor.line_anchor.region, DocumentAnchorRegion::Transcript)
         && matches!(
@@ -23,10 +27,10 @@ pub(crate) fn find_document_offset_for_viewport_anchor(
             LineAnchorKind::RenderedLine
         )
     {
-        return find_document_offset_for_rendered_transcript_anchor(layout, anchor);
+        return find_document_offset_for_rendered_transcript_anchor(layout, anchor, context);
     }
 
-    find_document_anchor_offset(layout, anchor.line_anchor)
+    find_document_anchor_offset(layout, anchor.line_anchor, context)
 }
 
 pub(crate) fn transcript_content_line_count_for_item(
@@ -42,14 +46,15 @@ pub(crate) fn transcript_content_line_count_for_item(
 fn find_document_anchor_offset(
     layout: &DocumentLayout,
     anchor: DocumentLineAnchor,
+    context: FrameRenderContext,
 ) -> Option<usize> {
     if matches!(anchor.region, DocumentAnchorRegion::Transcript) {
-        return find_transcript_document_anchor_offset(layout, anchor.transcript);
+        return find_transcript_document_anchor_offset(layout, anchor.transcript, context);
     }
 
     let mut best = None;
     for index in 0..layout.line_count() {
-        let Some(candidate) = layout.line_anchor_at(index) else {
+        let Some(candidate) = layout.line_anchor_at(index, context) else {
             continue;
         };
         let Some(score) = score_document_anchor_match(candidate, anchor) else {
@@ -70,6 +75,7 @@ fn find_document_anchor_offset(
 fn find_transcript_document_anchor_offset(
     layout: &DocumentLayout,
     target: LineAnchor,
+    context: FrameRenderContext,
 ) -> Option<usize> {
     let item_lines = layout.transcript_item_lines(target.item_index)?;
     let start = item_lines.content_start_line;
@@ -86,7 +92,7 @@ fn find_transcript_document_anchor_offset(
         ..DocumentLineAnchor::default()
     };
     for index in start..end {
-        let Some(candidate) = layout.line_anchor_at(index) else {
+        let Some(candidate) = layout.line_anchor_at(index, context) else {
             continue;
         };
         let Some(score) = score_document_anchor_match(candidate, target_anchor) else {
@@ -191,6 +197,7 @@ fn score_range_anchor_match(start: usize, end: usize, target: usize) -> usize {
 fn find_document_offset_for_rendered_transcript_anchor(
     layout: &DocumentLayout,
     anchor: &DocumentViewportAnchor,
+    context: FrameRenderContext,
 ) -> Option<usize> {
     let item_index = anchor.line_anchor.transcript.item_index;
     let target_rendered_line = anchor.line_anchor.transcript.item_anchor.rendered_line;
@@ -205,25 +212,15 @@ fn find_document_offset_for_rendered_transcript_anchor(
     if item_offsets.is_empty() {
         return None;
     }
+    let target = RenderedTranscriptMatchTarget {
+        text: &anchor.line_text,
+        rendered_line: target_rendered_line,
+        item_line_count: anchor.transcript_item_line_count,
+        semantic_position: anchor.transcript_semantic_position,
+    };
 
-    let exact = find_rendered_transcript_text_match(
-        layout,
-        &item_offsets,
-        &anchor.line_text,
-        target_rendered_line,
-        anchor.transcript_item_line_count,
-        anchor.transcript_semantic_position,
-        true,
-    );
-    let fuzzy = find_rendered_transcript_text_match(
-        layout,
-        &item_offsets,
-        &anchor.line_text,
-        target_rendered_line,
-        anchor.transcript_item_line_count,
-        anchor.transcript_semantic_position,
-        false,
-    );
+    let exact = find_rendered_transcript_text_match(layout, &item_offsets, target, true, context);
+    let fuzzy = find_rendered_transcript_text_match(layout, &item_offsets, target, false, context);
     match (exact, fuzzy) {
         (Some((_exact_offset, exact_score)), Some((fuzzy_offset, fuzzy_score)))
             if fuzzy_score <= exact_score =>
@@ -236,26 +233,26 @@ fn find_document_offset_for_rendered_transcript_anchor(
             let mut best = item_offsets[0];
             let mut best_score = score_rendered_transcript_relative_position(
                 layout
-                    .line_anchor_at(best)?
+                    .line_anchor_at(best, context)?
                     .transcript
                     .item_anchor
                     .rendered_line,
                 item_offsets.len(),
-                target_rendered_line,
-                anchor.transcript_item_line_count,
-                anchor.transcript_semantic_position,
+                target.rendered_line,
+                target.item_line_count,
+                target.semantic_position,
             );
             for offset in item_offsets.into_iter().skip(1) {
                 let score = score_rendered_transcript_relative_position(
                     layout
-                        .line_anchor_at(offset)?
+                        .line_anchor_at(offset, context)?
                         .transcript
                         .item_anchor
                         .rendered_line,
                     transcript_content_line_count_for_item(layout, item_index),
-                    target_rendered_line,
-                    anchor.transcript_item_line_count,
-                    anchor.transcript_semantic_position,
+                    target.rendered_line,
+                    target.item_line_count,
+                    target.semantic_position,
                 );
                 if score < best_score {
                     best = offset;
@@ -265,6 +262,14 @@ fn find_document_offset_for_rendered_transcript_anchor(
             Some(best)
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RenderedTranscriptMatchTarget<'a> {
+    text: &'a str,
+    rendered_line: usize,
+    item_line_count: usize,
+    semantic_position: TranscriptSemanticPosition,
 }
 
 fn transcript_content_line_offsets_for_item(
@@ -282,31 +287,29 @@ fn transcript_content_line_offsets_for_item(
 fn find_rendered_transcript_text_match(
     layout: &DocumentLayout,
     item_offsets: &[usize],
-    target_text: &str,
-    target_rendered_line: usize,
-    target_item_line_count: usize,
-    target_semantic_position: TranscriptSemanticPosition,
+    target: RenderedTranscriptMatchTarget<'_>,
     exact: bool,
+    context: FrameRenderContext,
 ) -> Option<(usize, usize)> {
     if exact {
         let mut best = None;
         for &offset in item_offsets {
             let candidate_text =
-                canonical_rendered_transcript_anchor_text(&layout.line_text_at(offset)?);
-            if candidate_text != target_text {
+                canonical_rendered_transcript_anchor_text(&layout.line_text_at(offset, context)?);
+            if candidate_text != target.text {
                 continue;
             }
 
             let score = score_rendered_transcript_relative_position(
                 layout
-                    .line_anchor_at(offset)?
+                    .line_anchor_at(offset, context)?
                     .transcript
                     .item_anchor
                     .rendered_line,
                 item_offsets.len(),
-                target_rendered_line,
-                target_item_line_count,
-                target_semantic_position,
+                target.rendered_line,
+                target.item_line_count,
+                target.semantic_position,
             );
             if best
                 .as_ref()
@@ -319,45 +322,22 @@ fn find_rendered_transcript_text_match(
         return best;
     }
 
-    find_rendered_transcript_split_sequence_match(
-        layout,
-        item_offsets,
-        target_text,
-        target_rendered_line,
-        target_item_line_count,
-        target_semantic_position,
-    )
-    .or_else(|| {
-        find_rendered_transcript_merged_line_match(
-            layout,
-            item_offsets,
-            target_text,
-            target_rendered_line,
-            target_item_line_count,
-            target_semantic_position,
-        )
-    })
-    .or_else(|| {
-        find_rendered_transcript_boundary_spanning_match(
-            layout,
-            item_offsets,
-            target_text,
-            target_rendered_line,
-            target_item_line_count,
-            target_semantic_position,
-        )
-    })
+    find_rendered_transcript_split_sequence_match(layout, item_offsets, target, context)
+        .or_else(|| {
+            find_rendered_transcript_merged_line_match(layout, item_offsets, target, context)
+        })
+        .or_else(|| {
+            find_rendered_transcript_boundary_spanning_match(layout, item_offsets, target, context)
+        })
 }
 
 fn find_rendered_transcript_split_sequence_match(
     layout: &DocumentLayout,
     item_offsets: &[usize],
-    target_text: &str,
-    target_rendered_line: usize,
-    target_item_line_count: usize,
-    target_semantic_position: TranscriptSemanticPosition,
+    target: RenderedTranscriptMatchTarget<'_>,
+    context: FrameRenderContext,
 ) -> Option<(usize, usize)> {
-    if target_text.is_empty() {
+    if target.text.is_empty() {
         return None;
     }
 
@@ -366,29 +346,29 @@ fn find_rendered_transcript_split_sequence_match(
         let offset = item_offsets[start];
         let mut prefix = String::new();
         for next in start..item_offsets.len() {
-            let piece = layout.line_text_at(item_offsets[next])?;
+            let piece = layout.line_text_at(item_offsets[next], context)?;
             if piece.is_empty() {
                 break;
             }
 
             prefix.push_str(&piece);
-            if !target_text.starts_with(&prefix) {
+            if !target.text.starts_with(&prefix) {
                 break;
             }
-            if prefix != target_text || next == start {
+            if prefix != target.text || next == start {
                 continue;
             }
 
             let score = score_rendered_transcript_relative_position(
                 layout
-                    .line_anchor_at(offset)?
+                    .line_anchor_at(offset, context)?
                     .transcript
                     .item_anchor
                     .rendered_line,
                 item_offsets.len(),
-                target_rendered_line,
-                target_item_line_count,
-                target_semantic_position,
+                target.rendered_line,
+                target.item_line_count,
+                target.semantic_position,
             );
             if best
                 .as_ref()
@@ -407,34 +387,32 @@ fn find_rendered_transcript_split_sequence_match(
 fn find_rendered_transcript_merged_line_match(
     layout: &DocumentLayout,
     item_offsets: &[usize],
-    target_text: &str,
-    target_rendered_line: usize,
-    target_item_line_count: usize,
-    target_semantic_position: TranscriptSemanticPosition,
+    target: RenderedTranscriptMatchTarget<'_>,
+    context: FrameRenderContext,
 ) -> Option<(usize, usize)> {
-    if target_text.is_empty() {
+    if target.text.is_empty() {
         return None;
     }
 
     let mut best = None;
     for &offset in item_offsets {
-        let candidate_text = layout.line_text_at(offset)?;
+        let candidate_text = layout.line_text_at(offset, context)?;
         if candidate_text.is_empty()
-            || !contains_rendered_transcript_merged_text(&candidate_text, target_text)
+            || !contains_rendered_transcript_merged_text(&candidate_text, target.text)
         {
             continue;
         }
 
         let score = score_rendered_transcript_relative_position(
             layout
-                .line_anchor_at(offset)?
+                .line_anchor_at(offset, context)?
                 .transcript
                 .item_anchor
                 .rendered_line,
             item_offsets.len(),
-            target_rendered_line,
-            target_item_line_count,
-            target_semantic_position,
+            target.rendered_line,
+            target.item_line_count,
+            target.semantic_position,
         );
         if best
             .as_ref()
@@ -514,41 +492,39 @@ fn rendered_transcript_word_char(character: char) -> bool {
 fn find_rendered_transcript_boundary_spanning_match(
     layout: &DocumentLayout,
     item_offsets: &[usize],
-    target_text: &str,
-    target_rendered_line: usize,
-    target_item_line_count: usize,
-    target_semantic_position: TranscriptSemanticPosition,
+    target: RenderedTranscriptMatchTarget<'_>,
+    context: FrameRenderContext,
 ) -> Option<(usize, usize)> {
-    if target_text.is_empty() {
+    if target.text.is_empty() {
         return None;
     }
 
     let mut best = None;
-    let target = target_text.chars().collect::<Vec<_>>();
+    let target_chars = target.text.chars().collect::<Vec<_>>();
     for start in 0..item_offsets.len() {
         let candidate_offset = item_offsets[start];
         let mut pieces = Vec::new();
         for next in start..item_offsets.len() {
-            let piece = layout.line_text_at(item_offsets[next])?;
+            let piece = layout.line_text_at(item_offsets[next], context)?;
             if piece.is_empty() {
                 break;
             }
 
             pieces.push(piece.chars().collect::<Vec<_>>());
-            if !rendered_transcript_boundary_spanning_sequence_matches(&target, &pieces) {
+            if !rendered_transcript_boundary_spanning_sequence_matches(&target_chars, &pieces) {
                 continue;
             }
 
             let score = score_rendered_transcript_relative_position(
                 layout
-                    .line_anchor_at(candidate_offset)?
+                    .line_anchor_at(candidate_offset, context)?
                     .transcript
                     .item_anchor
                     .rendered_line,
                 item_offsets.len(),
-                target_rendered_line,
-                target_item_line_count,
-                target_semantic_position,
+                target.rendered_line,
+                target.item_line_count,
+                target.semantic_position,
             );
             if best
                 .as_ref()

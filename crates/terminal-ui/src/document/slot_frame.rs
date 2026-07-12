@@ -8,6 +8,16 @@ pub(crate) struct SlotFrame {
 }
 
 impl SlotFrame {
+    /// `empty` 表示当前 document 中没有可定位的 composer slot。
+    pub(crate) const fn empty() -> Self {
+        Self {
+            frame_start_line: 0,
+            frame_line_count: 0,
+            content_start_line: 0,
+            content_line_count: 0,
+        }
+    }
+
     /// `new` 根据是否带装饰行计算 slot 的全文坐标。
     pub(crate) fn new(
         frame_start_line: usize,
@@ -31,11 +41,15 @@ impl SlotFrame {
         }
     }
 
-    pub(crate) fn frame_bottom_line(self) -> usize {
-        self.frame_start_line + self.frame_line_count - 1
+    pub(crate) const fn is_empty(self) -> bool {
+        self.frame_line_count == 0
     }
 
-    pub(crate) fn content_bottom_line(self) -> usize {
-        self.content_start_line + self.content_line_count - 1
+    pub(crate) fn frame_bottom_line(self) -> Option<usize> {
+        (!self.is_empty()).then(|| self.frame_start_line + self.frame_line_count - 1)
+    }
+
+    pub(crate) fn content_bottom_line(self) -> Option<usize> {
+        (!self.is_empty()).then(|| self.content_start_line + self.content_line_count - 1)
     }
 }

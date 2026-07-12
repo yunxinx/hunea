@@ -1,10 +1,11 @@
-use std::{cell::RefCell, collections::HashMap, ops::Range, rc::Rc};
+use std::{cell::RefCell, ops::Range, path::Path, rc::Rc};
 
 use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag};
 use ratatui::text::Line;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
+    bounded_lru_cache::BoundedLruCache,
     display_width::grapheme_width,
     markdown_source::{MarkdownSourceBounds, markdown_source_bounds},
     styled_text::{line_plain_text_len, line_to_plain_text},
@@ -21,22 +22,84 @@ use super::assistant::assistant_message_content_width;
 
 const ASSISTANT_PROJECTION_MIN_BYTES: usize = 4 * 1024;
 const ASSISTANT_PROJECTION_PAGE_LINES: usize = 64;
+const MAX_ASSISTANT_PROJECTION_PAGES: usize = 8;
 
 type AssistantProjectionPage = Rc<Vec<Line<'static>>>;
 type AssistantProjectionPageKey = (usize, usize);
-type AssistantProjectionPageCache =
-    RefCell<HashMap<AssistantProjectionPageKey, AssistantProjectionPage>>;
+type AssistantProjectionPageCache = RefCell<AssistantProjectionPageStore>;
+
+#[derive(Debug)]
+struct AssistantProjectionPageStore {
+    pages: BoundedLruCache<AssistantProjectionPageKey, AssistantProjectionPage>,
+}
+
+impl Default for AssistantProjectionPageStore {
+    fn default() -> Self {
+        Self {
+            pages: BoundedLruCache::new(MAX_ASSISTANT_PROJECTION_PAGES),
+        }
+    }
+}
+
+impl AssistantProjectionPageStore {
+    fn get(&mut self, key: AssistantProjectionPageKey) -> Option<AssistantProjectionPage> {
+        self.pages.get_cloned(&key)
+    }
+
+    fn insert(&mut self, key: AssistantProjectionPageKey, page: AssistantProjectionPage) {
+        self.pages.insert(key, page);
+    }
+}
 
 /// `AssistantMessageRenderProjection` 保存长 assistant Markdown 的按需渲染视图。
 #[derive(Debug)]
 pub(crate) struct AssistantMessageRenderProjection {
     source: Rc<str>,
+    working_dir: Option<Rc<Path>>,
     width: usize,
     palette: TerminalPalette,
     blocks: Vec<AssistantProjectedBlock>,
     pages: AssistantProjectionPageCache,
     line_count: usize,
     plain_text_char_len: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AssistantProjectionFallbackReason {
+    NotAssistant,
+    BelowThreshold,
+    Tab,
+    Table,
+    EmptySource,
+    UnsupportedMarkdown,
+    InvalidFence,
+    StatefulFence,
+    UnprojectableParagraph,
+    NoMarkdownStructure,
+}
+
+#[derive(Debug)]
+pub(crate) enum AssistantProjectionOutcome {
+    Projected(Box<AssistantMessageRenderProjection>),
+    Fallback(AssistantProjectionFallbackReason),
+}
+
+impl AssistantProjectionOutcome {
+    #[cfg(test)]
+    pub(crate) fn into_projection(self) -> Option<AssistantMessageRenderProjection> {
+        match self {
+            Self::Projected(projection) => Some(*projection),
+            Self::Fallback(_) => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn fallback_reason(&self) -> Option<AssistantProjectionFallbackReason> {
+        match self {
+            Self::Projected(_) => None,
+            Self::Fallback(reason) => Some(*reason),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -79,18 +142,29 @@ struct FencedCodePageRender<'a> {
     page_end: usize,
     width: usize,
     palette: TerminalPalette,
+    working_dir: Option<&'a Path>,
+}
+
+#[derive(Clone, Copy)]
+struct AssistantProjectionRenderContext<'a> {
+    source: &'a str,
+    pages: &'a AssistantProjectionPageCache,
+    width: usize,
+    palette: TerminalPalette,
+    working_dir: Option<&'a Path>,
 }
 
 #[derive(Debug)]
 struct ParserProjectionBlock {
     kind: ParserProjectionBlockKind,
     range: Range<usize>,
+    list_group: Option<usize>,
 }
 
 #[derive(Debug)]
 enum ParserProjectionBlockKind {
     Heading,
-    List,
+    ListItem,
     Paragraph,
     FencedCode,
 }
@@ -99,7 +173,7 @@ impl ParserProjectionBlockKind {
     fn markdown_block_kind(&self) -> MarkdownBlockKind {
         match self {
             Self::Heading => MarkdownBlockKind::Heading,
-            Self::List => MarkdownBlockKind::List,
+            Self::ListItem => MarkdownBlockKind::List,
             Self::Paragraph => MarkdownBlockKind::Paragraph,
             Self::FencedCode => MarkdownBlockKind::Code,
         }
@@ -126,15 +200,21 @@ impl AssistantMessageRenderProjection {
     }
 
     pub(crate) fn line_at(&self, index: usize) -> Option<Line<'static>> {
-        let (block_index, block) = self.block_for_line(index)?;
-        block.line_at(
-            &self.source,
-            &self.pages,
-            block_index,
-            self.width,
-            self.palette,
-            index - block.start_line,
-        )
+        let block_match = self.block_for_line(index);
+        debug_assert!(
+            block_match.is_some() || index >= self.line_count,
+            "projection index {index} is inside line_count {} but outside every block",
+            self.line_count,
+        );
+        let (block_index, block) = block_match?;
+        let context = AssistantProjectionRenderContext {
+            source: self.source.as_ref(),
+            pages: &self.pages,
+            width: self.width,
+            palette: self.palette,
+            working_dir: self.working_dir.as_deref(),
+        };
+        block.line_at(context, block_index, index - block.start_line)
     }
 
     pub(crate) fn plain_line_at(&self, index: usize) -> Option<String> {
@@ -148,10 +228,11 @@ impl AssistantMessageRenderProjection {
     pub(crate) fn estimated_render_ui_bytes(&self) -> usize {
         let pages = self.pages.borrow();
         let cached_page_bytes = pages
+            .pages
             .values()
             .map(|page| estimated_page_bytes(page.as_slice()))
             .sum::<usize>();
-        let page_map_bytes = pages.capacity()
+        let page_map_bytes = pages.pages.storage_capacity()
             * (std::mem::size_of::<AssistantProjectionPageKey>()
                 + std::mem::size_of::<AssistantProjectionPage>());
 
@@ -165,6 +246,26 @@ impl AssistantMessageRenderProjection {
                 .sum::<usize>()
             + page_map_bytes
             + cached_page_bytes
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cached_page_count_for_test(&self) -> usize {
+        self.pages.borrow().pages.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn max_markdown_materialization_lines_for_test(&self) -> usize {
+        self.blocks
+            .iter()
+            .filter_map(|block| {
+                matches!(
+                    block.kind,
+                    AssistantProjectedBlockKind::MarkdownSnippet { .. }
+                )
+                .then_some(block.line_count.saturating_sub(block.leading_blank_lines))
+            })
+            .max()
+            .unwrap_or(0)
     }
 
     fn block_for_line(&self, index: usize) -> Option<(usize, &AssistantProjectedBlock)> {
@@ -195,9 +296,10 @@ impl AssistantProjectedBlock {
         range: Range<usize>,
         width: usize,
         palette: TerminalPalette,
+        working_dir: Option<&Path>,
     ) -> Option<Self> {
         let snippet = &source[range.clone()];
-        let (line_count, char_len) = render_markdown_metrics(snippet, width, palette);
+        let (line_count, char_len) = render_markdown_metrics(snippet, width, palette, working_dir);
         (line_count > 0).then(|| Self {
             start_line,
             line_count: line_count.saturating_add(leading_blank_lines),
@@ -254,11 +356,8 @@ impl AssistantProjectedBlock {
 
     fn line_at(
         &self,
-        source: &str,
-        pages: &AssistantProjectionPageCache,
+        context: AssistantProjectionRenderContext<'_>,
         block_index: usize,
-        width: usize,
-        palette: TerminalPalette,
         relative_line: usize,
     ) -> Option<Line<'static>> {
         if relative_line >= self.line_count {
@@ -267,22 +366,28 @@ impl AssistantProjectedBlock {
 
         let page_index = relative_line / ASSISTANT_PROJECTION_PAGE_LINES;
         let page_offset = relative_line % ASSISTANT_PROJECTION_PAGE_LINES;
-        let page = self.materialized_page(source, pages, block_index, page_index, width, palette);
-        page.get(page_offset).cloned()
+        let page = self.materialized_page(context, block_index, page_index);
+        let line = page.get(page_offset).cloned();
+        debug_assert!(
+            line.is_some(),
+            "projection block {block_index} start={} count={} leading={} relative={relative_line} page={page_index} offset={page_offset} cached_page_len={}",
+            self.start_line,
+            self.line_count,
+            self.leading_blank_lines,
+            page.len(),
+        );
+        line
     }
 
     fn materialized_page(
         &self,
-        source: &str,
-        pages: &AssistantProjectionPageCache,
+        context: AssistantProjectionRenderContext<'_>,
         block_index: usize,
         page_index: usize,
-        width: usize,
-        palette: TerminalPalette,
     ) -> AssistantProjectionPage {
         let cache_key = (block_index, page_index);
-        if let Some(page) = pages.borrow().get(&cache_key) {
-            return Rc::clone(page);
+        if let Some(page) = context.pages.borrow_mut().get(cache_key) {
+            return page;
         }
 
         let page_start = page_index * ASSISTANT_PROJECTION_PAGE_LINES;
@@ -301,8 +406,13 @@ impl AssistantProjectedBlock {
                     .map(|_| Line::raw(""))
                     .collect(),
                 AssistantProjectedBlockKind::MarkdownSnippet { range } => {
-                    let snippet = &source[range.clone()];
-                    let lines = render_markdown_lines(snippet, width, palette);
+                    let snippet = &context.source[range.clone()];
+                    let lines = render_markdown_lines(
+                        snippet,
+                        context.width,
+                        context.palette,
+                        context.working_dir,
+                    );
                     let end = content_end.min(lines.len());
                     if content_start >= end {
                         Vec::new()
@@ -316,21 +426,30 @@ impl AssistantProjectedBlock {
                     line_ranges,
                     line_prefix_sums,
                 } => render_fenced_code_page(FencedCodePageRender {
-                    source,
+                    source: context.source,
                     marker,
                     info_range,
                     line_ranges,
                     line_prefix_sums,
                     page_start: content_start,
                     page_end: content_end,
-                    width,
-                    palette,
+                    width: context.width,
+                    palette: context.palette,
+                    working_dir: context.working_dir,
                 }),
             });
         }
 
+        debug_assert_eq!(
+            lines.len(),
+            page_end.saturating_sub(page_start),
+            "projection block {block_index} page {page_index} materialized an inconsistent line count"
+        );
         let page = Rc::new(lines);
-        pages.borrow_mut().insert(cache_key, Rc::clone(&page));
+        context
+            .pages
+            .borrow_mut()
+            .insert(cache_key, Rc::clone(&page));
         page
     }
 
@@ -354,42 +473,58 @@ pub(super) fn render_assistant_message_projection(
     content: Rc<str>,
     width: u16,
     palette: TerminalPalette,
-) -> Option<AssistantMessageRenderProjection> {
-    if content.len() < ASSISTANT_PROJECTION_MIN_BYTES || content.contains('\t') {
-        return None;
+    working_dir: Option<Rc<Path>>,
+) -> AssistantProjectionOutcome {
+    if content.len() < ASSISTANT_PROJECTION_MIN_BYTES {
+        return AssistantProjectionOutcome::Fallback(
+            AssistantProjectionFallbackReason::BelowThreshold,
+        );
+    }
+    if content.contains('\t') {
+        return AssistantProjectionOutcome::Fallback(AssistantProjectionFallbackReason::Tab);
     }
 
     let width = assistant_message_content_width(width);
-    let blocks = build_common_markdown_projection_blocks(content.as_ref(), width, palette)?;
+    let blocks = match build_common_markdown_projection_blocks(
+        content.as_ref(),
+        width,
+        palette,
+        working_dir.as_deref(),
+    ) {
+        Ok(blocks) => blocks,
+        Err(reason) => return AssistantProjectionOutcome::Fallback(reason),
+    };
     let line_count = blocks
         .last()
         .map(|block| block.start_line + block.line_count)
         .unwrap_or(0);
     let plain_text_char_len = blocks.iter().map(|block| block.char_len).sum();
 
-    Some(AssistantMessageRenderProjection {
+    AssistantProjectionOutcome::Projected(Box::new(AssistantMessageRenderProjection {
         source: content,
+        working_dir,
         width,
         palette,
         blocks,
-        pages: RefCell::new(HashMap::new()),
+        pages: RefCell::new(AssistantProjectionPageStore::default()),
         line_count,
         plain_text_char_len,
-    })
+    }))
 }
 
 fn build_common_markdown_projection_blocks(
     content: &str,
     width: usize,
     palette: TerminalPalette,
-) -> Option<Vec<AssistantProjectedBlock>> {
+    working_dir: Option<&Path>,
+) -> Result<Vec<AssistantProjectedBlock>, AssistantProjectionFallbackReason> {
     if contains_table_structure(content) {
-        return None;
+        return Err(AssistantProjectionFallbackReason::Table);
     }
 
     let source_bounds = markdown_source_bounds(content);
     if source_bounds.is_empty() {
-        return None;
+        return Err(AssistantProjectionFallbackReason::EmptySource);
     }
     let leading_blank_lines = source_bounds.leading_blank_lines;
     let parser_blocks = collect_parser_projection_blocks(content, source_bounds)?;
@@ -404,9 +539,16 @@ fn build_common_markdown_projection_blocks(
 
     let mut saw_markdown_structure = false;
     let mut previous_block = None;
+    let mut previous_list_group = None;
     for parser_block in parser_blocks {
         saw_markdown_structure |= parser_block.kind.is_markdown_structure();
-        let leading_blank_lines = markdown_block_spacing_before(previous_block);
+        let leading_blank_lines = if parser_block.list_group.is_some()
+            && parser_block.list_group == previous_list_group
+        {
+            0
+        } else {
+            markdown_block_spacing_before(previous_block)
+        };
         let markdown_block_kind = parser_block.kind.markdown_block_kind();
         match parser_block.kind {
             ParserProjectionBlockKind::FencedCode => {
@@ -430,7 +572,7 @@ fn build_common_markdown_projection_blocks(
             }
             ParserProjectionBlockKind::Paragraph => {
                 if !markdown_range_lines_are_projectable(content, parser_block.range.clone()) {
-                    return None;
+                    return Err(AssistantProjectionFallbackReason::UnprojectableParagraph);
                 }
                 let block = AssistantProjectedBlock::markdown_snippet(
                     line_cursor,
@@ -439,10 +581,17 @@ fn build_common_markdown_projection_blocks(
                     parser_block.range,
                     width,
                     palette,
-                )?;
+                    working_dir,
+                )
+                .ok_or(AssistantProjectionFallbackReason::UnsupportedMarkdown)?;
+                if block.line_count.saturating_sub(block.leading_blank_lines)
+                    > ASSISTANT_PROJECTION_PAGE_LINES
+                {
+                    return Err(AssistantProjectionFallbackReason::UnprojectableParagraph);
+                }
                 push_optional_block(&mut blocks, &mut line_cursor, block);
             }
-            ParserProjectionBlockKind::Heading | ParserProjectionBlockKind::List => {
+            ParserProjectionBlockKind::Heading | ParserProjectionBlockKind::ListItem => {
                 let block = AssistantProjectedBlock::markdown_snippet(
                     line_cursor,
                     leading_blank_lines,
@@ -450,15 +599,23 @@ fn build_common_markdown_projection_blocks(
                     parser_block.range,
                     width,
                     palette,
-                )?;
+                    working_dir,
+                )
+                .ok_or(AssistantProjectionFallbackReason::UnsupportedMarkdown)?;
+                if block.line_count.saturating_sub(block.leading_blank_lines)
+                    > ASSISTANT_PROJECTION_PAGE_LINES
+                {
+                    return Err(AssistantProjectionFallbackReason::UnsupportedMarkdown);
+                }
                 push_optional_block(&mut blocks, &mut line_cursor, block);
             }
         }
         previous_block = Some(markdown_block_kind);
+        previous_list_group = parser_block.list_group;
     }
 
     if !saw_markdown_structure {
-        return None;
+        return Err(AssistantProjectionFallbackReason::NoMarkdownStructure);
     }
 
     for _ in 0..source_bounds.trailing_blank_lines {
@@ -467,15 +624,21 @@ fn build_common_markdown_projection_blocks(
         });
     }
 
-    Some(blocks)
+    debug_assert!(blocks.windows(2).all(|pair| {
+        pair[0].start_line.saturating_add(pair[0].line_count) == pair[1].start_line
+    }));
+
+    Ok(blocks)
 }
 
 fn collect_parser_projection_blocks(
     content: &str,
     source_bounds: MarkdownSourceBounds,
-) -> Option<Vec<ParserProjectionBlock>> {
+) -> Result<Vec<ParserProjectionBlock>, AssistantProjectionFallbackReason> {
     let mut blocks = Vec::new();
     let mut depth = 0usize;
+    let mut next_list_group = 0usize;
+    let mut active_list_group = None;
 
     // projection 的顶层 block 边界必须跟 eager renderer 同源，避免重新实现
     // CommonMark list/paragraph/fence 归属规则；不支持的 parser block 保守回退。
@@ -487,24 +650,43 @@ fn collect_parser_projection_blocks(
                     let kind = match tag {
                         Tag::Paragraph => ParserProjectionBlockKind::Paragraph,
                         Tag::Heading { .. } => ParserProjectionBlockKind::Heading,
-                        Tag::List(_) => ParserProjectionBlockKind::List,
+                        Tag::List(_) => {
+                            active_list_group = Some(next_list_group);
+                            next_list_group = next_list_group.saturating_add(1);
+                            depth = depth.saturating_add(1);
+                            continue;
+                        }
                         Tag::CodeBlock(CodeBlockKind::Fenced(_)) => {
                             ParserProjectionBlockKind::FencedCode
                         }
-                        _ => return None,
+                        _ => return Err(AssistantProjectionFallbackReason::UnsupportedMarkdown),
                     };
                     blocks.push(ParserProjectionBlock {
                         kind,
-                        range: trim_parser_block_range(content, range, source_bounds)?,
+                        range: trim_parser_block_range(content, range, source_bounds)
+                            .ok_or(AssistantProjectionFallbackReason::UnsupportedMarkdown)?,
+                        list_group: None,
+                    });
+                } else if depth == 1 && matches!(tag, Tag::Item) {
+                    blocks.push(ParserProjectionBlock {
+                        kind: ParserProjectionBlockKind::ListItem,
+                        range: trim_parser_block_range(content, range, source_bounds)
+                            .ok_or(AssistantProjectionFallbackReason::UnsupportedMarkdown)?,
+                        list_group: active_list_group,
                     });
                 }
                 depth = depth.saturating_add(1);
             }
             Event::End(_) => {
-                depth = depth.checked_sub(1)?;
+                depth = depth
+                    .checked_sub(1)
+                    .ok_or(AssistantProjectionFallbackReason::UnsupportedMarkdown)?;
+                if depth == 0 {
+                    active_list_group = None;
+                }
             }
             Event::Rule | Event::Html(_) | Event::InlineHtml(_) | Event::DisplayMath(_) => {
-                return None;
+                return Err(AssistantProjectionFallbackReason::UnsupportedMarkdown);
             }
             Event::Text(_)
             | Event::Code(_)
@@ -516,7 +698,11 @@ fn collect_parser_projection_blocks(
         }
     }
 
-    (!blocks.is_empty()).then_some(blocks)
+    if blocks.is_empty() {
+        Err(AssistantProjectionFallbackReason::NoMarkdownStructure)
+    } else {
+        Ok(blocks)
+    }
 }
 
 fn trim_parser_block_range(
@@ -584,26 +770,38 @@ fn collect_source_lines_in_range(
 fn projectable_fenced_code_block(
     content: &str,
     range: Range<usize>,
-) -> Option<FencedCodeSourceBlock<'_>> {
+) -> Result<FencedCodeSourceBlock<'_>, AssistantProjectionFallbackReason> {
     let source_lines = collect_source_lines_in_range(content, range);
-    let opener = source_lines.first().copied()?;
-    let (marker, info_range) = markdown_fence_opener(opener)?;
-    let closer = source_lines.last().copied()?;
+    let opener = source_lines
+        .first()
+        .copied()
+        .ok_or(AssistantProjectionFallbackReason::InvalidFence)?;
+    let (marker, info_range) =
+        markdown_fence_opener(opener).ok_or(AssistantProjectionFallbackReason::InvalidFence)?;
+    let closer = source_lines
+        .last()
+        .copied()
+        .ok_or(AssistantProjectionFallbackReason::InvalidFence)?;
     if !is_markdown_fence_closer(closer.text, marker) {
-        return None;
+        return Err(AssistantProjectionFallbackReason::InvalidFence);
     }
     let code_lines = source_lines
-        .get(1..source_lines.len().checked_sub(1)?)
+        .get(
+            1..source_lines
+                .len()
+                .checked_sub(1)
+                .ok_or(AssistantProjectionFallbackReason::InvalidFence)?,
+        )
         .unwrap_or_default()
         .to_vec();
     if code_lines.iter().all(|line| line.text.is_empty()) {
-        return None;
+        return Err(AssistantProjectionFallbackReason::InvalidFence);
     }
     if fenced_code_requires_full_context(&content[info_range.clone()], &code_lines) {
-        return None;
+        return Err(AssistantProjectionFallbackReason::StatefulFence);
     }
 
-    Some(FencedCodeSourceBlock {
+    Ok(FencedCodeSourceBlock {
         marker,
         info_range,
         code_lines,
@@ -704,7 +902,50 @@ fn render_fenced_code_page(request: FencedCodePageRender<'_>) -> Vec<Line<'stati
     snippet.push('\n');
     snippet.push_str(request.marker);
 
-    render_markdown_lines(&snippet, request.width, request.palette)
+    let lines = render_markdown_lines(
+        &snippet,
+        request.width,
+        request.palette,
+        request.working_dir,
+    )
+    .into_iter()
+    .skip(first_offset)
+    .take(page_line_count)
+    .collect::<Vec<_>>();
+    if lines.len() == page_line_count {
+        return lines;
+    }
+
+    // Markdown renderer 会规整整段空白 fenced content；projection 的坐标系则必须
+    // 为每个源码空行保留一行。仅在批量渲染破坏固定页长时按源码行回退，普通页仍走
+    // 单次批量渲染的热路径。
+    let mut source_lines = Vec::new();
+    for range in &request.line_ranges[first_line..=last_line] {
+        let source_line = &request.source[range.clone()];
+        if source_line.is_empty() {
+            source_lines.push(Line::raw(""));
+            continue;
+        }
+
+        let mut line_snippet = String::new();
+        line_snippet.push_str(request.marker);
+        line_snippet.push_str(&request.source[request.info_range.clone()]);
+        line_snippet.push('\n');
+        line_snippet.push_str(source_line);
+        line_snippet.push('\n');
+        line_snippet.push_str(request.marker);
+        let expected_line_count = hard_wrapped_line_count(source_line, request.width);
+        let mut rendered = render_markdown_lines(
+            &line_snippet,
+            request.width,
+            request.palette,
+            request.working_dir,
+        );
+        rendered.resize(expected_line_count, Line::raw(""));
+        source_lines.extend(rendered.into_iter().take(expected_line_count));
+    }
+
+    source_lines
         .into_iter()
         .skip(first_offset)
         .take(page_line_count)

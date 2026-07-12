@@ -10,6 +10,8 @@ use runtime_domain::{envinfo, paths::DataDirResolution, phrases};
 use session_store::{LocalSessionStore, SessionHeader, SessionId, SessionStore};
 use terminal_ui::{self, StartupBannerOptions};
 
+pub use terminal_ui::install_terminal_panic_hook;
+
 mod dynamic_environment;
 mod options_mapping;
 mod precheck;
@@ -167,6 +169,7 @@ pub fn run_with_writer<W: Write>(
         load_models_and_phrases(working_dir, data_dir_resolution)?;
     let mut model_options =
         model_options_from_config_and_models(tui_config, &loaded_models, &loaded_phrases);
+    model_options.working_dir = working_dir.map(std::path::Path::to_path_buf);
     let mut runtime_options = AppRuntimeOptions {
         loaded_models: loaded_models.clone(),
         hunea_config_dir: data_dir_resolution.config_dir().to_path_buf(),
@@ -211,6 +214,7 @@ pub fn run_with_config_writer<W: Write>(
         load_models_and_phrases(working_dir, data_dir_resolution)?;
     let mut model_options =
         model_options_from_app_config_and_models(config, &loaded_models, &loaded_phrases);
+    model_options.working_dir = working_dir.map(std::path::Path::to_path_buf);
     let mut runtime_options =
         runtime_options_from_app_config_and_models(config, &loaded_models, data_dir_resolution);
     attach_default_session_persistence(
@@ -307,6 +311,7 @@ mod tests {
     fn model_options_from_config_carries_mouse_selection_copy_flag() {
         let options = model_options_from_config(&TuiConfig {
             user_input_style: UserInputStyle::Cx,
+            motion: app_config::appconfig::MotionMode::Full,
             status_line: Vec::new(),
             status_line_2: Vec::new(),
             external_editor: Vec::new(),
@@ -402,6 +407,7 @@ mod tests {
     fn model_options_from_config_carries_swap_enter_and_send_flag() {
         let options = model_options_from_config(&TuiConfig {
             user_input_style: UserInputStyle::Cx,
+            motion: app_config::appconfig::MotionMode::Full,
             status_line: Vec::new(),
             status_line_2: Vec::new(),
             external_editor: Vec::new(),
@@ -428,6 +434,7 @@ mod tests {
     fn model_options_from_config_carries_ctrl_c_clears_input_flag() {
         let options = model_options_from_config(&TuiConfig {
             user_input_style: UserInputStyle::Cx,
+            motion: app_config::appconfig::MotionMode::Full,
             status_line: Vec::new(),
             status_line_2: Vec::new(),
             external_editor: Vec::new(),
@@ -454,6 +461,7 @@ mod tests {
     fn model_options_from_config_carries_esc_interrupt_presses() {
         let options = model_options_from_config(&TuiConfig {
             user_input_style: UserInputStyle::Cx,
+            motion: app_config::appconfig::MotionMode::Full,
             status_line: Vec::new(),
             status_line_2: Vec::new(),
             external_editor: Vec::new(),
@@ -480,6 +488,7 @@ mod tests {
     fn model_options_from_config_carries_show_esc_interrupt_hint_flag() {
         let options = model_options_from_config(&TuiConfig {
             user_input_style: UserInputStyle::Cx,
+            motion: app_config::appconfig::MotionMode::Full,
             status_line: Vec::new(),
             status_line_2: Vec::new(),
             external_editor: Vec::new(),
@@ -506,6 +515,7 @@ mod tests {
     fn model_options_from_config_carries_show_reasoning_content_flag() {
         let options = model_options_from_config(&TuiConfig {
             user_input_style: UserInputStyle::Cx,
+            motion: app_config::appconfig::MotionMode::Full,
             status_line: Vec::new(),
             status_line_2: Vec::new(),
             external_editor: Vec::new(),
@@ -532,6 +542,7 @@ mod tests {
     fn model_options_from_config_carries_reasoning_display_mode() {
         let options = model_options_from_config(&TuiConfig {
             user_input_style: UserInputStyle::Cx,
+            motion: app_config::appconfig::MotionMode::Full,
             status_line: Vec::new(),
             status_line_2: Vec::new(),
             external_editor: Vec::new(),
@@ -630,6 +641,7 @@ mod tests {
         let model = Model::new(StartupBannerOptions::default());
         let config = TuiConfig {
             user_input_style: UserInputStyle::Cx,
+            motion: app_config::appconfig::MotionMode::Full,
             status_line: Vec::new(),
             status_line_2: Vec::new(),
             external_editor: Vec::new(),
@@ -658,6 +670,7 @@ mod tests {
         let model = Model::new(StartupBannerOptions::default());
         let config = TuiConfig {
             user_input_style: UserInputStyle::Cx,
+            motion: app_config::appconfig::MotionMode::Full,
             status_line: Vec::new(),
             status_line_2: Vec::new(),
             external_editor: Vec::new(),
@@ -687,6 +700,7 @@ mod tests {
     fn default_tui_config() -> TuiConfig {
         TuiConfig {
             user_input_style: UserInputStyle::Cx,
+            motion: app_config::appconfig::MotionMode::Full,
             status_line: Vec::new(),
             status_line_2: Vec::new(),
             external_editor: Vec::new(),
@@ -705,6 +719,16 @@ mod tests {
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
             esc_rewind_mode: EscRewindMode::Coarse,
         }
+    }
+
+    #[test]
+    fn model_options_map_reduced_motion_without_stringly_typed_state() {
+        let mut config = default_tui_config();
+        config.motion = app_config::appconfig::MotionMode::Reduced;
+
+        let options = model_options_from_config(&config);
+
+        assert_eq!(options.motion_mode, terminal_ui::MotionMode::Reduced);
     }
 
     fn default_runtime_config() -> RuntimeConfig {

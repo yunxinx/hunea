@@ -33,6 +33,7 @@ pub struct Config {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TuiConfig {
     pub user_input_style: UserInputStyle,
+    pub motion: MotionMode,
     pub status_line: Vec<String>,
     pub status_line_2: Vec<String>,
     pub external_editor: Vec<String>,
@@ -64,6 +65,26 @@ pub enum UserInputStyle {
     Cx,
     Cc,
     Ms,
+}
+
+/// `MotionMode` 控制TUI装饰性动画是否以完整形式运行。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MotionMode {
+    Full,
+    Reduced,
+}
+
+impl MotionMode {
+    pub(super) fn parse(value: &str) -> Result<Self, super::AppConfigError> {
+        match value {
+            "full" => Ok(Self::Full),
+            "reduced" => Ok(Self::Reduced),
+            other => Err(super::AppConfigError::InvalidMotionMode {
+                path: None,
+                value: other.to_string(),
+            }),
+        }
+    }
 }
 
 /// `EscRewindMode` 表示空 composer 下 `Esc` 进入哪类回溯交互。

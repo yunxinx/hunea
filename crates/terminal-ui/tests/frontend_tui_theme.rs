@@ -1,6 +1,7 @@
 use ratatui::style::Color;
 use terminal_ui::theme::{
-    palette_from_background, system_error_text_style, terminal_default_palette, tertiary_text_style,
+    TerminalColorCapability, palette_from_background, system_error_text_style,
+    terminal_default_palette, tertiary_text_style,
 };
 
 #[test]
@@ -22,10 +23,18 @@ fn palette_surface_preserves_the_background_hue_direction() {
 }
 
 #[test]
-fn terminal_default_palette_reports_terminal_default_mode() {
+fn palettes_expose_their_terminal_color_capability() {
+    let explicit = palette_from_background(true, Some(Color::Rgb(16, 36, 63)));
     let palette = terminal_default_palette();
 
-    assert!(palette.uses_terminal_default_colors());
+    assert_eq!(
+        explicit.color_capability(),
+        TerminalColorCapability::ExplicitRgb
+    );
+    assert_eq!(
+        palette.color_capability(),
+        TerminalColorCapability::TerminalDefault
+    );
 }
 
 #[test]

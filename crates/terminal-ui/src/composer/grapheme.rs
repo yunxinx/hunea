@@ -96,30 +96,6 @@ pub(crate) fn logical_column_for_visual_offset(
         return line.visible_start_char;
     }
 
-    if !line.column_offsets.is_empty() {
-        for (index, offset) in line.column_offsets.iter().enumerate() {
-            if *offset == visual_offset {
-                return line.visible_start_char + index;
-            }
-            if *offset >= visual_offset {
-                if index == 0 {
-                    return line.visible_start_char;
-                }
-
-                let mut boundary_index = index - 1;
-                while boundary_index > 0
-                    && line.column_offsets[boundary_index - 1]
-                        == line.column_offsets[boundary_index]
-                {
-                    boundary_index -= 1;
-                }
-                return line.visible_start_char + boundary_index;
-            }
-        }
-
-        return line.end_char;
-    }
-
     let mut consumed_width = 0;
     let mut consumed_chars = 0;
     for cluster in grapheme_clusters(&line.text) {

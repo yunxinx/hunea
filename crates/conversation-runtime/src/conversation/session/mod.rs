@@ -25,6 +25,7 @@ use super::{
     TurnExecutionError, turn::run_prepared_conversation_with_progress,
 };
 use crate::PreparedConversationRequest;
+use crate::{NotifyingSender, RuntimeEventNotifier};
 
 mod context_repair;
 mod event_apply;
@@ -70,8 +71,9 @@ impl ConversationWorkerEvent {
     }
 }
 
+type ConversationWorkerEventSender = NotifyingSender<ConversationWorkerEvent>;
+
 /// `ConversationWorker` 管理对话请求的后台 worker 与取消状态。
-#[derive(Default)]
 pub struct ConversationWorker {
     receiver: Option<Receiver<ConversationWorkerEvent>>,
     pub cancellation: Option<CancellationToken>,
@@ -81,9 +83,24 @@ pub struct ConversationWorker {
     pending_user_entry_id: Option<String>,
     session_items: Vec<PersistedConversationItem>,
     upstream_context_tokens: Option<usize>,
+    event_notifier: RuntimeEventNotifier,
 }
 
 impl ConversationWorker {
+    pub fn new(event_notifier: RuntimeEventNotifier) -> Self {
+        Self {
+            receiver: None,
+            cancellation: None,
+            target: None,
+            permission_broker: None,
+            pending_session_id: None,
+            pending_user_entry_id: None,
+            session_items: Vec::new(),
+            upstream_context_tokens: None,
+            event_notifier,
+        }
+    }
+
     pub fn start(
         &mut self,
         request: PreparedConversationRequest,
@@ -91,12 +108,14 @@ impl ConversationWorker {
         request_policy: RuntimeRequestPolicy,
     ) {
         let (sender, receiver) = mpsc::channel();
+        let sender = ConversationWorkerEventSender::new(sender, self.event_notifier.clone());
         let cancellation = CancellationToken::default();
         let thread_cancellation = cancellation.clone();
         let target = request.target();
         let permission_broker = ConversationPermissionBroker::default();
         let thread_permission_broker = permission_broker.clone();
         thread::spawn(move || {
+            let _exit_notification = sender.notify_on_drop();
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build();
@@ -194,13 +213,19 @@ impl ConversationWorker {
     }
 }
 
+impl Default for ConversationWorker {
+    fn default() -> Self {
+        Self::new(RuntimeEventNotifier::default())
+    }
+}
+
 async fn run_conversation_worker(
     request: PreparedConversationRequest,
     executor: ToolExecutorRegistry,
     request_policy: RuntimeRequestPolicy,
     cancellation: CancellationToken,
     permission_broker: ConversationPermissionBroker,
-    sender: mpsc::Sender<ConversationWorkerEvent>,
+    sender: ConversationWorkerEventSender,
 ) {
     let provider_context_items_started = Arc::new(AtomicBool::new(false));
     let provider_context_repair_ledger =
@@ -471,7 +496,7 @@ async fn run_conversation_worker(
 
 async fn send_terminal_after_session_persistence(
     session_sender: &tokio_mpsc::Sender<SessionPersistenceCommand>,
-    sender: &mpsc::Sender<ConversationWorkerEvent>,
+    sender: &ConversationWorkerEventSender,
     terminal_event: ConversationEvent,
 ) {
     let event = match flush_session_persistence(session_sender).await {
@@ -488,7 +513,7 @@ fn send_repair_items(
     sender: &tokio_mpsc::Sender<SessionPersistenceCommand>,
     content: &'static str,
     conversation_cancellation: &CancellationToken,
-    progress_sender: &mpsc::Sender<ConversationWorkerEvent>,
+    progress_sender: &ConversationWorkerEventSender,
 ) {
     for item in take_provider_context_repair_items(ledger, content) {
         if !try_send_session_persistence(
@@ -507,7 +532,7 @@ async fn retry_conversation_after_attempt(
     request_policy: &RuntimeRequestPolicy,
     cancellation: &CancellationToken,
     session_sender: &tokio_mpsc::Sender<SessionPersistenceCommand>,
-    sender: &mpsc::Sender<ConversationWorkerEvent>,
+    sender: &ConversationWorkerEventSender,
 ) -> bool {
     let retry = attempt + 1;
     let _ = sender.send(ConversationWorkerEvent::progress(
@@ -532,7 +557,7 @@ fn try_send_session_persistence(
     sender: &tokio_mpsc::Sender<SessionPersistenceCommand>,
     command: SessionPersistenceCommand,
     conversation_cancellation: &CancellationToken,
-    progress_sender: &mpsc::Sender<ConversationWorkerEvent>,
+    progress_sender: &ConversationWorkerEventSender,
 ) -> bool {
     match sender.try_send(command) {
         Ok(()) => true,

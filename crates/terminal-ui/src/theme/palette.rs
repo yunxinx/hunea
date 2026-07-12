@@ -38,6 +38,17 @@ pub struct PaletteDetection {
     pub has_dark_background: bool,
 }
 
+/// `TerminalColorCapability` 描述当前 palette 的颜色输出契约。
+///
+/// 这不是 ANSI16/ANSI256/truecolor 深度探测；当前启动流程没有足够信息可靠区分这些能力。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalColorCapability {
+    /// 终端背景已经明确，语义槽位使用与背景匹配的显式 RGB 颜色。
+    ExplicitRgb,
+    /// 背景与颜色深度未知，依赖终端默认前景/背景和 ANSI named colors。
+    TerminalDefault,
+}
+
 /// `TerminalPalette` 定义当前终端下的一组基础语义颜色。
 /// `main` 用于主体信息，`muted` 用于弱化正文，`secondary` 用于辅助信息，
 /// `tertiary` 用于更弱的状态信息，`accent` 用于面板强调线，
@@ -59,13 +70,7 @@ pub struct TerminalPalette {
     pub table_header: Color,
     pub surface: Option<Color>,
     pub has_dark_background: bool,
-    mode: PaletteMode,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PaletteMode {
-    Explicit,
-    TerminalDefault,
+    color_capability: TerminalColorCapability,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,14 +106,14 @@ pub fn terminal_default_palette() -> TerminalPalette {
         table_header: Color::Cyan,
         surface: None,
         has_dark_background: true,
-        mode: PaletteMode::TerminalDefault,
+        color_capability: TerminalColorCapability::TerminalDefault,
     }
 }
 
 impl TerminalPalette {
-    /// `uses_terminal_default_colors` 表示当前配色是否依赖终端默认前景/背景色。
-    pub fn uses_terminal_default_colors(&self) -> bool {
-        matches!(self.mode, PaletteMode::TerminalDefault)
+    /// `color_capability` 返回当前 palette 可以安全输出的颜色能力。
+    pub const fn color_capability(&self) -> TerminalColorCapability {
+        self.color_capability
     }
 
     /// `has_dark_background` 返回当前 palette 绑定的背景深浅语义。
@@ -127,7 +132,7 @@ pub(crate) fn context_budget_slot_color(
     slot: ContextBudgetColorSlot,
     palette: &TerminalPalette,
 ) -> Color {
-    if palette.uses_terminal_default_colors() {
+    if palette.color_capability() == TerminalColorCapability::TerminalDefault {
         return match slot {
             ContextBudgetColorSlot::SystemPrompt => Color::Blue,
             ContextBudgetColorSlot::SkillDiscovery => Color::Yellow,
@@ -234,7 +239,7 @@ pub fn palette_from_background(
         },
         surface: Some(surface_color(has_dark_background, background)),
         has_dark_background,
-        mode: PaletteMode::Explicit,
+        color_capability: TerminalColorCapability::ExplicitRgb,
     }
 }
 

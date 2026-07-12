@@ -207,7 +207,7 @@ pub(super) fn wait_for_runtime_idle(coordinator: &mut AppRuntimeCoordinator) {
             events.is_empty(),
             "runtime should not emit events while waiting for no-op command: {events:?}"
         );
-        if !RuntimeCoordinator::has_background_runtime(coordinator) {
+        if !coordinator.has_pending_work_for_test() {
             return;
         }
         thread::sleep(Duration::from_millis(10));

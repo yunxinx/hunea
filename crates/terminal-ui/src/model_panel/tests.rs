@@ -31,7 +31,7 @@ fn provider_refresh_success_replaces_models_and_drops_stale_selection() {
             .collect::<Vec<_>>(),
         vec!["fresh-a", "fresh-b"]
     );
-    assert_eq!(model.selected_model, None);
+    assert_eq!(model.selected_model.selection(), None);
     assert_eq!(model.model_panel.model_index, 0);
     assert_eq!(model.model_panel.scroll, 0);
     assert_eq!(model.current_status_notice_text(), "");
@@ -113,8 +113,8 @@ fn provider_refresh_failure_keeps_existing_models_and_records_error() {
         vec!["qwen3"]
     );
     assert_eq!(
-        model.selected_model,
-        Some(ModelSelection::new("local", "qwen3"))
+        model.selected_model.selection(),
+        Some(&ModelSelection::new("local", "qwen3"))
     );
     assert_eq!(model.current_status_notice_text(), "");
     assert_eq!(
@@ -126,7 +126,7 @@ fn provider_refresh_failure_keeps_existing_models_and_records_error() {
 #[test]
 fn model_panel_selection_uses_toast_not_status_notice() {
     let mut model = model_with_single_provider();
-    model.selected_model = None;
+    model.selected_model.set(None);
     model.open_model_panel();
 
     let effect = model.handle_model_panel_key(KeyEvent::from(KeyCode::Enter));

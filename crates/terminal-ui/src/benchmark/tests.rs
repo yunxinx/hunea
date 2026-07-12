@@ -1,4 +1,99 @@
+use super::tail::StreamActivityTailBench;
+use super::terminal_surface::{TerminalFlushBench, TerminalGridBench, TerminalGridScenario};
 use super::*;
+
+#[test]
+fn single_cell_terminal_diff_emits_one_put() {
+    let bench = TerminalGridBench::new(TerminalGridScenario::SingleCell, 24, 6);
+
+    let summary = bench.diff();
+
+    assert_eq!(summary.command_count, 1);
+    assert_eq!(summary.put_count, 1);
+    assert_eq!(summary.clear_to_end_count, 0);
+    assert_eq!(summary.wide_prefill_cells, 0);
+}
+
+#[test]
+fn full_screen_terminal_diff_emits_visible_grid() {
+    let bench = TerminalGridBench::new(TerminalGridScenario::FullScreen, 12, 4);
+
+    let summary = bench.diff();
+
+    assert_eq!(summary.command_count, 48);
+    assert_eq!(summary.put_count, 48);
+    assert_eq!(summary.clear_to_end_count, 0);
+}
+
+#[test]
+fn scroll_one_line_terminal_diff_changes_every_row() {
+    let bench = TerminalGridBench::new(TerminalGridScenario::ScrollOneLine, 12, 4);
+
+    let summary = bench.diff();
+
+    assert_eq!(summary.command_count, 48);
+    assert_eq!(summary.put_count, 48);
+    assert_eq!(summary.clear_to_end_count, 0);
+}
+
+#[test]
+fn terminal_flush_summary_matches_diff_and_writes_ansi() {
+    let mut bench = TerminalFlushBench::new(TerminalGridScenario::SingleCell, 24, 6);
+
+    let summary = bench.diff_and_flush();
+
+    assert_eq!(summary.commands.command_count, 1);
+    assert_eq!(summary.commands.put_count, 1);
+    assert!(summary.output_bytes > 1);
+}
+
+#[test]
+fn large_rust_code_block_fixture_is_fenced_and_scales_with_lines() {
+    let small = large_rust_code_block_fixture(8);
+    let large = large_rust_code_block_fixture(32);
+
+    assert!(small.starts_with("```rust\n"));
+    assert!(small.ends_with("```\n"));
+    assert_eq!(small.matches("let value_").count(), 8);
+    assert_eq!(large.matches("let value_").count(), 32);
+    assert!(large.len() > small.len());
+}
+
+#[test]
+fn large_rust_code_block_fixture_wraps_lines_in_function_body() {
+    let markdown = large_rust_code_block_fixture(4);
+
+    assert!(markdown.contains("fn benchmark_values() -> usize {\n"));
+    assert!(markdown.ends_with("    0\n}\n```\n"));
+}
+
+#[test]
+fn large_composer_draft_fixture_reaches_requested_size_with_wide_text() {
+    let draft = large_composer_draft_fixture(8 * 1024);
+
+    assert!(draft.len() >= 8 * 1024);
+    assert!(draft.contains('\t'));
+    assert!(draft.contains("中文"));
+    assert!(draft.contains("👨‍👩‍👧"));
+    assert!(draft.lines().count() > 32);
+}
+
+#[test]
+fn stream_activity_tail_bench_advances_real_frame_deadline() {
+    let mut bench = StreamActivityTailBench::new(8 * 1024, 64, 16);
+    let initial_frame_time = bench.frame_time();
+
+    let first = bench.rebuild_next_activity_frame();
+    let first_frame_time = bench.frame_time();
+    let second = bench.rebuild_next_activity_frame();
+
+    assert!(first_frame_time > initial_frame_time);
+    assert!(bench.frame_time() > first_frame_time);
+    assert_eq!(first, second);
+    assert!(first.line_count >= first.composer_line_count);
+    assert!(first.composer_line_count > 32);
+    assert!(first.plain_text_len >= 8 * 1024);
+}
 
 #[test]
 fn cold_resume_stress_fixture_keeps_transcript_render_cold_before_measurement() {
@@ -195,7 +290,9 @@ fn transcript_benchmark_render_summary_scales_with_item_count() {
     let mut bench = TranscriptBench::new(24, 80, default_palette());
     assert_eq!(bench.transcript.len(), 24);
 
-    let render = bench.transcript.render();
+    let render = bench
+        .transcript
+        .render(crate::frame_time::FrameRenderContext::capture());
     let summary = summarize_transcript_render(&render);
 
     assert!(
@@ -247,7 +344,8 @@ fn long_user_message_scroll_profile() {
     model.sync_command_panel_navigation();
     model.sync_composer_height();
 
-    let initial_layout = model.build_document_layout();
+    let initial_layout =
+        model.build_document_layout(crate::frame_time::FrameRenderContext::capture());
     let document_lines = initial_layout.line_count();
     let transcript_lines = initial_layout.transcript_line_count;
     model.apply_document_viewport_position(&initial_layout, 0, 0, false, true);
@@ -266,8 +364,9 @@ fn long_user_message_scroll_profile() {
         scroll_times.push(scroll_started_at.elapsed());
 
         let viewport_started_at = std::time::Instant::now();
-        let layout = model.build_document_layout();
-        let viewport = model.build_document_viewport(&layout);
+        let context = crate::frame_time::FrameRenderContext::capture();
+        let layout = model.build_document_layout(context);
+        let viewport = model.build_document_viewport(&layout, context);
         assert_eq!(viewport.lines.len(), usize::from(height));
         viewport_times.push(viewport_started_at.elapsed());
 
@@ -484,8 +583,9 @@ fn prepare_hot_path_profile_model(model: &mut Model, _width: u16, _height: u16) 
 }
 
 fn warm_hot_path_frame(model: &mut Model, frame_surface: &mut FrameSurfaceHarness, height: u16) {
-    let layout = model.build_document_layout();
-    let viewport = model.build_document_viewport(&layout);
+    let context = crate::frame_time::FrameRenderContext::capture();
+    let layout = model.build_document_layout(context);
+    let viewport = model.build_document_viewport(&layout, context);
     assert_eq!(viewport.lines.len(), usize::from(height));
     let _ = frame_surface.render_model(model);
 }
@@ -511,8 +611,9 @@ fn measure_scroll_hot_path(
         timings.scroll_times.push(scroll_started_at.elapsed());
 
         let viewport_started_at = std::time::Instant::now();
-        let layout = model.build_document_layout();
-        let viewport = model.build_document_viewport(&layout);
+        let context = crate::frame_time::FrameRenderContext::capture();
+        let layout = model.build_document_layout(context);
+        let viewport = model.build_document_viewport(&layout, context);
         assert_eq!(viewport.lines.len(), usize::from(height));
         timings.viewport_times.push(viewport_started_at.elapsed());
 
@@ -547,11 +648,14 @@ fn measure_selection_drag_hot_path(
         timings.scroll_times.push(scroll_started_at.elapsed());
 
         let viewport_started_at = std::time::Instant::now();
-        let layout = model.build_document_layout();
-        if let Some(point) = model.selection_point_for_mouse_with_layout(12, height - 1, &layout) {
+        let context = crate::frame_time::FrameRenderContext::capture();
+        let layout = model.build_document_layout(context);
+        if let Some(point) =
+            model.selection_point_for_mouse_with_layout(12, height - 1, &layout, context)
+        {
             model.update_selection_focus(point);
         }
-        let viewport = model.build_document_viewport(&layout);
+        let viewport = model.build_document_viewport(&layout, context);
         assert_eq!(viewport.lines.len(), usize::from(height));
         timings.viewport_times.push(viewport_started_at.elapsed());
 
@@ -632,7 +736,8 @@ fn single_100k_user_message_scroll_profile() {
     let sync_profile = model.sync_transcript_render_profile();
     model.sync_command_panel_navigation();
     model.sync_composer_height();
-    let layout = model.build_document_layout();
+    let context = crate::frame_time::FrameRenderContext::capture();
+    let layout = model.build_document_layout(context);
     let document_lines = layout.line_count();
     let transcript_lines = layout.transcript_line_count;
     model.apply_document_viewport_position(&layout, 0, 0, false, true);
@@ -687,7 +792,8 @@ fn huge_assistant_markdown_scroll_profile() {
     let sync_profile = model.sync_transcript_render_profile();
     model.sync_command_panel_navigation();
     model.sync_composer_height();
-    let layout = model.build_document_layout();
+    let context = crate::frame_time::FrameRenderContext::capture();
+    let layout = model.build_document_layout(context);
     let document_lines = layout.line_count();
     let transcript_lines = layout.transcript_line_count;
     model.apply_document_viewport_position(&layout, 0, 0, false, true);
@@ -736,11 +842,12 @@ fn selection_drag_mixed_long_history_profile() {
     let sync_profile = model.sync_transcript_render_profile();
     model.sync_command_panel_navigation();
     model.sync_composer_height();
-    let layout = model.build_document_layout();
+    let context = crate::frame_time::FrameRenderContext::capture();
+    let layout = model.build_document_layout(context);
     let document_lines = layout.line_count();
     let transcript_lines = layout.transcript_line_count;
     model.apply_document_viewport_position(&layout, 0, 0, false, true);
-    if let Some(point) = model.selection_point_for_mouse_with_layout(4, 0, &layout) {
+    if let Some(point) = model.selection_point_for_mouse_with_layout(4, 0, &layout, context) {
         model.start_selection(point);
     }
     drop(layout);
@@ -811,14 +918,16 @@ fn mixed_long_history_high_frequency_scroll_profile() {
     model.sync_command_panel_navigation();
     model.sync_composer_height();
 
-    let initial_layout = model.build_document_layout();
+    let initial_layout =
+        model.build_document_layout(crate::frame_time::FrameRenderContext::capture());
     let document_lines = initial_layout.line_count();
     let transcript_lines = initial_layout.transcript_line_count;
     model.apply_document_viewport_position(&initial_layout, 0, 0, false, true);
     drop(initial_layout);
 
-    let warm_layout = model.build_document_layout();
-    let warm_viewport = model.build_document_viewport(&warm_layout);
+    let warm_context = crate::frame_time::FrameRenderContext::capture();
+    let warm_layout = model.build_document_layout(warm_context);
+    let warm_viewport = model.build_document_viewport(&warm_layout, warm_context);
     assert_eq!(warm_viewport.lines.len(), usize::from(height));
     let mut frame_surface = FrameSurfaceHarness::new(width, height);
     let _ = frame_surface.render_model(&mut model);
@@ -835,8 +944,9 @@ fn mixed_long_history_high_frequency_scroll_profile() {
         scroll_times.push(scroll_started_at.elapsed());
 
         let viewport_started_at = std::time::Instant::now();
-        let layout = model.build_document_layout();
-        let viewport = model.build_document_viewport(&layout);
+        let context = crate::frame_time::FrameRenderContext::capture();
+        let layout = model.build_document_layout(context);
+        let viewport = model.build_document_viewport(&layout, context);
         assert_eq!(viewport.lines.len(), usize::from(height));
         viewport_times.push(viewport_started_at.elapsed());
 
@@ -941,7 +1051,7 @@ fn document_pipeline_scroll_profile_for_100000_items() {
     model.sync_command_panel_navigation();
     model.sync_composer_height();
 
-    let layout = model.build_document_layout();
+    let layout = model.build_document_layout(crate::frame_time::FrameRenderContext::capture());
     let document_lines = layout.line_count();
     let transcript_lines = layout.transcript_line_count;
     model.apply_document_viewport_position(&layout, 0, 0, false, true);
@@ -996,7 +1106,7 @@ fn standard_benchmark_fast_estimates_match_exact_line_counts() {
 
     for index in 0..30 {
         let (sender, content) = standard_benchmark_message(index);
-        let mut transcript = Transcript::new(palette);
+        let mut transcript = Transcript::new(palette, None);
         transcript.set_gap(0);
         transcript.set_width(width);
         transcript.append_message_with_style_mode(sender, content, StyleMode::Cx);

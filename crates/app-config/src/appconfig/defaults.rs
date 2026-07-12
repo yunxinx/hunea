@@ -1,6 +1,6 @@
 use super::{
     BRANCH_PICKER_LIST_ROWS_DEFAULT, COMPOSER_UNDO_DEFAULT_LIMIT, Config, DebugConfig,
-    MESSAGE_HISTORY_LIMIT_DEFAULT, ReasoningContentDisplay, RuntimeConfig, TuiConfig,
+    MESSAGE_HISTORY_LIMIT_DEFAULT, MotionMode, ReasoningContentDisplay, RuntimeConfig, TuiConfig,
     UserInputStyle,
 };
 
@@ -9,6 +9,7 @@ impl Config {
         Self {
             tui: TuiConfig {
                 user_input_style: UserInputStyle::Cx,
+                motion: MotionMode::Full,
                 status_line: Vec::new(),
                 status_line_2: Vec::new(),
                 external_editor: Vec::new(),

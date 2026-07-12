@@ -128,18 +128,9 @@ fn visual_offset_for_logical_column(line: &VisualLine, logical_column: usize) ->
     if logical_column <= line.visible_start_char {
         return 0;
     }
-    if logical_column >= line.end_char {
-        return line
-            .column_offsets
-            .last()
-            .copied()
-            .unwrap_or_else(|| measure_width(&line.text));
-    }
-
-    let index = logical_column.saturating_sub(line.visible_start_char);
-    if index < line.column_offsets.len() {
-        return line.column_offsets[index];
-    }
-
-    measure_width(&line.text)
+    let target_chars = logical_column
+        .min(line.end_char)
+        .saturating_sub(line.visible_start_char);
+    let prefix = line.text.chars().take(target_chars).collect::<String>();
+    measure_width(&prefix)
 }

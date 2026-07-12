@@ -17,6 +17,7 @@ fn conversation_runtime_clears_receiver_after_terminal_event() {
         pending_user_entry_id: None,
         session_items: Vec::new(),
         upstream_context_tokens: None,
+        event_notifier: RuntimeEventNotifier::default(),
     };
 
     assert_eq!(
@@ -39,6 +40,7 @@ fn conversation_runtime_keeps_receiver_after_retry_event() {
         pending_user_entry_id: None,
         session_items: Vec::new(),
         upstream_context_tokens: None,
+        event_notifier: RuntimeEventNotifier::default(),
     };
 
     sender
@@ -89,6 +91,7 @@ fn conversation_runtime_keeps_receiver_after_token_estimate_event() {
         pending_user_entry_id: None,
         session_items: Vec::new(),
         upstream_context_tokens: None,
+        event_notifier: RuntimeEventNotifier::default(),
     };
 
     sender
@@ -116,6 +119,7 @@ fn conversation_runtime_keeps_receiver_after_text_delta_event() {
         pending_user_entry_id: None,
         session_items: Vec::new(),
         upstream_context_tokens: None,
+        event_notifier: RuntimeEventNotifier::default(),
     };
 
     sender
@@ -147,6 +151,7 @@ fn conversation_runtime_buffers_session_events_without_ui_event() {
         pending_user_entry_id: None,
         session_items: Vec::new(),
         upstream_context_tokens: None,
+        event_notifier: RuntimeEventNotifier::default(),
     };
     let message = ConversationItem::text(Role::Assistant, "stored");
 
@@ -194,6 +199,7 @@ fn conversation_runtime_preserves_turn_entry_id_when_retry_replays_turn_start() 
         pending_user_entry_id: None,
         session_items: Vec::new(),
         upstream_context_tokens: None,
+        event_notifier: RuntimeEventNotifier::default(),
     };
 
     sender
@@ -232,6 +238,7 @@ fn conversation_interrupt_keeps_receiver_until_worker_terminal_event() {
         pending_user_entry_id: None,
         session_items: Vec::new(),
         upstream_context_tokens: None,
+        event_notifier: RuntimeEventNotifier::default(),
     };
 
     assert!(runtime.interrupt());

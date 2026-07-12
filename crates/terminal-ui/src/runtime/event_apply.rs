@@ -438,7 +438,8 @@ impl Model {
         I: IntoIterator<Item = T>,
         T: TranscriptReplayItemSource,
     {
-        let mut transcript = crate::transcript::Transcript::new(self.palette);
+        let mut transcript =
+            crate::transcript::Transcript::new(self.palette, self.working_dir.clone());
         transcript.set_gap(1);
         if self.has_window {
             transcript.set_width(self.width);
@@ -473,7 +474,7 @@ impl Model {
             return;
         };
 
-        self.selected_model = Some(selection);
+        self.selected_model.set(Some(selection));
         self.requires_model_selection = true;
         self.bump_status_line_revision();
     }

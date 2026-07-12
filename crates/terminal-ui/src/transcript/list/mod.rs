@@ -2,6 +2,7 @@
 
 use std::{
     collections::{BTreeSet, HashMap},
+    path::Path,
     rc::Rc,
     time::{Duration, Instant},
 };
@@ -60,9 +61,11 @@ pub(crate) enum TranscriptItem {
 #[derive(Debug, Clone)]
 pub(crate) struct Transcript {
     items: Rc<Vec<Rc<TranscriptItem>>>,
+    working_dir: Option<Rc<Path>>,
     gap: usize,
     width: u16,
     palette: TerminalPalette,
+    motion_mode: crate::MotionMode,
     tool_activity_render_mode: ToolActivityRenderMode,
     reasoning_render_mode: ReasoningRenderMode,
     items_version: usize,
@@ -73,9 +76,11 @@ pub(crate) struct Transcript {
 impl PartialEq for Transcript {
     fn eq(&self, other: &Self) -> bool {
         self.items == other.items
+            && self.working_dir == other.working_dir
             && self.gap == other.gap
             && self.width == other.width
             && self.palette == other.palette
+            && self.motion_mode == other.motion_mode
             && self.tool_activity_render_mode == other.tool_activity_render_mode
             && self.reasoning_render_mode == other.reasoning_render_mode
     }
@@ -85,18 +90,28 @@ impl Eq for Transcript {}
 
 impl Transcript {
     /// `new` 创建一个空 transcript。
-    pub(crate) fn new(palette: TerminalPalette) -> Self {
+    pub(crate) fn new(palette: TerminalPalette, working_dir: Option<Rc<Path>>) -> Self {
         Self {
             items: Rc::new(Vec::new()),
+            working_dir,
             gap: 1,
             width: DEFAULT_RENDER_WIDTH as u16,
             palette,
+            motion_mode: crate::MotionMode::Full,
             tool_activity_render_mode: ToolActivityRenderMode::Compact,
             reasoning_render_mode: ReasoningRenderMode::Compact,
             items_version: 1,
             metrics_cache: TranscriptItemMetricsCache::default(),
             screen_cache: ScreenRenderCache::default(),
         }
+    }
+
+    pub(crate) fn set_motion_mode(&mut self, motion_mode: crate::MotionMode) {
+        if self.motion_mode == motion_mode {
+            return;
+        }
+        self.motion_mode = motion_mode;
+        self.screen_cache.invalidate_all();
     }
 
     /// `set_gap` 设置项与项之间的空行数。
@@ -145,7 +160,7 @@ impl Transcript {
     /// `append_message` 追加一条消息项。
     #[cfg(test)]
     pub(crate) fn append_message(&mut self, sender: Sender, content: impl Into<String>) {
-        self.push_item(TranscriptItem::Message(MessageItem::new(sender, content)));
+        self.append_message_with_style_mode(sender, content, StyleMode::Cx);
     }
 
     /// `append_message_with_style_mode` 追加一条带样式模式的消息项。
@@ -172,6 +187,7 @@ impl Transcript {
                 content,
                 style_mode,
                 source_message,
+                self.working_dir.clone(),
             ),
         ));
     }
@@ -212,7 +228,8 @@ impl Transcript {
             return;
         }
 
-        let mut item = ReasoningMessageItem::new(content, display_mode, duration);
+        let mut item =
+            ReasoningMessageItem::new(content, display_mode, duration, self.working_dir.clone());
         let _ = item.set_render_mode(self.reasoning_render_mode);
         self.push_item(TranscriptItem::Reasoning(item));
     }
@@ -642,7 +659,10 @@ impl Transcript {
     /// `render` 渲染整个 transcript，并返回带锚点的稳定结果。
     /// 这条路径保留给显式需要完整 transcript block/anchor 的冷路径；steady-state
     /// document 主路径应继续走 `item_metrics_index()` 与局部 viewport materialization。
-    pub(crate) fn render(&mut self) -> Rc<RenderResult> {
+    pub(crate) fn render(
+        &mut self,
+        context: crate::frame_time::FrameRenderContext,
+    ) -> Rc<RenderResult> {
         let width = self.render_width();
         if self
             .screen_cache
@@ -680,7 +700,8 @@ impl Transcript {
         };
         self.screen_cache.begin_recent_limit_batch();
         let index = self.item_metrics_index();
-        let result = Rc::new(self.build_render_result(width, dirty_from, append_start_line, index));
+        let result =
+            Rc::new(self.build_render_result(width, dirty_from, append_start_line, index, context));
         self.screen_cache.store_result(
             width,
             self.gap,

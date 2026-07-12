@@ -1,6 +1,9 @@
 use std::time::{Duration, Instant};
 
-use crate::document::{DocumentLayout, DocumentLineAnchor};
+use crate::{
+    document::{DocumentLayout, DocumentLineAnchor},
+    frame_time::FrameRenderContext,
+};
 
 /// `SELECTION_MULTI_CLICK_WINDOW` 表示双击/三击识别窗口。
 pub(crate) const SELECTION_MULTI_CLICK_WINDOW: Duration = Duration::from_millis(500);
@@ -95,9 +98,10 @@ impl DocumentSelectionRange {
     pub(crate) fn ordered_points(
         self,
         layout: &DocumentLayout,
+        context: FrameRenderContext,
     ) -> Option<(ResolvedSelectionPoint, ResolvedSelectionPoint)> {
-        let mut start = layout.resolve_selection_point(self.anchor)?;
-        let mut end = layout.resolve_selection_point(self.focus)?;
+        let mut start = layout.resolve_selection_point(self.anchor, context)?;
+        let mut end = layout.resolve_selection_point(self.focus, context)?;
         if end.line < start.line || (end.line == start.line && end.column < start.column) {
             std::mem::swap(&mut start, &mut end);
         }
@@ -167,12 +171,13 @@ impl SelectionState {
     pub(crate) fn ordered_points(
         self,
         layout: &DocumentLayout,
+        context: FrameRenderContext,
     ) -> Option<(ResolvedSelectionPoint, ResolvedSelectionPoint)> {
         if !self.active {
             return None;
         }
 
-        self.range.ordered_points(layout)
+        self.range.ordered_points(layout, context)
     }
 }
 
@@ -240,6 +245,7 @@ pub(crate) fn selection_auto_scroll_direction_for_mouse_row(
 mod tests {
     use super::*;
     use crate::document::{DocumentAnchorRegion, DocumentLayout};
+    use crate::selection::SelectableLineRange;
 
     fn test_anchor(line: usize) -> DocumentLineAnchor {
         DocumentLineAnchor {
@@ -252,15 +258,18 @@ mod tests {
     fn selection_test_layout(line_count: usize) -> DocumentLayout {
         let lines = vec![""; line_count];
         let mut layout = DocumentLayout::with_test_plain_lines(0, &lines);
-        layout.tail = std::rc::Rc::new(crate::document::DocumentTailLayout {
-            anchors: (0..line_count).map(test_anchor).collect(),
-            lines: lines
+        layout.tail = std::rc::Rc::new(crate::document::DocumentTailLayout::from_test_parts(
+            lines
                 .iter()
                 .map(|line| ratatui::text::Line::raw((*line).to_string()))
                 .collect(),
-            text_lines: lines.iter().map(|line| (*line).to_string()).collect(),
-            ..layout.tail.as_ref().clone()
-        });
+            lines.iter().map(|line| (*line).to_string()).collect(),
+            (0..line_count).map(test_anchor).collect(),
+            vec![SelectableLineRange::default(); line_count],
+            layout.tail.composer_slot,
+            layout.tail.cursor_x,
+            layout.tail.cursor_y,
+        ));
         layout
     }
 
@@ -283,7 +292,7 @@ mod tests {
         assert!(!selection.is_dragging());
         assert_eq!(selection.focus(), focus);
         assert_eq!(
-            selection.ordered_points(&layout),
+            selection.ordered_points(&layout, FrameRenderContext::capture()),
             Some((
                 ResolvedSelectionPoint::new(2, 3),
                 ResolvedSelectionPoint::new(4, 6)
@@ -319,7 +328,7 @@ mod tests {
         );
 
         let (start, end) = selection
-            .ordered_points(&layout)
+            .ordered_points(&layout, FrameRenderContext::capture())
             .expect("active multi-cell selection should normalize");
         assert_eq!(start, ResolvedSelectionPoint::new(2, 3));
         assert_eq!(end, ResolvedSelectionPoint::new(4, 7));

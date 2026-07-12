@@ -5,6 +5,8 @@ use std::time::{Duration, Instant};
 use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 use tachyonfx::{Effect, Interpolation, Motion, fx};
 
+use crate::frame_time::next_animation_frame_deadline;
+
 /// 启动 banner 动画期间的重绘节奏。
 pub(crate) const STARTUP_BANNER_ENTRANCE_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
@@ -34,9 +36,11 @@ impl Default for StartupBannerEntranceState {
 }
 
 impl StartupBannerEntranceState {
-    pub(crate) fn frame_interval_at(&self, _now: Instant) -> Option<Duration> {
-        matches!(self.phase, StartupBannerEntrancePhase::Running)
-            .then_some(STARTUP_BANNER_ENTRANCE_FRAME_INTERVAL)
+    pub(crate) fn next_frame_deadline_at(&self, now: Instant) -> Option<Instant> {
+        let last_frame_at = self
+            .last_frame_at
+            .filter(|_| matches!(self.phase, StartupBannerEntrancePhase::Running))?;
+        next_animation_frame_deadline(last_frame_at, now, STARTUP_BANNER_ENTRANCE_FRAME_INTERVAL)
     }
 
     pub(crate) fn apply_at(
@@ -106,14 +110,32 @@ fn startup_banner_entrance_effect(slide_fill_color: Color) -> Effect {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use ratatui::style::Color;
 
-    use super::startup_banner_entrance_effect;
+    use super::{
+        STARTUP_BANNER_ENTRANCE_FRAME_INTERVAL, StartupBannerEntranceState,
+        startup_banner_entrance_effect,
+    };
 
     #[test]
     fn entrance_uses_only_background_slide_in_effect() {
         let effect = startup_banner_entrance_effect(Color::from_u32(0x1d2021));
 
         assert_eq!(effect.name(), "slide_in");
+    }
+
+    #[test]
+    fn entrance_next_frame_deadline_is_anchored_to_last_frame() {
+        let mut state = StartupBannerEntranceState::default();
+        let started_at = Instant::now();
+        state.start_for_test(started_at);
+        let now = started_at + Duration::from_millis(10);
+
+        assert_eq!(
+            state.next_frame_deadline_at(now),
+            Some(started_at + STARTUP_BANNER_ENTRANCE_FRAME_INTERVAL),
+        );
     }
 }

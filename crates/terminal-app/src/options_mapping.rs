@@ -6,8 +6,8 @@ use app_config::appconfig::{
 use conversation_runtime::models::LoadedModelCatalog;
 use runtime_domain::{envinfo, paths::DataDirResolution, phrases::LoadedStatusPhrases};
 use terminal_ui::{
-    EscRewindMode as TuiEscRewindMode, ModelOptions, ReasoningDisplayMode, RuntimeRequestPolicy,
-    StatusLineItem, StyleMode,
+    EscRewindMode as TuiEscRewindMode, ModelOptions, MotionMode as TuiMotionMode,
+    ReasoningDisplayMode, RuntimeRequestPolicy, StatusLineItem, StyleMode,
 };
 use tool_runtime::builtin::ManagedSearchToolConfig;
 
@@ -18,6 +18,13 @@ fn style_mode_from_config(style: UserInputStyle) -> StyleMode {
         UserInputStyle::Cx => StyleMode::Cx,
         UserInputStyle::Cc => StyleMode::Cc,
         UserInputStyle::Ms => StyleMode::Ms,
+    }
+}
+
+fn motion_mode_from_config(mode: app_config::appconfig::MotionMode) -> TuiMotionMode {
+    match mode {
+        app_config::appconfig::MotionMode::Full => TuiMotionMode::Full,
+        app_config::appconfig::MotionMode::Reduced => TuiMotionMode::Reduced,
     }
 }
 
@@ -119,7 +126,9 @@ fn model_options_from_configs(
     loaded_phrases: &LoadedStatusPhrases,
 ) -> ModelOptions {
     ModelOptions {
+        working_dir: None,
         style_mode: style_mode_from_config(tui_config.user_input_style),
+        motion_mode: motion_mode_from_config(tui_config.motion),
         status_line_items: status_line_items_from_config(&tui_config.status_line),
         status_line_2_items: status_line_items_from_config(&tui_config.status_line_2),
         external_editor: tui_config.external_editor.clone(),

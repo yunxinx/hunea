@@ -7,6 +7,8 @@ mod mouse_interaction;
 mod render;
 mod viewport;
 
+use std::rc::Rc;
+
 #[cfg(test)]
 mod tests;
 
@@ -22,27 +24,23 @@ use self::{
         measure_width,
     },
     image_placeholder::ComposerImageAttachment,
-    layout::{visual_line_count, visual_lines_for_text},
-    render::{DocumentRenderResult, render_document},
+    layout::{ComposerLayoutSnapshot, visual_line_count},
     viewport::{calculate_cursor_visual_position, sync_viewport_offset_for_cursor},
 };
 use super::{style_mode::StyleMode, theme::TerminalPalette};
 use crate::terminal_text::sanitize_terminal_text;
 
+#[cfg(test)]
+pub(crate) use self::layout::{reset_visual_lines_call_count, visual_lines_call_count};
 pub(crate) use self::message::ComposerSourceMessage;
 pub(crate) use self::mouse::{
     cursor_position_for_line_anchor_click, move_cursor_to_logical_position,
     selection_end_char_for_line_anchor, selection_start_char_for_line_anchor,
 };
 pub(crate) use self::mouse_interaction::{ComposerMouseOutcome, PendingComposerCursorClick};
-pub(crate) use self::render::LineAnchor;
+pub(crate) use self::render::{ComposerDocumentSnapshot, LineAnchor};
 #[cfg(test)]
 use self::render::{RenderResult, render};
-#[cfg(test)]
-pub(crate) use self::{
-    layout::{reset_visual_lines_call_count, visual_lines_call_count},
-    render::{render_document_call_count, reset_render_document_call_count},
-};
 
 const PLACEHOLDER: &str = "Enter to send Prompt";
 const COMPOSER_RIGHT_PADDING_WIDTH: u16 = 2;
@@ -62,7 +60,9 @@ pub struct Composer {
     height: u16,
     viewport_y: usize,
     content_revision: usize,
+    presentation_revision: usize,
     cursor_revision: usize,
+    layout_snapshot: Rc<ComposerLayoutSnapshot>,
     style_mode: StyleMode,
     kill_buffer: String,
     undo_history: Vec<ComposerSnapshot>,
@@ -99,17 +99,25 @@ impl Composer {
 
     /// `new_with_undo_limit` 创建指定 undo 容量的输入框状态。
     pub fn new_with_undo_limit(style_mode: StyleMode, undo_limit: usize) -> Self {
+        let content_revision = 1;
+        let width = 1;
         Self {
             value: String::new(),
             skill_bindings: Vec::new(),
             custom_prompt_bindings: Vec::new(),
             image_attachments: Vec::new(),
             cursor: 0,
-            width: 1,
+            width,
             height: 1,
             viewport_y: 0,
-            content_revision: 1,
+            content_revision,
+            presentation_revision: 1,
             cursor_revision: 1,
+            layout_snapshot: ComposerLayoutSnapshot::build(
+                "",
+                composer_content_width(width),
+                usize::from(prompt_width()),
+            ),
             style_mode: style_mode.normalized(),
             kill_buffer: String::new(),
             undo_history: Vec::new(),
@@ -120,7 +128,13 @@ impl Composer {
 
     /// `set_width` 更新 composer 的总渲染宽度。
     pub fn set_width(&mut self, width: u16) {
-        self.width = width.max(1);
+        let width = width.max(1);
+        if self.width == width {
+            return;
+        }
+
+        self.width = width;
+        self.refresh_layout_snapshot();
         self.clamp_viewport();
     }
 
@@ -138,7 +152,7 @@ impl Composer {
 
     /// `full_height` 返回 composer 完整内容的视觉高度。
     pub fn full_height(&self) -> u16 {
-        self.full_height_for_value_at_width(&self.value, self.width)
+        u16::try_from(self.layout_snapshot.line_count()).unwrap_or(u16::MAX)
     }
 
     /// `value` 返回当前输入内容。
@@ -235,6 +249,7 @@ impl Composer {
     ) {
         let value = sanitized_owned_text(value.into());
         let changed = self.value != value;
+        let mut presentation_changed = false;
         match undo_mode {
             ComposerReplaceUndoMode::Record if changed => {
                 self.finish_grapheme_undo_group();
@@ -243,7 +258,7 @@ impl Composer {
             ComposerReplaceUndoMode::Reset => {
                 self.undo_history.clear();
                 self.has_active_grapheme_undo_group = false;
-                self.clear_structured_bindings();
+                presentation_changed = self.clear_structured_bindings();
             }
             ComposerReplaceUndoMode::Record => {}
         }
@@ -254,6 +269,8 @@ impl Composer {
                 self.reconcile_structured_bindings();
             }
             self.bump_content_revision();
+        } else if presentation_changed {
+            self.bump_presentation_revision();
         }
         self.set_cursor(total_chars(&self.value));
         self.sync_viewport_to_cursor();
@@ -440,6 +457,7 @@ impl Composer {
             self.image_attachments.len() + 1,
             attachment,
         ));
+        self.bump_presentation_revision();
         true
     }
 
@@ -491,6 +509,7 @@ impl Composer {
         });
         self.skill_bindings
             .sort_by_key(|binding| binding.start_char);
+        self.bump_presentation_revision();
         true
     }
 
@@ -521,6 +540,7 @@ impl Composer {
             });
         self.custom_prompt_bindings
             .sort_by_key(|binding| binding.start_char);
+        self.bump_presentation_revision();
         true
     }
 
@@ -609,8 +629,12 @@ impl Composer {
         render(self, palette)
     }
 
-    pub(crate) fn render_document(&self, palette: TerminalPalette) -> DocumentRenderResult {
-        render_document(self, palette)
+    pub(crate) fn document_snapshot(&self, palette: TerminalPalette) -> ComposerDocumentSnapshot {
+        ComposerDocumentSnapshot::new(self, palette)
+    }
+
+    pub(crate) fn layout_snapshot(&self) -> Rc<ComposerLayoutSnapshot> {
+        Rc::clone(&self.layout_snapshot)
     }
 
     pub(crate) fn content_width(&self) -> usize {
@@ -635,6 +659,10 @@ impl Composer {
 
     pub(crate) fn content_revision(&self) -> usize {
         self.content_revision
+    }
+
+    pub(crate) fn presentation_revision(&self) -> usize {
+        self.presentation_revision
     }
 
     pub(crate) fn has_image_attachments(&self) -> bool {
@@ -666,39 +694,15 @@ impl Composer {
         logical_position(&self.value, self.cursor)
     }
 
-    pub(crate) fn cursor_visual_position_for_anchors(
-        &self,
-        anchors: &[LineAnchor],
-    ) -> Option<(u16, usize)> {
+    pub(crate) fn cursor_visual_position(&self) -> (u16, usize) {
         let (logical_line, logical_column) = self.cursor_position();
-        self.visual_position_for_logical_position(logical_line, logical_column, anchors)
-    }
-
-    /// `visual_position_for_char_in_anchors` 基于已渲染 anchors 计算字符的视觉坐标。
-    pub(crate) fn visual_position_for_char_in_anchors(
-        &self,
-        char_index: usize,
-        anchors: &[LineAnchor],
-    ) -> Option<(u16, usize)> {
-        let (logical_line, logical_column) = logical_position(&self.value, char_index);
-        self.visual_position_for_logical_position(logical_line, logical_column, anchors)
-    }
-
-    fn visual_position_for_logical_position(
-        &self,
-        logical_line: usize,
-        logical_column: usize,
-        anchors: &[LineAnchor],
-    ) -> Option<(u16, usize)> {
-        let prompt_width = measure_width(self.prompt());
-        let (visual_line, visual_x) = cursor_visual_position_for_anchors(
-            self.value(),
-            anchors,
+        let (visual_y, visual_x) = calculate_cursor_visual_position(
+            self.layout_snapshot.visual_lines(),
             logical_line,
             logical_column,
-            prompt_width,
-        )?;
-        Some((u16::try_from(visual_x).unwrap_or(u16::MAX), visual_line))
+            measure_width(self.prompt()),
+        );
+        (u16::try_from(visual_x).unwrap_or(u16::MAX), visual_y)
     }
 
     pub(crate) fn line(&self) -> usize {
@@ -737,6 +741,10 @@ impl Composer {
     }
 
     pub(crate) fn full_height_for_value_at_width(&self, value: &str, width: u16) -> u16 {
+        if value == self.value && width.max(1) == self.width {
+            return u16::try_from(self.layout_snapshot.line_count()).unwrap_or(u16::MAX);
+        }
+
         if value.is_empty() {
             return 1;
         }
@@ -938,14 +946,10 @@ impl Composer {
         }
 
         let lines = logical_lines(&self.value);
-        let visual_lines = visual_lines_for_text(
-            &self.value,
-            self.content_width(),
-            usize::from(prompt_width()),
-        );
+        let visual_lines = self.layout_snapshot.visual_lines();
         let (row, column) = logical_position(&self.value, self.cursor);
         let (current_visual_line, current_visual_column) =
-            calculate_cursor_visual_position(&visual_lines, row, column, 0);
+            calculate_cursor_visual_position(visual_lines, row, column, 0);
 
         let Some(target_visual_line) =
             offset_index(current_visual_line, direction, visual_lines.len())
@@ -1030,11 +1034,7 @@ impl Composer {
     }
 
     fn page_move(&mut self, direction: isize) {
-        let visual_lines = visual_lines_for_text(
-            &self.value,
-            self.content_width(),
-            usize::from(prompt_width()),
-        );
+        let visual_lines = self.layout_snapshot.visual_lines();
         if visual_lines.is_empty() {
             self.viewport_y = 0;
             return;
@@ -1043,7 +1043,7 @@ impl Composer {
         let lines = logical_lines(&self.value);
         let (row, column) = logical_position(&self.value, self.cursor);
         let (current_visual_line, current_visual_column) =
-            calculate_cursor_visual_position(&visual_lines, row, column, 0);
+            calculate_cursor_visual_position(visual_lines, row, column, 0);
         let current_offset = sync_viewport_offset_for_cursor(
             self.viewport_y,
             self.viewport_height(),
@@ -1076,15 +1076,17 @@ impl Composer {
             current_visual_column,
             self.content_width(),
         );
+        let target_logical_line = target_line.logical_line;
+        let visual_line_count = visual_lines.len();
         self.set_cursor(absolute_cursor_for_position(
             &lines,
-            target_line.logical_line,
+            target_logical_line,
             target_column,
         ));
         self.viewport_y = sync_viewport_offset_for_cursor(
             current_offset,
             self.viewport_height(),
-            visual_lines.len(),
+            visual_line_count,
             target_visual_line,
         );
     }
@@ -1095,13 +1097,9 @@ impl Composer {
             return;
         }
 
-        let visual_lines = visual_lines_for_text(
-            &self.value,
-            self.content_width(),
-            usize::from(prompt_width()),
-        );
+        let visual_lines = self.layout_snapshot.visual_lines();
         let (row, column) = logical_position(&self.value, self.cursor);
-        let (cursor_visual_y, _) = calculate_cursor_visual_position(&visual_lines, row, column, 0);
+        let (cursor_visual_y, _) = calculate_cursor_visual_position(visual_lines, row, column, 0);
         self.viewport_y = sync_viewport_offset_for_cursor(
             self.viewport_y,
             self.viewport_height(),
@@ -1124,12 +1122,7 @@ impl Composer {
     }
 
     fn total_visual_lines(&self) -> usize {
-        if self.value.is_empty() {
-            return 1;
-        }
-
-        let prompt_width = usize::from(prompt_width());
-        visual_line_count(&self.value, self.content_width(), prompt_width).max(1)
+        self.layout_snapshot.line_count()
     }
 
     fn current_prefixed_token(&self, prefix: char) -> Option<PrefixedToken> {
@@ -1227,6 +1220,9 @@ impl Composer {
             return;
         };
 
+        let presentation_changed = self.skill_bindings != snapshot.skill_bindings
+            || self.custom_prompt_bindings != snapshot.custom_prompt_bindings
+            || self.image_attachments != snapshot.image_attachments;
         if self.value != snapshot.value {
             self.value = snapshot.value;
             self.skill_bindings = snapshot.skill_bindings;
@@ -1237,6 +1233,9 @@ impl Composer {
             self.skill_bindings = snapshot.skill_bindings;
             self.custom_prompt_bindings = snapshot.custom_prompt_bindings;
             self.image_attachments = snapshot.image_attachments;
+            if presentation_changed {
+                self.bump_presentation_revision();
+            }
         }
         self.set_cursor(snapshot.cursor.min(total_chars(&self.value)));
         self.sync_viewport_to_cursor();
@@ -1286,6 +1285,20 @@ impl Composer {
 
     fn bump_content_revision(&mut self) {
         self.content_revision = self.content_revision.saturating_add(1);
+        self.bump_presentation_revision();
+        self.refresh_layout_snapshot();
+    }
+
+    fn bump_presentation_revision(&mut self) {
+        self.presentation_revision = self.presentation_revision.saturating_add(1);
+    }
+
+    fn refresh_layout_snapshot(&mut self) {
+        self.layout_snapshot = ComposerLayoutSnapshot::build(
+            &self.value,
+            self.content_width(),
+            usize::from(prompt_width()),
+        );
     }
 
     fn set_cursor(&mut self, cursor: usize) {
@@ -1297,10 +1310,14 @@ impl Composer {
         self.cursor_revision = self.cursor_revision.saturating_add(1);
     }
 
-    fn clear_structured_bindings(&mut self) {
+    fn clear_structured_bindings(&mut self) -> bool {
+        let changed = !self.skill_bindings.is_empty()
+            || !self.custom_prompt_bindings.is_empty()
+            || !self.image_attachments.is_empty();
         self.skill_bindings.clear();
         self.custom_prompt_bindings.clear();
         self.image_attachments.clear();
+        changed
     }
 
     fn reconcile_structured_bindings(&mut self) {
@@ -1450,99 +1467,6 @@ pub(crate) fn char_to_byte_index(value: &str, char_index: usize) -> usize {
         .nth(char_index)
         .map(|(byte_index, _)| byte_index)
         .unwrap_or(value.len())
-}
-
-fn cursor_visual_position_for_anchors(
-    value: &str,
-    anchors: &[LineAnchor],
-    logical_line: usize,
-    logical_column: usize,
-    prompt_width: usize,
-) -> Option<(usize, usize)> {
-    let (first_line, last_line) = line_anchor_bounds(anchors, logical_line)?;
-    if logical_column == 0 {
-        return Some((first_line, prompt_width));
-    }
-
-    let last_anchor = anchors[last_line];
-    let logical_column = logical_column.min(last_anchor.end_char);
-    for line_index in first_line..=last_line {
-        let anchor = anchors[line_index];
-        if logical_column == anchor.end_char && line_index < last_line {
-            let next_anchor = anchors[line_index + 1];
-            if next_anchor.visible_start_char <= logical_column
-                && logical_column <= next_anchor.end_char
-            {
-                continue;
-            }
-            if next_anchor.visible_start_char == logical_column {
-                return Some((line_index + 1, prompt_width));
-            }
-        }
-
-        if logical_column > anchor.end_char {
-            continue;
-        }
-
-        if logical_column <= anchor.visible_start_char {
-            return Some((line_index, prompt_width));
-        }
-
-        return Some((
-            line_index,
-            prompt_width + visual_width_for_anchor_prefix(value, anchor, logical_column)?,
-        ));
-    }
-
-    Some((
-        last_line,
-        prompt_width + visual_width_for_anchor_prefix(value, last_anchor, last_anchor.end_char)?,
-    ))
-}
-
-fn line_anchor_bounds(anchors: &[LineAnchor], logical_line: usize) -> Option<(usize, usize)> {
-    let mut first = None;
-    let mut last = None;
-    for (index, anchor) in anchors.iter().enumerate() {
-        if anchor.logical_line != logical_line {
-            if first.is_some() {
-                break;
-            }
-            continue;
-        }
-        first.get_or_insert(index);
-        last = Some(index);
-    }
-    match (first, last) {
-        (Some(first), Some(last)) => Some((first, last)),
-        _ => None,
-    }
-}
-
-fn visual_width_for_anchor_prefix(
-    value: &str,
-    anchor: LineAnchor,
-    logical_column: usize,
-) -> Option<usize> {
-    let lines = logical_lines(value);
-    let line = lines.get(anchor.logical_line)?;
-    let end_char = logical_column.min(anchor.end_char).min(line.len_chars());
-    if end_char <= anchor.visible_start_char {
-        return Some(0);
-    }
-
-    let text = line
-        .text
-        .chars()
-        .skip(anchor.visible_start_char)
-        .take(end_char - anchor.visible_start_char)
-        .collect::<String>();
-    Some(
-        grapheme_clusters(&text)
-            .iter()
-            .map(|cluster| cluster.width)
-            .sum(),
-    )
 }
 
 fn total_chars(value: &str) -> usize {

@@ -45,6 +45,14 @@ impl ToastAnimation {
         self.progress_at(now) >= 1.0
     }
 
+    pub(super) fn next_frame_deadline_at(&self, now: Instant) -> Option<Instant> {
+        crate::frame_time::next_animation_frame_deadline(
+            self.started_at?,
+            now,
+            TOAST_FRAME_INTERVAL,
+        )
+    }
+
     fn progress_at(&self, now: Instant) -> f64 {
         let started_at = self.started_at.unwrap_or(now);
         let elapsed = now.saturating_duration_since(started_at);

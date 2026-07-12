@@ -216,18 +216,21 @@ impl Model {
     }
 
     fn visible_composer_content_line_count_in_viewport(&mut self) -> usize {
-        let layout = self.build_document_layout();
+        let layout = self.build_document_layout(crate::frame_time::FrameRenderContext::capture());
         let line_indices = offset_viewport_line_indices(
             &layout,
             self.document_runtime.viewport_y,
             self.document_viewport_height(),
         );
+        let Some(content_bottom_line) = layout.composer_slot.content_bottom_line() else {
+            return 0;
+        };
 
         line_indices
             .into_iter()
             .filter(|line_index| {
                 *line_index >= layout.composer_slot.content_start_line
-                    && *line_index <= layout.composer_slot.content_bottom_line()
+                    && *line_index <= content_bottom_line
             })
             .count()
     }
@@ -246,7 +249,10 @@ impl Model {
             return self.current_visible_transcript_window_for_index(&index);
         }
 
-        let layout = self.transcript_window_layout(transcript_line_count);
+        let layout = self.transcript_window_layout(
+            transcript_line_count,
+            crate::frame_time::FrameRenderContext::capture(),
+        );
         self.current_visible_transcript_window_for_layout(&layout, transcript_line_count, false)
     }
 
@@ -259,7 +265,10 @@ impl Model {
         }
 
         let manual_scroll = self.document_runtime.viewport_state.manual_scroll();
-        let layout = self.document_layout_for_transcript_index(index.clone());
+        let layout = self.document_layout_for_transcript_index(
+            index.clone(),
+            crate::frame_time::FrameRenderContext::capture(),
+        );
         self.current_visible_transcript_window_for_layout(&layout, index.line_count, manual_scroll)
     }
 

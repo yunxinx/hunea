@@ -9,7 +9,8 @@ use runtime_domain::{
 };
 
 use super::{
-    AppEvent, Model, ModelOptions, STARTUP_PROBE_TIMEOUT, StartupBannerOptions, StyleMode, theme,
+    AppEvent, Model, ModelOptions, STARTUP_PROBE_TIMEOUT, StartupBannerOptions, StyleMode,
+    transcript::prewarm_markdown_highlighting,
 };
 
 mod conversation;
@@ -19,6 +20,7 @@ pub(crate) use effects::run_open_message_history_picker_effect;
 mod event_pipeline;
 mod external_io;
 mod input;
+mod loop_event_pump;
 mod model_refresh;
 mod terminal;
 mod terminal_probe;
@@ -28,25 +30,28 @@ use super::{runtime::RuntimeEventApply, theme::palette_detection_from_background
 use effects::apply_effect_if_needed;
 use external_io::{ExternalIoRuntime, apply_external_io_event};
 pub(crate) use input::TerminalInputCoalescing;
-use input::{
-    TerminalInputAction, coalesced_input_actions_with_options, read_ready_terminal_events,
-};
+use input::{TerminalInputAction, coalesced_input_actions_with_options};
+pub use loop_event_pump::LoopEventWaker;
+use loop_event_pump::{LoopEvent, LoopEventPump};
 use model_refresh::apply_model_provider_refresh_event;
 pub(crate) use terminal::TerminalMouseModePreference;
-use terminal::{TerminalMouseMode, TerminalSession, apply_mouse_mode, wait_for_terminal_event};
+use terminal::{TerminalMouseMode, TerminalSession};
 
 /// `RuntimeCoordinator` 是 TUI runner 与具体对话运行时之间的最小边界。
 pub trait RuntimeCoordinator {
+    fn install_loop_event_waker(
+        &mut self,
+        _waker: LoopEventWaker,
+    ) -> std::result::Result<(), String> {
+        Ok(())
+    }
+
     fn drain_runtime_events(&mut self) -> Vec<RuntimeEvent> {
         Vec::new()
     }
 
     fn drain_model_provider_refresh_events(&mut self) -> Vec<ModelProviderRefreshEvent> {
         Vec::new()
-    }
-
-    fn has_background_runtime(&self) -> bool {
-        false
     }
 
     fn dispatch_runtime_command(
@@ -150,21 +155,17 @@ pub fn run_with_runtime_coordinator(
     options: ModelOptions,
     runtime_coordinator: &mut impl RuntimeCoordinator,
 ) -> Result<Model> {
+    spawn_markdown_highlighting_prewarm();
     let mut model = Model::new_with_options(startup_banner_options, options);
 
-    let (mut terminal, _guard) = TerminalSession::enter()?;
+    let (mut terminal, mut terminal_session) = TerminalSession::enter()?;
 
     let background_probe = terminal_probe::query_background(STARTUP_PROBE_TIMEOUT);
-    if let Some(detection) = startup_palette_detection(background_probe) {
-        apply_model_event_without_effect(
-            &mut model,
-            AppEvent::DetectedPalette {
-                palette: detection.palette,
-                has_dark_background: detection.has_dark_background,
-            },
-            "startup palette detection",
-        );
-    }
+    apply_model_event_without_effect(
+        &mut model,
+        startup_palette_event(background_probe),
+        "startup palette detection",
+    );
     let area = terminal.size()?;
     apply_model_event_without_effect(
         &mut model,
@@ -174,6 +175,11 @@ pub fn run_with_runtime_coordinator(
         },
         "initial terminal resize",
     );
+
+    let mut loop_events = LoopEventPump::start()?;
+    runtime_coordinator
+        .install_loop_event_waker(loop_events.waker())
+        .map_err(color_eyre::eyre::Report::msg)?;
 
     if let Err(message) =
         runtime_coordinator.dispatch_runtime_command(RuntimeCommand::LoadMessageHistoryStartupCache)
@@ -186,10 +192,9 @@ pub fn run_with_runtime_coordinator(
         model.show_toast(crate::toast::ToastSeverity::Error, message);
     }
 
-    let startup_deadline = Instant::now() + STARTUP_PROBE_TIMEOUT;
     let mut render_needed = true;
     let mut mouse_mode = TerminalMouseMode::for_mouse_capture(true);
-    let mut external_io = ExternalIoRuntime::new();
+    let mut external_io = ExternalIoRuntime::new(loop_events.waker());
 
     loop {
         render_needed |= drain_runtime_coordinator_events(&mut model, runtime_coordinator);
@@ -204,7 +209,7 @@ pub fn run_with_runtime_coordinator(
             let desired_mouse_mode =
                 TerminalMouseMode::from_preference(model.mouse_mode_preference());
             if desired_mouse_mode != mouse_mode {
-                apply_mouse_mode(&mut terminal, desired_mouse_mode)?;
+                terminal_session.apply_mouse_mode(&mut terminal, desired_mouse_mode)?;
                 mouse_mode = desired_mouse_mode;
             }
             render_needed = false;
@@ -215,54 +220,42 @@ pub fn run_with_runtime_coordinator(
         }
 
         let now = Instant::now();
-        if !model.has_palette() && now >= startup_deadline {
-            let effect = model.update(AppEvent::StartupReadyTimeout);
-            apply_effect_if_needed(
-                &mut terminal,
-                &mut model,
-                runtime_coordinator,
-                &mut external_io,
-                effect,
-            )?;
-            render_needed = true;
-            continue;
-        }
-
         if let Some(timeout_event) = model.timeout_event(now) {
             let effect = model.update(timeout_event);
             apply_effect_if_needed(
                 &mut terminal,
+                &mut terminal_session,
                 &mut model,
                 runtime_coordinator,
                 &mut external_io,
+                &mut loop_events,
                 effect,
             )?;
             render_needed = true;
             continue;
         }
 
-        let has_background_work =
-            runtime_coordinator.has_background_runtime() || external_io.has_pending_work();
-        let wait_plan =
-            event_pipeline::terminal_wait_plan(&model, startup_deadline, now, has_background_work);
-        let first_event = match wait_for_terminal_event(wait_plan)? {
-            Some(event) => event,
+        let wait_plan = event_pipeline::loop_wait_plan(&model, now);
+        let first_event = match loop_events.wait(wait_plan.timeout())? {
+            Some(LoopEvent::Terminal(event)) => event,
+            Some(LoopEvent::BackgroundReady) => continue,
+            Some(LoopEvent::TerminalInputFailed(error)) => return Err(error.into()),
             None => {
-                // timeout 到期或后台 runtime poll 到期。下一轮会先 drain runtime，
-                // activity frame 到期时需要重绘；后台 poll 到期则只检查事件。
                 render_needed = wait_plan.render_on_timeout();
                 continue;
             }
         };
 
         let input_coalescing = model.terminal_input_coalescing();
-        let terminal_events = read_ready_terminal_events(first_event, input_coalescing)?;
+        let terminal_events = loop_events.collect_terminal_burst(first_event, input_coalescing)?;
         if apply_terminal_input_actions(
             coalesced_input_actions_with_options(terminal_events, input_coalescing),
             &mut terminal,
+            &mut terminal_session,
             &mut model,
             runtime_coordinator,
             &mut external_io,
+            &mut loop_events,
         )? {
             render_needed = true;
         }
@@ -273,12 +266,23 @@ pub fn run_with_runtime_coordinator(
     Ok(model)
 }
 
-fn startup_palette_detection(
+fn spawn_markdown_highlighting_prewarm() {
+    let _ = std::thread::Builder::new()
+        .name("hunea-syntax-prewarm".to_string())
+        .spawn(prewarm_markdown_highlighting);
+}
+
+fn startup_palette_event(
     background_probe: terminal_probe::TerminalBackgroundProbeResult,
-) -> Option<theme::PaletteDetection> {
-    background_probe
-        .background
-        .map(palette_detection_from_background)
+) -> AppEvent {
+    let Some(background) = background_probe.background else {
+        return AppEvent::StartupReadyTimeout;
+    };
+    let detection = palette_detection_from_background(background);
+    AppEvent::DetectedPalette {
+        palette: detection.palette,
+        has_dark_background: detection.has_dark_background,
+    }
 }
 
 fn apply_model_event_without_effect(model: &mut Model, event: AppEvent, context: &str) {
@@ -292,16 +296,26 @@ fn apply_model_event_without_effect(model: &mut Model, event: AppEvent, context:
 fn apply_terminal_input_actions(
     actions: Vec<TerminalInputAction>,
     terminal: &mut terminal::TuiTerminal,
+    terminal_session: &mut TerminalSession,
     model: &mut Model,
     runtime_coordinator: &mut impl RuntimeCoordinator,
     external_io: &mut ExternalIoRuntime,
+    loop_events: &mut LoopEventPump,
 ) -> Result<bool> {
     let mut changed = false;
     for action in actions {
         match action {
             TerminalInputAction::App(app_event) => {
                 let effect = model.update(app_event);
-                apply_effect_if_needed(terminal, model, runtime_coordinator, external_io, effect)?;
+                apply_effect_if_needed(
+                    terminal,
+                    terminal_session,
+                    model,
+                    runtime_coordinator,
+                    external_io,
+                    loop_events,
+                    effect,
+                )?;
                 changed = true;
             }
             TerminalInputAction::CancelExitConfirmation => {

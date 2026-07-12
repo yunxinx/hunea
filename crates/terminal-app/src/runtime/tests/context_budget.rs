@@ -2,8 +2,10 @@ use super::support::*;
 
 #[test]
 fn context_budget_worker_shutdown_stops_accepting_new_commands() {
-    let mut worker = super::super::context_budget_worker::ContextBudgetWorker::new()
-        .expect("context budget worker should initialize");
+    let mut worker = super::super::context_budget_worker::ContextBudgetWorker::new(
+        conversation_runtime::RuntimeEventNotifier::default(),
+    )
+    .expect("context budget worker should initialize");
 
     worker
         .shutdown()
@@ -69,7 +71,7 @@ fn context_budget_snapshot_dispatches_to_background_worker() {
 
     assert_eq!(receipt, RuntimeCommandReceipt::Accepted);
     assert!(
-        RuntimeCoordinator::has_background_runtime(&coordinator),
+        coordinator.has_pending_work_for_test(),
         "context budget snapshot should be computed through background runtime work"
     );
 
@@ -446,14 +448,14 @@ fn cancel_context_budget_snapshot_stops_background_tracking_and_drops_stale_even
             selection: ModelSelection::new("local", "qwen3"),
         })
         .expect("context budget snapshot command should be accepted");
-    assert!(RuntimeCoordinator::has_background_runtime(&coordinator));
+    assert!(coordinator.has_pending_work_for_test());
 
     coordinator
         .handle_runtime_command(RuntimeCommand::CancelContextBudgetSnapshot)
         .expect("cancel context budget command should be accepted");
 
     assert!(
-        !RuntimeCoordinator::has_background_runtime(&coordinator),
+        !coordinator.has_pending_work_for_test(),
         "cancel should clear `/context` background tracking immediately"
     );
     wait_for_runtime_idle(&mut coordinator);
@@ -513,7 +515,7 @@ fn latest_context_budget_request_supersedes_stale_work() {
                 loaded_request_ids.push(request_id);
             }
         }
-        if !RuntimeCoordinator::has_background_runtime(&coordinator) {
+        if !coordinator.has_pending_work_for_test() {
             break;
         }
         thread::sleep(Duration::from_millis(10));

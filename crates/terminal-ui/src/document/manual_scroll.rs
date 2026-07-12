@@ -78,7 +78,7 @@ impl Model {
             return;
         }
 
-        let layout = self.build_document_layout();
+        let layout = self.build_document_layout(crate::frame_time::FrameRenderContext::capture());
         let offsets = self.restore_offsets(&layout);
         if self.document_runtime.viewport_y != offsets.document_offset
             || self.composer.viewport_offset() != offsets.composer_offset
@@ -97,7 +97,7 @@ impl Model {
     }
 
     pub(super) fn restore_from_manual_document_scroll(&mut self) {
-        let layout = self.build_document_layout();
+        let layout = self.build_document_layout(crate::frame_time::FrameRenderContext::capture());
         let offsets = self.edit_restore_offsets(&layout);
         self.apply_document_viewport_position(
             &layout,

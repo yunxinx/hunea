@@ -14,6 +14,7 @@ session-store.workspace = true
 tool-runtime.workspace = true
 terminal-ui.workspace = true
 crossterm.workspace = true
+futures-util.workspace = true
 ratatui.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true

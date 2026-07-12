@@ -1,11 +1,86 @@
 use std::time::Instant;
 
+use runtime_domain::model_catalog::ModelSelection;
+
 use crate::{
     document::{
-        LayoutCache, RestoreState, TailLayoutCache, TranscriptCache, ViewportCache, ViewportState,
+        LayoutCache, RestoreState, StableTailLayoutCache, TailLayoutCache, TranscriptCache,
+        ViewportCache, ViewportState,
     },
     selection::{AutoScrollDirection, MousePosition, SelectionClickState, SelectionState},
 };
+
+/// `SelectedModelState` 收口当前模型选择及其缓存失效 revision。
+///
+/// 唯一写路径是 [`SelectedModelState::set`]，保证任何选择变化都伴随 revision 递增，
+/// 使 tail layout cache key 只比较 revision，不必每帧分配并比较 display name。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SelectedModelState {
+    selection: Option<ModelSelection>,
+    revision: usize,
+}
+
+impl SelectedModelState {
+    pub(crate) fn new(selection: Option<ModelSelection>) -> Self {
+        Self {
+            selection,
+            revision: 0,
+        }
+    }
+
+    pub(crate) fn selection(&self) -> Option<&ModelSelection> {
+        self.selection.as_ref()
+    }
+
+    pub(crate) fn set(&mut self, selection: Option<ModelSelection>) {
+        if self.selection == selection {
+            return;
+        }
+        self.selection = selection;
+        self.revision = self.revision.saturating_add(1);
+    }
+
+    pub(crate) fn revision(&self) -> usize {
+        self.revision
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use runtime_domain::model_catalog::ModelSelection;
+
+    use super::SelectedModelState;
+
+    #[test]
+    fn selected_model_revision_changes_only_when_selection_changes() {
+        let first_selection = ModelSelection::new("local", "qwen3");
+        let second_selection = ModelSelection::new("remote", "gpt-5");
+        let mut state = SelectedModelState::new(Some(first_selection.clone()));
+
+        assert_eq!(state.revision(), 0);
+
+        state.set(Some(first_selection));
+        assert_eq!(
+            state.revision(),
+            0,
+            "equal selection must keep the cache key"
+        );
+
+        state.set(Some(second_selection));
+        assert_eq!(
+            state.revision(),
+            1,
+            "changed selection must invalidate caches"
+        );
+
+        state.set(None);
+        assert_eq!(
+            state.revision(),
+            2,
+            "clearing selection must invalidate caches"
+        );
+    }
+}
 
 /// `SelectionRuntimeState` 收口 selection 与拖拽自动滚动的运行态。
 #[derive(Debug, Clone)]
@@ -47,6 +122,7 @@ pub(crate) struct DocumentRuntimeState {
     pub(crate) viewport_y: usize,
     pub(crate) viewport_state: ViewportState,
     pub(crate) transcript_cache: TranscriptCache,
+    pub(crate) stable_tail_layout_cache: StableTailLayoutCache,
     pub(crate) tail_layout_cache: TailLayoutCache,
     pub(crate) layout_cache: LayoutCache,
     pub(crate) viewport_cache: ViewportCache,

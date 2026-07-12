@@ -1,9 +1,7 @@
 use ratatui::{
-    buffer::{Buffer, Cell, CellDiffOption},
-    style::Color,
+    buffer::{Buffer, Cell, CellDiffOption, CellWidth},
+    style::{Color, Modifier},
 };
-
-use crate::display_width::display_width;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TerminalDrawCommand<'a> {
@@ -59,8 +57,12 @@ pub(crate) fn diff_terminal_buffers<'a>(
     for (index, (current_cell, previous_cell)) in
         current_cells.iter().zip(previous_cells.iter()).enumerate()
     {
+        let current_width = usize::from(current_cell.cell_width());
+        let previous_width = usize::from(previous_cell.cell_width());
         if !cell_is_skipped(current_cell)
-            && (current_cell != previous_cell || invalidated > 0)
+            && (cell_is_always_updated(current_cell)
+                || current_cell != previous_cell
+                || invalidated > 0)
             && to_skip == 0
         {
             let (x, y) = current.pos_of(index);
@@ -76,15 +78,15 @@ pub(crate) fn diff_terminal_buffers<'a>(
                         current_cells,
                         index,
                         current.area.width as usize,
+                        current_width,
                     ),
                 });
             }
         }
 
-        to_skip = display_width(current_cell.symbol()).saturating_sub(1);
+        to_skip = current_width.saturating_sub(1);
 
-        let affected_width =
-            display_width(current_cell.symbol()).max(display_width(previous_cell.symbol()));
+        let affected_width = current_width.max(previous_width);
         invalidated = affected_width.max(invalidated).saturating_sub(1);
     }
 
@@ -97,8 +99,10 @@ fn row_clear_from(row: &[Cell], trailing_bg: Color) -> usize {
 
     while column < row.len() {
         let cell = &row[column];
-        let width = display_width(cell.symbol()).max(1);
-        if !cell_is_skipped(cell) && cell_requires_visible_cell(cell, trailing_bg) {
+        let width = usize::from(cell.cell_width()).max(1);
+        if !cell_is_skipped(cell)
+            && (cell_is_always_updated(cell) || cell_requires_visible_cell(cell, trailing_bg))
+        {
             content_end = column.saturating_add(width).min(row.len());
         }
         column += width;
@@ -111,7 +115,7 @@ fn previous_tail_needs_clear(row: &[Cell], clear_from: usize, clear_bg: Color) -
     let mut column = 0usize;
     while column < row.len() {
         let cell = &row[column];
-        let width = display_width(cell.symbol()).max(1);
+        let width = usize::from(cell.cell_width()).max(1);
         if !cell_is_skipped(cell)
             && column < clear_from
             && column.saturating_add(width) > clear_from
@@ -130,6 +134,10 @@ fn cell_is_skipped(cell: &Cell) -> bool {
     matches!(cell.diff_option, CellDiffOption::Skip)
 }
 
+fn cell_is_always_updated(cell: &Cell) -> bool {
+    matches!(cell.diff_option, CellDiffOption::AlwaysUpdate)
+}
+
 fn cell_requires_visible_cell(cell: &Cell, trailing_bg: Color) -> bool {
     cell.symbol() != " " || cell.bg != trailing_bg || !cell.modifier.is_empty()
 }
@@ -143,8 +151,8 @@ fn wide_prefill_width(
     current_cells: &[Cell],
     index: usize,
     row_width: usize,
+    width: usize,
 ) -> usize {
-    let width = display_width(current_cells[index].symbol());
     if width <= 1 || row_width == 0 {
         return 0;
     }
@@ -156,14 +164,16 @@ fn wide_prefill_width(
         .min(current_cells.len())
         .min(previous_cells.len());
     let leading = &current_cells[index];
-    if current_cells[index + 1..end].iter().any(|cell| {
-        cell.symbol() == " "
-            && tail_has_visible_style(cell)
-            && tail_style_matches_leading(cell, leading)
-    }) || previous_cells[index + 1..end]
-        .iter()
-        .zip(&current_cells[index + 1..end])
-        .any(|(previous, current)| current.symbol() == " " && previous != current)
+    if leading.modifier.contains(Modifier::REVERSED)
+        || current_cells[index + 1..end].iter().any(|cell| {
+            cell.symbol() == " "
+                && tail_has_visible_style(cell)
+                && tail_style_matches_leading(cell, leading)
+        })
+        || previous_cells[index + 1..end]
+            .iter()
+            .zip(&current_cells[index + 1..end])
+            .any(|(previous, current)| current.symbol() == " " && previous != current)
     {
         width
     } else {
@@ -187,6 +197,8 @@ fn tail_has_visible_style(cell: &Cell) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU16;
+
     use ratatui::{
         buffer::{Buffer, CellDiffOption},
         layout::Rect,
@@ -256,6 +268,56 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(updates, vec![(0, 0, "a"), (2, 0, "c"), (3, 0, "d")]);
+    }
+
+    #[test]
+    fn terminal_grid_diff_always_updates_equal_cells() {
+        let mut previous = Buffer::empty(Rect::new(0, 0, 2, 1));
+        previous[(0, 0)].set_symbol("x");
+        let mut current = previous.clone();
+        current[(0, 0)].set_diff_option(CellDiffOption::AlwaysUpdate);
+        previous[(0, 0)].set_diff_option(CellDiffOption::AlwaysUpdate);
+
+        let diff = super::diff_terminal_buffers(&previous, &current);
+
+        assert!(diff.iter().any(|command| matches!(
+            command,
+            super::TerminalDrawCommand::Put { x: 0, y: 0, cell, .. }
+                if cell.symbol() == "x"
+        )));
+    }
+
+    #[test]
+    fn terminal_grid_diff_always_updates_blank_cell_on_empty_row() {
+        let mut previous = Buffer::empty(Rect::new(0, 0, 3, 1));
+        let mut current = previous.clone();
+        previous[(1, 0)].set_diff_option(CellDiffOption::AlwaysUpdate);
+        current[(1, 0)].set_diff_option(CellDiffOption::AlwaysUpdate);
+
+        let diff = super::diff_terminal_buffers(&previous, &current);
+
+        assert!(diff.iter().any(|command| matches!(
+            command,
+            super::TerminalDrawCommand::Put { x: 1, y: 0, cell, .. }
+                if cell.symbol() == " "
+        )));
+    }
+
+    #[test]
+    fn terminal_grid_diff_always_updates_blank_after_visible_content() {
+        let mut previous = Buffer::empty(Rect::new(0, 0, 4, 1));
+        previous[(0, 0)].set_symbol("x");
+        let mut current = previous.clone();
+        previous[(2, 0)].set_diff_option(CellDiffOption::AlwaysUpdate);
+        current[(2, 0)].set_diff_option(CellDiffOption::AlwaysUpdate);
+
+        let diff = super::diff_terminal_buffers(&previous, &current);
+
+        assert!(diff.iter().any(|command| matches!(
+            command,
+            super::TerminalDrawCommand::Put { x: 2, y: 0, cell, .. }
+                if cell.symbol() == " "
+        )));
     }
 
     #[test]
@@ -353,6 +415,30 @@ mod tests {
                 cell,
                 prefill_width: 2,
             } if cell.symbol() == "2️⃣"
+        )));
+    }
+
+    #[test]
+    fn terminal_grid_diff_uses_forced_width_for_reversed_prefill() {
+        let previous = Buffer::empty(Rect::new(0, 0, 5, 1));
+        let mut current = Buffer::empty(Rect::new(0, 0, 5, 1));
+        current[(0, 0)]
+            .set_symbol("x")
+            .set_style(Style::default().add_modifier(Modifier::REVERSED))
+            .set_diff_option(CellDiffOption::ForcedWidth(
+                NonZeroU16::new(3).expect("forced width must be non-zero"),
+            ));
+
+        let diff = super::diff_terminal_buffers(&previous, &current);
+
+        assert!(diff.iter().any(|command| matches!(
+            command,
+            super::TerminalDrawCommand::Put {
+                x: 0,
+                y: 0,
+                cell,
+                prefill_width: 3,
+            } if cell.symbol() == "x"
         )));
     }
 }

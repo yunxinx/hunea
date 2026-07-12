@@ -1,7 +1,7 @@
 use ratatui::text::Line;
 
 use super::{DocumentLayout, DocumentViewport};
-use crate::Model;
+use crate::{Model, frame_time::FrameRenderContext};
 
 /// `BottomFollowPresentation` 描述底部跟随视图的临时展示决策。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -21,8 +21,10 @@ impl Model {
 
     pub(crate) fn bottom_follow_anchor_line(&self, layout: &DocumentLayout) -> usize {
         if !layout_has_content_below_composer_frame(layout) {
-            if layout.composer_slot.frame_line_count <= self.document_viewport_height() {
-                return layout.composer_slot.frame_bottom_line();
+            if layout.composer_slot.frame_line_count <= self.document_viewport_height()
+                && let Some(frame_bottom_line) = layout.composer_slot.frame_bottom_line()
+            {
+                return frame_bottom_line;
             }
             return layout.cursor_y;
         }
@@ -77,16 +79,19 @@ pub(crate) fn compose_bottom_follow_document_viewport(
     layout: &DocumentLayout,
     height: usize,
     presentation: BottomFollowPresentation,
+    context: FrameRenderContext,
 ) -> DocumentViewport {
     compose_document_viewport_from_line_indices(
         layout,
         &bottom_follow_viewport_line_indices(layout, height, presentation),
+        context,
     )
 }
 
 pub(crate) fn compose_document_viewport_from_line_indices(
     layout: &DocumentLayout,
     line_indices: &[usize],
+    context: FrameRenderContext,
 ) -> DocumentViewport {
     if line_indices.is_empty() {
         return DocumentViewport {
@@ -101,11 +106,11 @@ pub(crate) fn compose_document_viewport_from_line_indices(
 
     if let Some((start, count)) = contiguous_line_range(line_indices) {
         return DocumentViewport {
-            lines: layout.lines_for_range(start, count),
-            assistant_lines: assistant_flags_for_line_indices(layout, line_indices),
-            plain_text_len: layout.plain_text_len_for_range(start, count),
+            lines: layout.lines_for_range(start, count, context),
+            assistant_lines: assistant_flags_for_line_indices(layout, line_indices, context),
+            plain_text_len: layout.plain_text_len_for_range(start, count, context),
             #[cfg(test)]
-            plain_lines: layout.line_texts_for_range(start, count),
+            plain_lines: layout.line_texts_for_range(start, count, context),
             resolved_offset: start,
         };
     }
@@ -116,13 +121,13 @@ pub(crate) fn compose_document_viewport_from_line_indices(
     #[cfg(test)]
     let mut plain_lines = Vec::with_capacity(line_indices.len());
     for &index in line_indices {
-        if let Some(line) = layout.line_at(index) {
+        if let Some(line) = layout.line_at(index, context) {
             if !lines.is_empty() {
                 plain_text_len += 1;
             }
             plain_text_len += line.plain_line.len();
             lines.push(line.line);
-            assistant_lines.push(layout.is_assistant_message_line(index));
+            assistant_lines.push(layout.is_assistant_message_line(index, context));
             #[cfg(test)]
             plain_lines.push(line.plain_line);
         }
@@ -138,7 +143,12 @@ pub(crate) fn compose_document_viewport_from_line_indices(
 }
 
 fn layout_has_content_below_composer_frame(layout: &DocumentLayout) -> bool {
-    layout.composer_slot.frame_bottom_line() < layout.line_count().saturating_sub(1)
+    layout
+        .composer_slot
+        .frame_bottom_line()
+        .map_or(layout.line_count() > 0, |frame_bottom_line| {
+            frame_bottom_line < layout.line_count().saturating_sub(1)
+        })
 }
 
 fn contiguous_line_range(line_indices: &[usize]) -> Option<(usize, usize)> {
@@ -152,10 +162,14 @@ fn contiguous_line_range(line_indices: &[usize]) -> Option<(usize, usize)> {
     Some((start, line_indices.len()))
 }
 
-fn assistant_flags_for_line_indices(layout: &DocumentLayout, line_indices: &[usize]) -> Vec<bool> {
+fn assistant_flags_for_line_indices(
+    layout: &DocumentLayout,
+    line_indices: &[usize],
+    context: FrameRenderContext,
+) -> Vec<bool> {
     line_indices
         .iter()
-        .map(|index| layout.is_assistant_message_line(*index))
+        .map(|index| layout.is_assistant_message_line(*index, context))
         .collect()
 }
 
@@ -172,19 +186,23 @@ mod tests {
         model.has_window = true;
 
         let layout = DocumentLayout {
-            tail: std::rc::Rc::new(DocumentTailLayout {
-                lines: vec![
+            tail: std::rc::Rc::new(DocumentTailLayout::from_test_parts(
+                vec![
                     Line::raw("frame-top"),
                     Line::raw("input-line"),
                     Line::raw("frame-bottom"),
                 ],
-                text_lines: vec![
+                vec![
                     "frame-top".to_string(),
                     "input-line".to_string(),
                     "frame-bottom".to_string(),
                 ],
-                ..DocumentTailLayout::default()
-            }),
+                Vec::new(),
+                Vec::new(),
+                SlotFrame::new(0, true, 1),
+                2,
+                1,
+            )),
             composer_slot: SlotFrame::new(0, true, 1),
             cursor_x: 2,
             cursor_y: 1,
@@ -195,6 +213,7 @@ mod tests {
             &layout,
             model.document_viewport_height(),
             model.bottom_follow_presentation(&layout),
+            FrameRenderContext::capture(),
         );
 
         assert_eq!(
@@ -211,21 +230,25 @@ mod tests {
         model.has_window = true;
 
         let layout = DocumentLayout {
-            tail: std::rc::Rc::new(DocumentTailLayout {
-                lines: vec![
+            tail: std::rc::Rc::new(DocumentTailLayout::from_test_parts(
+                vec![
                     Line::raw("frame-top"),
                     Line::raw("input-line"),
                     Line::raw("frame-bottom"),
                     Line::raw("status-line"),
                 ],
-                text_lines: vec![
+                vec![
                     "frame-top".to_string(),
                     "input-line".to_string(),
                     "frame-bottom".to_string(),
                     "status-line".to_string(),
                 ],
-                ..DocumentTailLayout::default()
-            }),
+                Vec::new(),
+                Vec::new(),
+                SlotFrame::new(0, true, 1),
+                2,
+                1,
+            )),
             composer_slot: SlotFrame::new(0, true, 1),
             cursor_x: 2,
             cursor_y: 1,
@@ -236,6 +259,7 @@ mod tests {
             &layout,
             model.document_viewport_height(),
             model.bottom_follow_presentation(&layout),
+            FrameRenderContext::capture(),
         );
 
         assert_eq!(

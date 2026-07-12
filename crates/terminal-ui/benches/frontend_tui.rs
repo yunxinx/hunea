@@ -19,6 +19,23 @@ fn transcript_benches(c: &mut Criterion) {
         });
     });
 
+    for line_count in [256_usize, 2048_usize] {
+        let large_code = benchmark::large_rust_code_block_fixture(line_count);
+        black_box(benchmark::render_markdown_plain_text(
+            &large_code,
+            72,
+            palette,
+        ));
+        group.throughput(Throughput::Bytes(large_code.len() as u64));
+        group.bench_with_input(
+            BenchmarkId::new("render_markdown/large_rust_code", line_count),
+            &large_code,
+            |b, markdown| {
+                b.iter(|| black_box(benchmark::render_markdown_plain_text(markdown, 72, palette)));
+            },
+        );
+    }
+
     group.throughput(Throughput::Bytes(prose.len() as u64));
     group.bench_function("wrap_prompt_visual_lines/prose", |b| {
         b.iter(|| black_box(benchmark::wrap_prompt_visual_lines_summary(&prose, 36, 2)));
@@ -67,6 +84,17 @@ fn transcript_benches(c: &mut Criterion) {
             },
         );
     }
+
+    for item_count in [512_usize, 4096_usize] {
+        let mut bench = benchmark::AssistantProjectionBench::long_list(item_count, 72, palette);
+        group.throughput(Throughput::Elements(item_count as u64));
+        group.bench_function(
+            BenchmarkId::new("assistant_projection/materialize_next_page", item_count),
+            |b| b.iter(|| black_box(bench.materialize_next_page())),
+        );
+    }
+
+    group.finish();
 }
 
 fn composer_benches(c: &mut Criterion) {
@@ -85,6 +113,17 @@ fn composer_benches(c: &mut Criterion) {
             ))
         });
     });
+
+    for draft_bytes in [4 * 1024_usize, 64 * 1024_usize] {
+        let mut bench = benchmark::StreamActivityTailBench::new(draft_bytes, 80, 24);
+        group.throughput(Throughput::Bytes(draft_bytes as u64));
+        group.bench_function(
+            BenchmarkId::new("tail_rebuild/stream_activity", draft_bytes),
+            |b| b.iter(|| black_box(bench.rebuild_next_activity_frame())),
+        );
+    }
+
+    group.finish();
 }
 
 fn document_benches(c: &mut Criterion) {
@@ -141,6 +180,8 @@ fn document_benches(c: &mut Criterion) {
             },
         );
     }
+
+    group.finish();
 }
 
 fn model_render_benches(c: &mut Criterion) {
@@ -164,11 +205,61 @@ fn model_render_benches(c: &mut Criterion) {
             },
         );
     }
+
+    group.finish();
+}
+
+fn terminal_grid_benches(c: &mut Criterion) {
+    let width = 240_u16;
+    let height = 70_u16;
+    let mut group = c.benchmark_group("frontend_tui/terminal_grid");
+    group.throughput(Throughput::Elements(u64::from(width) * u64::from(height)));
+
+    for (name, scenario) in terminal_grid_scenarios() {
+        let bench = benchmark::TerminalGridBench::new(scenario, width, height);
+        group.bench_function(BenchmarkId::new("diff", name), |b| {
+            b.iter(|| black_box(bench.diff()));
+        });
+    }
+
+    group.finish();
+}
+
+fn terminal_surface_benches(c: &mut Criterion) {
+    let width = 240_u16;
+    let height = 70_u16;
+    let mut group = c.benchmark_group("frontend_tui/terminal_surface");
+    group.throughput(Throughput::Elements(u64::from(width) * u64::from(height)));
+
+    for (name, scenario) in terminal_grid_scenarios() {
+        let mut bench = benchmark::TerminalFlushBench::new(scenario, width, height);
+        group.bench_function(BenchmarkId::new("diff_and_flush", name), |b| {
+            b.iter(|| black_box(bench.diff_and_flush()));
+        });
+    }
+
+    group.finish();
+}
+
+fn terminal_grid_scenarios() -> [(&'static str, benchmark::TerminalGridScenario); 3] {
+    [
+        ("single_cell", benchmark::TerminalGridScenario::SingleCell),
+        ("full_screen", benchmark::TerminalGridScenario::FullScreen),
+        (
+            "scroll_one_line",
+            benchmark::TerminalGridScenario::ScrollOneLine,
+        ),
+    ]
 }
 
 criterion_group!(
     name = benches;
     config = Criterion::default().sample_size(20);
-    targets = transcript_benches, composer_benches, document_benches, model_render_benches
+    targets = transcript_benches,
+        composer_benches,
+        document_benches,
+        model_render_benches,
+        terminal_grid_benches,
+        terminal_surface_benches
 );
 criterion_main!(benches);

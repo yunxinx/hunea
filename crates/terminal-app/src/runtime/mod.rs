@@ -15,7 +15,8 @@ use std::{
 };
 
 use conversation_runtime::{
-    ConversationWorker, ModelRefreshWorker, ProviderConversation, models as provider_models,
+    ConversationWorker, ModelRefreshWorker, ProviderConversation, RuntimeEventNotifier,
+    models as provider_models,
 };
 use runtime_domain::{
     dynamic_environment::DynamicEnvironmentSessionConfig,
@@ -97,6 +98,7 @@ pub(crate) struct AppRuntimeCoordinator {
     session_store_worker: SessionStoreWorker,
     context_budget_worker: ContextBudgetWorker,
     dynamic_environment_worker: DynamicEnvironmentWorker,
+    runtime_event_notifier: RuntimeEventNotifier,
     pending_conversation_turn: Option<PendingConversationTurn>,
     pending_runtime_events: Vec<RuntimeEvent>,
     manual_skill_activity_sequence: usize,
@@ -136,16 +138,22 @@ impl AppRuntimeCoordinator {
         let prompt_assembly_tool_definitions = tool_definitions_from_registry(&workspace_tools);
         let provider_conversation = fresh_provider_conversation(&options)?;
         let dynamic_environment_observer = Arc::clone(&options.dynamic_environment_observer);
+        let runtime_event_notifier = RuntimeEventNotifier::default();
         Ok(Self {
             options,
-            conversation_worker: ConversationWorker::default(),
+            conversation_worker: ConversationWorker::new(runtime_event_notifier.clone()),
             provider_conversation,
-            model_refresh: ModelRefreshWorker::default(),
+            model_refresh: ModelRefreshWorker::new(runtime_event_notifier.clone()),
             workspace_tools,
             prompt_assembly_tool_definitions,
-            session_store_worker: SessionStoreWorker::new(),
-            context_budget_worker: ContextBudgetWorker::new().map_err(|error| error.to_string())?,
-            dynamic_environment_worker: DynamicEnvironmentWorker::new(dynamic_environment_observer),
+            session_store_worker: SessionStoreWorker::new(runtime_event_notifier.clone()),
+            context_budget_worker: ContextBudgetWorker::new(runtime_event_notifier.clone())
+                .map_err(|error| error.to_string())?,
+            dynamic_environment_worker: DynamicEnvironmentWorker::new(
+                dynamic_environment_observer,
+                runtime_event_notifier.clone(),
+            ),
+            runtime_event_notifier,
             pending_conversation_turn: None,
             pending_runtime_events: Vec::new(),
             manual_skill_activity_sequence: 0,
@@ -215,6 +223,8 @@ impl AppRuntimeCoordinator {
                 limit,
             } => self.record_message_history(entry_id, text, limit),
             RuntimeCommand::Reset => {
+                self.dynamic_environment_worker.cancel_pending();
+                self.pending_conversation_turn = None;
                 self.conversation_worker.reset_after_clear();
                 self.provider_conversation = fresh_provider_conversation(&self.options)?;
                 self.model_refresh.reset_after_clear();
@@ -266,6 +276,11 @@ impl AppRuntimeCoordinator {
             tool_definitions_from_registry(&self.workspace_tools);
     }
 
+    fn defer_runtime_event_until_next_render(&mut self, event: RuntimeEvent) {
+        self.pending_runtime_events.push(event);
+        self.runtime_event_notifier.notify();
+    }
+
     pub(crate) fn shutdown(&mut self) -> Result<(), String> {
         self.conversation_worker.reset_after_clear();
         self.context_budget_worker.shutdown()?;
@@ -274,6 +289,16 @@ impl AppRuntimeCoordinator {
             self.session_store_worker.flush_all(store.clone())?;
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_pending_work_for_test(&self) -> bool {
+        self.conversation_worker.is_running()
+            || self.model_refresh.is_running()
+            || self.session_store_worker.has_pending_work()
+            || self.context_budget_worker.has_pending_work()
+            || self.dynamic_environment_worker.has_pending_work()
+            || self.pending_conversation_turn.is_some()
     }
 }
 
@@ -390,12 +415,19 @@ fn restored_model_selection(
 }
 
 impl RuntimeCoordinator for AppRuntimeCoordinator {
-    fn drain_runtime_events(&mut self) -> Vec<RuntimeEvent> {
-        if !self.pending_runtime_events.is_empty() {
-            return std::mem::take(&mut self.pending_runtime_events);
-        }
+    fn install_loop_event_waker(
+        &mut self,
+        waker: terminal_ui::LoopEventWaker,
+    ) -> Result<(), String> {
+        self.runtime_event_notifier
+            .replace_callback(move || waker.wake());
+        Ok(())
+    }
 
-        let mut events = Vec::new();
+    fn drain_runtime_events(&mut self) -> Vec<RuntimeEvent> {
+        // 消费一次 wake 后必须观测所有 producer。deferred event 只建立跨 render 的
+        // 交付边界，不能让已经就绪且其 wake 可能被合并的 worker payload 留在 receiver。
+        let mut events = std::mem::take(&mut self.pending_runtime_events);
         self.drain_context_budget_events_into(&mut events);
         self.drain_session_store_events_into(&mut events);
         self.drain_dynamic_environment_events_into(&mut events);
@@ -420,7 +452,7 @@ impl RuntimeCoordinator for AppRuntimeCoordinator {
             }
             let runtime_event = runtime_event_from_conversation_event(target, event);
             if should_defer_runtime_event_for_render_barrier(&events, &runtime_event) {
-                self.pending_runtime_events.push(runtime_event);
+                self.defer_runtime_event_until_next_render(runtime_event);
                 break;
             }
             events.push(runtime_event);
@@ -434,15 +466,6 @@ impl RuntimeCoordinator for AppRuntimeCoordinator {
             events.push(event);
         }
         events
-    }
-
-    fn has_background_runtime(&self) -> bool {
-        self.conversation_worker.is_running()
-            || self.model_refresh.is_running()
-            || self.session_store_worker.has_pending_work()
-            || self.context_budget_worker.has_pending_work()
-            || self.dynamic_environment_worker.has_pending_work()
-            || self.pending_conversation_turn.is_some()
     }
 
     fn dispatch_runtime_command(

@@ -4,10 +4,9 @@ use std::{
         mpsc::{self, Receiver, Sender},
     },
     thread,
-    time::Duration,
 };
 
-use conversation_runtime::ProviderConversation;
+use conversation_runtime::{NotifyingSender, ProviderConversation, RuntimeEventNotifier};
 use runtime_domain::session::{
     MessageHistoryEntryId, PromptAssemblyCommandFailureKind, RuntimeEvent, SessionLoadRequestId,
     SessionPickerRow, SessionResumePayload, SessionTreePayload,
@@ -19,8 +18,7 @@ use super::{
     session_resume_payload, session_tree_load::SessionTreeLoadConsumer, session_tree_payload,
 };
 
-const SESSION_EVENT_DRAIN_WAIT: Duration = Duration::from_millis(2);
-const SESSION_SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
+const SESSION_SHUTDOWN_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub(super) struct SessionStoreWorker {
     command_sender: Sender<SessionStoreCommand>,
@@ -51,6 +49,8 @@ pub(super) enum SessionStoreWorkerEvent {
         is_mutation: bool,
     },
 }
+
+type SessionStoreWorkerEventSender = NotifyingSender<SessionStoreWorkerEvent>;
 
 enum SessionStoreCommand {
     ListSessions {
@@ -128,14 +128,15 @@ enum SessionStoreCommand {
 
 impl Default for SessionStoreWorker {
     fn default() -> Self {
-        Self::new()
+        Self::new(RuntimeEventNotifier::default())
     }
 }
 
 impl SessionStoreWorker {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(event_notifier: RuntimeEventNotifier) -> Self {
         let (command_sender, command_receiver) = mpsc::channel();
         let (event_sender, event_receiver) = mpsc::channel();
+        let event_sender = SessionStoreWorkerEventSender::new(event_sender, event_notifier);
         // session store 可能包含阻塞文件系统路径；这里固定为专用 OS 线程，
         // 线程内用 current-thread runtime 驱动 store 的 async trait，避免阻塞 TUI 主循环。
         thread::spawn(move || run_session_worker(command_receiver, event_sender));
@@ -147,6 +148,7 @@ impl SessionStoreWorker {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn has_pending_work(&self) -> bool {
         self.pending_commands > 0
     }
@@ -157,23 +159,26 @@ impl SessionStoreWorker {
 
     pub(super) fn drain_events(&mut self) -> Vec<SessionStoreWorkerEvent> {
         let mut events = Vec::new();
-        while let Ok(event) = self.event_receiver.try_recv() {
-            self.mark_event_drained(&event);
-            events.push(event);
-        }
-
-        if events.is_empty()
-            && self.pending_commands > 0
-            && let Ok(event) = self.event_receiver.recv_timeout(SESSION_EVENT_DRAIN_WAIT)
-        {
-            self.mark_event_drained(&event);
-            events.push(event);
-            while let Ok(event) = self.event_receiver.try_recv() {
-                self.mark_event_drained(&event);
-                events.push(event);
+        loop {
+            match self.event_receiver.try_recv() {
+                Ok(event) => {
+                    self.mark_event_drained(&event);
+                    events.push(event);
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    if self.pending_commands > 0 {
+                        self.pending_commands = 0;
+                        self.pending_mutations = 0;
+                        events.push(SessionStoreWorkerEvent::Failed {
+                            message: "session store worker stopped".to_string(),
+                            is_mutation: false,
+                        });
+                    }
+                    break;
+                }
             }
         }
-
         events
     }
 
@@ -473,8 +478,9 @@ impl SessionStoreWorkerEvent {
 
 fn run_session_worker(
     command_receiver: Receiver<SessionStoreCommand>,
-    event_sender: Sender<SessionStoreWorkerEvent>,
+    event_sender: SessionStoreWorkerEventSender,
 ) {
+    let _exit_notification = event_sender.notify_on_drop();
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -522,7 +528,7 @@ async fn handle_list_sessions_command(
     store: Arc<dyn SessionStore>,
     project_dir: ProjectDir,
     active_session_id: Option<SessionId>,
-    event_sender: &Sender<SessionStoreWorkerEvent>,
+    event_sender: &SessionStoreWorkerEventSender,
 ) {
     // session picker 先显示 SQLite 缓存结果，再用 repair 后的结果刷新，避免扫盘阻塞入口。
     let initial_rows = match list_session_rows(
@@ -897,5 +903,63 @@ fn failed(message: String, is_mutation: bool) -> SessionStoreWorkerEvent {
     SessionStoreWorkerEvent::Failed {
         message,
         is_mutation,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    };
+
+    use conversation_runtime::RuntimeEventNotifier;
+
+    use super::*;
+
+    #[test]
+    fn session_worker_event_sender_notifies_after_payload_is_queued() {
+        let (event_sender, event_receiver) = mpsc::channel();
+        let notification_count = Arc::new(AtomicUsize::new(0));
+        let callback_count = Arc::clone(&notification_count);
+        let notifier = RuntimeEventNotifier::default();
+        notifier.replace_callback(move || {
+            callback_count.fetch_add(1, Ordering::SeqCst);
+        });
+        let sender = SessionStoreWorkerEventSender::new(event_sender, notifier);
+
+        sender
+            .send(SessionStoreWorkerEvent::Noop)
+            .expect("session worker event should queue");
+
+        assert!(matches!(
+            event_receiver.try_recv(),
+            Ok(SessionStoreWorkerEvent::Noop)
+        ));
+        assert_eq!(notification_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn disconnected_session_worker_clears_pending_commands_and_reports_failure() {
+        let (command_sender, _command_receiver) = mpsc::channel();
+        let (event_sender, event_receiver) = mpsc::channel();
+        drop(event_sender);
+        let mut worker = SessionStoreWorker {
+            command_sender,
+            event_receiver,
+            pending_commands: 2,
+            pending_mutations: 1,
+        };
+
+        let events = worker.drain_events();
+
+        assert_eq!(worker.pending_commands, 0);
+        assert_eq!(worker.pending_mutations, 0);
+        assert!(matches!(
+            events.as_slice(),
+            [SessionStoreWorkerEvent::Failed { message, .. }]
+                if message == "session store worker stopped"
+        ));
     }
 }

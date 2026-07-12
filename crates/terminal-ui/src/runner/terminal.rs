@@ -1,18 +1,10 @@
-use std::{fmt, io};
+use std::io;
 
-use crossterm::{
-    Command,
-    cursor::Show,
-    event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event,
-    },
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-};
 use ratatui::backend::CrosstermBackend;
 
-use super::{event_pipeline::TerminalWaitPlan, terminal_surface::TerminalSurface};
+use crate::terminal_lifecycle::TerminalLifecycleGuard;
+
+use super::terminal_surface::TerminalSurface;
 
 pub(super) type TuiTerminal = TerminalSurface<CrosstermBackend<io::Stdout>>;
 
@@ -56,167 +48,70 @@ impl TerminalMouseMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct EnableAlternateScroll;
-
-impl Command for EnableAlternateScroll {
-    fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
-        write!(f, "\x1b[?1007h")
-    }
-
-    #[cfg(windows)]
-    fn execute_winapi(&self) -> io::Result<()> {
-        Err(io::Error::other(
-            "tried to execute EnableAlternateScroll using WinAPI; use ANSI instead",
-        ))
-    }
-
-    #[cfg(windows)]
-    fn is_ansi_code_supported(&self) -> bool {
-        true
-    }
+pub(super) struct TerminalSession {
+    lifecycle: TerminalLifecycleGuard,
 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct DisableAlternateScroll;
-
-impl Command for DisableAlternateScroll {
-    fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
-        write!(f, "\x1b[?1007l")
-    }
-
-    #[cfg(windows)]
-    fn execute_winapi(&self) -> io::Result<()> {
-        Err(io::Error::other(
-            "tried to execute DisableAlternateScroll using WinAPI; use ANSI instead",
-        ))
-    }
-
-    #[cfg(windows)]
-    fn is_ansi_code_supported(&self) -> bool {
-        true
-    }
-}
-
-pub(super) fn wait_for_terminal_event(wait_plan: TerminalWaitPlan) -> io::Result<Option<Event>> {
-    match wait_plan {
-        TerminalWaitPlan::Block => event::read().map(Some),
-        TerminalWaitPlan::Poll { duration, .. } => {
-            if event::poll(duration)? {
-                event::read().map(Some)
-            } else {
-                Ok(None)
-            }
-        }
-    }
-}
-
-pub(super) fn apply_mouse_mode(
-    terminal: &mut TuiTerminal,
-    mode: TerminalMouseMode,
-) -> io::Result<()> {
-    match (mode.has_mouse_capture, mode.has_alternate_scroll) {
-        (true, false) => execute!(
-            terminal.backend_mut(),
-            DisableAlternateScroll,
-            EnableMouseCapture
-        ),
-        (false, true) => execute!(
-            terminal.backend_mut(),
-            DisableMouseCapture,
-            EnableAlternateScroll
-        ),
-        (true, true) => execute!(
-            terminal.backend_mut(),
-            EnableAlternateScroll,
-            EnableMouseCapture
-        ),
-        (false, false) => execute!(
-            terminal.backend_mut(),
-            DisableMouseCapture,
-            DisableAlternateScroll
-        ),
-    }
-}
-
-pub(super) struct TerminalSession;
 
 impl TerminalSession {
     pub(super) fn enter() -> io::Result<(TuiTerminal, Self)> {
-        enable_raw_mode()?;
+        let mut lifecycle = TerminalLifecycleGuard::default();
         let mut stdout = io::stdout();
-        execute!(
-            stdout,
-            EnterAlternateScreen,
-            DisableAlternateScroll,
-            EnableMouseCapture,
-            EnableBracketedPaste
-        )?;
+        lifecycle.activate_main(&mut stdout)?;
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = TerminalSurface::new(backend)?;
-        terminal.hide_cursor()?;
-        Ok((terminal, Self))
+        lifecycle.hide_cursor_with(|| terminal.hide_cursor())?;
+        Ok((terminal, Self { lifecycle }))
     }
 
-    pub(super) fn suspend(terminal: &mut TuiTerminal) -> io::Result<()> {
-        terminal.show_cursor()?;
-        disable_raw_mode()?;
-        execute!(
+    pub(super) fn apply_mouse_mode(
+        &mut self,
+        terminal: &mut TuiTerminal,
+        mode: TerminalMouseMode,
+    ) -> io::Result<()> {
+        self.lifecycle.apply_mouse_mode(
             terminal.backend_mut(),
-            DisableBracketedPaste,
-            DisableMouseCapture,
-            DisableAlternateScroll,
-            LeaveAlternateScreen
-        )?;
-        Ok(())
+            mode.has_mouse_capture,
+            mode.has_alternate_scroll,
+        )
     }
 
-    pub(super) fn resume(terminal: &mut TuiTerminal) -> io::Result<()> {
-        enable_raw_mode()?;
-        execute!(
-            terminal.backend_mut(),
-            EnterAlternateScreen,
-            DisableAlternateScroll,
-            EnableMouseCapture,
-            EnableBracketedPaste
-        )?;
-        terminal.hide_cursor()?;
-        terminal.clear()?;
+    pub(super) fn suspend(&mut self, terminal: &mut TuiTerminal) -> io::Result<()> {
+        let mut first_error = self
+            .lifecycle
+            .show_cursor_with(|| terminal.show_cursor())
+            .err();
+        if let Err(error) = self.lifecycle.restore_modes(terminal.backend_mut())
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+        finish_terminal_transition(first_error)
+    }
+
+    pub(super) fn resume(&mut self, terminal: &mut TuiTerminal) -> io::Result<()> {
+        self.lifecycle.activate_main(terminal.backend_mut())?;
+        if let Err(error) = self.lifecycle.hide_cursor_with(|| terminal.hide_cursor()) {
+            let _ = self.lifecycle.restore_all(terminal.backend_mut());
+            return Err(error);
+        }
+        if let Err(error) = terminal.clear() {
+            let _ = self.lifecycle.restore_all(terminal.backend_mut());
+            return Err(error);
+        }
         Ok(())
     }
 }
 
-impl Drop for TerminalSession {
-    fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        let mut stdout = io::stdout();
-        let _ = execute!(
-            stdout,
-            Show,
-            DisableBracketedPaste,
-            DisableMouseCapture,
-            DisableAlternateScroll,
-            LeaveAlternateScreen
-        );
+fn finish_terminal_transition(first_error: Option<io::Error>) -> io::Result<()> {
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crossterm::Command;
-
-    use super::{DisableAlternateScroll, EnableAlternateScroll, TerminalMouseMode};
-
-    #[test]
-    fn alternate_scroll_commands_emit_xterm_mode_sequences() {
-        let mut enable = String::new();
-        EnableAlternateScroll.write_ansi(&mut enable).unwrap();
-        assert_eq!(enable, "\x1b[?1007h");
-
-        let mut disable = String::new();
-        DisableAlternateScroll.write_ansi(&mut disable).unwrap();
-        assert_eq!(disable, "\x1b[?1007l");
-    }
+    use super::TerminalMouseMode;
 
     #[test]
     fn overlay_mouse_mode_uses_alternate_scroll_without_mouse_capture() {

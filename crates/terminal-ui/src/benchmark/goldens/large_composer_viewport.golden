@@ -1,0 +1,45 @@
+size=48x12
+cursor=2,11
+cells:
+00|··字·and·emoji·👨‍👩‍👧·aligned·while·the·draft·wrap··|
+01|··s·across·the·terminal·························|
+02|··line·0063·····composer·viewport·keeps·中文宽··|
+03|··字·and·emoji·👨‍👩‍👧·aligned·while·the·draft·wrap··|
+04|··s·across·the·terminal·························|
+05|··line·0064·····composer·viewport·keeps·中文宽··|
+06|··字·and·emoji·👨‍👩‍👧·aligned·while·the·draft·wrap··|
+07|··s·across·the·terminal·························|
+08|··line·0065·····composer·viewport·keeps·中文宽··|
+09|··字·and·emoji·👨‍👩‍👧·aligned·while·the·draft·wrap··|
+10|··s·across·the·terminal·························|
+11|················································|
+styles:
+00|00..02 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+00|04..15 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+00|17..47 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+01|00..47 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+02|00..40 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+02|42..42 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+02|44..44 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+02|46..47 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+03|00..02 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+03|04..15 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+03|17..47 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+04|00..47 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+05|00..40 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+05|42..42 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+05|44..44 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+05|46..47 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+06|00..02 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+06|04..15 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+06|17..47 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+07|00..47 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+08|00..40 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+08|42..42 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+08|44..44 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+08|46..47 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+09|00..02 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+09|04..15 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+09|17..47 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+10|00..47 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+11|00..47 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None

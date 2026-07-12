@@ -1,23 +1,29 @@
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::{display_width::grapheme_width, document::DocumentLayout};
+use crate::{
+    display_width::grapheme_width, document::DocumentLayout, frame_time::FrameRenderContext,
+};
 
 use super::{
     SelectionState, policy::preserves_blank_selection, selection_columns_for_line,
     selection_ends_before_line_content,
 };
 
-pub(crate) fn selection_text(layout: &DocumentLayout, selection: SelectionState) -> Option<String> {
-    let (start, end) = selection.ordered_points(layout)?;
+pub(crate) fn selection_text(
+    layout: &DocumentLayout,
+    selection: SelectionState,
+    context: FrameRenderContext,
+) -> Option<String> {
+    let (start, end) = selection.ordered_points(layout, context)?;
     if start.line() >= layout.line_count() || end.line() >= layout.line_count() {
         return None;
     }
 
     let mut lines = Vec::with_capacity(end.line().saturating_sub(start.line()) + 1);
     for line in start.line()..=end.line() {
-        if let Some(line_data) = layout.selection_line_at(line)
+        if let Some(line_data) = layout.selection_line_at(line, context)
             && let Some((start_column, end_column)) =
-                selection_columns_for_line(selection, layout, line, line_data.selectable)
+                selection_columns_for_line(selection, layout, line, line_data.selectable, context)
         {
             lines.push(selection_text_for_line(
                 &line_data.text,
@@ -27,7 +33,7 @@ pub(crate) fn selection_text(layout: &DocumentLayout, selection: SelectionState)
             continue;
         }
 
-        let line_data = layout.selection_line_at(line);
+        let line_data = layout.selection_line_at(line, context);
         let preserves_blank = line_data
             .as_ref()
             .is_some_and(|line_data| preserves_blank_selection(&line_data.anchor));
@@ -35,7 +41,7 @@ pub(crate) fn selection_text(layout: &DocumentLayout, selection: SelectionState)
             .map(|line_data| line_data.selectable)
             .unwrap_or_default();
         if preserves_blank
-            || selection_ends_before_line_content(selection, layout, line, selectable)
+            || selection_ends_before_line_content(selection, layout, line, selectable, context)
         {
             lines.push(String::new());
         }
@@ -92,6 +98,9 @@ mod tests {
             super::super::SelectionPoint::new(crate::document::DocumentLineAnchor::default(), 1),
         );
 
-        assert_eq!(selection_text(&layout, selection), None);
+        assert_eq!(
+            selection_text(&layout, selection, FrameRenderContext::capture()),
+            None,
+        );
     }
 }

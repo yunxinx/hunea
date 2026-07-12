@@ -144,11 +144,14 @@ where
     }
 }
 
-fn draw_terminal_commands<'a, W, I>(writer: &mut W, commands: I) -> io::Result<()>
+/// 将 terminal diff command 编码为 ANSI 输出，并在结束时恢复默认 SGR 状态。
+pub(crate) fn draw_terminal_commands<'a, W, I>(writer: &mut W, commands: I) -> io::Result<()>
 where
     W: Write,
     I: Iterator<Item = TerminalDrawCommand<'a>>,
 {
+    const PREFILL_SPACES: &str = "                                ";
+
     let mut style = TerminalStyleState::default();
     let mut last_pos: Option<Position> = None;
 
@@ -171,7 +174,13 @@ where
             } => {
                 style.queue_cell(writer, cell)?;
                 if prefill_width > 1 {
-                    queue!(writer, Print(" ".repeat(prefill_width)), MoveTo(x, y))?;
+                    let mut remaining = prefill_width;
+                    while remaining > 0 {
+                        let chunk_width = remaining.min(PREFILL_SPACES.len());
+                        queue!(writer, Print(&PREFILL_SPACES[..chunk_width]))?;
+                        remaining -= chunk_width;
+                    }
+                    queue!(writer, MoveTo(x, y))?;
                 }
                 queue!(writer, Print(cell.symbol()))?;
             }

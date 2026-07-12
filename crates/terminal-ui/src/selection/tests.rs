@@ -20,9 +20,10 @@ fn transcript_selection_survives_append_and_copies_using_anchor_bound_range() {
         .append_message(Sender::Assistant, "alpha");
     model.sync_transcript_render();
 
-    let layout = model.build_document_layout();
+    let context = crate::frame_time::FrameRenderContext::capture();
+    let layout = model.build_document_layout(context);
     let anchor = model
-        .selection_point_for_mouse_with_layout(3, 0, &layout)
+        .selection_point_for_mouse_with_layout(3, 0, &layout, context)
         .expect("selection should start inside the transcript line");
     let focus = model
         .selection_point_for_drag_mouse(7, 0)
@@ -52,13 +53,14 @@ fn assistant_selection_uses_visual_inset_as_display_only_offset() {
         .append_message(Sender::Assistant, "alpha");
     model.sync_transcript_render();
 
-    let layout = model.build_document_layout();
+    let context = crate::frame_time::FrameRenderContext::capture();
+    let layout = model.build_document_layout(context);
 
     let inset_start = model
-        .selection_point_for_mouse_with_layout(1, 0, &layout)
+        .selection_point_for_mouse_with_layout(1, 0, &layout, context)
         .expect("assistant visual inset should be usable as a selection handle");
     let text_start = model
-        .selection_point_for_mouse_with_layout(2, 0, &layout)
+        .selection_point_for_mouse_with_layout(2, 0, &layout, context)
         .expect("the first visible assistant character should start selection");
     let end = model
         .selection_point_for_drag_mouse(7, 0)
@@ -86,18 +88,24 @@ fn line_selection_falls_back_to_current_line_end_when_next_anchor_is_missing() {
         ..DocumentLineAnchor::default()
     };
     let mut layout = DocumentLayout::with_test_plain_lines(0, &["alpha", "beta"]);
-    layout.tail = Rc::new(DocumentTailLayout {
-        lines: vec![Line::raw("alpha"), Line::raw("beta")],
-        text_lines: vec!["alpha".to_string(), "beta".to_string()],
-        anchors: vec![first_anchor],
-        selectable: vec![
+    layout.tail = Rc::new(DocumentTailLayout::from_test_parts(
+        vec![Line::raw("alpha"), Line::raw("beta")],
+        vec!["alpha".to_string(), "beta".to_string()],
+        vec![first_anchor],
+        vec![
             SelectableLineRange::new(0, 5),
             SelectableLineRange::new(0, 4),
         ],
-        ..layout.tail.as_ref().clone()
-    });
+        layout.tail.composer_slot,
+        layout.tail.cursor_x,
+        layout.tail.cursor_y,
+    ));
 
-    model.select_line_at_point(SelectionPoint::new(first_anchor, 2), &layout);
+    model.select_line_at_point(
+        SelectionPoint::new(first_anchor, 2),
+        &layout,
+        crate::frame_time::FrameRenderContext::capture(),
+    );
 
     assert!(model.selection_runtime.selection.is_active());
     assert_eq!(
@@ -132,11 +140,15 @@ fn request_copy_selection_exactizes_the_selected_transcript_range_on_demand() {
         model.transcript.item(0).expect("item 0 should exist"),
         18,
         default_palette(),
+        crate::frame_time::FrameRenderContext::capture(),
+        crate::MotionMode::Full,
     );
     let end_block = materialize_transcript_item_render_block(
         model.transcript.item(2).expect("item 2 should exist"),
         18,
         default_palette(),
+        crate::frame_time::FrameRenderContext::capture(),
+        crate::MotionMode::Full,
     );
     let start = SelectionPoint::new(
         DocumentLineAnchor {
@@ -220,6 +232,8 @@ fn request_copy_selection_exactizes_transcript_tail_when_selection_crosses_into_
             .expect("selected transcript item should exist"),
         18,
         default_palette(),
+        crate::frame_time::FrameRenderContext::capture(),
+        crate::MotionMode::Full,
     );
     let start = SelectionPoint::new(
         DocumentLineAnchor {
@@ -235,10 +249,11 @@ fn request_copy_selection_exactizes_transcript_tail_when_selection_crosses_into_
         0,
     );
 
-    let layout = model.build_document_layout();
+    let layout = model.build_document_layout(crate::frame_time::FrameRenderContext::capture());
     let (composer_anchor, composer_end_column) = (0..layout.line_count())
         .find_map(|line_index| {
-            let line = layout.selection_line_at(line_index)?;
+            let line = layout
+                .selection_line_at(line_index, crate::frame_time::FrameRenderContext::capture())?;
             if line.anchor.region != DocumentAnchorRegion::Composer {
                 return None;
             }

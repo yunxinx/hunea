@@ -1,4 +1,4 @@
-use crate::transcript::LineAnchorKind;
+use crate::{frame_time::FrameRenderContext, transcript::LineAnchorKind};
 
 use super::{
     DocumentAnchorRegion, DocumentLayout, DocumentLineAnchor, DocumentViewportAnchor,
@@ -82,9 +82,10 @@ impl ViewportState {
             return Self::bottom_follow(resolved_offset, viewport_height, document_width);
         }
 
-        let (anchor, anchor_viewport_offset) = preferred_view_anchor(layout, line_indices)
+        let context = FrameRenderContext::capture();
+        let (anchor, anchor_viewport_offset) = preferred_view_anchor(layout, line_indices, context)
             .map(|(line_index, viewport_offset)| {
-                let anchor = document_viewport_anchor_at_line(layout, line_index)
+                let anchor = document_viewport_anchor_at_line(layout, line_index, context)
                     .map(ViewAnchor::Line)
                     .unwrap_or(ViewAnchor::Top);
                 (anchor, viewport_offset)
@@ -129,7 +130,10 @@ impl ViewportState {
             ViewAnchor::Top => 0,
             ViewAnchor::Bottom => layout.line_count().saturating_sub(1),
             ViewAnchor::Line(anchor) => {
-                if let Some(offset) = find_document_offset_for_viewport_anchor(layout, anchor) {
+                let context = FrameRenderContext::capture();
+                if let Some(offset) =
+                    find_document_offset_for_viewport_anchor(layout, anchor, context)
+                {
                     offset
                 } else {
                     return fallback;
@@ -192,9 +196,10 @@ impl ViewportState {
 pub(crate) fn document_viewport_anchor_at_line(
     layout: &DocumentLayout,
     line_index: usize,
+    context: FrameRenderContext,
 ) -> Option<DocumentViewportAnchor> {
-    let line_anchor = layout.line_anchor_at(line_index)?;
-    let mut line_text = layout.line_text_at(line_index)?;
+    let line_anchor = layout.line_anchor_at(line_index, context)?;
+    let mut line_text = layout.line_text_at(line_index, context)?;
     let mut transcript_item_line_count = 0;
     let mut semantic_position = TranscriptSemanticPosition::Unknown;
 
@@ -250,11 +255,12 @@ pub(crate) fn transcript_semantic_position(
 fn preferred_view_anchor(
     layout: &DocumentLayout,
     line_indices: &[usize],
+    context: FrameRenderContext,
 ) -> Option<(usize, usize)> {
     let mut best = None;
     for (viewport_offset, &line_index) in line_indices.iter().enumerate() {
         let priority = layout
-            .line_anchor_at(line_index)
+            .line_anchor_at(line_index, context)
             .map(view_anchor_priority)
             .unwrap_or(usize::MAX);
         if best

@@ -1,7 +1,7 @@
 //! TUI model 状态与子域装配。
 
-use std::rc::Rc;
 use std::time::Instant;
+use std::{path::Path, rc::Rc};
 
 use ratatui::{
     buffer::Buffer,
@@ -11,7 +11,7 @@ use ratatui::{
 pub(super) use runtime_domain::session::{RuntimeToolActivity, RuntimeToolActivityUpdate};
 use runtime_domain::{
     envinfo,
-    model_catalog::{ModelCatalog, ModelSelection},
+    model_catalog::ModelCatalog,
     prompt_assembly::{
         PromptAssemblyCandidateInventorySnapshot, PromptAssemblyCoreSystemSnapshot,
         PromptAssemblyInput, PromptAssemblyManagerSnapshot, PromptAssemblyResolvedSnapshot,
@@ -34,7 +34,6 @@ use super::{
     message_revisit::MessageRevisitState,
     model_panel::ModelPanelState,
     render_frame::RenderFrame,
-    selection::project_wide_selection_styles,
     skill_picker::SkillPickerState,
     startup_banner::StartupBannerEntranceState,
     status_line::StatusLineItem,
@@ -58,22 +57,24 @@ mod state;
 pub use metrics::RequestMetrics;
 pub use options::{EscRewindMode, ModelOptions};
 use runtime_response::{RuntimeResponseBuffer, StreamedRuntimeReasoning};
-pub(crate) use state::PendingReasoningToggleClick;
 use state::{DocumentRuntimeState, NoticeState, SelectionRuntimeState};
+pub(crate) use state::{PendingReasoningToggleClick, SelectedModelState};
 
 /// `Model` 表示交互式 TUI 应用的状态。
 #[derive(Debug, Clone)]
 pub struct Model {
+    pub(super) working_dir: Option<Rc<Path>>,
     pub(super) startup_banner_options: StartupBannerOptions,
     pub(super) startup_banner_entrance: StartupBannerEntranceState,
     pub(super) style_mode: StyleMode,
+    pub(super) motion_mode: crate::MotionMode,
     pub(super) status_line_items: Vec<StatusLineItem>,
     pub(super) status_line_2_items: Vec<StatusLineItem>,
     pub(super) external_editor: Vec<String>,
     pub(super) external_editor_hint: String,
     pub(super) external_editor_helper_enabled: bool,
     pub(super) model_catalog: ModelCatalog,
-    pub(super) selected_model: Option<ModelSelection>,
+    pub(super) selected_model: SelectedModelState,
     pub(super) requires_model_selection: bool,
     pub(super) model_panel: ModelPanelState,
     pub(super) tool_approval_panel: ToolApprovalPanelState,
@@ -145,6 +146,7 @@ pub struct Model {
     pub(super) toast_state: ToastState,
     pub(super) pending_prompt_assembly_notice: Option<PromptAssemblyUpdateNotice>,
     pub(super) status_line_revision: usize,
+    pub(super) stream_activity_revision: usize,
     quitting: bool,
 }
 
@@ -174,7 +176,9 @@ impl Model {
         options: ModelOptions,
     ) -> Self {
         let palette = default_palette();
+        let working_dir = options.working_dir.map(Rc::<Path>::from);
         let style_mode = options.style_mode.normalized();
+        let motion_mode = options.motion_mode;
         let status_line_items = options.status_line_items;
         let status_line_2_items = options.status_line_2_items;
         let selected_model = options.selected_model;
@@ -183,7 +187,13 @@ impl Model {
                 .as_ref()
                 .map(|selection| selection.model_id.clone());
         }
-        let mut transcript = Transcript::new(palette);
+        if startup_banner_options.work_dir.is_none() {
+            startup_banner_options.work_dir = working_dir
+                .as_deref()
+                .map(|path| path.display().to_string());
+        }
+        let mut transcript = Transcript::new(palette, working_dir.clone());
+        transcript.set_motion_mode(motion_mode);
         transcript.set_gap(1);
         transcript.append_startup_banner(startup_banner_options.clone());
         let transcript_render = Rc::new(index_only_render_result(
@@ -219,17 +229,19 @@ impl Model {
                     diagnostics: Vec::new(),
                 });
 
-        Self {
+        let mut model = Self {
+            working_dir,
             startup_banner_options,
             startup_banner_entrance: StartupBannerEntranceState::default(),
             style_mode,
+            motion_mode,
             status_line_items: status_line_items.clone(),
             status_line_2_items,
             external_editor: options.external_editor,
             external_editor_hint: options.external_editor_hint,
             external_editor_helper_enabled: options.show_external_editor_helper,
             model_catalog: options.model_catalog,
-            selected_model,
+            selected_model: SelectedModelState::new(selected_model),
             requires_model_selection: options.requires_model_selection,
             model_panel: ModelPanelState::default(),
             tool_approval_panel: ToolApprovalPanelState::default(),
@@ -313,8 +325,13 @@ impl Model {
             toast_state: ToastState::default(),
             pending_prompt_assembly_notice: None,
             status_line_revision: 1,
+            stream_activity_revision: 1,
             quitting: false,
+        };
+        if !motion_mode.allows_animation() {
+            model.startup_banner_entrance.complete();
         }
+        model
     }
 
     /// `render_to_buffer` 将当前模型渲染到指定屏幕缓冲区。
@@ -329,9 +346,12 @@ impl Model {
         area: Rect,
         buffer: &mut Buffer,
     ) -> Option<Position> {
-        let mut frame = RenderFrame::new_at(now, area, buffer);
+        let mut frame = RenderFrame::new(
+            crate::frame_time::FrameRenderContext::new(now),
+            area,
+            buffer,
+        );
         view::render(self, &mut frame);
-        project_wide_selection_styles(frame.buffer_mut());
         frame.cursor_position()
     }
 
@@ -479,7 +499,8 @@ impl Model {
 
     pub(crate) fn reset_to_initial_tui_state(&mut self) {
         self.startup_banner_entrance.complete();
-        let mut transcript = Transcript::new(self.palette);
+        let mut transcript = Transcript::new(self.palette, self.working_dir.clone());
+        transcript.set_motion_mode(self.motion_mode);
         transcript.set_gap(1);
         if self.has_window {
             transcript.set_width(self.width);
@@ -522,15 +543,18 @@ impl Model {
         self.sync_document_viewport_to_bottom();
     }
 
-    pub(crate) fn startup_banner_entrance_frame_interval_at(
+    pub(crate) fn startup_banner_entrance_next_frame_deadline_at(
         &self,
         now: Instant,
-    ) -> Option<std::time::Duration> {
+    ) -> Option<Instant> {
+        if !self.motion_mode.allows_animation() {
+            return None;
+        }
         if !self.startup_banner_entrance_target_renderable() {
             return None;
         }
 
-        self.startup_banner_entrance.frame_interval_at(now)
+        self.startup_banner_entrance.next_frame_deadline_at(now)
     }
 
     pub(crate) fn apply_startup_banner_entrance_at(
@@ -539,6 +563,9 @@ impl Model {
         buffer: &mut ratatui::buffer::Buffer,
         area: ratatui::layout::Rect,
     ) {
+        if !self.motion_mode.allows_animation() {
+            return;
+        }
         let slide_fill_color = self.palette.surface.unwrap_or_else(|| {
             startup_banner_entrance_fallback_fill_color(self.has_dark_background)
         });

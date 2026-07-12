@@ -53,6 +53,38 @@ fn conversation_target_must_match_running_worker() {
 }
 
 #[test]
+fn reset_discards_a_turn_waiting_for_dynamic_environment() {
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions::default());
+    let request = ConversationTurnRequest::new(
+        "openai",
+        ProviderKind::OpenAi,
+        "gpt-4o-mini",
+        None,
+        None,
+        None,
+        ConversationItem::text(Role::User, "stale turn"),
+    );
+    coordinator.pending_conversation_turn = Some(super::super::PendingConversationTurn {
+        target: request.target(),
+        activity_label: "gpt-4o-mini".to_string(),
+        provider_request: request,
+        transcript_user_message: runtime_domain::session::TranscriptUserMessage {
+            content: "stale turn".to_string(),
+            attachments: Vec::new(),
+            skill_bindings: Vec::new(),
+            custom_prompt_bindings: Vec::new(),
+        },
+        manual_skill_activities: Vec::new(),
+    });
+
+    coordinator
+        .handle_runtime_command(RuntimeCommand::Reset)
+        .expect("reset should be accepted");
+
+    assert!(coordinator.pending_conversation_turn.is_none());
+}
+
+#[test]
 fn token_estimate_creates_render_barrier_before_permission_request() {
     let output_batch = vec![RuntimeEvent::OutputTokenEstimate {
         target: Some(RuntimeTarget::provider("local", "qwen3")),

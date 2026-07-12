@@ -9,12 +9,15 @@ use crate::transcript::{
 use crate::{
     composer,
     selection::SelectableLineRange,
-    style_mode::StyleMode,
     theme::TerminalPalette,
     transcript::{self, CachedRenderBlock, TranscriptItem, TranscriptItemMetricsIndex},
 };
 
-use super::{slot_frame::SlotFrame, tail::DocumentTailLayout};
+use super::{
+    selection_semantic_cache::SelectionSemanticCache,
+    slot_frame::SlotFrame,
+    tail::{DocumentTailLayout, DocumentTailLayoutKey},
+};
 
 /// `DocumentTranscriptKey` 描述 transcript->document 中间快照的命中条件。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -30,11 +33,11 @@ pub(crate) struct DocumentTranscriptSnapshot {
     pub(super) index: TranscriptItemMetricsIndex,
     pub(super) width: u16,
     pub(super) palette: TerminalPalette,
+    pub(super) motion_mode: crate::MotionMode,
     pub(super) items: Rc<Vec<Rc<TranscriptItem>>>,
     pub(super) warmed_item_block_cache: Rc<RefCell<HashMap<usize, Rc<CachedRenderBlock>>>>,
     pub(super) item_block_cache: Rc<RefCell<HashMap<usize, Rc<CachedRenderBlock>>>>,
-    pub(super) item_text_lines_cache: Rc<RefCell<HashMap<usize, Vec<String>>>>,
-    pub(super) selectable_cache: Rc<RefCell<HashMap<usize, Vec<SelectableLineRange>>>>,
+    pub(super) selection_semantic_cache: Rc<RefCell<SelectionSemanticCache>>,
 }
 
 impl Default for DocumentTranscriptSnapshot {
@@ -43,11 +46,11 @@ impl Default for DocumentTranscriptSnapshot {
             index: TranscriptItemMetricsIndex::default(),
             width: 0,
             palette: crate::theme::default_palette(),
+            motion_mode: crate::MotionMode::Full,
             items: Rc::new(Vec::new()),
             warmed_item_block_cache: Rc::new(RefCell::new(HashMap::new())),
             item_block_cache: Rc::new(RefCell::new(HashMap::new())),
-            item_text_lines_cache: Rc::new(RefCell::new(HashMap::new())),
-            selectable_cache: Rc::new(RefCell::new(HashMap::new())),
+            selection_semantic_cache: Rc::new(RefCell::new(SelectionSemanticCache::default())),
         }
     }
 }
@@ -63,38 +66,14 @@ pub(crate) struct DocumentTranscriptCache {
 /// `DocumentLayoutKey` 描述影响统一文档布局的最小状态集合。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct DocumentLayoutKey {
-    pub(super) transcript_render_version: usize,
-    pub(super) palette_version: usize,
-    pub(super) style_mode: StyleMode,
-    pub(super) document_width: u16,
-    pub(super) document_viewport_height: usize,
-    pub(super) composer_viewport_height: usize,
-    pub(super) composer_content_revision: usize,
-    pub(super) composer_cursor_revision: usize,
-    pub(super) composer_width: usize,
-    pub(super) command_panel_selected: usize,
-    pub(super) command_panel_scroll: usize,
-    pub(super) tool_approval_panel_active: bool,
-    pub(super) tool_approval_panel_selected: usize,
-    pub(super) tool_approval_panel_revision: usize,
-    pub(super) model_panel_active: bool,
-    pub(super) model_panel_provider_index: usize,
-    pub(super) model_panel_model_index: usize,
-    pub(super) model_panel_scroll: usize,
-    pub(super) model_panel_revision: usize,
-    pub(super) context_budget_active: bool,
-    pub(super) context_budget_revision: usize,
-    pub(super) selected_model: Option<String>,
-    pub(super) status_line_config: u8,
-    pub(super) status_line_2_config: u8,
-    pub(super) status_line_revision: usize,
-    pub(super) stream_activity_frame: usize,
-    pub(super) tool_activity_frame: usize,
+    pub(super) transcript: DocumentTranscriptKey,
+    pub(super) tail: DocumentTailLayoutKey,
 }
 
 /// `DocumentLayout` 表示整份统一文档流的稳定布局。
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DocumentLayout {
+    pub(super) key: DocumentLayoutKey,
     pub(super) transcript: Rc<DocumentTranscriptSnapshot>,
     pub(crate) transcript_line_count: usize,
     pub(crate) tail: Rc<DocumentTailLayout>,
@@ -103,6 +82,12 @@ pub(crate) struct DocumentLayout {
     pub(crate) composer_line_count: usize,
     pub(crate) cursor_x: u16,
     pub(crate) cursor_y: usize,
+}
+
+impl DocumentLayout {
+    pub(crate) const fn key(&self) -> &DocumentLayoutKey {
+        &self.key
+    }
 }
 
 #[cfg(test)]
@@ -158,25 +143,26 @@ impl DocumentLayout {
                 index: render.index.clone(),
                 warmed_item_block_cache: Rc::new(RefCell::new(HashMap::new())),
                 item_block_cache: Rc::new(RefCell::new(item_block_cache)),
-                item_text_lines_cache: Rc::new(RefCell::new(
-                    transcript_plain_lines
-                        .iter()
-                        .enumerate()
-                        .map(|(index, line)| (index, vec![(*line).to_string()]))
-                        .collect(),
+                selection_semantic_cache: Rc::new(RefCell::new(
+                    SelectionSemanticCache::from_plain_lines(
+                        transcript_plain_lines
+                            .iter()
+                            .enumerate()
+                            .map(|(index, line)| (index, vec![(*line).to_string()])),
+                    ),
                 )),
                 ..DocumentTranscriptSnapshot::default()
             }),
-            tail: Rc::new(DocumentTailLayout {
-                lines: tail_plain_lines
+            tail: Rc::new(DocumentTailLayout::from_test_parts(
+                tail_plain_lines
                     .iter()
                     .map(|line| Line::raw((*line).to_string()))
                     .collect(),
-                text_lines: tail_plain_lines
+                tail_plain_lines
                     .iter()
                     .map(|line| (*line).to_string())
                     .collect(),
-                anchors: tail_plain_lines
+                tail_plain_lines
                     .iter()
                     .enumerate()
                     .map(|(index, _)| DocumentLineAnchor {
@@ -185,9 +171,11 @@ impl DocumentLayout {
                         ..DocumentLineAnchor::default()
                     })
                     .collect(),
-                selectable: vec![SelectableLineRange::default(); tail_plain_lines.len()],
-                ..DocumentTailLayout::default()
-            }),
+                vec![SelectableLineRange::default(); tail_plain_lines.len()],
+                SlotFrame::default(),
+                0,
+                0,
+            )),
             ..Self::default()
         }
     }

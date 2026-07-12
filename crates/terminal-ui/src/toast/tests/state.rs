@@ -36,6 +36,20 @@ fn advance_completes_entering_transition_with_snappier_duration() {
 }
 
 #[test]
+fn toast_next_frame_deadline_is_anchored_to_animation_start() {
+    let mut state = ToastState::default();
+    let started_at = Instant::now();
+    state.show(ToastSeverity::Info, "Copied");
+    state.advance_at(started_at);
+    let now = started_at + Duration::from_millis(10);
+
+    assert_eq!(
+        state.next_frame_deadline_at(now),
+        Some(started_at + TOAST_FRAME_INTERVAL),
+    );
+}
+
+#[test]
 fn replacement_waits_for_current_exit_before_next_enter() {
     let mut state = ToastState::default();
     let now = Instant::now();

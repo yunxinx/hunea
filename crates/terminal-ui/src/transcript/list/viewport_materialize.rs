@@ -21,6 +21,7 @@ impl Transcript {
         &mut self,
         line_index: usize,
     ) -> (TranscriptItemMetricsIndex, Option<LineAnchor>) {
+        let context = crate::frame_time::FrameRenderContext::capture();
         let mut index = self.progressive_item_metrics_index();
         if index.line_count == 0 || line_index >= index.line_count {
             return (index, None);
@@ -52,7 +53,7 @@ impl Transcript {
 
         let block_index = relative.saturating_sub(position.gap_before);
         self.begin_recent_render_block_batch();
-        let block = self.render_screen_block(position.item_index, self.render_width());
+        let block = self.render_screen_block(position.item_index, self.render_width(), context);
         let anchor = block.anchor_at(block_index).map(|item_anchor| LineAnchor {
             item_index: position.item_index,
             item_anchor,
@@ -66,6 +67,7 @@ impl Transcript {
         &mut self,
         target: LineAnchor,
     ) -> (TranscriptItemMetricsIndex, Option<usize>) {
+        let context = crate::frame_time::FrameRenderContext::capture();
         let mut index = self.progressive_item_metrics_index();
         let Some(item_lines) = index.item_lines(target.item_index) else {
             return (index, None);
@@ -99,7 +101,7 @@ impl Transcript {
         }
 
         self.begin_recent_render_block_batch();
-        let block = self.render_screen_block(target.item_index, self.render_width());
+        let block = self.render_screen_block(target.item_index, self.render_width(), context);
         let line_index = block
             .anchor_index(target.item_anchor)
             .map(|block_index| item_lines.content_start_line.saturating_add(block_index));
@@ -112,6 +114,7 @@ impl Transcript {
         &mut self,
         start: usize,
         count: usize,
+        context: crate::frame_time::FrameRenderContext,
     ) -> TranscriptViewportLines {
         let mut index = self.progressive_item_metrics_index();
         if count == 0 || index.line_count == 0 || start >= index.line_count {
@@ -131,8 +134,9 @@ impl Transcript {
         );
 
         self.begin_recent_render_block_batch();
-        let warmed_item_count = self.prewarm_viewport_window(&index, start, visible_line_count);
-        let lines = self.materialize_viewport_lines(&index, start, visible_line_count);
+        let warmed_item_count =
+            self.prewarm_viewport_window(&index, start, visible_line_count, context);
+        let lines = self.materialize_viewport_lines(&index, start, visible_line_count, context);
         self.finish_recent_render_block_batch(warmed_item_count);
 
         TranscriptViewportLines { index, lines }
@@ -173,6 +177,7 @@ impl Transcript {
         index: &TranscriptItemMetricsIndex,
         start: usize,
         count: usize,
+        context: crate::frame_time::FrameRenderContext,
     ) -> Vec<TranscriptViewportLine> {
         if count == 0 || index.line_count == 0 || start >= index.line_count {
             return Vec::new();
@@ -210,7 +215,7 @@ impl Transcript {
                 .saturating_sub(position.gap_before)
                 .min(position.content_line_count);
             if block_start < block_end {
-                let block = self.render_screen_block(position.item_index, width);
+                let block = self.render_screen_block(position.item_index, width, context);
                 let is_assistant = self
                     .items
                     .get(position.item_index)
@@ -237,7 +242,12 @@ impl Transcript {
 
     /// `render_viewport` 返回 transcript 的可视切片。
     #[cfg(test)]
-    pub(crate) fn render_viewport(&mut self, offset: usize, height: usize) -> ViewportRenderResult {
+    pub(crate) fn render_viewport(
+        &mut self,
+        offset: usize,
+        height: usize,
+        context: crate::frame_time::FrameRenderContext,
+    ) -> ViewportRenderResult {
         self.begin_recent_render_block_batch();
         let index = self.item_metrics_index();
         if index.line_count == 0 {
@@ -256,8 +266,9 @@ impl Transcript {
             height
         };
         let warmed_item_count =
-            self.prewarm_viewport_window(&index, resolved_offset, visible_line_count);
-        let slice = self.materialize_viewport_slice(&index, resolved_offset, visible_line_count);
+            self.prewarm_viewport_window(&index, resolved_offset, visible_line_count, context);
+        let slice =
+            self.materialize_viewport_slice(&index, resolved_offset, visible_line_count, context);
         self.finish_recent_render_block_batch(warmed_item_count);
 
         ViewportRenderResult {
@@ -272,8 +283,9 @@ impl Transcript {
         index: &TranscriptItemMetricsIndex,
         start: usize,
         count: usize,
+        context: crate::frame_time::FrameRenderContext,
     ) -> usize {
-        self.prewarm_viewport_neighborhood(index, start, count, self.render_width())
+        self.prewarm_viewport_neighborhood(index, start, count, self.render_width(), context)
     }
 
     fn prewarm_viewport_neighborhood(
@@ -282,6 +294,7 @@ impl Transcript {
         start: usize,
         count: usize,
         width: u16,
+        context: crate::frame_time::FrameRenderContext,
     ) -> usize {
         let overscan_lines = viewport_overscan_line_budget(count);
         let Some((start_position, end_position)) =
@@ -296,7 +309,7 @@ impl Transcript {
             .collect::<Vec<_>>();
         let warmed_item_count = item_indices.len();
         for item_index in item_indices {
-            let _ = self.render_screen_block(item_index, width);
+            let _ = self.render_screen_block(item_index, width, context);
         }
         warmed_item_count
     }
@@ -307,6 +320,7 @@ impl Transcript {
         index: &TranscriptItemMetricsIndex,
         start: usize,
         count: usize,
+        context: crate::frame_time::FrameRenderContext,
     ) -> crate::transcript::render_state::RenderRangeSlice {
         if count == 0 || index.line_count == 0 || start >= index.line_count {
             return crate::transcript::render_state::RenderRangeSlice::default();
@@ -348,7 +362,7 @@ impl Transcript {
                 .saturating_sub(position.gap_before)
                 .min(position.content_line_count);
             if block_start < block_end {
-                let block = self.render_screen_block(position.item_index, width);
+                let block = self.render_screen_block(position.item_index, width, context);
                 block.extend_lines(&mut slice.lines, block_start, block_end);
                 #[cfg(test)]
                 for block_index in block_start..block_end {

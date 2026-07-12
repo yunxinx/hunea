@@ -1,0 +1,44 @@
+size=64x18
+cursor=none
+cells:
+00|>·Overlay·keeps·中文·history·visible····························|
+01|································································|
+02|··##·Transcript·overlay·········································|
+03|································································|
+04|··-·light·palette···············································|
+05|··-·fixed·footer················································|
+06|··-·scroll·percentage···········································|
+07|································································|
+08|··Esc·closes·this·view.·········································|
+09|~·······························································|
+10|~·······························································|
+11|~·······························································|
+12|~·······························································|
+13|~·······························································|
+14|~·······························································|
+15|~·······························································|
+16|──────────────────────────────────────────────────────────·0%·──|
+17|··Esc·close···↑↓·scroll···PgUp/PgDn·page···Home/End·jump········|
+styles:
+00|00..01 fg=Rgb(47, 47, 47) bg=Rgb(236, 236, 236) underline=Reset modifiers=NONE diff=None
+00|02..16 fg=Rgb(47, 47, 47) bg=Rgb(236, 236, 236) underline=Reset modifiers=BOLD diff=None
+00|18..18 fg=Rgb(47, 47, 47) bg=Rgb(236, 236, 236) underline=Reset modifiers=BOLD diff=None
+00|20..35 fg=Rgb(47, 47, 47) bg=Rgb(236, 236, 236) underline=Reset modifiers=BOLD diff=None
+02|02..22 fg=Rgb(47, 47, 47) bg=Reset underline=Reset modifiers=BOLD diff=None
+04|02..03 fg=Rgb(110, 110, 110) bg=Reset underline=Reset modifiers=NONE diff=None
+04|04..16 fg=Rgb(47, 47, 47) bg=Reset underline=Reset modifiers=NONE diff=None
+05|02..03 fg=Rgb(110, 110, 110) bg=Reset underline=Reset modifiers=NONE diff=None
+05|04..15 fg=Rgb(47, 47, 47) bg=Reset underline=Reset modifiers=NONE diff=None
+06|02..03 fg=Rgb(110, 110, 110) bg=Reset underline=Reset modifiers=NONE diff=None
+06|04..20 fg=Rgb(47, 47, 47) bg=Reset underline=Reset modifiers=NONE diff=None
+08|02..04 fg=Cyan bg=Reset underline=Reset modifiers=NONE diff=None
+08|05..22 fg=Rgb(47, 47, 47) bg=Reset underline=Reset modifiers=NONE diff=None
+09|00..00 fg=Rgb(95, 95, 95) bg=Reset underline=Reset modifiers=NONE diff=None
+10|00..00 fg=Rgb(95, 95, 95) bg=Reset underline=Reset modifiers=NONE diff=None
+11|00..00 fg=Rgb(95, 95, 95) bg=Reset underline=Reset modifiers=NONE diff=None
+12|00..00 fg=Rgb(95, 95, 95) bg=Reset underline=Reset modifiers=NONE diff=None
+13|00..00 fg=Rgb(95, 95, 95) bg=Reset underline=Reset modifiers=NONE diff=None
+14|00..00 fg=Rgb(95, 95, 95) bg=Reset underline=Reset modifiers=NONE diff=None
+15|00..00 fg=Rgb(95, 95, 95) bg=Reset underline=Reset modifiers=NONE diff=None
+16|00..63 fg=Rgb(95, 95, 95) bg=Reset underline=Reset modifiers=NONE diff=None
+17|00..55 fg=Rgb(122, 122, 122) bg=Reset underline=Reset modifiers=ITALIC diff=None

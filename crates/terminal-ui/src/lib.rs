@@ -1,6 +1,7 @@
 #[cfg(not(feature = "bench-support"))]
 #[doc(hidden)]
-// 默认构建仍编译 benchmark helper 以校验性能路径；其公开入口只在 bench-support 下使用。
+// benchmark 同时是内部性能路径的编译期消费者；移出普通构建前必须先把这些
+// benchmark-only 查询从生产 API 逐一 feature-gate，避免掩盖真实 dead-code 变化。
 #[allow(dead_code)]
 mod benchmark;
 #[cfg(feature = "bench-support")]
@@ -8,6 +9,7 @@ mod benchmark;
 pub mod benchmark;
 
 mod attached_prompt_picker_row;
+mod bounded_lru_cache;
 mod command_panel;
 mod composer;
 mod composer_inline_picker;
@@ -23,6 +25,7 @@ mod external_editor;
 mod file_picker;
 mod file_search;
 mod floating;
+mod frame_time;
 mod fullscreen_list_chrome;
 mod fullscreen_search_list;
 mod history_scroll_indicator;
@@ -38,6 +41,7 @@ mod message_revisit;
 mod modal_layer;
 mod model;
 mod model_panel;
+mod motion;
 mod overlay_input_result;
 mod path_resolve;
 mod picker_scrollbar;
@@ -64,6 +68,8 @@ mod stream_activity;
 mod style_mode;
 mod styled_text;
 mod terminal_grid;
+mod terminal_lifecycle;
+mod terminal_panic;
 pub mod terminal_session;
 mod terminal_text;
 #[cfg(test)]
@@ -83,8 +89,9 @@ pub mod theme;
 
 pub use external_editor::ExternalEditorLaunch;
 pub use model::{EscRewindMode, Model, ModelOptions, RequestMetrics};
+pub use motion::MotionMode;
 pub use runner::{
-    NoopRuntimeCoordinator, RuntimeCoordinator, run, run_with_options,
+    LoopEventWaker, NoopRuntimeCoordinator, RuntimeCoordinator, run, run_with_options,
     run_with_runtime_coordinator, run_with_style_mode,
 };
 pub use sender::Sender;
@@ -96,6 +103,7 @@ pub use startup_banner::{
 };
 pub use status_line::StatusLineItem;
 pub use style_mode::StyleMode;
+pub use terminal_panic::install_terminal_panic_hook;
 pub use terminal_session::MinimalTerminalSession;
 pub use transcript::ReasoningDisplayMode;
 pub use update::{AppEffect, AppEvent, STARTUP_PROBE_TIMEOUT};

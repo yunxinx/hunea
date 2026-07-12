@@ -12,6 +12,8 @@ use ratatui::{
     layout::{Position, Size},
 };
 
+#[cfg(feature = "bench-support")]
+use super::message::AssistantProjectionOutcome;
 use super::{
     Model, ModelOptions, Sender, StartupBannerOptions, StyleMode,
     composer::Composer,
@@ -23,6 +25,17 @@ use super::{
     },
 };
 use crate::runner::terminal_surface::TerminalSurface;
+
+mod tail;
+mod terminal_surface;
+
+#[cfg(feature = "bench-support")]
+pub use tail::{StreamActivityTailBench, TailLayoutSummary};
+#[cfg(feature = "bench-support")]
+pub use terminal_surface::{
+    TerminalCommandSummary, TerminalFlushBench, TerminalFlushSummary, TerminalGridBench,
+    TerminalGridScenario,
+};
 
 /// `TextRenderSummary` 收敛一类文本渲染 benchmark 的稳定输出特征。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,11 +188,57 @@ pub struct TranscriptBench {
     next_index: usize,
 }
 
+/// `AssistantProjectionBench` 测量长Markdown在有界page store上的顺序物化。
+#[cfg(feature = "bench-support")]
+#[derive(Debug)]
+pub struct AssistantProjectionBench {
+    projection: super::message::AssistantMessageRenderProjection,
+    next_line: usize,
+}
+
+#[cfg(feature = "bench-support")]
+impl AssistantProjectionBench {
+    pub fn long_list(item_count: usize, width: u16, palette: TerminalPalette) -> Self {
+        let markdown = format!(
+            "# Projected list\n\n{}",
+            "- projected item with enough text to exercise wrapping\n".repeat(item_count)
+        );
+        let message = super::message::MessageItem::new_with_style_mode_and_source(
+            Sender::Assistant,
+            markdown,
+            StyleMode::Cx,
+            None,
+            None,
+        );
+        let AssistantProjectionOutcome::Projected(projection) =
+            message.render_assistant_projection(width, palette)
+        else {
+            panic!("long-list benchmark fixture must remain projectable");
+        };
+        Self {
+            projection: *projection,
+            next_line: 0,
+        }
+    }
+
+    pub fn materialize_next_page(&mut self) -> usize {
+        if self.next_line >= self.projection.line_count() {
+            self.next_line = 0;
+        }
+        let line = self.next_line;
+        self.next_line = self.next_line.saturating_add(64);
+        self.projection
+            .line_at(line)
+            .map_or(0, |line| line.spans.len())
+    }
+}
+
 /// `DocumentBench` 封装 unified document benchmark 所需的状态。
 #[derive(Debug, Clone)]
 pub struct DocumentBench {
     model: Model,
     layout: Rc<super::document::DocumentLayout>,
+    layout_context: crate::frame_time::FrameRenderContext,
     next_index: usize,
 }
 
@@ -226,6 +285,19 @@ pub fn markdown_document_fixture() -> String {
     sections.join("\n")
 }
 
+/// `large_rust_code_block_fixture` 构造可按代码行数扩展的 fenced Rust markdown。
+pub fn large_rust_code_block_fixture(line_count: usize) -> String {
+    let mut markdown = String::from("```rust\nfn benchmark_values() -> usize {\n");
+    for index in 0..line_count {
+        let _ = writeln!(
+            markdown,
+            "    let value_{index}: usize = {index}; // syntax benchmark line {index}"
+        );
+    }
+    markdown.push_str("    0\n}\n```\n");
+    markdown
+}
+
 /// `prompt_prose_fixture` 返回与 Go benchmark 对齐的 prose prompt 文本。
 pub fn prompt_prose_fixture() -> String {
     "the composer should preserve wrapped words and cursor anchors across resize ".repeat(8)
@@ -259,6 +331,20 @@ pub fn composer_draft_fixture() -> String {
     .join("\n")
 }
 
+/// `large_composer_draft_fixture` 构造达到目标字节数的多语言长草稿。
+pub fn large_composer_draft_fixture(min_bytes: usize) -> String {
+    let mut draft = String::with_capacity(min_bytes);
+    let mut line_index = 0usize;
+    while draft.len() < min_bytes {
+        let _ = writeln!(
+            draft,
+            "line {line_index:04}\tcomposer viewport keeps 中文宽字 and emoji 👨‍👩‍👧 aligned while the draft wraps across the terminal"
+        );
+        line_index += 1;
+    }
+    draft
+}
+
 /// `rendered_block_fixture` 返回 transcript 列表 benchmark 使用的稳定块文本。
 pub fn rendered_block_fixture(index: usize) -> String {
     format!(
@@ -274,7 +360,7 @@ pub fn render_markdown_plain_text(
     width: usize,
     palette: TerminalPalette,
 ) -> TextRenderSummary {
-    summarize_text_lines(&render_markdown_lines(markdown, width, palette))
+    summarize_text_lines(&render_markdown_lines(markdown, width, palette, None))
 }
 
 /// `wrap_prompt_visual_lines_summary` 运行 prompt wrap 并返回稳定摘要。
@@ -303,14 +389,16 @@ pub fn render_composer_document_with_input(
     composer.set_width(width);
     composer.reset_text_and_move_to_end(value);
 
-    let document = composer.render_document(palette);
+    let document = composer.document_snapshot(palette);
+    let range = document.range(0, document.line_count());
+    let (cursor_x, cursor_y) = composer.cursor_visual_position();
     ComposerRenderSummary {
-        line_count: document.lines.len(),
-        plain_text_len: plain_lines_len(&document.plain_lines),
-        anchor_count: document.anchors.len(),
-        selectable_count: document.selectable_ranges.len(),
-        cursor_x: document.cursor_x,
-        cursor_y: document.cursor_y,
+        line_count: range.lines.len(),
+        plain_text_len: plain_lines_len(&range.plain_lines),
+        anchor_count: document.line_count(),
+        selectable_count: range.selectable_ranges.len(),
+        cursor_x,
+        cursor_y,
     }
 }
 
@@ -422,12 +510,13 @@ fn measure_document_pipeline_stress_with_model(
     model.sync_composer_height();
 
     let document_layout_started_at = std::time::Instant::now();
-    let layout = model.build_document_layout();
+    let context = crate::frame_time::FrameRenderContext::capture();
+    let layout = model.build_document_layout(context);
     let document_layout_time = document_layout_started_at.elapsed();
     let rss_after_layout_kib = process_rss_kib();
 
     let document_viewport_started_at = std::time::Instant::now();
-    let viewport = model.build_document_viewport(&layout);
+    let viewport = model.build_document_viewport(&layout, context);
     let document_viewport_time = document_viewport_started_at.elapsed();
     let rss_after_viewport_kib = process_rss_kib();
 
@@ -595,7 +684,7 @@ pub fn format_phase_a_baseline_summary(summary: &PhaseABaselineSummary) -> Strin
 impl TranscriptBench {
     /// `new` 创建一个与 Go transcript benchmark 场景对齐的 transcript bench。
     pub fn new(item_count: usize, width: u16, palette: TerminalPalette) -> Self {
-        let mut transcript = Transcript::new(palette);
+        let mut transcript = Transcript::new(palette, None);
         transcript.set_gap(1);
         transcript.set_width(width.max(1));
 
@@ -611,14 +700,22 @@ impl TranscriptBench {
 
     /// `render` 渲染当前 transcript 并返回稳定摘要。
     pub fn render(&mut self) -> TranscriptRenderSummary {
-        summarize_transcript_render(&self.transcript.render())
+        summarize_transcript_render(
+            &self
+                .transcript
+                .render(crate::frame_time::FrameRenderContext::capture()),
+        )
     }
 
     /// `append_benchmark_item_and_render` 追加一项并测量 append fast path。
     pub fn append_benchmark_item_and_render(&mut self) -> TranscriptRenderSummary {
         append_transcript_benchmark_item(&mut self.transcript, self.next_index);
         self.next_index += 1;
-        summarize_transcript_render(&self.transcript.render())
+        summarize_transcript_render(
+            &self
+                .transcript
+                .render(crate::frame_time::FrameRenderContext::capture()),
+        )
     }
 }
 
@@ -628,10 +725,12 @@ impl DocumentBench {
         let mut model = new_stress_document_model(item_count, width, height);
         model.sync_transcript_render();
 
-        let layout = model.build_document_layout();
+        let layout_context = crate::frame_time::FrameRenderContext::capture();
+        let layout = model.build_document_layout(layout_context);
         Self {
             model,
             layout,
+            layout_context,
             next_index: item_count,
         }
     }
@@ -640,9 +739,11 @@ impl DocumentBench {
     pub fn rebuild_layout(&mut self) -> DocumentLayoutSummary {
         self.model.document_runtime.transcript_cache = Default::default();
         self.model.document_runtime.layout_cache = Default::default();
-        let layout = self.model.build_document_layout();
+        let layout_context = crate::frame_time::FrameRenderContext::capture();
+        let layout = self.model.build_document_layout(layout_context);
         let summary = summarize_document_layout(&layout);
         self.layout = layout;
+        self.layout_context = layout_context;
         summary
     }
 
@@ -668,7 +769,11 @@ impl DocumentBench {
     pub fn build_offset_viewport(&mut self) -> DocumentViewportSummary {
         self.model.document_runtime.viewport_cache = Default::default();
 
-        summarize_document_viewport(&self.model.build_document_viewport(&self.layout))
+        summarize_document_viewport(
+            &self
+                .model
+                .build_document_viewport(&self.layout, self.layout_context),
+        )
     }
 
     /// `prepare_bottom_follow_viewport_state` 把模型切到底部跟随状态。
@@ -688,7 +793,11 @@ impl DocumentBench {
     pub fn build_bottom_follow_viewport(&mut self) -> DocumentViewportSummary {
         self.model.document_runtime.viewport_cache = Default::default();
 
-        summarize_document_viewport(&self.model.build_document_viewport(&self.layout))
+        summarize_document_viewport(
+            &self
+                .model
+                .build_document_viewport(&self.layout, self.layout_context),
+        )
     }
 
     /// `rebuild_layout_after_transcript_append` 追加 transcript 后重建 layout 并返回稳定摘要。
@@ -701,9 +810,11 @@ impl DocumentBench {
         self.next_index += 1;
         self.model.sync_transcript_render();
 
-        let layout = self.model.build_document_layout();
+        let layout_context = crate::frame_time::FrameRenderContext::capture();
+        let layout = self.model.build_document_layout(layout_context);
         let summary = summarize_document_layout(&layout);
         self.layout = layout;
+        self.layout_context = layout_context;
         summary
     }
 
@@ -712,9 +823,11 @@ impl DocumentBench {
         self.model.composer_mut().insert_text("x");
         self.model.sync_composer_height();
 
-        let layout = self.model.build_document_layout();
+        let layout_context = crate::frame_time::FrameRenderContext::capture();
+        let layout = self.model.build_document_layout(layout_context);
         let summary = summarize_document_layout(&layout);
         self.layout = layout;
+        self.layout_context = layout_context;
         summary
     }
 }
@@ -930,14 +1043,19 @@ fn apply_stress_window_resize_without_render(model: &mut Model, width: u16, heig
 fn mid_history_restore_viewport_state(item_count: usize, width: u16, height: u16) -> ViewportState {
     let mut model = new_warm_stress_document_model(item_count, width, height);
     let exact_index = model.transcript.item_metrics_index();
-    let layout = model.document_layout_for_transcript_index(exact_index);
+    let layout = model.document_layout_for_transcript_index(
+        exact_index,
+        crate::frame_time::FrameRenderContext::capture(),
+    );
     let target_item_index = item_count / 2;
     let target_line = (0..layout.line_count())
         .find(|&line_index| {
-            layout.line_anchor_at(line_index).is_some_and(|anchor| {
-                anchor.region == super::document::DocumentAnchorRegion::Transcript
-                    && anchor.transcript.item_index == target_item_index
-            })
+            layout
+                .line_anchor_at(line_index, crate::frame_time::FrameRenderContext::capture())
+                .is_some_and(|anchor| {
+                    anchor.region == super::document::DocumentAnchorRegion::Transcript
+                        && anchor.transcript.item_index == target_item_index
+                })
         })
         .unwrap_or(0);
     let composer_offset = model.current_composer_viewport_offset(&layout, target_line);
@@ -995,7 +1113,7 @@ fn summarize_transcript_render(
 fn summarize_document_layout(layout: &super::document::DocumentLayout) -> DocumentLayoutSummary {
     DocumentLayoutSummary {
         line_count: layout.line_count(),
-        plain_text_len: layout.plain_text_len(),
+        plain_text_len: layout.plain_text_len(crate::frame_time::FrameRenderContext::capture()),
         transcript_line_count: layout.transcript_line_count,
         composer_line_count: layout.composer_line_count,
         cursor_x: layout.cursor_x,
@@ -1111,3 +1229,5 @@ fn benchmark_composer_draft_for_document() -> String {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod visual_baseline;

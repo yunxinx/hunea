@@ -2,7 +2,8 @@
 
 use crate::{
     AppEffect, Model, composer,
-    document::DocumentAnchorRegion,
+    document::{DocumentAnchorRegion, DocumentLayout},
+    frame_time::FrameRenderContext,
     selection::{MousePosition, SelectionPoint, selection_auto_scroll_direction_for_mouse_row},
 };
 
@@ -43,18 +44,19 @@ impl Model {
     }
 
     pub(crate) fn composer_cursor_click_for_mouse(
-        &mut self,
+        &self,
         column: u16,
         row: u16,
+        layout: &DocumentLayout,
+        context: FrameRenderContext,
     ) -> Option<PendingComposerCursorClick> {
         if self.composer.value().is_empty() {
             return None;
         }
 
-        let layout = self.build_document_layout();
-        let line_indices = self.document_viewport_line_indices(&layout);
+        let line_indices = self.document_viewport_line_indices(layout);
         let line = *line_indices.get(usize::from(row))?;
-        let line_data = layout.line_at(line)?;
+        let line_data = layout.line_at(line, context)?;
         if line_data.anchor.region != DocumentAnchorRegion::Composer {
             return None;
         }
@@ -102,21 +104,22 @@ impl Model {
     }
 
     pub(crate) fn is_composer_end_gutter_drag(
-        &mut self,
+        &self,
         click: PendingComposerCursorClick,
         column: u16,
         row: u16,
+        layout: &DocumentLayout,
+        context: FrameRenderContext,
     ) -> bool {
         if !click.hit_content {
             return false;
         }
 
-        let layout = self.build_document_layout();
-        let line_indices = self.document_viewport_line_indices(&layout);
+        let line_indices = self.document_viewport_line_indices(layout);
         let Some(line) = line_indices.get(usize::from(row)).copied() else {
             return false;
         };
-        let Some(line_data) = layout.line_at(line) else {
+        let Some(line_data) = layout.line_at(line, context) else {
             return false;
         };
         if line_data.anchor.region != DocumentAnchorRegion::Composer
@@ -134,9 +137,11 @@ impl Model {
     }
 
     pub(crate) fn is_composer_edge_clamped_motion(
-        &mut self,
+        &self,
         click: PendingComposerCursorClick,
         row: u16,
+        layout: &DocumentLayout,
+        context: FrameRenderContext,
     ) -> bool {
         if selection_auto_scroll_direction_for_mouse_row(row, self.document_viewport_height())
             == Default::default()
@@ -144,12 +149,11 @@ impl Model {
             return false;
         }
 
-        let layout = self.build_document_layout();
-        let line_indices = self.document_viewport_line_indices(&layout);
+        let line_indices = self.document_viewport_line_indices(layout);
         let Some(line) = line_indices.get(usize::from(row)).copied() else {
             return false;
         };
-        layout.line_at(line).is_some_and(|line_data| {
+        layout.line_at(line, context).is_some_and(|line_data| {
             line_data.anchor.region == DocumentAnchorRegion::Composer
                 && line_data.anchor == click.selection_point.anchor()
         })
@@ -159,10 +163,10 @@ impl Model {
         &mut self,
         column: u16,
         row: u16,
-        layout: &crate::document::DocumentLayout,
-        at: std::time::Instant,
+        layout: &DocumentLayout,
+        context: FrameRenderContext,
     ) -> ComposerMouseOutcome {
-        let Some(click) = self.composer_cursor_click_for_mouse(column, row) else {
+        let Some(click) = self.composer_cursor_click_for_mouse(column, row, layout, context) else {
             return ComposerMouseOutcome::Ignored;
         };
 
@@ -173,16 +177,16 @@ impl Model {
             return ComposerMouseOutcome::Handled(None);
         }
 
-        match self.register_selection_click(click.selection_point, at) {
+        match self.register_selection_click(click.selection_point, context.now()) {
             2 => {
                 self.clear_pending_composer_cursor_click();
-                if self.select_word_at_point(click.selection_point, layout) {
+                if self.select_word_at_point(click.selection_point, layout, context) {
                     return ComposerMouseOutcome::Handled(None);
                 }
             }
             3 => {
                 self.clear_pending_composer_cursor_click();
-                self.select_line_at_point(click.selection_point, layout);
+                self.select_line_at_point(click.selection_point, layout, context);
                 return ComposerMouseOutcome::Handled(None);
             }
             _ => {}
@@ -204,28 +208,31 @@ impl Model {
 
         let click = self.pending_composer_cursor_click;
         self.clear_pending_composer_cursor_click();
+        let context = FrameRenderContext::capture();
+        let layout = self.build_document_layout(context);
 
-        if let Some(release_click) = self.composer_cursor_click_for_mouse(column, row)
+        if let Some(release_click) =
+            self.composer_cursor_click_for_mouse(column, row, &layout, context)
             && self.same_composer_cursor_target(click, release_click)
-            && !self.is_composer_end_gutter_drag(click, column, row)
+            && !self.is_composer_end_gutter_drag(click, column, row, &layout, context)
         {
             self.clear_selection_range();
             self.handle_composer_cursor_click(release_click);
             return ComposerMouseOutcome::Handled(None);
         }
 
-        if let Some(point) = self.selection_point_for_drag_mouse(column, row)
+        if let Some(point) =
+            self.selection_point_for_drag_mouse_with_layout(column, row, &layout, context)
             && point != click.selection_point
         {
             self.start_selection(click.selection_point);
             self.finish_selection(point);
             self.reset_selection_click();
-            let layout = self.build_document_layout();
             if self.copy_on_mouse_selection_release
                 && self
                     .selection_runtime
                     .selection
-                    .ordered_points(&layout)
+                    .ordered_points(&layout, context)
                     .is_some()
             {
                 return ComposerMouseOutcome::Handled(self.request_copy_selection());
@@ -254,20 +261,25 @@ impl Model {
         }
 
         let click = self.pending_composer_cursor_click;
-        if let Some(motion_click) = self.composer_cursor_click_for_mouse(column, row)
+        let context = FrameRenderContext::capture();
+        let layout = self.build_document_layout(context);
+        if let Some(motion_click) =
+            self.composer_cursor_click_for_mouse(column, row, &layout, context)
             && self.same_composer_cursor_target(click, motion_click)
         {
-            if self.is_composer_end_gutter_drag(click, column, row) {
+            if self.is_composer_end_gutter_drag(click, column, row, &layout, context) {
                 self.start_selection(click.selection_point);
                 self.clear_pending_composer_cursor_click();
-                if let Some(point) = self.selection_point_for_drag_mouse(column, row) {
+                if let Some(point) =
+                    self.selection_point_for_drag_mouse_with_layout(column, row, &layout, context)
+                {
                     self.update_selection_focus(point);
                 }
                 self.update_selection_auto_scroll(MousePosition::new(column, row));
                 return ComposerMouseOutcome::Handled(None);
             }
 
-            if self.is_composer_edge_clamped_motion(click, row) {
+            if self.is_composer_edge_clamped_motion(click, row, &layout, context) {
                 if click.edge_motions == 0 {
                     self.pending_composer_cursor_click = PendingComposerCursorClick {
                         edge_motions: 1,
@@ -285,10 +297,10 @@ impl Model {
             return ComposerMouseOutcome::Handled(None);
         }
 
-        let point = self.selection_point_for_drag_mouse(column, row);
+        let point = self.selection_point_for_drag_mouse_with_layout(column, row, &layout, context);
         let left_viewport = usize::from(row) >= self.document_viewport_height();
         if point.is_none() || point == Some(click.selection_point) {
-            if left_viewport || self.is_composer_edge_clamped_motion(click, row) {
+            if left_viewport || self.is_composer_edge_clamped_motion(click, row, &layout, context) {
                 self.start_selection(click.selection_point);
                 self.clear_pending_composer_cursor_click();
                 self.update_selection_auto_scroll(MousePosition::new(column, row));

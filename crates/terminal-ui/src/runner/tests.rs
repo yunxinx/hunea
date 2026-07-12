@@ -15,7 +15,7 @@ use crate::{
     AppEffect, AppEvent, ReasoningDisplayMode, Sender, StatusLineItem,
     runtime::RuntimeEventApply,
     test_helpers::{branch_choice, render_model_buffer, rendered_rows},
-    theme::default_palette,
+    theme::{TerminalBackgroundColor, TerminalColorCapability, default_palette},
     transcript::TranscriptItem,
 };
 use crossterm::event::{
@@ -228,9 +228,11 @@ fn unrelated_runtime_commands_do_not_inject_context_budget_events() {
 #[test]
 fn open_context_budget_effect_dispatches_snapshot_load_with_request_id() {
     let mut model = Model::new(StartupBannerOptions::default());
-    model.selected_model = Some(runtime_domain::model_catalog::ModelSelection::new(
-        "local", "qwen3",
-    ));
+    model
+        .selected_model
+        .set(Some(runtime_domain::model_catalog::ModelSelection::new(
+            "local", "qwen3",
+        )));
     let mut runtime_coordinator = TestRuntimeCoordinator::default();
 
     super::effects::run_open_context_budget_effect(&mut model, &mut runtime_coordinator);
@@ -250,9 +252,11 @@ fn open_context_budget_effect_dispatches_snapshot_load_with_request_id() {
 #[test]
 fn open_context_budget_effect_dispatch_failure_uses_runtime_internal_error() {
     let mut model = Model::new(StartupBannerOptions::default());
-    model.selected_model = Some(runtime_domain::model_catalog::ModelSelection::new(
-        "local", "qwen3",
-    ));
+    model
+        .selected_model
+        .set(Some(runtime_domain::model_catalog::ModelSelection::new(
+            "local", "qwen3",
+        )));
     let mut runtime_coordinator = TestRuntimeCoordinator {
         next_runtime_error: Some("runtime unavailable".to_string()),
         ..TestRuntimeCoordinator::default()
@@ -1131,7 +1135,9 @@ fn conversation_completion_keeps_reasoning_body_gap_to_one_line() {
         },
     );
 
-    let render = model.transcript_mut().render();
+    let render = model
+        .transcript_mut()
+        .render(crate::frame_time::FrameRenderContext::capture());
 
     assert_eq!(render.all_plain_lines(), vec!["先分析", "", "结论"]);
 }
@@ -2118,10 +2124,80 @@ fn ready_input_batch_coalesces_preview_wheel_burst_to_single_page_delta() {
 }
 
 #[test]
-fn startup_probe_without_background_leaves_palette_for_startup_timeout() {
-    assert!(
-        startup_palette_detection(terminal_probe::TerminalBackgroundProbeResult::unavailable())
-            .is_none()
+fn ready_input_batch_coalesces_adjacent_resize_burst_to_last_size() {
+    let actions = coalesced_input_actions([
+        Event::Resize(80, 24),
+        Event::Resize(100, 30),
+        Event::Resize(120, 40),
+    ]);
+
+    assert_eq!(
+        actions,
+        vec![TerminalInputAction::App(AppEvent::Resized {
+            width: 120,
+            height: 40,
+        })]
+    );
+}
+
+#[test]
+fn ready_input_batch_keeps_resize_order_across_key_boundary() {
+    let actions = coalesced_input_actions([
+        Event::Resize(80, 24),
+        Event::Resize(100, 30),
+        Event::Key(KeyEvent::from(KeyCode::Char('x'))),
+        Event::Resize(120, 40),
+    ]);
+
+    assert_eq!(
+        actions,
+        vec![
+            TerminalInputAction::App(AppEvent::Resized {
+                width: 100,
+                height: 30,
+            }),
+            TerminalInputAction::App(AppEvent::Key(KeyEvent::from(KeyCode::Char('x')))),
+            TerminalInputAction::App(AppEvent::Resized {
+                width: 120,
+                height: 40,
+            }),
+        ]
+    );
+}
+
+#[test]
+fn startup_probe_without_background_immediately_selects_terminal_default_palette() {
+    let event = startup_palette_event(terminal_probe::TerminalBackgroundProbeResult::unavailable());
+    assert_eq!(event, AppEvent::StartupReadyTimeout);
+
+    let mut model = Model::new(StartupBannerOptions::default());
+    assert_eq!(model.update(event), None);
+    assert!(model.has_palette());
+    assert_eq!(
+        model.palette().color_capability(),
+        TerminalColorCapability::TerminalDefault
+    );
+}
+
+#[test]
+fn startup_probe_with_background_immediately_selects_explicit_palette() {
+    let event = startup_palette_event(terminal_probe::TerminalBackgroundProbeResult {
+        background: Some(TerminalBackgroundColor::from_rgb(18, 24, 32)),
+    });
+    assert!(matches!(
+        &event,
+        AppEvent::DetectedPalette {
+            palette,
+            has_dark_background: true,
+        } if palette.color_capability() == TerminalColorCapability::ExplicitRgb
+    ));
+
+    let mut model = Model::new(StartupBannerOptions::default());
+    assert_eq!(model.update(event), None);
+    assert!(model.has_palette());
+    assert_eq!(
+        model.palette().color_capability(),
+        TerminalColorCapability::ExplicitRgb
     );
 }
 

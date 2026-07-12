@@ -1,0 +1,54 @@
+size=72x10
+cursor=2,8
+cells:
+00|······let·value_252:·usize·=·252;·//·syntax·benchmark·line·252··········|
+01|······let·value_253:·usize·=·253;·//·syntax·benchmark·line·253··········|
+02|······let·value_254:·usize·=·254;·//·syntax·benchmark·line·254··········|
+03|······let·value_255:·usize·=·255;·//·syntax·benchmark·line·255··········|
+04|······0·································································|
+05|··}·····································································|
+06|········································································|
+07|▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄|
+08|›·Enter·to·send·Prompt··················································|
+09|▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀|
+styles:
+00|02..05 fg=Rgb(192, 197, 206) bg=Reset underline=Reset modifiers=NONE diff=None
+00|06..08 fg=Rgb(180, 142, 173) bg=Reset underline=Reset modifiers=NONE diff=None
+00|09..20 fg=Rgb(192, 197, 206) bg=Reset underline=Reset modifiers=NONE diff=None
+00|21..25 fg=Rgb(180, 142, 173) bg=Reset underline=Reset modifiers=NONE diff=None
+00|26..28 fg=Rgb(192, 197, 206) bg=Reset underline=Reset modifiers=NONE diff=None
+00|29..31 fg=Rgb(208, 135, 112) bg=Reset underline=Reset modifiers=NONE diff=None
+00|32..33 fg=Rgb(192, 197, 206) bg=Reset underline=Reset modifiers=NONE diff=None
+00|34..61 fg=Rgb(101, 115, 126) bg=Reset underline=Reset modifiers=NONE diff=None
+01|02..05 fg=Rgb(192, 197, 206) bg=Reset underline=Reset modifiers=NONE diff=None
+01|06..08 fg=Rgb(180, 142, 173) bg=Reset underline=Reset modifiers=NONE diff=None
+01|09..20 fg=Rgb(192, 197, 206) bg=Reset underline=Reset modifiers=NONE diff=None
+01|21..25 fg=Rgb(180, 142, 173) bg=Reset underline=Reset modifiers=NONE diff=None
+01|26..28 fg=Rgb(192, 197, 206) bg=Reset underline=Reset modifiers=NONE diff=None
+01|29..31 fg=Rgb(208, 135, 112) bg=Reset underline=Reset modifiers=NONE diff=None
+01|32..33 fg=Rgb(192, 197, 206) bg=Reset underline=Reset modifiers=NONE diff=None
+01|34..61 fg=Rgb(101, 115, 126) bg=Reset underline=Reset modifiers=NONE diff=None
+02|02..05 fg=Rgb(192, 197, 206) bg=Reset underline=Reset modifiers=NONE diff=None
+02|06..08 fg=Rgb(180, 142, 173) bg=Reset underline=Reset modifiers=NONE diff=None
+02|09..20 fg=Rgb(192, 197, 206) bg=Reset underline=Reset modifiers=NONE diff=None
+02|21..25 fg=Rgb(180, 142, 173) bg=Reset underline=Reset modifiers=NONE diff=None
+02|26..28 fg=Rgb(192, 197, 206) bg=Reset underline=Reset modifiers=NONE diff=None
+02|29..31 fg=Rgb(208, 135, 112) bg=Reset underline=Reset modifiers=NONE diff=None
+02|32..33 fg=Rgb(192, 197, 206) bg=Reset underline=Reset modifiers=NONE diff=None
+02|34..61 fg=Rgb(101, 115, 126) bg=Reset underline=Reset modifiers=NONE diff=None
+03|02..05 fg=Rgb(192, 197, 206) bg=Reset underline=Reset modifiers=NONE diff=None
+03|06..08 fg=Rgb(180, 142, 173) bg=Reset underline=Reset modifiers=NONE diff=None
+03|09..20 fg=Rgb(192, 197, 206) bg=Reset underline=Reset modifiers=NONE diff=None
+03|21..25 fg=Rgb(180, 142, 173) bg=Reset underline=Reset modifiers=NONE diff=None
+03|26..28 fg=Rgb(192, 197, 206) bg=Reset underline=Reset modifiers=NONE diff=None
+03|29..31 fg=Rgb(208, 135, 112) bg=Reset underline=Reset modifiers=NONE diff=None
+03|32..33 fg=Rgb(192, 197, 206) bg=Reset underline=Reset modifiers=NONE diff=None
+03|34..61 fg=Rgb(101, 115, 126) bg=Reset underline=Reset modifiers=NONE diff=None
+04|02..05 fg=Rgb(192, 197, 206) bg=Reset underline=Reset modifiers=NONE diff=None
+04|06..06 fg=Rgb(208, 135, 112) bg=Reset underline=Reset modifiers=NONE diff=None
+05|02..02 fg=Rgb(192, 197, 206) bg=Reset underline=Reset modifiers=NONE diff=None
+07|00..71 fg=Rgb(46, 46, 46) bg=Reset underline=Reset modifiers=NONE diff=None
+08|00..01 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+08|02..21 fg=Rgb(166, 166, 166) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+08|22..71 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+09|00..71 fg=Rgb(46, 46, 46) bg=Reset underline=Reset modifiers=NONE diff=None

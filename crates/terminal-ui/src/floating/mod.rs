@@ -281,19 +281,9 @@ impl Model {
         viewport: &DocumentViewport,
         token_start: usize,
     ) -> Option<FloatingAnchor> {
-        let tail_composer_start = document.tail.composer_slot.content_start_line;
-        let tail_composer_end =
-            tail_composer_start.saturating_add(document.tail.composer_slot.content_line_count);
-        let composer_anchors = document
+        let (x, composer_y) = document
             .tail
-            .anchors
-            .get(tail_composer_start..tail_composer_end)?
-            .iter()
-            .map(|anchor| anchor.composer)
-            .collect::<Vec<_>>();
-        let (x, composer_y) = self
-            .composer
-            .visual_position_for_char_in_anchors(token_start, &composer_anchors)?;
+            .composer_visual_position_for_char(token_start)?;
         let document_y = document
             .composer_slot
             .content_start_line

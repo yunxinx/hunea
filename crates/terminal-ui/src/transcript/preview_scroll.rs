@@ -18,7 +18,11 @@ pub(crate) fn latest_preview_offset(transcript: &mut Transcript, content_height:
 
         let next_offset = effective_total.saturating_sub(content_height);
         let visible_line_count = content_height.min(effective_total.saturating_sub(next_offset));
-        let window = transcript.materialize_line_window(next_offset, visible_line_count);
+        let window = transcript.materialize_line_window(
+            next_offset,
+            visible_line_count,
+            crate::frame_time::FrameRenderContext::capture(),
+        );
         let exact_offset = window.index.line_count.saturating_sub(content_height);
         if exact_offset == offset {
             return exact_offset;

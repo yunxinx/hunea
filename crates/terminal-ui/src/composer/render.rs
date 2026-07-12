@@ -1,7 +1,4 @@
-#[cfg(test)]
-thread_local! {
-    static COMPOSER_RENDER_DOCUMENT_CALL_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
+use std::{cell::RefCell, rc::Rc};
 
 use ratatui::{
     style::Style,
@@ -12,8 +9,7 @@ use runtime_domain::session::{TranscriptCustomPromptBinding, TranscriptSkillBind
 use super::{
     Composer,
     grapheme::{grapheme_clusters, is_space_cluster, measure_width},
-    layout::{VisualLine, placeholder_visual_lines_for_text, visual_lines_for_text},
-    viewport::calculate_cursor_visual_position,
+    layout::{ComposerLayoutSnapshot, VisualLine, placeholder_visual_lines_for_text},
 };
 use crate::{
     selection::SelectableLineRange,
@@ -25,7 +21,7 @@ use crate::{
 };
 
 #[cfg(test)]
-use super::viewport::visible_viewport_lines;
+use super::viewport::{calculate_cursor_visual_position, visible_viewport_lines};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct LineAnchor {
@@ -50,6 +46,7 @@ pub(crate) struct RenderResult {
     pub(crate) cursor_y: u16,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub(crate) struct DocumentRenderResult {
     pub(crate) lines: Vec<Line<'static>>,
@@ -57,11 +54,306 @@ pub(crate) struct DocumentRenderResult {
     pub(crate) anchors: Vec<LineAnchor>,
     pub(crate) selectable_ranges: Vec<SelectableLineRange>,
     pub(crate) frame_decoration_top_line: Option<Line<'static>>,
+    pub(crate) frame_decoration_bottom_line: Option<Line<'static>>,
+    pub(crate) cursor_x: u16,
+    pub(crate) cursor_y: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ComposerDocumentRange {
+    pub(crate) lines: Vec<Line<'static>>,
+    pub(crate) plain_lines: Vec<String>,
+    pub(crate) selectable_ranges: Vec<SelectableLineRange>,
+}
+
+#[derive(Debug, Default)]
+struct ComposerMaterializedWindow {
+    start_line: usize,
+    range: ComposerDocumentRange,
+}
+
+/// `ComposerDocumentSnapshot` 为一份immutable geometry提供有界的styled row窗口。
+#[derive(Debug)]
+pub(crate) struct ComposerDocumentSnapshot {
+    layout: Rc<ComposerLayoutSnapshot>,
+    prompt: String,
+    prompt_width: usize,
+    content_width: usize,
+    frame_fill_width: usize,
+    prompt_first_line_only: bool,
+    prompt_style: Style,
+    text_style: Style,
+    placeholder_style: Style,
+    highlighted_text_style: Style,
+    fill_style: Style,
+    skill_bindings: Vec<TranscriptSkillBinding>,
+    custom_prompt_bindings: Vec<TranscriptCustomPromptBinding>,
+    image_attachment_ranges: Vec<(usize, usize)>,
+    placeholder: Option<String>,
+    plain_text_len: usize,
+    pub(crate) frame_decoration_top_line: Option<Line<'static>>,
     pub(crate) frame_decoration_top_plain_line: Option<String>,
     pub(crate) frame_decoration_bottom_line: Option<Line<'static>>,
     pub(crate) frame_decoration_bottom_plain_line: Option<String>,
-    pub(crate) cursor_x: u16,
-    pub(crate) cursor_y: usize,
+    materialized: RefCell<ComposerMaterializedWindow>,
+}
+
+impl ComposerDocumentSnapshot {
+    pub(crate) fn new(composer: &Composer, palette: TerminalPalette) -> Self {
+        let prompt_width = measure_width(composer.prompt());
+        let frame_width = usize::from(composer.width.max(1));
+        let frame_mode = frame_decoration_mode(composer.style_mode());
+        let prompt_first_line_only = matches!(composer.style_mode(), StyleMode::Cx | StyleMode::Cc);
+        let mut prompt_style = if matches!(composer.style_mode(), StyleMode::Cx) {
+            primary_text_style(palette)
+        } else {
+            secondary_text_style(palette)
+        };
+        let mut text_style = primary_text_style(palette);
+        let mut placeholder_style = secondary_text_style(palette);
+        let mut fill_style = Style::default();
+        let mut frame_fill_width = 0;
+        let frame_decoration = frame_decoration_lines(frame_mode, palette, frame_width);
+        if matches!(frame_mode, FrameDecorationMode::Surface) && palette.surface.is_some() {
+            frame_fill_width = frame_width;
+            fill_style = surface_text_style(palette);
+            prompt_style = apply_optional_background(prompt_style, palette);
+            text_style = apply_optional_background(text_style, palette);
+            placeholder_style = apply_optional_background(placeholder_style, palette);
+        }
+        let highlighted_text_style = text_style.fg(palette.command_accent);
+
+        let layout = composer.layout_snapshot();
+        let placeholder = composer
+            .value()
+            .is_empty()
+            .then(|| composer.placeholder().to_string());
+        let plain_text_len = composer_plain_text_len(
+            layout.visual_lines(),
+            placeholder.as_deref(),
+            composer.prompt(),
+            prompt_width,
+            composer.content_width(),
+            frame_fill_width,
+            prompt_first_line_only,
+        );
+
+        Self {
+            layout,
+            prompt: composer.prompt().to_string(),
+            prompt_width,
+            content_width: composer.content_width(),
+            frame_fill_width,
+            prompt_first_line_only,
+            prompt_style,
+            text_style,
+            placeholder_style,
+            highlighted_text_style,
+            fill_style,
+            skill_bindings: composer.skill_bindings.clone(),
+            custom_prompt_bindings: composer.custom_prompt_bindings.clone(),
+            image_attachment_ranges: composer.image_attachment_highlight_ranges(),
+            placeholder,
+            plain_text_len,
+            frame_decoration_top_line: frame_decoration.top_line,
+            frame_decoration_top_plain_line: frame_decoration.top_plain_line,
+            frame_decoration_bottom_line: frame_decoration.bottom_line,
+            frame_decoration_bottom_plain_line: frame_decoration.bottom_plain_line,
+            materialized: RefCell::new(ComposerMaterializedWindow::default()),
+        }
+    }
+
+    pub(crate) fn line_count(&self) -> usize {
+        self.layout.line_count()
+    }
+
+    /// 返回所有 visual line 的内容字节数，不包含行间换行分隔符。
+    pub(crate) fn text_bytes_len(&self) -> usize {
+        self.plain_text_len
+            .saturating_sub(self.line_count().saturating_sub(1))
+    }
+
+    pub(crate) fn anchor_at(&self, index: usize) -> Option<LineAnchor> {
+        self.layout
+            .visual_lines()
+            .get(index)
+            .map(|line| LineAnchor {
+                logical_line: line.logical_line,
+                visible_start_char: line.visible_start_char,
+                end_char: line.end_char,
+            })
+    }
+
+    pub(crate) fn line_index_for_anchor(&self, target: LineAnchor) -> Option<usize> {
+        self.layout.visual_lines().iter().position(|line| {
+            line.logical_line == target.logical_line
+                && line.visible_start_char == target.visible_start_char
+                && line.end_char == target.end_char
+        })
+    }
+
+    pub(crate) fn visual_position_for_char(&self, char_index: usize) -> Option<(u16, usize)> {
+        let lines = self.layout.visual_lines();
+        let mut fallback = None;
+        for (index, line) in lines.iter().enumerate() {
+            let start = line.logical_line_start_char + line.visible_start_char;
+            let end = line.logical_line_start_char + line.end_char;
+            if char_index < start {
+                continue;
+            }
+            fallback = Some((index, line));
+            if char_index <= end {
+                let relative = char_index.saturating_sub(start);
+                let width = measure_width(&line.text.chars().take(relative).collect::<String>());
+                return Some((
+                    u16::try_from(self.prompt_width + width).unwrap_or(u16::MAX),
+                    index,
+                ));
+            }
+        }
+        fallback.map(|(index, line)| {
+            (
+                u16::try_from(self.prompt_width + measure_width(&line.text)).unwrap_or(u16::MAX),
+                index,
+            )
+        })
+    }
+
+    pub(crate) fn range(&self, start: usize, count: usize) -> ComposerDocumentRange {
+        if count == 0 || start >= self.line_count() {
+            return ComposerDocumentRange::default();
+        }
+        let count = count.min(self.line_count() - start);
+        let overscan = crate::transcript::viewport_overscan_line_budget(count);
+        let window_start = start.saturating_sub(overscan);
+        let window_end = (start + count + overscan).min(self.line_count());
+
+        let needs_refresh = {
+            let cached = self.materialized.borrow();
+            start < cached.start_line
+                || start + count > cached.start_line + cached.range.lines.len()
+        };
+        if needs_refresh {
+            *self.materialized.borrow_mut() = ComposerMaterializedWindow {
+                start_line: window_start,
+                range: self.materialize(window_start, window_end - window_start),
+            };
+        }
+
+        let cached = self.materialized.borrow();
+        let local_start = start - cached.start_line;
+        let local_end = local_start + count;
+        ComposerDocumentRange {
+            lines: cached.range.lines[local_start..local_end].to_vec(),
+            plain_lines: cached.range.plain_lines[local_start..local_end].to_vec(),
+            selectable_ranges: cached.range.selectable_ranges[local_start..local_end].to_vec(),
+        }
+    }
+
+    fn materialize(&self, start: usize, count: usize) -> ComposerDocumentRange {
+        let end = (start + count).min(self.line_count());
+        let visual_lines = &self.layout.visual_lines()[start..end];
+        let placeholder_lines;
+        let (visual_lines, text_style, highlighted_text_style, trim_overflow_spaces) =
+            if let Some(placeholder) = self.placeholder.as_ref() {
+                placeholder_lines = vec![first_placeholder_visual_line(
+                    placeholder,
+                    self.content_width,
+                    self.prompt_width,
+                )];
+                (
+                    placeholder_lines.as_slice(),
+                    self.placeholder_style,
+                    self.placeholder_style,
+                    true,
+                )
+            } else {
+                (
+                    visual_lines,
+                    self.text_style,
+                    self.highlighted_text_style,
+                    false,
+                )
+            };
+
+        ComposerDocumentRange {
+            plain_lines: rendered_plain_lines(
+                visual_lines,
+                PlainVisualRenderOptions {
+                    prompt: &self.prompt,
+                    prompt_width: self.prompt_width,
+                    content_width: self.content_width,
+                    frame_fill_width: self.frame_fill_width,
+                    prompt_first_line_only: self.prompt_first_line_only,
+                    trim_overflow_spaces,
+                },
+            ),
+            selectable_ranges: selectable_ranges_for_visual_lines(
+                visual_lines,
+                self.prompt_width,
+                self.content_width,
+                self.frame_fill_width,
+                self.prompt_first_line_only,
+                trim_overflow_spaces,
+            ),
+            lines: render_visual_lines(
+                visual_lines,
+                StyledVisualRenderOptions {
+                    prompt: &self.prompt,
+                    prompt_width: self.prompt_width,
+                    prompt_style: self.prompt_style,
+                    text_style,
+                    highlighted_text_style,
+                    skill_bindings: &self.skill_bindings,
+                    custom_prompt_bindings: &self.custom_prompt_bindings,
+                    image_attachment_ranges: &self.image_attachment_ranges,
+                    content_width: self.content_width,
+                    frame_fill_width: self.frame_fill_width,
+                    fill_style: self.fill_style,
+                    prompt_first_line_only: self.prompt_first_line_only,
+                    trim_overflow_spaces,
+                },
+            ),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn materialized_window(&self) -> (usize, usize) {
+        let window = self.materialized.borrow();
+        (window.start_line, window.range.lines.len())
+    }
+}
+
+fn composer_plain_text_len(
+    lines: &[VisualLine],
+    placeholder: Option<&str>,
+    prompt: &str,
+    prompt_width: usize,
+    content_width: usize,
+    frame_fill_width: usize,
+    prompt_first_line_only: bool,
+) -> usize {
+    if let Some(placeholder) = placeholder {
+        let line = first_placeholder_visual_line(placeholder, content_width, prompt_width);
+        let text = trim_overflow_boundary_spaces(&line.text, content_width);
+        let fill = frame_fill_width.saturating_sub(prompt_width + measure_width(&text));
+        return prompt.len() + text.len() + fill;
+    }
+
+    let bytes = lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let prefix = if line.is_continuation || prompt_first_line_only && index > 0 {
+                prompt_width
+            } else {
+                prompt.len()
+            };
+            let fill = frame_fill_width.saturating_sub(prompt_width + measure_width(&line.text));
+            prefix + line.text.len() + fill
+        })
+        .sum::<usize>();
+    bytes + lines.len().saturating_sub(1)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -112,13 +404,11 @@ pub(crate) fn render(composer: &Composer, palette: TerminalPalette) -> RenderRes
     }
 }
 
+#[cfg(test)]
 pub(crate) fn render_document(
     composer: &Composer,
     palette: TerminalPalette,
 ) -> DocumentRenderResult {
-    #[cfg(test)]
-    COMPOSER_RENDER_DOCUMENT_CALL_COUNT.with(|count| count.set(count.get() + 1));
-
     let prompt_width = measure_width(composer.prompt());
     let frame_width = usize::from(composer.width.max(1));
     let frame_mode = frame_decoration_mode(composer.style_mode());
@@ -192,24 +482,22 @@ pub(crate) fn render_document(
                 true,
             ),
             frame_decoration_top_line: frame_decoration.top_line,
-            frame_decoration_top_plain_line: frame_decoration.top_plain_line,
             frame_decoration_bottom_line: frame_decoration.bottom_line,
-            frame_decoration_bottom_plain_line: frame_decoration.bottom_plain_line,
             cursor_x: u16::try_from(prompt_width).unwrap_or(u16::MAX),
             cursor_y: 0,
         };
     }
 
-    let visual_lines =
-        visual_lines_for_text(composer.value(), composer.content_width(), prompt_width);
+    let snapshot = composer.layout_snapshot();
+    let visual_lines = snapshot.visual_lines();
     let image_attachment_ranges = composer.image_attachment_highlight_ranges();
     let (row, column) = composer.cursor_position();
     let (cursor_y, cursor_visual_x) =
-        calculate_cursor_visual_position(&visual_lines, row, column, prompt_width);
+        calculate_cursor_visual_position(visual_lines, row, column, prompt_width);
     DocumentRenderResult {
-        anchors: line_anchors_for_visual_lines(&visual_lines),
+        anchors: line_anchors_for_visual_lines(visual_lines),
         plain_lines: rendered_plain_lines(
-            &visual_lines,
+            visual_lines,
             PlainVisualRenderOptions {
                 prompt: composer.prompt(),
                 prompt_width,
@@ -220,7 +508,7 @@ pub(crate) fn render_document(
             },
         ),
         selectable_ranges: selectable_ranges_for_visual_lines(
-            &visual_lines,
+            visual_lines,
             prompt_width,
             composer.content_width(),
             frame_fill_width,
@@ -228,7 +516,7 @@ pub(crate) fn render_document(
             false,
         ),
         lines: render_visual_lines(
-            &visual_lines,
+            visual_lines,
             StyledVisualRenderOptions {
                 prompt: composer.prompt(),
                 prompt_width,
@@ -246,22 +534,10 @@ pub(crate) fn render_document(
             },
         ),
         frame_decoration_top_line: frame_decoration.top_line,
-        frame_decoration_top_plain_line: frame_decoration.top_plain_line,
         frame_decoration_bottom_line: frame_decoration.bottom_line,
-        frame_decoration_bottom_plain_line: frame_decoration.bottom_plain_line,
         cursor_x: u16::try_from(cursor_visual_x).unwrap_or(u16::MAX),
         cursor_y,
     }
-}
-
-#[cfg(test)]
-pub(crate) fn reset_render_document_call_count() {
-    COMPOSER_RENDER_DOCUMENT_CALL_COUNT.with(|count| count.set(0));
-}
-
-#[cfg(test)]
-pub(crate) fn render_document_call_count() -> usize {
-    COMPOSER_RENDER_DOCUMENT_CALL_COUNT.with(std::cell::Cell::get)
 }
 
 fn selectable_ranges_for_visual_lines(
@@ -316,7 +592,6 @@ fn first_placeholder_visual_line(text: &str, width: usize, line_prefix_width: us
             logical_line_start_char: 0,
             visible_start_char: 0,
             end_char: 0,
-            column_offsets: Vec::new(),
             is_continuation: false,
         })
 }
@@ -475,6 +750,7 @@ fn rendered_plain_lines(
         .collect()
 }
 
+#[cfg(test)]
 fn line_anchors_for_visual_lines(lines: &[VisualLine]) -> Vec<LineAnchor> {
     let anchors = lines
         .iter()

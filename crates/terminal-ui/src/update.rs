@@ -145,6 +145,12 @@ pub enum AppEvent {
     StartupReadyTimeout,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComposerEnterAction {
+    Send,
+    InsertNewline,
+}
+
 impl Model {
     pub(crate) fn terminal_input_coalescing(&self) -> crate::runner::TerminalInputCoalescing {
         crate::runner::TerminalInputCoalescing {
@@ -461,6 +467,11 @@ impl Model {
             return result.into_effect();
         }
 
+        let result = self.handle_command_panel_key(key);
+        if !result.is_ignored() {
+            return result.into_effect();
+        }
+
         if is_plain_esc && let Some(effect) = self.handle_chat_interrupt_key() {
             return Some(effect);
         } else if key.code != KeyCode::Esc {
@@ -479,11 +490,6 @@ impl Model {
             return self
                 .maybe_prepare_external_editor_launch()
                 .map(AppEffect::LaunchExternalEditor);
-        }
-
-        let result = self.handle_command_panel_key(key);
-        if !result.is_ignored() {
-            return result.into_effect();
         }
 
         let result = self.handle_file_picker_key(key);
@@ -513,25 +519,11 @@ impl Model {
             }
         }
 
-        if key.code == KeyCode::Enter {
-            if key.modifiers.contains(KeyModifiers::SHIFT) {
-                if self.swap_enter_and_send {
-                    return self.handle_composer_send();
-                }
-                return self.handle_composer_insert_newline();
-            }
-
-            if self.swap_enter_and_send {
-                return self.handle_composer_insert_newline();
-            }
-            return self.handle_composer_send();
-        }
-
-        if key.code == KeyCode::Char('j') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            if self.swap_enter_and_send {
-                return self.handle_composer_send();
-            }
-            return self.handle_composer_insert_newline();
+        if let Some(action) = composer_enter_action(key, self.swap_enter_and_send) {
+            return match action {
+                ComposerEnterAction::Send => self.handle_composer_send(),
+                ComposerEnterAction::InsertNewline => self.handle_composer_insert_newline(),
+            };
         }
 
         if matches!(key.code, KeyCode::PageUp | KeyCode::PageDown)
@@ -848,17 +840,18 @@ impl Model {
         if content.trim().is_empty() {
             return None;
         }
-        if self.requires_model_selection && self.selected_model.selection().is_none() {
-            self.show_toast(ToastSeverity::Error, "Select a model before sending");
+        let Some(selection) = self.selected_model.selection().cloned() else {
+            self.show_toast(
+                ToastSeverity::Error,
+                "Please configure a model before trying again",
+            );
             return None;
-        }
+        };
         if self.stream_activity.is_some() {
             self.show_toast(ToastSeverity::Error, "Chat request is already running");
             return None;
         }
-        if let Some(selection) = self.selected_model.selection().cloned()
-            && !self.validate_provider_selection(&selection)
-        {
+        if !self.validate_provider_selection(&selection) {
             return None;
         }
 
@@ -890,7 +883,6 @@ impl Model {
         self.sync_composer_height();
         self.document_runtime.follow_bottom = true;
         self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
-        let selection = self.selected_model.selection().cloned()?;
         self.conversation_turn_request_for_selection(&selection, source_message)
             .map(|request| AppEffect::SendConversationTurn {
                 request: Box::new(request),
@@ -921,6 +913,37 @@ impl Model {
         self.restore_transcript_overlay_scroll_anchor(transcript_overlay_anchor);
         self.sync_copy_picker_preview_follow_bottom();
         self.sync_entry_tree_preview_follow_bottom();
+    }
+}
+
+fn composer_enter_action(key: KeyEvent, swap_enter_and_send: bool) -> Option<ComposerEnterAction> {
+    let by_swap_mode = |default_action, swapped_action| {
+        if swap_enter_and_send {
+            swapped_action
+        } else {
+            default_action
+        }
+    };
+
+    // 修饰键精确匹配：未定义的组合（如 Ctrl+Shift+Enter）刻意忽略而非回退到发送，
+    // 由 undefined_modified_enter_combination_is_ignored 测试锁定。
+    // Ctrl+M 仅在 keyboard enhancement 生效时可区分；legacy 终端把它报告为
+    // 无修饰 Enter，走默认发送路径，这是终端协议的固有限制。
+    match (key.code, key.modifiers) {
+        (KeyCode::Enter, KeyModifiers::NONE) => Some(by_swap_mode(
+            ComposerEnterAction::Send,
+            ComposerEnterAction::InsertNewline,
+        )),
+        (KeyCode::Enter, KeyModifiers::SHIFT) | (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
+            Some(by_swap_mode(
+                ComposerEnterAction::InsertNewline,
+                ComposerEnterAction::Send,
+            ))
+        }
+        (KeyCode::Enter, KeyModifiers::ALT) | (KeyCode::Char('m'), KeyModifiers::CONTROL) => {
+            Some(ComposerEnterAction::InsertNewline)
+        }
+        _ => None,
     }
 }
 

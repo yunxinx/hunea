@@ -9,6 +9,10 @@ use terminal_ui::{
     theme::{palette_from_background, terminal_default_palette},
 };
 
+mod common;
+
+use common::single_model_catalog;
+
 #[test]
 fn model_does_not_auto_select_first_catalog_model_without_default() {
     let model = Model::new_with_options(
@@ -56,7 +60,6 @@ fn configured_default_model_is_kept_when_provider_models_are_not_loaded() {
                 Vec::new(),
             )]),
             selected_model: Some(ModelSelection::new("local", "qwen3")),
-            requires_model_selection: true,
             ..ModelOptions::default()
         },
     );
@@ -85,7 +88,6 @@ fn configured_default_model_is_trusted_when_it_is_outside_allowlist() {
         ModelOptions {
             model_catalog: single_model_catalog(),
             selected_model: Some(ModelSelection::new("local", "qwen4")),
-            requires_model_selection: true,
             ..ModelOptions::default()
         },
     );
@@ -116,12 +118,11 @@ fn configured_default_model_is_trusted_when_it_is_outside_allowlist() {
 }
 
 #[test]
-fn enter_with_required_empty_model_keeps_draft_unsent() {
+fn enter_without_selected_model_keeps_draft_unsent() {
     let mut model = Model::new_with_options(
         StartupBannerOptions::default(),
         ModelOptions {
             model_catalog: single_model_catalog(),
-            requires_model_selection: true,
             ..ModelOptions::default()
         },
     );
@@ -145,13 +146,12 @@ fn enter_with_required_empty_model_keeps_draft_unsent() {
 }
 
 #[test]
-fn enter_with_required_selected_model_sends_message() {
+fn enter_with_selected_model_sends_message() {
     let mut model = Model::new_with_options(
         StartupBannerOptions::default(),
         ModelOptions {
             model_catalog: single_model_catalog(),
             selected_model: Some(ModelSelection::new("local", "qwen3")),
-            requires_model_selection: true,
             ..ModelOptions::default()
         },
     );
@@ -177,7 +177,6 @@ fn enter_with_selected_provider_model_returns_conversation_turn_effect() {
         ModelOptions {
             model_catalog: single_model_catalog(),
             selected_model: Some(ModelSelection::new("local", "qwen3")),
-            requires_model_selection: true,
             ..ModelOptions::default()
         },
     );
@@ -214,7 +213,6 @@ fn enter_with_provider_api_key_returns_conversation_turn_effect_with_direct_key(
         ModelOptions {
             model_catalog: ModelCatalog::new(vec![provider]),
             selected_model: Some(ModelSelection::new("remote", "qwen3")),
-            requires_model_selection: true,
             ..ModelOptions::default()
         },
     );
@@ -248,7 +246,6 @@ fn enter_with_openai_compatible_provider_without_base_url_keeps_draft_unsent() {
                 vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
             )]),
             selected_model: Some(ModelSelection::new("local", "qwen3")),
-            requires_model_selection: true,
             ..ModelOptions::default()
         },
     );
@@ -278,7 +275,6 @@ fn clear_command_removes_previous_conversation_context() {
         ModelOptions {
             model_catalog: single_model_catalog(),
             selected_model: Some(ModelSelection::new("local", "qwen3")),
-            requires_model_selection: true,
             ..ModelOptions::default()
         },
     );
@@ -301,17 +297,6 @@ fn clear_command_removes_previous_conversation_context() {
     };
     assert!(request.is_user_message());
     assert_eq!(request.message_text(), "fresh question");
-}
-
-fn single_model_catalog() -> ModelCatalog {
-    ModelCatalog::new(vec![ModelProvider::new(
-        "local",
-        ProviderKind::OpenAiCompatible,
-        "Local",
-        Some("http://127.0.0.1:1234/v1".to_string()),
-        ModelSource::Configured,
-        vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
-    )])
 }
 
 #[test]
@@ -346,7 +331,14 @@ fn startup_timeout_allows_initial_frame_without_detected_palette() {
 
 #[test]
 fn enter_submits_raw_message_and_clears_the_composer() {
-    let mut model = Model::new(StartupBannerOptions::default());
+    let mut model = Model::new_with_options(
+        StartupBannerOptions::default(),
+        ModelOptions {
+            model_catalog: single_model_catalog(),
+            selected_model: Some(ModelSelection::new("local", "qwen3")),
+            ..ModelOptions::default()
+        },
+    );
 
     model.update(AppEvent::Resized {
         width: 80,

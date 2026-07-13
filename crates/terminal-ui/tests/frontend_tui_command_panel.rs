@@ -11,10 +11,15 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier},
 };
+use runtime_domain::model_catalog::ModelSelection;
 use terminal_ui::{
     AppEffect, AppEvent, EscRewindMode, Model, ModelOptions, StartupBannerOptions, StatusLineItem,
     StyleMode, theme::default_palette,
 };
+
+mod common;
+
+use common::single_model_catalog;
 
 #[test]
 fn inline_command_panel_renders_below_composer_and_hides_regular_status_line() {
@@ -56,6 +61,27 @@ fn inline_command_panel_renders_below_composer_and_hides_regular_status_line() {
     );
 
     env::set_current_dir(original_dir).expect("should restore original directory");
+}
+
+#[test]
+fn command_panel_plain_esc_removes_cached_render_without_changing_composer() {
+    let mut model = ready_model(48, 12, ModelOptions::default());
+    type_text(&mut model, "/");
+
+    let rows_before = render_trimmed_rows(&mut model, 48, 12);
+    assert!(
+        rows_before.iter().any(|row| row.contains("/exit")),
+        "command panel should be visible before Esc: {rows_before:?}"
+    );
+
+    model.update(AppEvent::Key(KeyCode::Esc.into()));
+
+    let rows_after = render_trimmed_rows(&mut model, 48, 12);
+    assert_eq!(model.composer_text(), "/");
+    assert!(
+        rows_after.iter().all(|row| !row.contains("/exit")),
+        "Esc should invalidate the cached command panel render: {rows_after:?}"
+    );
 }
 
 #[test]
@@ -499,7 +525,11 @@ fn command_panel_text_can_be_drag_selected_and_copied() {
     assert_eq!(effect, Some(AppEffect::CopySelection("/exit".to_string())));
 }
 
-fn ready_model(width: u16, height: u16, options: ModelOptions) -> Model {
+fn ready_model(width: u16, height: u16, mut options: ModelOptions) -> Model {
+    if options.selected_model.is_none() {
+        options.model_catalog = single_model_catalog();
+        options.selected_model = Some(ModelSelection::new("local", "qwen3"));
+    }
     let mut model = Model::new_with_options(StartupBannerOptions::default(), options);
     model.update(AppEvent::Resized { width, height });
     model.update(AppEvent::DetectedPalette {

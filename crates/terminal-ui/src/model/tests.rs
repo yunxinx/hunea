@@ -246,7 +246,6 @@ fn send_validation_error_uses_toast_not_status_notice() {
                 ModelSource::Configured,
                 vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
             )]),
-            requires_model_selection: true,
             ..ModelOptions::default()
         },
     );
@@ -258,7 +257,7 @@ fn send_validation_error_uses_toast_not_status_notice() {
     assert_eq!(model.current_status_notice_text(), "");
     assert_eq!(
         model.active_toast_text_for_test(),
-        Some("Select a model before sending")
+        Some("Please configure a model before trying again")
     );
     assert_eq!(model.composer_text(), "hello");
     assert!(
@@ -266,6 +265,51 @@ fn send_validation_error_uses_toast_not_status_notice() {
             .transcript_plain_items()
             .iter()
             .all(|item| !item.contains("hello"))
+    );
+}
+
+#[test]
+fn send_without_model_keeps_draft_and_transcript_unchanged_by_default() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.composer_mut().insert_text("hello");
+    let transcript_before = model.transcript_plain_items();
+    let history_before = model.blind_recall().clone();
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    assert_eq!(effect, None);
+    assert_eq!(model.composer_text(), "hello");
+    assert_eq!(model.transcript_plain_items(), transcript_before);
+    assert_eq!(model.blind_recall(), &history_before);
+    assert_eq!(
+        model.active_toast_text_for_test(),
+        Some("Please configure a model before trying again")
+    );
+}
+
+#[test]
+fn swapped_shift_enter_without_model_keeps_draft_and_transcript_unchanged() {
+    let mut model = Model::new_with_options(
+        StartupBannerOptions::default(),
+        ModelOptions {
+            swap_enter_and_send: true,
+            ..ModelOptions::default()
+        },
+    );
+    model.composer_mut().insert_text("hello");
+    let transcript_before = model.transcript_plain_items();
+
+    let effect = model.update(AppEvent::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::SHIFT,
+    )));
+
+    assert_eq!(effect, None);
+    assert_eq!(model.composer_text(), "hello");
+    assert_eq!(model.transcript_plain_items(), transcript_before);
+    assert_eq!(
+        model.active_toast_text_for_test(),
+        Some("Please configure a model before trying again")
     );
 }
 
@@ -478,7 +522,6 @@ fn conversation_test_model() -> Model {
                 vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
             )]),
             selected_model: Some(ModelSelection::new("local", "qwen3")),
-            requires_model_selection: true,
             ..ModelOptions::default()
         },
     );
@@ -549,7 +592,6 @@ fn conversation_turn_request_carries_only_current_user_message() {
                 vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
             )]),
             selected_model: Some(ModelSelection::new("local", "qwen3")),
-            requires_model_selection: true,
             ..ModelOptions::default()
         },
     );
@@ -591,7 +633,6 @@ fn conversation_turn_request_ignores_runtime_system_messages_in_transcript() {
                 vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
             )]),
             selected_model: Some(ModelSelection::new("local", "qwen3")),
-            requires_model_selection: true,
             ..ModelOptions::default()
         },
     );
@@ -1309,7 +1350,6 @@ fn at_file_picker_enter_on_empty_results_does_not_send_composer() {
             style_mode: StyleMode::Ms,
             model_catalog: file_picker_test_model_catalog(),
             selected_model: Some(ModelSelection::new("local", "qwen3")),
-            requires_model_selection: true,
             ..ModelOptions::default()
         },
     );
@@ -3227,7 +3267,6 @@ fn enter_during_conversation_activity_does_not_append_unsent_message() {
                 ModelSource::Configured,
                 vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
             )]),
-            requires_model_selection: true,
             ..ModelOptions::default()
         },
     );

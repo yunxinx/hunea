@@ -31,6 +31,7 @@ mod fullscreen_search_list;
 mod history_scroll_indicator;
 mod image_attachment;
 mod inline_panel;
+mod keyboard_enhancement;
 mod list_selection;
 mod markdown_display;
 mod markdown_source;
@@ -88,7 +89,9 @@ mod view;
 pub mod theme;
 
 pub use external_editor::ExternalEditorLaunch;
-pub use model::{EscRewindMode, Model, ModelOptions, RequestMetrics};
+pub use model::{
+    EscRewindMode, KeyboardEnhancementPreference, Model, ModelOptions, RequestMetrics,
+};
 pub use motion::MotionMode;
 pub use runner::{
     LoopEventWaker, NoopRuntimeCoordinator, RuntimeCoordinator, run, run_with_options,

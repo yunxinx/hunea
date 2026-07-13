@@ -25,6 +25,7 @@ pub(super) struct FileTuiConfig {
     pub(super) ctrl_c_clears_input: Option<bool>,
     pub(super) esc_interrupt_presses: Option<u8>,
     pub(super) esc_rewind_mode: Option<String>,
+    pub(super) keyboard_enhancement: Option<String>,
     pub(super) show_esc_interrupt_hint: Option<bool>,
     pub(super) file_picker_popup_height: Option<usize>,
     pub(super) branch_picker_list_rows: Option<usize>,

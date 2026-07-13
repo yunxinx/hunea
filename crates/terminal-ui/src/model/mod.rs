@@ -55,7 +55,7 @@ mod runtime_response;
 mod state;
 
 pub use metrics::RequestMetrics;
-pub use options::{EscRewindMode, ModelOptions};
+pub use options::{EscRewindMode, KeyboardEnhancementPreference, ModelOptions};
 use runtime_response::{RuntimeResponseBuffer, StreamedRuntimeReasoning};
 use state::{DocumentRuntimeState, NoticeState, SelectionRuntimeState};
 pub(crate) use state::{PendingReasoningToggleClick, SelectedModelState};
@@ -75,7 +75,6 @@ pub struct Model {
     pub(super) external_editor_helper_enabled: bool,
     pub(super) model_catalog: ModelCatalog,
     pub(super) selected_model: SelectedModelState,
-    pub(super) requires_model_selection: bool,
     pub(super) model_panel: ModelPanelState,
     pub(super) tool_approval_panel: ToolApprovalPanelState,
     pub(super) tool_approval_panel_revision: usize,
@@ -103,6 +102,7 @@ pub struct Model {
     pub(super) status_phrase_selector: StatusPhraseSelector,
     pub(super) command_panel_selected: usize,
     pub(super) command_panel_scroll: usize,
+    pub(super) dismissed_command_panel_query: Option<String>,
     pub(super) file_picker: Option<FilePickerState>,
     pub(super) skill_picker: Option<SkillPickerState>,
     pub(super) custom_prompt_picker: Option<CustomPromptPickerState>,
@@ -242,7 +242,6 @@ impl Model {
             external_editor_helper_enabled: options.show_external_editor_helper,
             model_catalog: options.model_catalog,
             selected_model: SelectedModelState::new(selected_model),
-            requires_model_selection: options.requires_model_selection,
             model_panel: ModelPanelState::default(),
             tool_approval_panel: ToolApprovalPanelState::default(),
             tool_approval_panel_revision: 1,
@@ -275,6 +274,7 @@ impl Model {
             ),
             command_panel_selected: 0,
             command_panel_scroll: 0,
+            dismissed_command_panel_query: None,
             file_picker: None,
             skill_picker: None,
             custom_prompt_picker: None,
@@ -521,6 +521,7 @@ impl Model {
         self.runtime_response_buffer.clear();
         self.command_panel_selected = 0;
         self.command_panel_scroll = 0;
+        self.dismissed_command_panel_query = None;
         self.file_picker = None;
         self.skill_picker = None;
         self.custom_prompt_picker = None;

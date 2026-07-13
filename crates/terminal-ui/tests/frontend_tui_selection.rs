@@ -6,10 +6,15 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier},
 };
+use runtime_domain::model_catalog::ModelSelection;
 use terminal_ui::theme::default_palette;
 use terminal_ui::{
     AppEffect, AppEvent, Model, ModelOptions, RequestMetrics, StartupBannerOptions, StatusLineItem,
 };
+
+mod common;
+
+use common::single_model_catalog;
 
 #[test]
 fn drag_selection_highlights_text_and_copies_on_release_when_enabled() {
@@ -537,6 +542,8 @@ fn ready_selection_model(copy_on_release: bool) -> Model {
         StartupBannerOptions::default(),
         ModelOptions {
             copy_on_mouse_selection_release: copy_on_release,
+            model_catalog: single_model_catalog(),
+            selected_model: Some(ModelSelection::new("local", "qwen3")),
             ..ModelOptions::default()
         },
     );

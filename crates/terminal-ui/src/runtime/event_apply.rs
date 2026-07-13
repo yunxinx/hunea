@@ -475,7 +475,6 @@ impl Model {
         };
 
         self.selected_model.set(Some(selection));
-        self.requires_model_selection = true;
         self.bump_status_line_revision();
     }
 }

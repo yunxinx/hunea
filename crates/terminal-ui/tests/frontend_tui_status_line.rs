@@ -16,6 +16,10 @@ use terminal_ui::{
     theme::default_palette,
 };
 
+mod common;
+
+use common::single_model_catalog;
+
 #[test]
 fn cx_status_line_renders_below_composer_frame() {
     let _guard = lock_test_environment();
@@ -420,7 +424,17 @@ fn status_line_refreshes_git_branch_only_after_transcript_changes() {
         env::set_var("PWD", &repo_dir);
     }
 
-    let mut model = ready_model(40, 4, StyleMode::Cx, vec![StatusLineItem::GitBranch]);
+    let mut model = ready_model_with_options(
+        40,
+        4,
+        ModelOptions {
+            style_mode: StyleMode::Cx,
+            status_line_items: vec![StatusLineItem::GitBranch],
+            model_catalog: single_model_catalog(),
+            selected_model: Some(ModelSelection::new("local", "qwen3")),
+            ..ModelOptions::default()
+        },
+    );
 
     assert_eq!(
         render_trimmed_rows(&mut model, 40, 4),
@@ -490,17 +504,6 @@ fn ready_model_with_options(width: u16, height: u16, options: ModelOptions) -> M
         has_dark_background: true,
     });
     model
-}
-
-fn single_model_catalog() -> ModelCatalog {
-    ModelCatalog::new(vec![ModelProvider::new(
-        "local",
-        ProviderKind::OpenAiCompatible,
-        "Local",
-        Some("http://127.0.0.1:1234/v1".to_string()),
-        ModelSource::Configured,
-        vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
-    )])
 }
 
 fn type_text(model: &mut Model, text: &str) {

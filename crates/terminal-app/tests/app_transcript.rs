@@ -1,6 +1,10 @@
 use crossterm::event::{KeyCode, KeyEvent};
+use runtime_domain::{
+    model_catalog::{ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource},
+    provider::ProviderKind,
+};
 use terminal_app::{write_terminal_replay, write_terminal_replay_preserving_ansi};
-use terminal_ui::{AppEvent, Model, StartupBannerOptions, theme::default_palette};
+use terminal_ui::{AppEvent, Model, ModelOptions, StartupBannerOptions, theme::default_palette};
 
 #[test]
 fn write_terminal_replay_matches_terminal_replay_items_without_ansi() {
@@ -45,7 +49,14 @@ fn write_terminal_replay_preserving_ansi_keeps_startup_banner_styles() {
 }
 
 fn submitted_model(message: &str) -> Model {
-    let mut model = Model::new(StartupBannerOptions::default());
+    let mut model = Model::new_with_options(
+        StartupBannerOptions::default(),
+        ModelOptions {
+            model_catalog: replay_test_model_catalog(),
+            selected_model: Some(ModelSelection::new("local", "qwen3")),
+            ..ModelOptions::default()
+        },
+    );
     model.update(AppEvent::Resized {
         width: 80,
         height: 24,
@@ -58,4 +69,15 @@ fn submitted_model(message: &str) -> Model {
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
 
     model
+}
+
+fn replay_test_model_catalog() -> ModelCatalog {
+    ModelCatalog::new(vec![ModelProvider::new(
+        "local",
+        ProviderKind::OpenAiCompatible,
+        "Local",
+        Some("http://127.0.0.1:1234/v1".to_string()),
+        ModelSource::Configured,
+        vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
+    )])
 }

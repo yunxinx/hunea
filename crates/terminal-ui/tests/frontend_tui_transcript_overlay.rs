@@ -1,9 +1,21 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{buffer::Buffer, layout::Rect};
-use terminal_ui::{AppEvent, Model, StartupBannerOptions};
+use runtime_domain::model_catalog::ModelSelection;
+use terminal_ui::{AppEvent, Model, ModelOptions, StartupBannerOptions};
+
+mod common;
+
+use common::single_model_catalog;
 
 fn ready_model(width: u16, height: u16) -> Model {
-    let mut model = Model::new(StartupBannerOptions::default());
+    let mut model = Model::new_with_options(
+        StartupBannerOptions::default(),
+        ModelOptions {
+            model_catalog: single_model_catalog(),
+            selected_model: Some(ModelSelection::new("local", "qwen3")),
+            ..ModelOptions::default()
+        },
+    );
     model.update(AppEvent::Resized { width, height });
     model.update(AppEvent::StartupReadyTimeout);
     model

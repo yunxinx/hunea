@@ -486,7 +486,6 @@ fn conversation_test_model() -> Model {
         ModelOptions {
             model_catalog: message_revisit_test_model_catalog(),
             selected_model: Some(ModelSelection::new("local", "qwen3")),
-            requires_model_selection: true,
             ..ModelOptions::default()
         },
     );

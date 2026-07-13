@@ -30,7 +30,6 @@ fn session_resumed_rebuilds_visible_transcript_and_restores_model() {
         ModelOptions {
             model_catalog: model_catalog(),
             selected_model: Some(ModelSelection::new("local", "qwen2")),
-            requires_model_selection: true,
             ..ModelOptions::default()
         },
     );
@@ -129,7 +128,6 @@ fn session_resumed_trusts_historical_model_selection_without_catalog_check() {
         ModelOptions {
             model_catalog: model_catalog(),
             selected_model: Some(ModelSelection::new("local", "qwen2")),
-            requires_model_selection: true,
             ..ModelOptions::default()
         },
     );

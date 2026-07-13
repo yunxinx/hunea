@@ -1,6 +1,11 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{buffer::Buffer, layout::Rect};
+use runtime_domain::model_catalog::ModelSelection;
 use terminal_ui::{AppEvent, Model, StartupBannerOptions};
+
+mod common;
+
+use common::single_model_catalog;
 
 #[test]
 fn ctrl_j_inserts_newline_and_renders_expanded_composer() {
@@ -20,6 +25,78 @@ fn ctrl_j_inserts_newline_and_renders_expanded_composer() {
         .position(|row| row == "› 1                 ")
         .expect("document should contain the first draft line");
     assert_eq!(rows[first_line + 1], "                    ");
+}
+
+#[test]
+fn modified_newline_keys_insert_one_newline_in_default_mode() {
+    let keys = [
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT),
+        KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL),
+    ];
+
+    for key in keys {
+        let mut model = ready_model(20, 12);
+        model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('x'))));
+        let transcript_before = model.transcript_plain_items();
+
+        let effect = model.update(AppEvent::Key(key));
+
+        assert_eq!(effect, None, "unexpected effect for {key:?}");
+        assert_eq!(model.composer_text(), "x\n", "unexpected draft for {key:?}");
+        assert_eq!(
+            model.transcript_plain_items(),
+            transcript_before,
+            "unexpected transcript change for {key:?}"
+        );
+    }
+}
+
+#[test]
+fn modified_enter_release_does_not_change_composer() {
+    let mut model = ready_model(20, 12);
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('x'))));
+    let key = KeyEvent {
+        kind: crossterm::event::KeyEventKind::Release,
+        ..KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)
+    };
+
+    let effect = model.update(AppEvent::Key(key));
+
+    assert_eq!(effect, None);
+    assert_eq!(model.composer_text(), "x");
+}
+
+#[test]
+fn modified_enter_repeat_inserts_newline() {
+    let mut model = ready_model(20, 12);
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('x'))));
+    let key = KeyEvent {
+        kind: crossterm::event::KeyEventKind::Repeat,
+        ..KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)
+    };
+
+    let effect = model.update(AppEvent::Key(key));
+
+    assert_eq!(effect, None);
+    assert_eq!(model.composer_text(), "x\n");
+}
+
+#[test]
+fn undefined_modified_enter_combination_is_ignored() {
+    let mut model = ready_model(20, 12);
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('x'))));
+    let transcript_before = model.transcript_plain_items();
+
+    let effect = model.update(AppEvent::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    )));
+
+    assert_eq!(effect, None);
+    assert_eq!(model.composer_text(), "x");
+    assert_eq!(model.transcript_plain_items(), transcript_before);
 }
 
 #[test]
@@ -100,6 +177,30 @@ fn swap_enter_and_send_makes_shift_enter_send_message() {
 }
 
 #[test]
+fn swap_enter_and_send_keeps_alt_enter_and_ctrl_m_as_newline_aliases() {
+    let keys = [
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT),
+        KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL),
+    ];
+
+    for key in keys {
+        let mut model = ready_model_with_swap_enter_and_send(20, 12, true);
+        model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('x'))));
+        let transcript_before = model.transcript_plain_items();
+
+        let effect = model.update(AppEvent::Key(key));
+
+        assert_eq!(effect, None, "unexpected effect for {key:?}");
+        assert_eq!(model.composer_text(), "x\n", "unexpected draft for {key:?}");
+        assert_eq!(
+            model.transcript_plain_items(),
+            transcript_before,
+            "unexpected transcript change for {key:?}"
+        );
+    }
+}
+
+#[test]
 fn long_english_input_wraps_by_word_boundary() {
     let mut model = ready_model(9, 20);
 
@@ -148,6 +249,8 @@ fn ready_model_with_swap_enter_and_send(
         StartupBannerOptions::default(),
         terminal_ui::ModelOptions {
             swap_enter_and_send,
+            model_catalog: single_model_catalog(),
+            selected_model: Some(ModelSelection::new("local", "qwen3")),
             ..terminal_ui::ModelOptions::default()
         },
     );

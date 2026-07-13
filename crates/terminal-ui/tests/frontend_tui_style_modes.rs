@@ -1,6 +1,13 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{buffer::Buffer, layout::Rect};
-use terminal_ui::{AppEvent, Model, StartupBannerOptions, StyleMode, theme::default_palette};
+use runtime_domain::model_catalog::ModelSelection;
+use terminal_ui::{
+    AppEvent, Model, ModelOptions, StartupBannerOptions, StyleMode, theme::default_palette,
+};
+
+mod common;
+
+use common::single_model_catalog;
 
 #[test]
 fn cx_style_mode_frames_user_messages_in_terminal_replay() {
@@ -87,7 +94,18 @@ fn ms_style_mode_keeps_the_legacy_prompt_without_frames() {
 }
 
 fn ready_model(style_mode: StyleMode, width: u16, height: u16) -> Model {
-    let mut model = Model::new_with_style_mode(StartupBannerOptions::default(), style_mode);
+    ready_model_with_options(
+        ModelOptions {
+            style_mode,
+            ..ModelOptions::default()
+        },
+        width,
+        height,
+    )
+}
+
+fn ready_model_with_options(options: ModelOptions, width: u16, height: u16) -> Model {
+    let mut model = Model::new_with_options(StartupBannerOptions::default(), options);
     model.update(AppEvent::Resized { width, height });
     model.update(AppEvent::DetectedPalette {
         palette: default_palette(),
@@ -97,7 +115,16 @@ fn ready_model(style_mode: StyleMode, width: u16, height: u16) -> Model {
 }
 
 fn submitted_model(style_mode: StyleMode, message: &str) -> Model {
-    let mut model = ready_model(style_mode, 40, 8);
+    let mut model = ready_model_with_options(
+        ModelOptions {
+            style_mode,
+            model_catalog: single_model_catalog(),
+            selected_model: Some(ModelSelection::new("local", "qwen3")),
+            ..ModelOptions::default()
+        },
+        40,
+        8,
+    );
     for character in message.chars() {
         model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(character))));
     }

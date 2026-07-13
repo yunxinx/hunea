@@ -52,6 +52,10 @@ pub enum AppConfigError {
         path: Option<PathBuf>,
         value: String,
     },
+    InvalidKeyboardEnhancementMode {
+        path: Option<PathBuf>,
+        value: String,
+    },
     InvalidFilePickerPopupHeight {
         path: Option<PathBuf>,
         value: usize,
@@ -178,6 +182,19 @@ impl fmt::Display for AppConfigError {
                 f,
                 "tui.esc_rewind_mode must be \"coarse\" or \"entry\", got {value:?}"
             ),
+            Self::InvalidKeyboardEnhancementMode {
+                path: Some(path),
+                value,
+            } => write!(
+                f,
+                "validate config file {}: tui.keyboard_enhancement must be \"auto\", \"on\", or \"off\", got {:?}",
+                path.display(),
+                value
+            ),
+            Self::InvalidKeyboardEnhancementMode { path: None, value } => write!(
+                f,
+                "tui.keyboard_enhancement must be \"auto\", \"on\", or \"off\", got {value:?}"
+            ),
             Self::InvalidFilePickerPopupHeight {
                 path: Some(path),
                 value,
@@ -284,6 +301,7 @@ impl std::error::Error for AppConfigError {
             | Self::ExternalEditorMustWait { .. }
             | Self::InvalidEscInterruptPresses { .. }
             | Self::InvalidEscRewindMode { .. }
+            | Self::InvalidKeyboardEnhancementMode { .. }
             | Self::InvalidFilePickerPopupHeight { .. }
             | Self::InvalidBranchPickerListRows { .. }
             | Self::InvalidComposerUndoLimit { .. }

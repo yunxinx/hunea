@@ -73,10 +73,16 @@ impl Model {
         let Some(query) = raw_command_panel_query(self.composer_text()) else {
             return false;
         };
+        if self.dismissed_command_panel_query.as_ref() == Some(&query) {
+            return false;
+        }
         !self.filter_command_panel_items(&query).is_empty() || query.chars().count() == 1
     }
 
     pub(crate) fn sync_command_panel_navigation(&mut self) {
+        if raw_command_panel_query(self.composer_text()).is_none() {
+            self.dismissed_command_panel_query = None;
+        }
         let Some(state) = self.current_command_panel_state() else {
             self.command_panel_selected = 0;
             self.command_panel_scroll = 0;
@@ -117,6 +123,12 @@ impl Model {
         };
 
         match key.code {
+            KeyCode::Esc if key.modifiers.is_empty() => {
+                self.dismissed_command_panel_query = Some(state.query);
+                self.command_panel_selected = 0;
+                self.command_panel_scroll = 0;
+                OverlayInputResult::Handled
+            }
             KeyCode::Up if key.modifiers.is_empty() => {
                 if state.items.len() <= 1 {
                     return OverlayInputResult::Ignored;
@@ -183,6 +195,9 @@ impl Model {
         }
 
         let query = raw_command_panel_query(self.composer_text())?;
+        if self.dismissed_command_panel_query.as_ref() == Some(&query) {
+            return None;
+        }
         let items = self.filter_command_panel_items(&query);
         if items.is_empty() && query.chars().count() > 1 {
             return None;

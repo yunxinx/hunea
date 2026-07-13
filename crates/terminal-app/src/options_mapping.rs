@@ -6,8 +6,10 @@ use app_config::appconfig::{
 use conversation_runtime::models::LoadedModelCatalog;
 use runtime_domain::{envinfo, paths::DataDirResolution, phrases::LoadedStatusPhrases};
 use terminal_ui::{
-    EscRewindMode as TuiEscRewindMode, ModelOptions, MotionMode as TuiMotionMode,
-    ReasoningDisplayMode, RuntimeRequestPolicy, StatusLineItem, StyleMode,
+    EscRewindMode as TuiEscRewindMode,
+    KeyboardEnhancementPreference as TuiKeyboardEnhancementPreference, ModelOptions,
+    MotionMode as TuiMotionMode, ReasoningDisplayMode, RuntimeRequestPolicy, StatusLineItem,
+    StyleMode,
 };
 use tool_runtime::builtin::ManagedSearchToolConfig;
 
@@ -139,6 +141,7 @@ fn model_options_from_configs(
         ctrl_c_clears_input: tui_config.ctrl_c_clears_input,
         esc_interrupt_presses: tui_config.esc_interrupt_presses,
         esc_rewind_mode: esc_rewind_mode_from_config(tui_config.esc_rewind_mode),
+        keyboard_enhancement: keyboard_enhancement_from_config(tui_config.keyboard_enhancement),
         show_esc_interrupt_hint: tui_config.show_esc_interrupt_hint,
         file_picker_popup_height: tui_config.file_picker_popup_height,
         branch_picker_list_rows: tui_config.branch_picker_list_rows,
@@ -151,7 +154,6 @@ fn model_options_from_configs(
         debug_commands_enabled: debug_config.is_some_and(|config| config.enabled),
         model_catalog: loaded_models.catalog.clone(),
         selected_model: loaded_models.selected_model.clone(),
-        requires_model_selection: loaded_models.requires_model_selection,
         status_phrases: loaded_phrases.phrases.clone(),
         status_phrase_order: loaded_phrases.order,
         prompt_assembly: None,
@@ -162,6 +164,20 @@ fn esc_rewind_mode_from_config(mode: app_config::appconfig::EscRewindMode) -> Tu
     match mode {
         app_config::appconfig::EscRewindMode::Coarse => TuiEscRewindMode::Coarse,
         app_config::appconfig::EscRewindMode::Entry => TuiEscRewindMode::Entry,
+    }
+}
+
+fn keyboard_enhancement_from_config(
+    mode: app_config::appconfig::KeyboardEnhancementMode,
+) -> TuiKeyboardEnhancementPreference {
+    match mode {
+        app_config::appconfig::KeyboardEnhancementMode::Auto => {
+            TuiKeyboardEnhancementPreference::Auto
+        }
+        app_config::appconfig::KeyboardEnhancementMode::On => TuiKeyboardEnhancementPreference::On,
+        app_config::appconfig::KeyboardEnhancementMode::Off => {
+            TuiKeyboardEnhancementPreference::Off
+        }
     }
 }
 

@@ -43,6 +43,7 @@ pub struct TuiConfig {
     pub ctrl_c_clears_input: bool,
     pub esc_interrupt_presses: u8,
     pub esc_rewind_mode: EscRewindMode,
+    pub keyboard_enhancement: KeyboardEnhancementMode,
     pub show_esc_interrupt_hint: bool,
     pub file_picker_popup_height: u16,
     pub branch_picker_list_rows: u16,
@@ -92,6 +93,15 @@ impl MotionMode {
 pub enum EscRewindMode {
     Coarse,
     Entry,
+}
+
+/// `KeyboardEnhancementMode` 控制 kitty keyboard enhancement 的启用策略：
+/// `Auto` 按环境自动判定（WSL 内的 VSCode 终端禁用），`On`/`Off` 强制指定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyboardEnhancementMode {
+    Auto,
+    On,
+    Off,
 }
 
 /// `ReasoningContentDisplay` 表示思维链内容的默认展示方式。
@@ -149,6 +159,20 @@ impl EscRewindMode {
             "coarse" => Ok(Self::Coarse),
             "entry" => Ok(Self::Entry),
             other => Err(super::AppConfigError::InvalidEscRewindMode {
+                path: None,
+                value: other.to_string(),
+            }),
+        }
+    }
+}
+
+impl KeyboardEnhancementMode {
+    pub(super) fn parse(value: &str) -> Result<Self, super::AppConfigError> {
+        match value {
+            "auto" => Ok(Self::Auto),
+            "on" => Ok(Self::On),
+            "off" => Ok(Self::Off),
+            other => Err(super::AppConfigError::InvalidKeyboardEnhancementMode {
                 path: None,
                 value: other.to_string(),
             }),

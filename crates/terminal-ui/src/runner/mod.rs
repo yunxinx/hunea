@@ -27,6 +27,7 @@ mod terminal_probe;
 pub(crate) mod terminal_surface;
 
 use super::{runtime::RuntimeEventApply, theme::palette_detection_from_background};
+use crate::keyboard_enhancement::keyboard_enhancement_suppressed;
 use effects::apply_effect_if_needed;
 use external_io::{ExternalIoRuntime, apply_external_io_event};
 pub(crate) use input::TerminalInputCoalescing;
@@ -156,9 +157,11 @@ pub fn run_with_runtime_coordinator(
     runtime_coordinator: &mut impl RuntimeCoordinator,
 ) -> Result<Model> {
     spawn_markdown_highlighting_prewarm();
+    let keyboard_enhancement = options.keyboard_enhancement;
     let mut model = Model::new_with_options(startup_banner_options, options);
 
-    let (mut terminal, mut terminal_session) = TerminalSession::enter()?;
+    let (mut terminal, mut terminal_session) =
+        TerminalSession::enter(keyboard_enhancement_suppressed(keyboard_enhancement))?;
 
     let background_probe = terminal_probe::query_background(STARTUP_PROBE_TIMEOUT);
     apply_model_event_without_effect(

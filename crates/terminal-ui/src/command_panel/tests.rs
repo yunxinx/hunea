@@ -129,6 +129,71 @@ fn command_panel_completion_is_undoable_to_the_query() {
 }
 
 #[test]
+fn plain_esc_dismisses_command_panel_without_changing_composer() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.composer.reset_text_and_move_to_end("/mod");
+    model.sync_command_panel_navigation();
+    assert!(model.command_panel_active());
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+
+    assert_eq!(effect, None);
+    assert_eq!(model.composer_text(), "/mod");
+    assert!(!model.command_panel_active());
+}
+
+#[test]
+fn dismissing_command_panel_does_not_prime_chat_interrupt() {
+    let mut model = Model::new_with_options(
+        StartupBannerOptions::default(),
+        ModelOptions {
+            esc_interrupt_presses: 2,
+            ..ModelOptions::default()
+        },
+    );
+    model.show_stream_activity("qwen3");
+    model.composer.reset_text_and_move_to_end("/");
+    model.sync_command_panel_navigation();
+
+    let dismiss_effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+    let first_interrupt_effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+
+    assert_eq!(dismiss_effect, None);
+    assert_eq!(first_interrupt_effect, None);
+    assert!(model.current_status_notice_text().contains("Esc again"));
+}
+
+#[test]
+fn editing_dismissed_command_query_reopens_panel() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.composer.reset_text_and_move_to_end("/");
+    model.sync_command_panel_navigation();
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+    assert!(!model.command_panel_active());
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('m'))));
+
+    assert_eq!(model.composer_text(), "/m");
+    assert!(model.command_panel_active());
+}
+
+#[test]
+fn leaving_command_query_clears_dismissed_query() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.composer.reset_text_and_move_to_end("/");
+    model.sync_command_panel_navigation();
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+    assert!(!model.command_panel_active());
+
+    model.composer.reset_text_and_move_to_end("plain text");
+    model.sync_command_panel_navigation();
+    model.composer.reset_text_and_move_to_end("/");
+    model.sync_command_panel_navigation();
+
+    assert!(model.command_panel_active());
+}
+
+#[test]
 fn rendered_command_panel_line_respects_available_width() {
     let model = Model::new(StartupBannerOptions::default());
 

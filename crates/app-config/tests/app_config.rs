@@ -5,8 +5,8 @@ use std::{
 };
 
 use app_config::appconfig::{
-    AppConfigError, EscRewindMode, ReasoningContentDisplay, UserInputStyle, load_from_paths,
-    persist_managed_search_tool_authorization_to_path,
+    AppConfigError, EscRewindMode, KeyboardEnhancementMode, ReasoningContentDisplay,
+    UserInputStyle, load_from_paths, persist_managed_search_tool_authorization_to_path,
     persist_managed_search_tool_rejection_to_path, read_managed_search_authorization,
 };
 use runtime_domain::session::ManagedSearchTool;
@@ -294,6 +294,20 @@ fn load_defaults_esc_rewind_mode_to_coarse() {
 }
 
 #[test]
+fn load_defaults_keyboard_enhancement_to_auto() {
+    let working_dir = temp_test_dir("load-default-keyboard-enhancement-working");
+    let user_config_dir = temp_test_dir("load-default-keyboard-enhancement-config");
+
+    let config = load_from_paths(Some(working_dir.as_path()), Some(user_config_dir.as_path()))
+        .expect("missing config files should keep keyboard enhancement at auto");
+
+    assert_eq!(
+        config.tui.keyboard_enhancement,
+        KeyboardEnhancementMode::Auto
+    );
+}
+
+#[test]
 fn load_defaults_print_transcript_on_exit_to_false() {
     let working_dir = temp_test_dir("load-default-print-transcript-working");
     let user_config_dir = temp_test_dir("load-default-print-transcript-config");
@@ -513,6 +527,26 @@ fn load_accepts_configured_entry_esc_rewind_mode() {
         .expect("esc_rewind_mode should accept entry");
 
     assert_eq!(config.tui.esc_rewind_mode, EscRewindMode::Entry);
+}
+
+#[test]
+fn load_accepts_configured_keyboard_enhancement_modes() {
+    for (raw_value, expected) in [
+        ("on", KeyboardEnhancementMode::On),
+        ("off", KeyboardEnhancementMode::Off),
+        ("auto", KeyboardEnhancementMode::Auto),
+    ] {
+        let working_dir = temp_test_dir(&format!("load-keyboard-enhancement-{raw_value}-working"));
+        write_config(
+            &working_dir.join(".hunea").join("config.toml"),
+            &format!("[tui]\nkeyboard_enhancement = \"{raw_value}\"\n"),
+        );
+
+        let config = load_from_paths(Some(working_dir.as_path()), None)
+            .expect("keyboard_enhancement should accept auto, on, and off");
+
+        assert_eq!(config.tui.keyboard_enhancement, expected);
+    }
 }
 
 #[test]
@@ -1089,6 +1123,20 @@ fn load_rejects_invalid_esc_rewind_mode() {
         .expect_err("esc_rewind_mode should only accept coarse or entry");
 
     assert!(error.to_string().contains("tui.esc_rewind_mode"));
+}
+
+#[test]
+fn load_rejects_invalid_keyboard_enhancement_mode() {
+    let working_dir = temp_test_dir("load-invalid-keyboard-enhancement-working");
+    write_config(
+        &working_dir.join(".hunea").join("config.toml"),
+        "[tui]\nkeyboard_enhancement = \"always\"\n",
+    );
+
+    let error = load_from_paths(Some(working_dir.as_path()), None)
+        .expect_err("keyboard_enhancement should only accept auto, on, or off");
+
+    assert!(error.to_string().contains("tui.keyboard_enhancement"));
 }
 
 #[test]

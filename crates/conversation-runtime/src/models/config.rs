@@ -28,7 +28,6 @@ pub struct LoadedModelCatalog {
     pub context_limits: ModelContextLimits,
     pub selected_model: Option<ModelSelection>,
     pub source_path: Option<PathBuf>,
-    pub requires_model_selection: bool,
 }
 
 impl LoadedModelCatalog {
@@ -230,7 +229,6 @@ fn load_from_explicit_paths(
             context_limits,
             selected_model,
             source_path,
-            requires_model_selection: true,
         },
         warnings,
     ))

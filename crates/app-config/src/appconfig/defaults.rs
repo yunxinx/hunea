@@ -19,6 +19,7 @@ impl Config {
                 ctrl_c_clears_input: true,
                 esc_interrupt_presses: 2,
                 esc_rewind_mode: super::EscRewindMode::Coarse,
+                keyboard_enhancement: super::KeyboardEnhancementMode::Auto,
                 show_esc_interrupt_hint: true,
                 file_picker_popup_height: 7,
                 branch_picker_list_rows: BRANCH_PICKER_LIST_ROWS_DEFAULT,

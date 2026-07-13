@@ -159,6 +159,13 @@ fn config_error_rows(error: &appconfig::AppConfigError) -> Vec<(&'static str, St
             "Unknown Esc rewind mode",
             "coarse, entry",
         ),
+        AppConfigError::InvalidKeyboardEnhancementMode { path, value } => validation_rows(
+            path,
+            "tui.keyboard_enhancement",
+            value,
+            "Unknown keyboard enhancement mode",
+            "auto, on, off",
+        ),
         AppConfigError::InvalidFilePickerPopupHeight { path, value } => rows_with_optional_file(
             path,
             vec![

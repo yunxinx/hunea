@@ -25,7 +25,6 @@ base_url = "http://127.0.0.1:1234/v1"
 
     let loaded = load_from_paths(Some(&working_dir), None).expect("models config should load");
 
-    assert!(loaded.requires_model_selection);
     assert_eq!(
         loaded.selected_model,
         Some(ModelSelection::new("local", "qwen3"))

@@ -34,15 +34,15 @@ use runtime::{AppRuntimeCoordinator, AppRuntimeOptions, tool_definitions_for_man
 
 #[cfg(test)]
 use app_config::appconfig::{
-    BRANCH_PICKER_LIST_ROWS_DEFAULT, DebugConfig, EscRewindMode, ReasoningContentDisplay,
-    RuntimeConfig, UserInputStyle,
+    BRANCH_PICKER_LIST_ROWS_DEFAULT, DebugConfig, EscRewindMode, KeyboardEnhancementMode,
+    ReasoningContentDisplay, RuntimeConfig, UserInputStyle,
 };
 #[cfg(test)]
 use options_mapping::{
     model_options_from_app_config, model_options_from_config, runtime_options_from_app_config,
 };
 #[cfg(test)]
-use terminal_ui::{Model, ReasoningDisplayMode, StatusLineItem};
+use terminal_ui::{KeyboardEnhancementPreference, Model, ReasoningDisplayMode, StatusLineItem};
 
 /// `AppRunError` 区分用户配置错误与运行期错误，便于 CLI 使用不同输出策略。
 #[derive(Debug)]
@@ -329,6 +329,7 @@ mod tests {
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
             esc_rewind_mode: EscRewindMode::Coarse,
+            keyboard_enhancement: KeyboardEnhancementMode::Auto,
         });
 
         assert!(options.copy_on_mouse_selection_release);
@@ -391,6 +392,19 @@ mod tests {
     }
 
     #[test]
+    fn model_options_from_config_carries_keyboard_enhancement_preference() {
+        let options = model_options_from_config(&TuiConfig {
+            keyboard_enhancement: KeyboardEnhancementMode::Off,
+            ..default_tui_config()
+        });
+
+        assert_eq!(
+            options.keyboard_enhancement,
+            KeyboardEnhancementPreference::Off
+        );
+    }
+
+    #[test]
     fn model_options_from_config_carries_second_status_line_items() {
         let options = model_options_from_config(&TuiConfig {
             status_line_2: vec!["current-dir".to_string(), "git-branch".to_string()],
@@ -425,6 +439,7 @@ mod tests {
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
             esc_rewind_mode: EscRewindMode::Coarse,
+            keyboard_enhancement: KeyboardEnhancementMode::Auto,
         });
 
         assert!(options.swap_enter_and_send);
@@ -452,6 +467,7 @@ mod tests {
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
             esc_rewind_mode: EscRewindMode::Coarse,
+            keyboard_enhancement: KeyboardEnhancementMode::Auto,
         });
 
         assert!(!options.ctrl_c_clears_input);
@@ -479,6 +495,7 @@ mod tests {
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
             esc_rewind_mode: EscRewindMode::Coarse,
+            keyboard_enhancement: KeyboardEnhancementMode::Auto,
         });
 
         assert_eq!(options.esc_interrupt_presses, 3);
@@ -506,6 +523,7 @@ mod tests {
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
             esc_rewind_mode: EscRewindMode::Coarse,
+            keyboard_enhancement: KeyboardEnhancementMode::Auto,
         });
 
         assert!(!options.show_esc_interrupt_hint);
@@ -533,6 +551,7 @@ mod tests {
             show_reasoning_content: true,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
             esc_rewind_mode: EscRewindMode::Coarse,
+            keyboard_enhancement: KeyboardEnhancementMode::Auto,
         });
 
         assert!(options.show_reasoning_content);
@@ -560,6 +579,7 @@ mod tests {
             show_reasoning_content: true,
             reasoning_content_display: ReasoningContentDisplay::Expanded,
             esc_rewind_mode: EscRewindMode::Coarse,
+            keyboard_enhancement: KeyboardEnhancementMode::Auto,
         });
 
         assert_eq!(
@@ -659,6 +679,7 @@ mod tests {
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
             esc_rewind_mode: EscRewindMode::Coarse,
+            keyboard_enhancement: KeyboardEnhancementMode::Auto,
         };
 
         write_terminal_replay_on_exit(&mut FailingWriter, &model, false, &config)
@@ -688,6 +709,7 @@ mod tests {
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
             esc_rewind_mode: EscRewindMode::Coarse,
+            keyboard_enhancement: KeyboardEnhancementMode::Auto,
         };
         let mut output = Vec::new();
 
@@ -718,6 +740,7 @@ mod tests {
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
             esc_rewind_mode: EscRewindMode::Coarse,
+            keyboard_enhancement: KeyboardEnhancementMode::Auto,
         }
     }
 

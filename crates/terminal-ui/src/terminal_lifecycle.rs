@@ -3,7 +3,10 @@ use std::{fmt, io, io::Write};
 use crossterm::{
     Command,
     cursor::Show,
-    event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
+    event::{
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -16,6 +19,8 @@ use crate::terminal_panic::{
 enum TerminalLifecycleOperation {
     EnableRawMode,
     DisableRawMode,
+    EnableKeyboardEnhancement,
+    DisableKeyboardEnhancement,
     EnterAlternateScreen,
     LeaveAlternateScreen,
     EnableAlternateScroll,
@@ -49,6 +54,21 @@ where
         match operation {
             TerminalLifecycleOperation::EnableRawMode => enable_raw_mode(),
             TerminalLifecycleOperation::DisableRawMode => disable_raw_mode(),
+            TerminalLifecycleOperation::EnableKeyboardEnhancement => execute!(
+                self.writer,
+                PushKeyboardEnhancementFlags(
+                    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                        | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                        | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+                )
+            ),
+            TerminalLifecycleOperation::DisableKeyboardEnhancement => {
+                execute!(
+                    self.writer,
+                    PopKeyboardEnhancementFlags,
+                    ResetKeyboardEnhancementFlags
+                )
+            }
             TerminalLifecycleOperation::EnterAlternateScreen => {
                 execute!(self.writer, EnterAlternateScreen)
             }
@@ -120,10 +140,39 @@ impl Command for DisableAlternateScroll {
     }
 }
 
+/// 在常规 Pop 之后追加一次缺省参数的 pop（`CSI < u`，kitty 协议缺省弹出 1 条，并非清空整栈）。
+/// 协议规定 pop 到空栈时重置全部 flags，因此即使终端漏处理了前一次 Pop，
+/// 这次追加的 pop 仍会把 keyboard enhancement 状态归零，避免污染退出后的 shell。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResetKeyboardEnhancementFlags;
+
+impl Command for ResetKeyboardEnhancementFlags {
+    fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
+        f.write_str("\x1b[<u")
+    }
+
+    #[cfg(windows)]
+    fn execute_winapi(&self) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "keyboard enhancement reset is not implemented for the legacy Windows API",
+        ))
+    }
+
+    #[cfg(windows)]
+    fn is_ansi_code_supported(&self) -> bool {
+        false
+    }
+}
+
 /// `TerminalLifecycleState` 记录退出前仍必须执行的 terminal inverse operation。
 #[derive(Debug, Default)]
 struct TerminalLifecycleState {
+    /// 环境对 CSI-u 支持不可靠时跳过 keyboard enhancement 的 Push；
+    /// 只影响 enable 侧，已登记的清理 obligation 不受它约束。
+    suppress_keyboard_enhancement: bool,
     must_disable_raw_mode: bool,
+    must_disable_keyboard_enhancement: bool,
     must_leave_alternate_screen: bool,
     must_disable_alternate_scroll: bool,
     must_disable_mouse_capture: bool,
@@ -134,7 +183,9 @@ struct TerminalLifecycleState {
 impl TerminalLifecycleState {
     fn emergency_restore_state() -> Self {
         Self {
+            suppress_keyboard_enhancement: false,
             must_disable_raw_mode: true,
+            must_disable_keyboard_enhancement: true,
             must_leave_alternate_screen: true,
             must_disable_alternate_scroll: true,
             must_disable_mouse_capture: true,
@@ -145,6 +196,7 @@ impl TerminalLifecycleState {
 
     fn has_restore_obligations(&self) -> bool {
         self.must_disable_raw_mode
+            || self.must_disable_keyboard_enhancement
             || self.must_leave_alternate_screen
             || self.must_disable_alternate_scroll
             || self.must_disable_mouse_capture
@@ -163,7 +215,11 @@ impl TerminalLifecycleState {
             self.enter_alternate_screen_with(operations)?;
             self.enforce_alternate_scroll_disabled_with(operations)?;
             self.enable_mouse_capture_with(operations)?;
-            self.enable_bracketed_paste_with(operations)
+            self.enable_bracketed_paste_with(operations)?;
+            // Kitty keyboard stack 在 main/alternate screen 间彼此独立，
+            // 因此必须在进入 alternate screen 后 Push，退出前再在同一 screen 上恢复。
+            self.enable_keyboard_enhancement_with(operations);
+            Ok(())
         })();
         if let Err(error) = activation {
             let _ = self.restore_all_with(operations);
@@ -251,6 +307,12 @@ impl TerminalLifecycleState {
         operations: &mut impl TerminalLifecycleOperations,
         first_error: &mut Option<io::Error>,
     ) {
+        if self.must_disable_keyboard_enhancement {
+            match operations.perform(TerminalLifecycleOperation::DisableKeyboardEnhancement) {
+                Ok(()) => self.must_disable_keyboard_enhancement = false,
+                Err(error) => record_first_error(first_error, error),
+            }
+        }
         if self.must_disable_bracketed_paste {
             match operations.perform(TerminalLifecycleOperation::DisableBracketedPaste) {
                 Ok(()) => self.must_disable_bracketed_paste = false,
@@ -292,6 +354,26 @@ impl TerminalLifecycleState {
         }
         self.must_disable_raw_mode = true;
         operations.perform(TerminalLifecycleOperation::EnableRawMode)
+    }
+
+    fn enable_keyboard_enhancement_with(
+        &mut self,
+        operations: &mut impl TerminalLifecycleOperations,
+    ) {
+        if self.suppress_keyboard_enhancement || self.must_disable_keyboard_enhancement {
+            return;
+        }
+        // Push 是 best-effort，但 write/flush 失败时序列可能已经被终端处理。
+        // 预先登记 inverse，退出时始终 Pop/reset 当前 screen，避免留下 CSI-u 状态。
+        self.must_disable_keyboard_enhancement = true;
+        if operations
+            .perform(TerminalLifecycleOperation::EnableKeyboardEnhancement)
+            .is_err_and(|error| error.kind() == io::ErrorKind::Unsupported)
+        {
+            // legacy backend 明确不支持时没有写入 ANSI 序列，也无需在退出时执行
+            // 同样不受支持的 Pop/reset；其他 I/O 错误仍保留 obligation 以覆盖部分写入。
+            self.must_disable_keyboard_enhancement = false;
+        }
     }
 
     fn enter_alternate_screen_with(
@@ -401,6 +483,12 @@ pub(crate) struct TerminalLifecycleGuard {
 }
 
 impl TerminalLifecycleGuard {
+    /// 跳过后续 activate 的 keyboard enhancement Push；
+    /// 用于已知对 CSI-u 支持不可靠的环境（判定见 `keyboard_enhancement` module）。
+    pub(crate) fn suppress_keyboard_enhancement(&mut self) {
+        self.state.suppress_keyboard_enhancement = true;
+    }
+
     pub(crate) fn activate_main<W>(&mut self, writer: &mut W) -> io::Result<()>
     where
         W: Write,
@@ -576,27 +664,35 @@ mod tests {
     use crossterm::Command;
 
     use super::{
-        DisableAlternateScroll, EnableAlternateScroll, TerminalLifecycleGuard,
-        TerminalLifecycleOperation, TerminalLifecycleOperations, TerminalLifecycleState,
+        CrosstermTerminalLifecycleOperations, DisableAlternateScroll, EnableAlternateScroll,
+        TerminalLifecycleGuard, TerminalLifecycleOperation, TerminalLifecycleOperations,
+        TerminalLifecycleState,
     };
     use crate::terminal_panic::TerminalPanicRestoreRegistry;
 
     #[derive(Debug, Default)]
     struct FakeTerminalLifecycleOperations {
         calls: Vec<TerminalLifecycleOperation>,
-        failures: VecDeque<TerminalLifecycleOperation>,
+        failures: VecDeque<(TerminalLifecycleOperation, io::ErrorKind)>,
     }
 
     impl FakeTerminalLifecycleOperations {
         fn failing_once(operation: TerminalLifecycleOperation) -> Self {
             Self {
-                failures: VecDeque::from([operation]),
+                failures: VecDeque::from([(operation, io::ErrorKind::Other)]),
+                ..Self::default()
+            }
+        }
+
+        fn unsupported_once(operation: TerminalLifecycleOperation) -> Self {
+            Self {
+                failures: VecDeque::from([(operation, io::ErrorKind::Unsupported)]),
                 ..Self::default()
             }
         }
 
         fn fail_next(&mut self, operation: TerminalLifecycleOperation) {
-            self.failures.push_back(operation);
+            self.failures.push_back((operation, io::ErrorKind::Other));
         }
 
         fn take_calls(&mut self) -> Vec<TerminalLifecycleOperation> {
@@ -607,9 +703,13 @@ mod tests {
     impl TerminalLifecycleOperations for FakeTerminalLifecycleOperations {
         fn perform(&mut self, operation: TerminalLifecycleOperation) -> io::Result<()> {
             self.calls.push(operation);
-            if self.failures.front() == Some(&operation) {
-                self.failures.pop_front();
-                return Err(io::Error::other(format!("{operation:?} failed")));
+            if self
+                .failures
+                .front()
+                .is_some_and(|(failed_operation, _)| *failed_operation == operation)
+            {
+                let (_, kind) = self.failures.pop_front().expect("failure should exist");
+                return Err(io::Error::new(kind, format!("{operation:?} failed")));
             }
             Ok(())
         }
@@ -624,6 +724,208 @@ mod tests {
         assert!(state.has_restore_obligations());
         state.restore_all_with(&mut operations).unwrap();
         assert!(!state.has_restore_obligations());
+    }
+
+    #[test]
+    fn main_lifecycle_enables_and_restores_keyboard_enhancement() {
+        let mut state = TerminalLifecycleState::default();
+        let mut operations = FakeTerminalLifecycleOperations::default();
+
+        state.activate_main_with(&mut operations).unwrap();
+        state.restore_all_with(&mut operations).unwrap();
+
+        assert_eq!(
+            operations.calls,
+            vec![
+                TerminalLifecycleOperation::EnableRawMode,
+                TerminalLifecycleOperation::EnterAlternateScreen,
+                TerminalLifecycleOperation::DisableAlternateScroll,
+                TerminalLifecycleOperation::EnableMouseCapture,
+                TerminalLifecycleOperation::EnableBracketedPaste,
+                TerminalLifecycleOperation::EnableKeyboardEnhancement,
+                TerminalLifecycleOperation::DisableKeyboardEnhancement,
+                TerminalLifecycleOperation::DisableBracketedPaste,
+                TerminalLifecycleOperation::DisableMouseCapture,
+                TerminalLifecycleOperation::LeaveAlternateScreen,
+                TerminalLifecycleOperation::DisableRawMode,
+            ]
+        );
+    }
+
+    #[test]
+    fn keyboard_enhancement_cleanup_pops_and_resets_the_active_screen_stack() {
+        let mut output = Vec::new();
+        let mut operations = CrosstermTerminalLifecycleOperations::new(&mut output);
+
+        operations
+            .perform(TerminalLifecycleOperation::DisableKeyboardEnhancement)
+            .unwrap();
+
+        assert_eq!(output, b"\x1b[<1u\x1b[<u");
+    }
+
+    #[test]
+    fn keyboard_enhancement_enable_failure_degrades_and_still_cleans_up() {
+        let mut state = TerminalLifecycleState::default();
+        let mut operations = FakeTerminalLifecycleOperations::failing_once(
+            TerminalLifecycleOperation::EnableKeyboardEnhancement,
+        );
+
+        state.activate_main_with(&mut operations).unwrap();
+        state.restore_all_with(&mut operations).unwrap();
+
+        assert_eq!(
+            operations.calls,
+            vec![
+                TerminalLifecycleOperation::EnableRawMode,
+                TerminalLifecycleOperation::EnterAlternateScreen,
+                TerminalLifecycleOperation::DisableAlternateScroll,
+                TerminalLifecycleOperation::EnableMouseCapture,
+                TerminalLifecycleOperation::EnableBracketedPaste,
+                TerminalLifecycleOperation::EnableKeyboardEnhancement,
+                TerminalLifecycleOperation::DisableKeyboardEnhancement,
+                TerminalLifecycleOperation::DisableBracketedPaste,
+                TerminalLifecycleOperation::DisableMouseCapture,
+                TerminalLifecycleOperation::LeaveAlternateScreen,
+                TerminalLifecycleOperation::DisableRawMode,
+            ]
+        );
+    }
+
+    #[test]
+    fn unsupported_keyboard_enhancement_degrades_without_cleanup_error() {
+        let mut state = TerminalLifecycleState::default();
+        let mut operations = FakeTerminalLifecycleOperations::unsupported_once(
+            TerminalLifecycleOperation::EnableKeyboardEnhancement,
+        );
+
+        state.activate_main_with(&mut operations).unwrap();
+        state.restore_all_with(&mut operations).unwrap();
+
+        assert_eq!(
+            operations.calls,
+            vec![
+                TerminalLifecycleOperation::EnableRawMode,
+                TerminalLifecycleOperation::EnterAlternateScreen,
+                TerminalLifecycleOperation::DisableAlternateScroll,
+                TerminalLifecycleOperation::EnableMouseCapture,
+                TerminalLifecycleOperation::EnableBracketedPaste,
+                TerminalLifecycleOperation::EnableKeyboardEnhancement,
+                TerminalLifecycleOperation::DisableBracketedPaste,
+                TerminalLifecycleOperation::DisableMouseCapture,
+                TerminalLifecycleOperation::LeaveAlternateScreen,
+                TerminalLifecycleOperation::DisableRawMode,
+            ]
+        );
+    }
+
+    #[test]
+    fn failed_keyboard_enhancement_cleanup_is_retried_without_repeating_other_cleanup() {
+        let mut state = TerminalLifecycleState::default();
+        let mut operations = FakeTerminalLifecycleOperations::default();
+        state.activate_main_with(&mut operations).unwrap();
+        operations.take_calls();
+        operations.fail_next(TerminalLifecycleOperation::DisableKeyboardEnhancement);
+
+        let error = state
+            .restore_all_with(&mut operations)
+            .expect_err("keyboard enhancement cleanup should fail once");
+
+        assert_eq!(error.to_string(), "DisableKeyboardEnhancement failed");
+        assert_eq!(
+            operations.take_calls(),
+            vec![
+                TerminalLifecycleOperation::DisableKeyboardEnhancement,
+                TerminalLifecycleOperation::DisableBracketedPaste,
+                TerminalLifecycleOperation::DisableMouseCapture,
+                TerminalLifecycleOperation::LeaveAlternateScreen,
+                TerminalLifecycleOperation::DisableRawMode,
+            ]
+        );
+
+        state.restore_all_with(&mut operations).unwrap();
+        assert_eq!(
+            operations.take_calls(),
+            vec![TerminalLifecycleOperation::DisableKeyboardEnhancement]
+        );
+    }
+
+    #[test]
+    fn emergency_restore_attempts_keyboard_enhancement_cleanup() {
+        let mut state = TerminalLifecycleState::emergency_restore_state();
+        let mut operations = FakeTerminalLifecycleOperations::default();
+
+        state.restore_all_with(&mut operations).unwrap();
+
+        assert_eq!(
+            operations.calls,
+            vec![
+                TerminalLifecycleOperation::ShowCursor,
+                TerminalLifecycleOperation::DisableKeyboardEnhancement,
+                TerminalLifecycleOperation::DisableBracketedPaste,
+                TerminalLifecycleOperation::DisableMouseCapture,
+                TerminalLifecycleOperation::DisableAlternateScroll,
+                TerminalLifecycleOperation::LeaveAlternateScreen,
+                TerminalLifecycleOperation::DisableRawMode,
+            ]
+        );
+    }
+
+    #[test]
+    fn suppressed_keyboard_enhancement_skips_push_and_cleanup() {
+        let mut state = TerminalLifecycleState {
+            suppress_keyboard_enhancement: true,
+            ..TerminalLifecycleState::default()
+        };
+        let mut operations = FakeTerminalLifecycleOperations::default();
+
+        state.activate_main_with(&mut operations).unwrap();
+        state.restore_all_with(&mut operations).unwrap();
+
+        assert_eq!(
+            operations.calls,
+            vec![
+                TerminalLifecycleOperation::EnableRawMode,
+                TerminalLifecycleOperation::EnterAlternateScreen,
+                TerminalLifecycleOperation::DisableAlternateScroll,
+                TerminalLifecycleOperation::EnableMouseCapture,
+                TerminalLifecycleOperation::EnableBracketedPaste,
+                TerminalLifecycleOperation::DisableBracketedPaste,
+                TerminalLifecycleOperation::DisableMouseCapture,
+                TerminalLifecycleOperation::LeaveAlternateScreen,
+                TerminalLifecycleOperation::DisableRawMode,
+            ]
+        );
+    }
+
+    #[test]
+    fn guard_keyboard_enhancement_suppression_survives_suspend_and_resume() {
+        let registry = Box::leak(Box::new(TerminalPanicRestoreRegistry::new()));
+        let mut guard = TerminalLifecycleGuard::with_registry_for_test(registry);
+        guard.suppress_keyboard_enhancement();
+        let mut operations = FakeTerminalLifecycleOperations::default();
+
+        guard
+            .activate_main_with_operations(&mut operations)
+            .unwrap();
+        guard
+            .restore_modes_with_operations(&mut operations)
+            .unwrap();
+        guard
+            .activate_main_with_operations(&mut operations)
+            .unwrap();
+        guard.restore_all_with_operations(&mut operations).unwrap();
+
+        assert!(
+            !operations
+                .calls
+                .contains(&TerminalLifecycleOperation::EnableKeyboardEnhancement)
+        );
+        assert!(
+            !operations
+                .calls
+                .contains(&TerminalLifecycleOperation::DisableKeyboardEnhancement)
+        );
     }
 
     #[test]
@@ -715,11 +1017,21 @@ mod tests {
             .restore_modes_with_operations(&mut operations)
             .unwrap();
         assert!(!registry.is_current_thread_owner());
+        let suspend_calls = operations.take_calls();
+        assert!(suspend_calls.contains(&TerminalLifecycleOperation::DisableKeyboardEnhancement));
 
         guard
             .activate_main_with_operations(&mut operations)
             .unwrap();
         assert!(registry.is_current_thread_owner());
+        assert_eq!(
+            operations.calls.first(),
+            Some(&TerminalLifecycleOperation::EnableRawMode)
+        );
+        assert_eq!(
+            operations.calls.get(5),
+            Some(&TerminalLifecycleOperation::EnableKeyboardEnhancement)
+        );
 
         guard
             .restore_all_with_operations(&mut operations)
@@ -830,6 +1142,7 @@ mod tests {
             operations.take_calls(),
             vec![
                 TerminalLifecycleOperation::ShowCursor,
+                TerminalLifecycleOperation::DisableKeyboardEnhancement,
                 TerminalLifecycleOperation::DisableBracketedPaste,
                 TerminalLifecycleOperation::DisableMouseCapture,
                 TerminalLifecycleOperation::LeaveAlternateScreen,
@@ -948,6 +1261,7 @@ mod tests {
         assert_eq!(
             operations.calls,
             vec![
+                TerminalLifecycleOperation::DisableKeyboardEnhancement,
                 TerminalLifecycleOperation::DisableBracketedPaste,
                 TerminalLifecycleOperation::DisableAlternateScroll,
                 TerminalLifecycleOperation::LeaveAlternateScreen,

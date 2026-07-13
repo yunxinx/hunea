@@ -53,8 +53,11 @@ pub(super) struct TerminalSession {
 }
 
 impl TerminalSession {
-    pub(super) fn enter() -> io::Result<(TuiTerminal, Self)> {
+    pub(super) fn enter(suppress_keyboard_enhancement: bool) -> io::Result<(TuiTerminal, Self)> {
         let mut lifecycle = TerminalLifecycleGuard::default();
+        if suppress_keyboard_enhancement {
+            lifecycle.suppress_keyboard_enhancement();
+        }
         let mut stdout = io::stdout();
         lifecycle.activate_main(&mut stdout)?;
         let backend = CrosstermBackend::new(stdout);

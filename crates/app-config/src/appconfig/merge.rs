@@ -4,7 +4,8 @@ use super::{
     error::AppConfigError,
     file_config::{FileConfig, FileRuntimeConfig},
     types::{
-        Config, EscRewindMode, MotionMode, ReasoningContentDisplay, RuntimeConfig, UserInputStyle,
+        Config, EscRewindMode, KeyboardEnhancementMode, MotionMode, ReasoningContentDisplay,
+        RuntimeConfig, UserInputStyle,
     },
     validate::{
         normalize_request_retry_delays, validate_branch_picker_list_rows,
@@ -140,6 +141,19 @@ pub(super) fn merge_config_file(
             EscRewindMode::parse(&esc_rewind_mode).map_err(|error| match error {
                 AppConfigError::InvalidEscRewindMode { value, .. } => {
                     AppConfigError::InvalidEscRewindMode {
+                        path: Some(path.to_path_buf()),
+                        value,
+                    }
+                }
+                other => other,
+            })?;
+    }
+
+    if let Some(keyboard_enhancement) = file_config.tui.keyboard_enhancement {
+        config.tui.keyboard_enhancement = KeyboardEnhancementMode::parse(&keyboard_enhancement)
+            .map_err(|error| match error {
+                AppConfigError::InvalidKeyboardEnhancementMode { value, .. } => {
+                    AppConfigError::InvalidKeyboardEnhancementMode {
                         path: Some(path.to_path_buf()),
                         value,
                     }

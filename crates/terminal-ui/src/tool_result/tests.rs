@@ -2059,7 +2059,73 @@ fn failed_exploration_tool_call_is_filtered_from_group_summary() {
         vec![
             "● Explored".to_string(),
             "  └ Read Cargo.toml".to_string(),
+            "".to_string(),
             "● Read AGENTS.md".to_string(),
+            "  └ Failed: File not found".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn failed_exploration_tool_calls_are_separated_inside_one_group() {
+    let mut item = ToolResultItem::from_exploration_tool_activity(
+        RuntimeToolActivity {
+            activity_id: "call-first".to_string(),
+            title: "Read first.md".to_string(),
+            kind: RuntimeToolKind::Read,
+            status: RuntimeToolActivityStatus::InProgress,
+            content: Vec::new(),
+            locations: vec![RuntimeToolActivityLocation {
+                path: "first.md".to_string(),
+                line: None,
+            }],
+            raw_input: Some(serde_json::json!({ "path": "first.md" }).into()),
+            raw_output: None,
+        },
+        ToolActivityRenderMode::Compact,
+    )
+    .expect("read should be an exploration tool activity");
+    assert!(item.append_exploration_tool_activity(RuntimeToolActivity {
+        activity_id: "call-second".to_string(),
+        title: "Read second.md".to_string(),
+        kind: RuntimeToolKind::Read,
+        status: RuntimeToolActivityStatus::InProgress,
+        content: Vec::new(),
+        locations: vec![RuntimeToolActivityLocation {
+            path: "second.md".to_string(),
+            line: None,
+        }],
+        raw_input: Some(serde_json::json!({ "path": "second.md" }).into()),
+        raw_output: None,
+    }));
+
+    for (activity_id, path) in [("call-first", "first.md"), ("call-second", "second.md")] {
+        assert!(
+            item.update_runtime_tool_activity(RuntimeToolActivityUpdate {
+                activity_id: activity_id.to_string(),
+                status: Some(RuntimeToolActivityStatus::Failed),
+                content: Some(vec![RuntimeToolActivityContent::Text(format!(
+                    "File not found: {path}"
+                ))]),
+                ..RuntimeToolActivityUpdate::default()
+            })
+        );
+    }
+    assert!(item.mark_exploration_complete());
+
+    let rendered_plain = item
+        .render_lines(80, default_palette())
+        .iter()
+        .map(line_to_plain_text)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        rendered_plain,
+        vec![
+            "● Read first.md".to_string(),
+            "  └ Failed: File not found".to_string(),
+            "".to_string(),
+            "● Read second.md".to_string(),
             "  └ Failed: File not found".to_string(),
         ]
     );

@@ -519,6 +519,7 @@ impl ToolResultItem {
         let mut lines = Vec::new();
 
         if !display_lines.is_empty() {
+            let mut summary_lines = Vec::new();
             let group_family = exploration_group_family(calls);
             let active_started_at = self.active_marker_started_at.filter(|_| {
                 calls.iter().any(|call| {
@@ -545,7 +546,7 @@ impl ToolResultItem {
             } else {
                 TOOL_RESULT_CONTINUATION_PREFIX
             };
-            lines.push(Line::from(vec![
+            summary_lines.push(Line::from(vec![
                 Span::styled(marker_text, marker_style),
                 Span::styled(title, Style::new().add_modifier(Modifier::BOLD)),
             ]));
@@ -556,7 +557,7 @@ impl ToolResultItem {
                 } else {
                     TOOL_EXPLORATION_CHILD_PREFIX
                 };
-                lines.extend(wrap_exploration_display_line(
+                summary_lines.extend(wrap_exploration_display_line(
                     display_line,
                     line_prefix,
                     TOOL_EXPLORATION_CHILD_PREFIX,
@@ -564,9 +565,18 @@ impl ToolResultItem {
                     palette,
                 ));
             }
+            append_message_block(&mut lines, summary_lines);
         }
 
-        lines.extend(self.failed_exploration_detail_lines(calls, width, palette, now));
+        for call in calls
+            .iter()
+            .filter(|call| call.status == RuntimeToolActivityStatus::Failed)
+        {
+            append_message_block(
+                &mut lines,
+                self.failed_exploration_tool_call_lines_at(call, width, palette, now),
+            );
+        }
 
         lines
     }
@@ -580,20 +590,6 @@ impl ToolResultItem {
     ) -> Vec<Line<'static>> {
         let width = usize::from(width.max(1));
         self.runtime_tool_activity_header_lines_at(call, width, palette, now, self.exploration_open)
-    }
-
-    fn failed_exploration_detail_lines(
-        &self,
-        calls: &[RuntimeToolActivity],
-        width: usize,
-        palette: TerminalPalette,
-        now: Instant,
-    ) -> Vec<Line<'static>> {
-        calls
-            .iter()
-            .filter(|call| call.status == RuntimeToolActivityStatus::Failed)
-            .flat_map(|call| self.failed_exploration_tool_call_lines_at(call, width, palette, now))
-            .collect()
     }
 
     fn failed_exploration_tool_call_lines_at(
@@ -1211,6 +1207,20 @@ impl ToolResultItem {
     fn is_compact_approval_suspended(&self) -> bool {
         self.approval_suspended && self.render_mode == ToolActivityRenderMode::Compact
     }
+}
+
+fn append_message_block(
+    lines: &mut Vec<Line<'static>>,
+    block: impl IntoIterator<Item = Line<'static>>,
+) {
+    let mut block = block.into_iter().peekable();
+    if block.peek().is_none() {
+        return;
+    }
+    if !lines.is_empty() {
+        lines.push(Line::raw(""));
+    }
+    lines.extend(block);
 }
 
 fn grouped_exploration_title(

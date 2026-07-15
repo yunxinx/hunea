@@ -1,4 +1,4 @@
-use crossterm::event::{Event, KeyCode, KeyEvent, MouseEventKind};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, MouseEventKind};
 
 use crate::{AppEvent, Model};
 
@@ -140,6 +140,11 @@ fn push_regular_event(
             }
         },
         Event::Key(key) => {
+            // 启用 REPORT_EVENT_TYPES 的终端会上报 release；release 不构成输入，
+            // 在归一化入口统一丢弃，下游（burst 合并与 Model）只见 press/repeat。
+            if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                return;
+            }
             if options.has_page_scroll_burst_coalescing && is_page_scroll_burst_key(&key) {
                 flush_pending_wheel_delta(actions, pending_wheel_delta, options);
                 if key.code == KeyCode::Up {

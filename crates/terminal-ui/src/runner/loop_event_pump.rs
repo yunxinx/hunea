@@ -515,6 +515,11 @@ struct PageScrollBurstRead {
 
 impl PageScrollBurstRead {
     fn observe(&mut self, event: &Event, options: TerminalInputCoalescing) {
+        // key release 对读窗口完全透明（不开启、不延长、不清除），
+        // 使上报 release 的终端与传统终端保持一致的合批节奏。
+        if event.is_key_release() {
+            return;
+        }
         if !options.has_page_scroll_burst_coalescing || !is_page_scroll_event(event) {
             self.clear();
             return;
@@ -563,7 +568,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use crossterm::event::{Event, KeyCode, KeyEvent};
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
     use futures_util::Stream;
 
     use super::*;
@@ -820,6 +825,35 @@ mod tests {
                 .expect("preserved wake should be readable"),
             Some(LoopEvent::BackgroundReady)
         ));
+    }
+
+    #[test]
+    fn page_scroll_burst_read_treats_key_release_as_transparent() {
+        let options = TerminalInputCoalescing {
+            has_page_scroll_burst_coalescing: true,
+        };
+        let arrow_release = Event::Key(KeyEvent {
+            kind: KeyEventKind::Release,
+            ..KeyEvent::from(KeyCode::Up)
+        });
+        let other_release = Event::Key(KeyEvent {
+            kind: KeyEventKind::Release,
+            ..KeyEvent::from(KeyCode::Char('x'))
+        });
+        let mut burst = PageScrollBurstRead::default();
+
+        // release 不开启读窗口
+        burst.observe(&arrow_release, options);
+        assert_eq!(burst.quiet_deadline, None);
+
+        // 方向键 release 不延长已开启的读窗口，非方向键 release 也不清除它
+        burst.observe(&Event::Key(KeyEvent::from(KeyCode::Up)), options);
+        let deadline = burst.quiet_deadline;
+        assert!(deadline.is_some());
+        burst.observe(&arrow_release, options);
+        assert_eq!(burst.quiet_deadline, deadline);
+        burst.observe(&other_release, options);
+        assert_eq!(burst.quiet_deadline, deadline);
     }
 
     #[test]

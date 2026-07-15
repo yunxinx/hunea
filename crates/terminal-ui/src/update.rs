@@ -14,7 +14,7 @@ use super::{
     theme::{TerminalPalette, palette_from_background, terminal_default_palette},
     toast::ToastSeverity,
 };
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton};
 use runtime_domain::{
     model_catalog::{ModelSelection, ProviderSyncRequest},
     session::{
@@ -409,7 +409,8 @@ impl Model {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Option<AppEffect> {
-        if !(key.kind.is_press() || key.kind.is_repeat()) {
+        // runner 入口已过滤 release；此守卫保护直接调用 update() 的路径（如集成测试）。
+        if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
             return None;
         }
 

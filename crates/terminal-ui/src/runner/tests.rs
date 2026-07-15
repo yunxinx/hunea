@@ -19,7 +19,7 @@ use crate::{
     transcript::TranscriptItem,
 };
 use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::style::Color;
 use runtime_domain::context_budget::ContextTokenLimit;
@@ -2064,6 +2064,67 @@ fn ready_input_batch_keeps_arrow_keys_uncoalesced_by_default() {
             TerminalInputAction::App(AppEvent::Key(KeyEvent::from(KeyCode::Up))),
             TerminalInputAction::App(AppEvent::Key(KeyEvent::from(KeyCode::Up))),
         ]
+    );
+}
+
+#[test]
+fn ready_input_batch_ignores_key_release_events() {
+    let release = KeyEvent {
+        kind: KeyEventKind::Release,
+        ..KeyEvent::from(KeyCode::Up)
+    };
+    let actions = coalesced_input_actions([
+        Event::Key(KeyEvent::from(KeyCode::Up)),
+        Event::Key(release),
+        Event::Key(KeyEvent::from(KeyCode::Char('j'))),
+    ]);
+
+    assert_eq!(
+        actions,
+        vec![
+            TerminalInputAction::App(AppEvent::Key(KeyEvent::from(KeyCode::Up))),
+            TerminalInputAction::App(AppEvent::Key(KeyEvent::from(KeyCode::Char('j')))),
+        ]
+    );
+}
+
+#[test]
+fn ready_input_batch_keeps_key_repeat_events() {
+    let repeat = KeyEvent {
+        kind: KeyEventKind::Repeat,
+        ..KeyEvent::from(KeyCode::Down)
+    };
+
+    assert_eq!(
+        coalesced_input_actions([Event::Key(repeat)]),
+        vec![TerminalInputAction::App(AppEvent::Key(repeat))]
+    );
+}
+
+#[test]
+fn ready_input_batch_ignores_key_release_when_alternate_scroll_burst_enabled() {
+    let release = KeyEvent {
+        kind: KeyEventKind::Release,
+        ..KeyEvent::from(KeyCode::Up)
+    };
+
+    // release 若计入 alternate scroll delta，flush 会合成 kind=Press 的 Up，
+    // Model 层守卫无法拦截，导致多滚一步。
+    let actions = coalesced_input_actions_with_options(
+        [
+            Event::Key(release),
+            Event::Key(KeyEvent::from(KeyCode::Char('j'))),
+        ],
+        TerminalInputCoalescing {
+            has_page_scroll_burst_coalescing: true,
+        },
+    );
+
+    assert_eq!(
+        actions,
+        vec![TerminalInputAction::App(AppEvent::Key(KeyEvent::from(
+            KeyCode::Char('j')
+        )))]
     );
 }
 

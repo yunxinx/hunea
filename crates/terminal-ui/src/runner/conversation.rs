@@ -67,6 +67,8 @@ pub(super) fn apply_conversation_event(
             metrics: metrics.map(|metrics| {
                 RuntimeRequestMetrics::new(metrics.latency, metrics.output_tokens, metrics.duration)
             }),
+            // 测试辅助路径不经过 terminal-app 拦截点,没有 usage 数据源。
+            context_usage: None,
         },
         ConversationEvent::Failed { message } => RuntimeEvent::Failed { target, message },
         ConversationEvent::Interrupted => RuntimeEvent::Interrupted { target },

@@ -30,6 +30,8 @@ user_input_style = "cx"
 # - "current-model"：当前选择的模型，格式为 provider/model
 # - "throughput"：最近一次成功请求的 LLM 每秒输出 token 数，例如 139tps
 # - "latency"：最近一次成功请求的首 token 延迟，例如 0.53s
+# - "context-used"：最近一次成功请求后的上下文已用百分比，例如 Context 42% used
+# - "context-remaining"：最近一次成功请求后的上下文剩余百分比，例如 Context 58% left
 #
 # 未配置时不显示状态行；如果配置了但当前所有项都拿不到内容，
 # 状态行也会保持隐藏。

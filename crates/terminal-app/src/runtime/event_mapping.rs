@@ -1,5 +1,6 @@
 //! Conversation event 到 TUI runtime event 的转换。
 
+use runtime_domain::context_budget::ContextWindowUsage;
 use runtime_domain::session::{
     ConversationEvent, RuntimeEvent, RuntimeRequestMetrics, RuntimeTarget,
 };
@@ -7,6 +8,7 @@ use runtime_domain::session::{
 pub(crate) fn runtime_event_from_conversation_event(
     target: Option<RuntimeTarget>,
     event: ConversationEvent,
+    context_usage: Option<ContextWindowUsage>,
 ) -> RuntimeEvent {
     match event {
         ConversationEvent::SystemMessage { message } => {
@@ -60,6 +62,7 @@ pub(crate) fn runtime_event_from_conversation_event(
             metrics: metrics.map(|metrics| {
                 RuntimeRequestMetrics::new(metrics.latency, metrics.output_tokens, metrics.duration)
             }),
+            context_usage,
         },
         ConversationEvent::Failed { message } => RuntimeEvent::Failed { target, message },
         ConversationEvent::Interrupted => RuntimeEvent::Interrupted { target },
@@ -86,4 +89,54 @@ fn is_runtime_token_estimate(event: &RuntimeEvent) -> bool {
         event,
         RuntimeEvent::OutputTokenEstimate { .. } | RuntimeEvent::InputTokenEstimate { .. }
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use runtime_domain::context_budget::ContextTokenLimit;
+    use runtime_domain::session::ConversationResponse;
+
+    use super::*;
+
+    fn sample_usage() -> ContextWindowUsage {
+        ContextWindowUsage {
+            limit: ContextTokenLimit::new(128_000).expect("test limit should be non-zero"),
+            used: 32_000,
+        }
+    }
+
+    #[test]
+    fn finished_event_carries_context_usage() {
+        let usage = sample_usage();
+        let event = runtime_event_from_conversation_event(
+            Some(RuntimeTarget::provider("openai", "gpt-4o-mini")),
+            ConversationEvent::Finished {
+                response: ConversationResponse::assistant_text("done"),
+                metrics: None,
+            },
+            Some(usage),
+        );
+
+        let RuntimeEvent::MessageFinished { context_usage, .. } = event else {
+            panic!("finished conversation event should map to MessageFinished, got {event:?}");
+        };
+        assert_eq!(context_usage, Some(usage));
+    }
+
+    #[test]
+    fn finished_event_without_usage_keeps_context_usage_hidden() {
+        let event = runtime_event_from_conversation_event(
+            Some(RuntimeTarget::provider("openai", "gpt-4o-mini")),
+            ConversationEvent::Finished {
+                response: ConversationResponse::assistant_text("done"),
+                metrics: None,
+            },
+            None,
+        );
+
+        let RuntimeEvent::MessageFinished { context_usage, .. } = event else {
+            panic!("finished conversation event should map to MessageFinished, got {event:?}");
+        };
+        assert_eq!(context_usage, None);
+    }
 }

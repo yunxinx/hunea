@@ -10,6 +10,7 @@ use ratatui::{
 #[cfg(test)]
 pub(super) use runtime_domain::session::{RuntimeToolActivity, RuntimeToolActivityUpdate};
 use runtime_domain::{
+    context_budget::ContextWindowUsage,
     envinfo,
     model_catalog::ModelCatalog,
     prompt_assembly::{
@@ -130,6 +131,7 @@ pub struct Model {
     pub(super) git_branch: String,
     pub(super) current_dir: String,
     pub(super) last_request_metrics: Option<RequestMetrics>,
+    pub(super) last_context_usage: Option<ContextWindowUsage>,
     pub(super) palette: TerminalPalette,
     pub(super) palette_version: usize,
     pub(super) transcript: Transcript,
@@ -306,6 +308,7 @@ impl Model {
             git_branch,
             current_dir,
             last_request_metrics: None,
+            last_context_usage: None,
             palette,
             palette_version: 1,
             transcript_render_version: 1,
@@ -396,6 +399,24 @@ impl Model {
         }
 
         self.last_request_metrics = metrics;
+        self.bump_status_line_revision();
+        if self.document_runtime.follow_bottom {
+            self.sync_document_viewport_to_bottom();
+        }
+    }
+
+    /// `last_context_usage` 返回最近一次成功完成请求后的会话上下文占用。
+    pub fn last_context_usage(&self) -> Option<ContextWindowUsage> {
+        self.last_context_usage
+    }
+
+    /// `set_last_context_usage` 更新最近一次成功完成请求后的会话上下文占用。
+    pub fn set_last_context_usage(&mut self, usage: Option<ContextWindowUsage>) {
+        if self.last_context_usage == usage {
+            return;
+        }
+
+        self.last_context_usage = usage;
         self.bump_status_line_revision();
         if self.document_runtime.follow_bottom {
             self.sync_document_viewport_to_bottom();
@@ -532,6 +553,7 @@ impl Model {
         self.pending_composer_cursor_click = PendingComposerCursorClick::default();
         self.pending_reasoning_toggle_click = PendingReasoningToggleClick::default();
         self.set_last_request_metrics(None);
+        self.set_last_context_usage(None);
         self.document_runtime = DocumentRuntimeState {
             follow_bottom: true,
             ..DocumentRuntimeState::default()

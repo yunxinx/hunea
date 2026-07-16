@@ -19,6 +19,7 @@ use conversation_runtime::{
     models as provider_models,
 };
 use runtime_domain::{
+    context_budget::ContextWindowUsage,
     dynamic_environment::DynamicEnvironmentSessionConfig,
     model_catalog::{ModelProviderRefreshEvent, ModelSelection, ProviderSyncRequest},
     prompt_assembly::{PromptAssemblyManagerSnapshot, PromptPreludeSnapshot},
@@ -491,7 +492,9 @@ impl RuntimeCoordinator for AppRuntimeCoordinator {
             if event.is_terminal() {
                 let _ = self.provider_conversation.rollback_pending_user();
             }
-            let runtime_event = runtime_event_from_conversation_event(target, event);
+            let context_usage =
+                self.context_usage_for_finished_turn(target.as_ref(), upstream_context_tokens);
+            let runtime_event = runtime_event_from_conversation_event(target, event, context_usage);
             if should_defer_runtime_event_for_render_barrier(&events, &runtime_event) {
                 self.defer_runtime_event_until_next_render(runtime_event);
                 break;
@@ -553,6 +556,28 @@ impl RuntimeCoordinator for AppRuntimeCoordinator {
 }
 
 impl AppRuntimeCoordinator {
+    /// `context_usage_for_finished_turn` 把 provider 报告的 usage 与按事件 target
+    /// 解析的 context limit 组装为下发 UI 的上下文占用摘要。
+    ///
+    /// limit 按"实际服务该请求的模型"解析(与 `/context` 同一解析链),
+    /// 请求进行中切换选中模型也不会算错。
+    fn context_usage_for_finished_turn(
+        &self,
+        target: Option<&RuntimeTarget>,
+        upstream_context_tokens: Option<usize>,
+    ) -> Option<ContextWindowUsage> {
+        let used = upstream_context_tokens?;
+        let RuntimeTarget::Provider(provider_target) = target?;
+        let selection = ModelSelection::new(
+            provider_target.provider_id.clone(),
+            provider_target.model_id.clone(),
+        );
+        Some(ContextWindowUsage {
+            limit: self.options.loaded_models.context_limit_for(&selection),
+            used,
+        })
+    }
+
     fn drain_session_store_events_into(&mut self, events: &mut Vec<RuntimeEvent>) {
         for event in self.session_store_worker.drain_events() {
             match event {

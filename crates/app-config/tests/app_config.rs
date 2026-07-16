@@ -133,6 +133,40 @@ fn load_accepts_latency_status_line() {
 }
 
 #[test]
+fn load_accepts_context_usage_status_line_items() {
+    let working_dir = temp_test_dir("load-accepts-context-usage-working");
+    write_config(
+        &working_dir.join(".hunea").join("config.toml"),
+        "[tui]\nstatus_line = [\"context-used\", \"context-remaining\"]\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("context usage items should be accepted as valid status line items");
+
+    assert_eq!(
+        config.tui.status_line,
+        vec!["context-used", "context-remaining"]
+    );
+}
+
+#[test]
+fn load_rejects_context_usage_status_line_alias() {
+    let working_dir = temp_test_dir("load-rejects-context-usage-alias-working");
+    write_config(
+        &working_dir.join(".hunea").join("config.toml"),
+        "[tui]\nstatus_line = [\"context-usage\"]\n",
+    );
+
+    let error = load_from_paths(Some(working_dir.as_path()), None)
+        .expect_err("context usage items have no alias and unknown values should be rejected");
+
+    assert!(
+        error.to_string().contains("unknown tui.status_line item"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn load_accepts_second_status_line() {
     let working_dir = temp_test_dir("load-accepts-second-status-line-working");
     write_config(

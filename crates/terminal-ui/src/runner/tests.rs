@@ -463,6 +463,7 @@ fn runtime_expanded_reasoning_flushes_before_message_finish() {
         response: reasoned_response("我先看一下 src。", "先分析目录结构", Duration::from_secs(2)),
         finish_reason: None,
         metrics: None,
+        context_usage: None,
     });
 
     assert_eq!(
@@ -504,6 +505,7 @@ fn runtime_expanded_simplified_reasoning_flushes_before_message_finish() {
         response: reasoned_response("我先看一下 src。", "先分析目录结构", Duration::from_secs(2)),
         finish_reason: None,
         metrics: None,
+        context_usage: None,
     });
 
     assert_eq!(
@@ -572,6 +574,7 @@ fn runtime_final_response_keeps_streamed_reasoning_flushed_across_tool_boundarie
         ),
         finish_reason: None,
         metrics: None,
+        context_usage: None,
     });
 
     assert_eq!(
@@ -637,6 +640,7 @@ fn runtime_final_response_extends_buffered_reasoning_tail_after_earlier_tool_bou
         ),
         finish_reason: None,
         metrics: None,
+        context_usage: None,
     });
 
     assert_eq!(
@@ -711,6 +715,7 @@ fn runtime_final_response_does_not_duplicate_buffered_delta() {
         response: assistant_response("最终结论"),
         finish_reason: None,
         metrics: None,
+        context_usage: None,
     });
 
     assert_eq!(model.transcript_plain_items(), vec!["最终结论".to_string()]);
@@ -744,6 +749,7 @@ fn runtime_final_response_does_not_overwrite_flushed_streamed_reasoning() {
         response: reasoned_response("最终结论", "先分析完整", Duration::from_secs(2)),
         finish_reason: None,
         metrics: None,
+        context_usage: None,
     });
 
     assert_eq!(
@@ -776,6 +782,7 @@ fn runtime_final_response_uses_final_reasoning_when_no_boundary_arrives() {
         response: reasoned_response("最终结论", "先分析完整", Duration::from_secs(2)),
         finish_reason: None,
         metrics: None,
+        context_usage: None,
     });
 
     assert_eq!(
@@ -847,6 +854,7 @@ fn runtime_final_response_after_four_tool_calls_inserts_divider_before_body() {
         response: assistant_response("最终正文"),
         finish_reason: None,
         metrics: None,
+        context_usage: None,
     });
 
     let items = model.transcript_plain_items();
@@ -877,6 +885,7 @@ fn runtime_final_response_after_three_tool_calls_does_not_insert_divider() {
         response: assistant_response("最终正文"),
         finish_reason: None,
         metrics: None,
+        context_usage: None,
     });
 
     let items = model.transcript_plain_items();
@@ -911,6 +920,7 @@ fn runtime_reasoning_after_four_tool_calls_inserts_divider_before_final_body() {
         response: reasoned_response("最终正文", "最终前的思考", Duration::from_secs(1)),
         finish_reason: None,
         metrics: None,
+        context_usage: None,
     });
 
     let items = model.transcript_plain_items();
@@ -961,6 +971,7 @@ fn runtime_intermediate_text_after_four_tool_calls_does_not_insert_divider_befor
         response: assistant_response("最终正文"),
         finish_reason: None,
         metrics: None,
+        context_usage: None,
     });
 
     let items = model.transcript_plain_items();

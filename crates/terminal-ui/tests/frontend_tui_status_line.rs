@@ -7,6 +7,7 @@ use std::{
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{buffer::Buffer, layout::Rect};
+use runtime_domain::context_budget::{ContextTokenLimit, ContextWindowUsage};
 use runtime_domain::model_catalog::{
     ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource,
 };
@@ -477,6 +478,135 @@ fn status_line_refreshes_git_branch_only_after_transcript_changes() {
 
     env::set_current_dir(original_dir).expect("should restore original directory");
     restore_env_var("PWD", original_pwd);
+}
+
+#[test]
+fn status_line_renders_context_usage_with_complementary_percentages() {
+    let mut model = ready_model(
+        48,
+        4,
+        StyleMode::Cx,
+        vec![
+            StatusLineItem::ContextUsed,
+            StatusLineItem::ContextRemaining,
+        ],
+    );
+    model.set_last_context_usage(Some(context_usage(32_000, 128_000)));
+
+    assert_eq!(
+        render_trimmed_rows(&mut model, 48, 4),
+        vec![
+            cx_top_surface_row(48),
+            "› Enter to send Prompt".to_string(),
+            cx_bottom_surface_row(48),
+            "  Context 25% used · Context 75% left".to_string()
+        ]
+    );
+}
+
+#[test]
+fn status_line_hides_context_usage_before_first_completed_request() {
+    let mut model = ready_model(
+        48,
+        4,
+        StyleMode::Cx,
+        vec![
+            StatusLineItem::ContextUsed,
+            StatusLineItem::ContextRemaining,
+        ],
+    );
+
+    let rows = render_trimmed_rows(&mut model, 48, 4);
+    assert!(
+        rows.iter().all(|row| !row.contains("Context")),
+        "context usage should not render before a completed request, got: {rows:?}"
+    );
+}
+
+#[test]
+fn status_line_clamps_context_usage_when_used_exceeds_limit() {
+    let mut model = ready_model(
+        48,
+        4,
+        StyleMode::Cx,
+        vec![
+            StatusLineItem::ContextUsed,
+            StatusLineItem::ContextRemaining,
+        ],
+    );
+    model.set_last_context_usage(Some(context_usage(300_000, 128_000)));
+
+    assert_eq!(
+        render_trimmed_rows(&mut model, 48, 4)
+            .last()
+            .map(String::as_str),
+        Some("  Context 100% used · Context 0% left")
+    );
+}
+
+#[test]
+fn status_line_hides_context_usage_after_clear_command() {
+    let mut model = ready_model(
+        48,
+        6,
+        StyleMode::Cx,
+        vec![
+            StatusLineItem::ContextUsed,
+            StatusLineItem::ContextRemaining,
+        ],
+    );
+    model.set_last_context_usage(Some(context_usage(32_000, 128_000)));
+    assert!(
+        render_trimmed_rows(&mut model, 48, 6)
+            .iter()
+            .any(|row| row.contains("Context 25% used")),
+        "context usage should render before /clear"
+    );
+
+    type_text(&mut model, "/clear");
+    model.update(AppEvent::Key(KeyCode::Enter.into()));
+
+    let rows = render_trimmed_rows(&mut model, 48, 6);
+    assert!(
+        rows.iter().all(|row| !row.contains("Context")),
+        "context usage should reset after /clear, got: {rows:?}"
+    );
+}
+
+#[test]
+fn second_status_line_deduplicates_context_usage_items_from_first_line() {
+    let mut model = ready_model_with_options(
+        48,
+        5,
+        ModelOptions {
+            style_mode: StyleMode::Cx,
+            status_line_items: vec![StatusLineItem::ContextUsed],
+            status_line_2_items: vec![
+                StatusLineItem::ContextRemaining,
+                StatusLineItem::ContextUsed,
+            ],
+            ..ModelOptions::default()
+        },
+    );
+    model.set_last_context_usage(Some(context_usage(32_000, 128_000)));
+
+    assert_eq!(
+        render_trimmed_rows(&mut model, 48, 5),
+        vec![
+            cx_top_surface_row(48),
+            "› Enter to send Prompt".to_string(),
+            cx_bottom_surface_row(48),
+            "  Context 25% used".to_string(),
+            "  Context 75% left".to_string()
+        ]
+    );
+}
+
+fn context_usage(used: usize, limit: usize) -> ContextWindowUsage {
+    ContextWindowUsage {
+        limit: ContextTokenLimit::new(limit).expect("test limit should be non-zero"),
+        used,
+    }
 }
 
 fn ready_model(

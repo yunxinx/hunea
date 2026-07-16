@@ -5,7 +5,7 @@ use super::{
     SessionBranchTreePayload, SessionLoadRequestId, SessionPickerRow, SessionPreviewPayload,
     SessionResumePayload, SessionTreePayload, context_budget::ContextBudgetLoadErrorPayload,
 };
-use crate::context_budget::ContextBudgetSnapshot;
+use crate::context_budget::{ContextBudgetSnapshot, ContextWindowUsage};
 use crate::prompt_assembly::PromptAssemblyManagerSnapshot;
 
 /// `PromptAssemblyUpdateNotice` 描述 `/prompt` 变更对当前运行时会话的生效范围。
@@ -174,6 +174,9 @@ pub enum RuntimeEvent {
         response: ConversationResponse,
         finish_reason: Option<String>,
         metrics: Option<RuntimeRequestMetrics>,
+        /// 本次请求完成后的会话上下文占用；与 `metrics` 相互独立,
+        /// provider 未报告 usage 时为 `None`。
+        context_usage: Option<ContextWindowUsage>,
     },
     Failed {
         target: Option<RuntimeTarget>,

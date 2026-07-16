@@ -1,5 +1,6 @@
 use ratatui::{buffer::Buffer, style::Color};
 use runtime_domain::{
+    context_budget::{ContextTokenLimit, ContextWindowUsage},
     model_catalog::{ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource},
     prompt_assembly::persistence::PromptAssemblyScope,
     prompt_assembly::{
@@ -8,9 +9,9 @@ use runtime_domain::{
     },
     provider::ProviderKind,
     session::{
-        RuntimeEvent, RuntimeIdentity, RuntimeTarget, SessionResumePayload, TranscriptReplayItem,
-        TranscriptReplayRole, TranscriptSkillBinding, TranscriptUserAttachment,
-        TranscriptUserMessage,
+        ConversationResponse, RuntimeEvent, RuntimeIdentity, RuntimeTarget, SessionResumePayload,
+        TranscriptReplayItem, TranscriptReplayRole, TranscriptSkillBinding,
+        TranscriptUserAttachment, TranscriptUserMessage,
     },
     session::{
         RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityContent,
@@ -319,6 +320,54 @@ fn session_resumed_drops_missing_skill_binding_color() {
 
     let buffer = render_model_buffer(&mut model, 60, 10);
     assert_text_cells_do_not_use_color(&buffer, "$code-review", default_palette().command_accent);
+}
+
+#[test]
+fn message_finished_updates_last_context_usage_and_retains_it_without_new_usage() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    let usage = ContextWindowUsage {
+        limit: ContextTokenLimit::new(128_000).expect("test limit should be non-zero"),
+        used: 32_000,
+    };
+
+    model.apply_runtime_event(RuntimeEvent::MessageFinished {
+        target: Some(RuntimeTarget::provider("local", "qwen3")),
+        response: ConversationResponse::assistant_text("done"),
+        finish_reason: None,
+        metrics: None,
+        context_usage: Some(usage),
+    });
+    assert_eq!(model.last_context_usage(), Some(usage));
+
+    // usage 缺失的后续完成事件保留上次数值,与 metrics 的"最近一次"语义一致。
+    model.apply_runtime_event(RuntimeEvent::MessageFinished {
+        target: Some(RuntimeTarget::provider("local", "qwen3")),
+        response: ConversationResponse::assistant_text("again"),
+        finish_reason: None,
+        metrics: None,
+        context_usage: None,
+    });
+    assert_eq!(model.last_context_usage(), Some(usage));
+}
+
+#[test]
+fn session_resumed_resets_last_context_usage() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.set_last_context_usage(Some(ContextWindowUsage {
+        limit: ContextTokenLimit::new(128_000).expect("test limit should be non-zero"),
+        used: 32_000,
+    }));
+
+    model.apply_runtime_event(RuntimeEvent::SessionResumed {
+        payload: SessionResumePayload {
+            session_id: "session-1".to_string(),
+            transcript: Vec::new(),
+            restored_model: None,
+        },
+    });
+
+    // v1 不在 resume 路径恢复占用数据,切换会话后应隐藏等待下一次请求完成。
+    assert_eq!(model.last_context_usage(), None);
 }
 
 fn model_catalog() -> ModelCatalog {

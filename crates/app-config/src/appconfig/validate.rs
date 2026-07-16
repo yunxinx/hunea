@@ -176,7 +176,8 @@ pub(super) fn normalize_request_retry_delays(
 fn validate_status_line_items(items: &[String]) -> Result<(), AppConfigError> {
     for item in items {
         match item.as_str() {
-            "git-branch" | "current-dir" | "current-model" | "throughput" | "latency" => {}
+            "git-branch" | "current-dir" | "current-model" | "throughput" | "latency"
+            | "context-used" | "context-remaining" => {}
             other => {
                 return Err(AppConfigError::InvalidStatusLineItem {
                     path: None,

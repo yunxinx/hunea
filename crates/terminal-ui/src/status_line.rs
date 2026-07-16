@@ -1,7 +1,7 @@
 use ratatui::text::Line;
 use unicode_segmentation::UnicodeSegmentation;
 
-use runtime_domain::envinfo;
+use runtime_domain::{context_budget::ContextWindowUsage, envinfo};
 
 use crate::{
     Model, StyleMode,
@@ -20,6 +20,8 @@ pub enum StatusLineItem {
     CurrentModel,
     Throughput,
     Latency,
+    ContextUsed,
+    ContextRemaining,
 }
 
 impl StatusLineItem {
@@ -31,6 +33,8 @@ impl StatusLineItem {
             "current-model" => Some(Self::CurrentModel),
             "throughput" => Some(Self::Throughput),
             "latency" => Some(Self::Latency),
+            "context-used" => Some(Self::ContextUsed),
+            "context-remaining" => Some(Self::ContextRemaining),
             _ => None,
         }
     }
@@ -174,6 +178,19 @@ impl Model {
                         parts.push(format_request_latency(metrics.latency));
                     }
                 }
+                StatusLineItem::ContextUsed => {
+                    if let Some(usage) = self.last_context_usage() {
+                        parts.push(format!("Context {}% used", context_used_percent(usage)));
+                    }
+                }
+                StatusLineItem::ContextRemaining => {
+                    if let Some(usage) = self.last_context_usage() {
+                        parts.push(format!(
+                            "Context {}% left",
+                            context_remaining_percent(usage)
+                        ));
+                    }
+                }
                 _ => {}
             }
         }
@@ -201,6 +218,12 @@ fn status_line_config_bits_for_items(items: &[StatusLineItem]) -> u8 {
     }
     if items.contains(&StatusLineItem::Latency) {
         bits |= 1 << 4;
+    }
+    if items.contains(&StatusLineItem::ContextUsed) {
+        bits |= 1 << 5;
+    }
+    if items.contains(&StatusLineItem::ContextRemaining) {
+        bits |= 1 << 6;
     }
     bits
 }
@@ -233,6 +256,22 @@ fn format_request_throughput(output_tokens: usize, duration: std::time::Duration
 
 fn format_request_latency(latency: std::time::Duration) -> String {
     format!("{:.2}s", latency.as_secs_f64())
+}
+
+/// `context_used_percent` 以 raw 口径计算上下文已用百分比:
+/// `round(used * 100 / limit)`,并 clamp 到 0..=100。
+fn context_used_percent(usage: ContextWindowUsage) -> u8 {
+    let limit = usage.limit.get();
+    // 四舍五入用 (used * 100 + limit / 2) / limit;saturating 运算保证
+    // 极端大 used 时结果饱和后仍被 clamp,不 panic、不溢出。
+    let percent = usage.used.saturating_mul(100).saturating_add(limit / 2) / limit;
+    percent.min(100) as u8
+}
+
+/// `context_remaining_percent` 返回剩余百分比;互补由构造保证(left = 100 - used),
+/// 不各自独立取整,两项之和恒为 100。
+fn context_remaining_percent(usage: ContextWindowUsage) -> u8 {
+    100 - context_used_percent(usage)
 }
 
 pub(crate) fn status_line_gap_before(style_mode: StyleMode) -> usize {
@@ -379,4 +418,48 @@ fn force_ellipsis_at_display_width(text: &str, width: usize) -> String {
         truncate_display_width(text, width - ellipsis_width),
         STATUS_LINE_ELLIPSIS
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use runtime_domain::context_budget::ContextTokenLimit;
+
+    use super::*;
+
+    fn usage(used: usize, limit: usize) -> ContextWindowUsage {
+        ContextWindowUsage {
+            limit: ContextTokenLimit::new(limit).expect("test limit should be non-zero"),
+            used,
+        }
+    }
+
+    #[test]
+    fn context_used_percent_covers_zero_and_full() {
+        assert_eq!(context_used_percent(usage(0, 128_000)), 0);
+        assert_eq!(context_used_percent(usage(128_000, 128_000)), 100);
+    }
+
+    #[test]
+    fn context_used_percent_rounds_half_up() {
+        // 125/1000 = 12.5% -> 13;124/1000 = 12.4% -> 12
+        assert_eq!(context_used_percent(usage(125, 1_000)), 13);
+        assert_eq!(context_used_percent(usage(124, 1_000)), 12);
+    }
+
+    #[test]
+    fn context_used_percent_clamps_when_used_exceeds_limit() {
+        assert_eq!(context_used_percent(usage(300_000, 128_000)), 100);
+        assert_eq!(context_used_percent(usage(usize::MAX, 1)), 100);
+    }
+
+    #[test]
+    fn context_remaining_percent_is_complement_of_used() {
+        for used in [0, 124, 125, 500, 1_000, 2_000] {
+            let sample = usage(used, 1_000);
+            assert_eq!(
+                context_used_percent(sample) as u16 + context_remaining_percent(sample) as u16,
+                100
+            );
+        }
+    }
 }

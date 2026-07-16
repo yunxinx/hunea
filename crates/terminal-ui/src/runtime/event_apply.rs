@@ -258,7 +258,10 @@ impl RuntimeEventApply for Model {
                 self.apply_session_resume_payload(payload);
             }
             RuntimeEvent::MessageFinished {
-                response, metrics, ..
+                response,
+                metrics,
+                context_usage,
+                ..
             } => {
                 self.close_runtime_permission_approval_panel();
                 if let Some(metrics) = metrics {
@@ -267,6 +270,9 @@ impl RuntimeEventApply for Model {
                         metrics.output_tokens,
                         metrics.duration,
                     )));
+                }
+                if let Some(usage) = context_usage {
+                    self.set_last_context_usage(Some(usage));
                 }
                 self.set_stream_activity_thinking(false);
                 self.flush_runtime_response_buffer_with_final(
@@ -342,6 +348,9 @@ impl Model {
 
     fn apply_session_resume_payload(&mut self, payload: SessionResumePayload) {
         self.close_runtime_permission_approval_panel();
+        // 上下文占用描述的是切换前会话的历史;v1 不在 resume 路径恢复
+        // 新会话的占用数据,因此切换后先隐藏,等待下一次请求完成再显示。
+        self.set_last_context_usage(None);
         self.clear_runtime_response_buffer();
         self.accept_streamed_runtime_reasoning_from_runtime();
         self.clear_stream_activity();

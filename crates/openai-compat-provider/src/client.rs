@@ -57,6 +57,31 @@ fn apply_session_affinity_headers(
     request
 }
 
+/// `http_client_with_idle_timeout` 构建应用 idle timeout 的 reqwest 客户端：
+/// 建连与相邻响应数据块的空闲间隔受 `config.idle_timeout` 约束，收到数据即重置。
+fn http_client_with_idle_timeout(
+    config: &OpenAiClientConfig,
+) -> Result<reqwest::Client, ProviderError> {
+    reqwest::Client::builder()
+        .connect_timeout(config.idle_timeout)
+        .read_timeout(config.idle_timeout)
+        .build()
+        .map_err(|source| ProviderError::Transport(source.to_string()))
+}
+
+/// `transport_error` 将 reqwest 错误映射为 provider transport 错误，
+/// 超时类错误给出 idle timeout 语义文案。
+fn transport_error(config: &OpenAiClientConfig, source: reqwest::Error) -> ProviderError {
+    if source.is_timeout() {
+        ProviderError::Transport(format!(
+            "provider request idle timeout after {}s",
+            config.idle_timeout.as_secs()
+        ))
+    } else {
+        ProviderError::Transport(source.to_string())
+    }
+}
+
 /// `OpenAiChatCompletionsClient` adapts OpenAI-compatible chat completions to `provider-protocol`.
 #[derive(Clone, Debug)]
 pub struct OpenAiChatCompletionsClient {
@@ -65,11 +90,9 @@ pub struct OpenAiChatCompletionsClient {
 }
 
 impl OpenAiChatCompletionsClient {
-    /// `new` creates a client with the default reqwest configuration.
+    /// `new` creates a client whose HTTP idle timeout comes from `config.idle_timeout`.
     pub fn new(config: OpenAiClientConfig) -> Result<Self, ProviderError> {
-        let http = reqwest::Client::builder()
-            .build()
-            .map_err(|source| ProviderError::Transport(source.to_string()))?;
+        let http = http_client_with_idle_timeout(&config)?;
         Ok(Self { http, config })
     }
 }
@@ -92,7 +115,7 @@ impl ProviderClient for OpenAiChatCompletionsClient {
                 .json(&body)
                 .send()
                 .await
-                .map_err(|source| ProviderError::Transport(source.to_string()))?;
+                .map_err(|source| transport_error(&self.config, source))?;
 
             if !response.status().is_success() {
                 return Err(provider_error_from_response(response).await);
@@ -102,7 +125,7 @@ impl ProviderClient for OpenAiChatCompletionsClient {
             let mut stream_state = OpenAiStreamState::new();
             let mut bytes = response.bytes_stream();
             while let Some(chunk) = bytes.next().await {
-                let chunk = chunk.map_err(|source| ProviderError::Transport(source.to_string()))?;
+                let chunk = chunk.map_err(|source| transport_error(&self.config, source))?;
                 let frames = decoder.push(&chunk)?;
                 for frame in frames {
                     if frame == "[DONE]" {
@@ -131,7 +154,7 @@ impl ProviderClient for OpenAiChatCompletionsClient {
                 .apply_auth(self.http.get(self.config.endpoint("/models")))
                 .send()
                 .await
-                .map_err(|source| ProviderError::Transport(source.to_string()))?;
+                .map_err(|source| transport_error(&self.config, source))?;
 
             if !response.status().is_success() {
                 return Err(provider_error_from_response(response).await);
@@ -154,11 +177,9 @@ pub struct OpenAiResponsesClient {
 }
 
 impl OpenAiResponsesClient {
-    /// `new` creates a client with the default reqwest configuration.
+    /// `new` creates a client whose HTTP idle timeout comes from `config.idle_timeout`.
     pub fn new(config: OpenAiClientConfig) -> Result<Self, ProviderError> {
-        let http = reqwest::Client::builder()
-            .build()
-            .map_err(|source| ProviderError::Transport(source.to_string()))?;
+        let http = http_client_with_idle_timeout(&config)?;
         Ok(Self { http, config })
     }
 }
@@ -181,7 +202,7 @@ impl ProviderClient for OpenAiResponsesClient {
                 .json(&body)
                 .send()
                 .await
-                .map_err(|source| ProviderError::Transport(source.to_string()))?;
+                .map_err(|source| transport_error(&self.config, source))?;
 
             if !response.status().is_success() {
                 return Err(provider_error_from_response(response).await);
@@ -191,7 +212,7 @@ impl ProviderClient for OpenAiResponsesClient {
             let mut stream_state = OpenAiResponsesStreamState::default();
             let mut bytes = response.bytes_stream();
             while let Some(chunk) = bytes.next().await {
-                let chunk = chunk.map_err(|source| ProviderError::Transport(source.to_string()))?;
+                let chunk = chunk.map_err(|source| transport_error(&self.config, source))?;
                 let frames = decoder.push(&chunk)?;
                 for frame in frames {
                     if frame == "[DONE]" {
@@ -220,7 +241,7 @@ impl ProviderClient for OpenAiResponsesClient {
                 .apply_auth(self.http.get(self.config.endpoint("/models")))
                 .send()
                 .await
-                .map_err(|source| ProviderError::Transport(source.to_string()))?;
+                .map_err(|source| transport_error(&self.config, source))?;
 
             if !response.status().is_success() {
                 return Err(provider_error_from_response(response).await);

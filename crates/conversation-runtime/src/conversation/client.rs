@@ -9,6 +9,7 @@ pub async fn run_conversation_turn_with_cancellation(
     request: &ConversationRequest,
     executor: ToolExecutorRegistry,
     cancellation: &tokio_util::sync::CancellationToken,
+    idle_timeout: std::time::Duration,
 ) -> Result<ConversationResponse, TurnExecutionError> {
     let completion = run_conversation_turn_with_cancellation_and_token_progress(
         request,
@@ -16,6 +17,7 @@ pub async fn run_conversation_turn_with_cancellation(
         cancellation,
         None,
         None,
+        idle_timeout,
         |_| {},
     )
     .await?;

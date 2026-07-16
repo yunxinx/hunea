@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use super::{
     ConversationRequest, TurnExecutionError,
     response::{ConversationCompletion, ConversationProgress},
@@ -14,6 +16,7 @@ pub(crate) async fn run_conversation_turn_with_cancellation_and_token_progress<F
     cancellation: &tokio_util::sync::CancellationToken,
     tool_max_turns: Option<usize>,
     permission_handler: Option<SharedToolPermissionHandler>,
+    idle_timeout: Duration,
     mut on_progress: F,
 ) -> Result<ConversationCompletion, TurnExecutionError>
 where
@@ -25,6 +28,7 @@ where
         cancellation,
         tool_max_turns,
         permission_handler,
+        idle_timeout,
         |progress| match progress {
             ConversationProgress::OutputTokens { total_tokens } => {
                 on_progress(ProviderProgress::OutputTokens { total_tokens });
@@ -52,6 +56,7 @@ pub(crate) async fn run_conversation_turn_with_cancellation_and_progress<F>(
     cancellation: &tokio_util::sync::CancellationToken,
     tool_max_turns: Option<usize>,
     permission_handler: Option<SharedToolPermissionHandler>,
+    idle_timeout: Duration,
     mut on_progress: F,
 ) -> Result<ConversationCompletion, TurnExecutionError>
 where
@@ -63,6 +68,7 @@ where
         cancellation,
         tool_max_turns,
         permission_handler,
+        idle_timeout,
         &mut on_progress,
     )
     .await
@@ -74,6 +80,7 @@ pub(crate) async fn run_prepared_conversation_with_progress<F>(
     cancellation: &tokio_util::sync::CancellationToken,
     tool_max_turns: Option<usize>,
     permission_handler: Option<SharedToolPermissionHandler>,
+    idle_timeout: Duration,
     mut on_progress: F,
 ) -> Result<ConversationCompletion, TurnExecutionError>
 where
@@ -85,6 +92,7 @@ where
         cancellation,
         tool_max_turns,
         permission_handler,
+        idle_timeout,
         &mut on_progress,
     )
     .await

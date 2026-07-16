@@ -21,18 +21,19 @@ use session_store::SessionId;
 use tool_runtime::{SharedToolPermissionHandler, ToolExecutorRegistry};
 
 use super::{
-    ConversationPermissionBroker, ConversationTimeoutPause, PersistedConversationItem,
-    TurnExecutionError, turn::run_prepared_conversation_with_progress,
+    ConversationPermissionBroker, PersistedConversationItem, TurnExecutionError,
+    turn::run_prepared_conversation_with_progress,
 };
 use crate::PreparedConversationRequest;
 use crate::{NotifyingSender, RuntimeEventNotifier};
 
+mod cancellation;
 mod context_repair;
 mod event_apply;
 mod persistence;
 mod progress_mapping;
-mod timeout;
 
+use cancellation::{TurnAttemptOutcome, run_with_cancellation_grace};
 use context_repair::{ProviderContextRepairLedger, take_provider_context_repair_items};
 use persistence::{
     ConversationDelta, SessionPersistenceCommand, flush_session_persistence,
@@ -41,7 +42,6 @@ use persistence::{
 use progress_mapping::{
     conversation_worker_event_from_progress, progress_sender_to_permission_sender,
 };
-use timeout::{TurnAttemptOutcome, run_with_soft_timeout};
 
 #[cfg(test)]
 use persistence::{
@@ -49,10 +49,9 @@ use persistence::{
     persist_tool_activity_started, persist_tool_activity_update, persist_turn_start,
 };
 
-const TIMEOUT_REPAIR_GRACE: Duration = Duration::from_secs(2);
+const CANCEL_REPAIR_GRACE: Duration = Duration::from_secs(2);
 const SESSION_PERSISTENCE_QUEUE_CAPACITY: usize = 256;
 const TOOL_EXECUTION_INTERRUPTED: &str = "Tool execution interrupted";
-const TOOL_EXECUTION_TIMED_OUT: &str = "Tool execution timed out";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ConversationWorkerEvent {
@@ -257,24 +256,20 @@ async fn run_conversation_worker(
         let attempt_provider_context_repair_ledger = Arc::clone(&provider_context_repair_ledger);
         let attempt_cancellation = cancellation.child_token();
         let progress_attempt_cancellation = attempt_cancellation.clone();
-        let timeout_pause = ConversationTimeoutPause::default();
-        let permission_handler: SharedToolPermissionHandler =
-            std::sync::Arc::new(permission_broker.handler(
-                progress_sender_to_permission_sender(sender.clone()),
-                timeout_pause.clone(),
-            ));
-        let attempt_result = run_with_soft_timeout(
+        let permission_handler: SharedToolPermissionHandler = std::sync::Arc::new(
+            permission_broker.handler(progress_sender_to_permission_sender(sender.clone())),
+        );
+        let attempt_result = run_with_cancellation_grace(
             &cancellation,
             &attempt_cancellation,
-            request_policy.timeout(),
-            TIMEOUT_REPAIR_GRACE,
-            timeout_pause,
+            CANCEL_REPAIR_GRACE,
             run_prepared_conversation_with_progress(
                 &request,
                 executor.clone(),
                 &attempt_cancellation,
                 request_policy.tool_max_turns(),
                 Some(permission_handler),
+                request_policy.timeout(),
                 move |progress| match progress {
                     crate::conversation::ConversationProgress::ProviderTurnStarted => {}
                     crate::conversation::ConversationProgress::ProviderContextItem { item } => {
@@ -346,50 +341,7 @@ async fn run_conversation_worker(
             !provider_context_items_started.load(Ordering::Relaxed);
 
         match attempt_result {
-            TurnAttemptOutcome::TimedOut(Err(_)) | TurnAttemptOutcome::TimedOutAfterGrace
-                if attempt < request_policy.attempts() && can_retry_from_original_request =>
-            {
-                permission_broker.cancel_all();
-                if retry_conversation_after_attempt(
-                    attempt,
-                    &request_policy,
-                    &cancellation,
-                    &session_sender,
-                    &sender,
-                )
-                .await
-                {
-                    drop(session_sender);
-                    let _ = session_actor.await;
-                    return;
-                }
-            }
-            TurnAttemptOutcome::TimedOut(Err(_)) | TurnAttemptOutcome::TimedOutAfterGrace => {
-                permission_broker.cancel_all();
-                send_repair_items(
-                    provider_context_repair_ledger.as_ref(),
-                    &session_sender,
-                    TOOL_EXECUTION_TIMED_OUT,
-                    &cancellation,
-                    &sender,
-                );
-                send_terminal_after_session_persistence(
-                    &session_sender,
-                    &sender,
-                    ConversationEvent::Failed {
-                        message: format!(
-                            "Conversation request timed out after {}s",
-                            request_policy.timeout().as_secs()
-                        ),
-                    },
-                )
-                .await;
-                drop(session_sender);
-                let _ = session_actor.await;
-                return;
-            }
-            TurnAttemptOutcome::Completed(Ok(completion))
-            | TurnAttemptOutcome::TimedOut(Ok(completion)) => {
+            TurnAttemptOutcome::Completed(Ok(completion)) => {
                 permission_broker.cancel_all();
                 if let Err(error) = flush_session_persistence(&session_sender).await {
                     let _ = sender.send(ConversationWorkerEvent::progress(

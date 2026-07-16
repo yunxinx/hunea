@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use tokio_util::sync::CancellationToken;
 use tool_loop_runtime::{ToolLoopOptions, run_tool_loop};
 use tool_runtime::{SharedToolPermissionHandler, ToolExecutorRegistry};
@@ -19,6 +21,7 @@ pub(crate) async fn execute_conversation_request<F>(
     cancellation: &CancellationToken,
     tool_max_turns: Option<usize>,
     permission_handler: Option<SharedToolPermissionHandler>,
+    idle_timeout: Duration,
     on_progress: &mut F,
 ) -> Result<ConversationCompletion, TurnExecutionError>
 where
@@ -28,7 +31,7 @@ where
         return Err(TurnExecutionError::Cancelled);
     }
 
-    let client = openai_client_for_request(request.provider_request())?;
+    let client = openai_client_for_request(request.provider_request(), idle_timeout)?;
     let prompt_request = prompt_request_from_provider_request(request.provider_request())?;
     let completion = run_tool_loop(
         &client,
@@ -68,6 +71,7 @@ pub(crate) async fn execute_prepared_conversation_request<F>(
     cancellation: &CancellationToken,
     tool_max_turns: Option<usize>,
     permission_handler: Option<SharedToolPermissionHandler>,
+    idle_timeout: Duration,
     on_progress: &mut F,
 ) -> Result<ConversationCompletion, TurnExecutionError>
 where
@@ -77,7 +81,7 @@ where
         return Err(TurnExecutionError::Cancelled);
     }
 
-    let client = openai_client_for_prepared_request(request)?;
+    let client = openai_client_for_prepared_request(request, idle_timeout)?;
     let prompt_request = prompt_request_from_prepared_request(request)?;
     let completion = run_tool_loop(
         &client,

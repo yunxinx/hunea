@@ -118,6 +118,8 @@ pub enum ReasoningContentDisplay {
 pub struct RuntimeConfig {
     pub request_retry_attempts: usize,
     pub request_retry_delays: Vec<u64>,
+    /// 单次 provider HTTP 请求的 idle timeout（秒）：约束建连等待与流式响应
+    /// 相邻数据块的空闲间隔，收到数据即重置；不限制一个 turn 的总时长。
     pub request_timeout_seconds: u64,
     pub tool_max_turns: Option<usize>,
     pub allow_managed_rg: Option<bool>,

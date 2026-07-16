@@ -11,7 +11,7 @@ use runtime_domain::session::{
     ConversationEvent, RuntimePermissionOption, RuntimePermissionOptionKind,
     RuntimePermissionRequest,
 };
-use tokio::sync::{oneshot, watch};
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use tool_runtime::{
     ToolPermissionDecision, ToolPermissionFuture, ToolPermissionHandler, ToolPermissionRequest,
@@ -26,54 +26,6 @@ const TOOL_PERMISSION_DENIED: &str = "Tool permission denied";
 
 type PermissionResponseSender = oneshot::Sender<Option<String>>;
 
-/// `ConversationTimeoutPause` 在用户审批期间暂停 request timeout 计时。
-#[derive(Debug, Clone)]
-pub(crate) struct ConversationTimeoutPause {
-    sender: watch::Sender<usize>,
-}
-
-impl Default for ConversationTimeoutPause {
-    fn default() -> Self {
-        let (sender, _) = watch::channel(0);
-        Self { sender }
-    }
-}
-
-impl ConversationTimeoutPause {
-    pub(crate) fn pause(&self) -> ConversationTimeoutPauseGuard {
-        let count = self.current_count().saturating_add(1);
-        let _ = self.sender.send(count);
-        ConversationTimeoutPauseGuard {
-            pause: self.clone(),
-        }
-    }
-
-    pub(crate) fn subscribe(&self) -> watch::Receiver<usize> {
-        self.sender.subscribe()
-    }
-
-    fn resume(&self) {
-        let count = self.current_count().saturating_sub(1);
-        let _ = self.sender.send(count);
-    }
-
-    fn current_count(&self) -> usize {
-        *self.sender.borrow()
-    }
-}
-
-/// `ConversationTimeoutPauseGuard` 在 drop 时恢复 request timeout 计时。
-#[derive(Debug)]
-pub(crate) struct ConversationTimeoutPauseGuard {
-    pause: ConversationTimeoutPause,
-}
-
-impl Drop for ConversationTimeoutPauseGuard {
-    fn drop(&mut self) {
-        self.pause.resume();
-    }
-}
-
 /// `ConversationPermissionBroker` 保存 conversation tool Ask 请求与 TUI 响应之间的等待关系。
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ConversationPermissionBroker {
@@ -85,12 +37,10 @@ impl ConversationPermissionBroker {
     pub(crate) fn handler(
         &self,
         sender: mpsc::Sender<ConversationEvent>,
-        timeout_pause: ConversationTimeoutPause,
     ) -> ConversationToolPermissionHandler {
         ConversationToolPermissionHandler {
             broker: self.clone(),
             sender,
-            timeout_pause,
         }
     }
 
@@ -139,7 +89,6 @@ impl ConversationPermissionBroker {
 pub(crate) struct ConversationToolPermissionHandler {
     broker: ConversationPermissionBroker,
     sender: mpsc::Sender<ConversationEvent>,
-    timeout_pause: ConversationTimeoutPause,
 }
 
 impl ToolPermissionHandler for ConversationToolPermissionHandler {
@@ -149,7 +98,6 @@ impl ToolPermissionHandler for ConversationToolPermissionHandler {
         cancellation: &'a CancellationToken,
     ) -> ToolPermissionFuture<'a> {
         Box::pin(async move {
-            let _timeout_pause = self.timeout_pause.pause();
             let request_id = self.broker.next_request_id();
             let (response_sender, response_receiver) = oneshot::channel();
             self.broker.register(request_id.clone(), response_sender);
@@ -275,7 +223,7 @@ mod tests {
     async fn conversation_permission_handler_round_trips_allow_response() {
         let broker = ConversationPermissionBroker::default();
         let (sender, receiver) = mpsc::channel();
-        let handler = Arc::new(broker.handler(sender, ConversationTimeoutPause::default()));
+        let handler = Arc::new(broker.handler(sender));
         let cancellation = CancellationToken::new();
         let task_handler = Arc::clone(&handler);
         let task_cancellation = cancellation.clone();
@@ -357,7 +305,7 @@ mod tests {
     async fn conversation_permission_request_preserves_tool_diff_preview() {
         let broker = ConversationPermissionBroker::default();
         let (sender, receiver) = mpsc::channel();
-        let handler = Arc::new(broker.handler(sender, ConversationTimeoutPause::default()));
+        let handler = Arc::new(broker.handler(sender));
         let cancellation = CancellationToken::new();
         let task_handler = Arc::clone(&handler);
         let task_cancellation = cancellation.clone();
@@ -406,7 +354,7 @@ mod tests {
      {
         let broker = ConversationPermissionBroker::default();
         let (sender, receiver) = mpsc::channel();
-        let handler = Arc::new(broker.handler(sender, ConversationTimeoutPause::default()));
+        let handler = Arc::new(broker.handler(sender));
         let cancellation = CancellationToken::new();
         let task_handler = Arc::clone(&handler);
         let task_cancellation = cancellation.clone();
@@ -443,7 +391,7 @@ mod tests {
     async fn conversation_permission_cancel_all_denies_pending_request() {
         let broker = ConversationPermissionBroker::default();
         let (sender, receiver) = mpsc::channel();
-        let handler = Arc::new(broker.handler(sender, ConversationTimeoutPause::default()));
+        let handler = Arc::new(broker.handler(sender));
         let cancellation = CancellationToken::new();
         let task_handler = Arc::clone(&handler);
         let task_cancellation = cancellation.clone();

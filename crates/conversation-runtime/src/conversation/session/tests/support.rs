@@ -28,12 +28,12 @@ pub(super) use tool_runtime::ToolExecutorRegistry;
 
 pub(super) use super::super::persistence::{SessionPersistenceCommand, SessionPersistenceError};
 pub(super) use super::super::{
-    ConversationDelta, ConversationEvent, ConversationPermissionBroker, ConversationTimeoutPause,
-    ConversationWorker, ConversationWorkerEvent, ConversationWorkerEventSender,
-    ProviderContextRepairLedger, SessionPersistenceState, TOOL_EXECUTION_TIMED_OUT,
-    TurnAttemptOutcome, flush_session_persistence, persist_context_item, persist_terminal_snapshot,
+    ConversationDelta, ConversationEvent, ConversationPermissionBroker, ConversationWorker,
+    ConversationWorkerEvent, ConversationWorkerEventSender, ProviderContextRepairLedger,
+    SessionPersistenceState, TOOL_EXECUTION_INTERRUPTED, TurnAttemptOutcome,
+    flush_session_persistence, persist_context_item, persist_terminal_snapshot,
     persist_tool_activity_started, persist_tool_activity_update, persist_turn_start,
-    run_conversation_worker, run_session_persistence_actor, run_with_soft_timeout,
+    run_conversation_worker, run_session_persistence_actor, run_with_cancellation_grace,
 };
 pub(super) use crate::{
     ConversationResponse, PreparedConversationRequest, PreparedTurnOptions, ProviderConversation,

@@ -17,7 +17,7 @@ fn provider_context_repair_items_fill_unresolved_tool_calls() {
         false,
     ));
 
-    let repair_items = ledger.take_repair_items(TOOL_EXECUTION_TIMED_OUT);
+    let repair_items = ledger.take_repair_items(TOOL_EXECUTION_INTERRUPTED);
 
     assert_eq!(repair_items.len(), 1);
     let repair_item = &repair_items[0];
@@ -29,13 +29,13 @@ fn provider_context_repair_items_fill_unresolved_tool_calls() {
         } => {
             assert_eq!(call_id, "call-2");
             assert!(*is_error);
-            assert_eq!(content[0].as_text(), Some(TOOL_EXECUTION_TIMED_OUT));
+            assert_eq!(content[0].as_text(), Some(TOOL_EXECUTION_INTERRUPTED));
         }
         _ => panic!("expected ToolResult item"),
     }
     assert!(
         ledger
-            .take_repair_items(TOOL_EXECUTION_TIMED_OUT)
+            .take_repair_items(TOOL_EXECUTION_INTERRUPTED)
             .is_empty()
     );
 }

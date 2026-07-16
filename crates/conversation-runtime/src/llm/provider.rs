@@ -15,8 +15,12 @@ use runtime_domain::{provider::ProviderKind, session::ProviderRequest};
 use crate::PreparedConversationRequest;
 use crate::llm::ProviderRequestError;
 
+/// 模型列表请求已有 3 秒总超时兜底，客户端 idle timeout 取同一上限。
+const MODEL_LIST_IDLE_TIMEOUT: Duration = Duration::from_secs(3);
+
 pub(crate) fn openai_client_for_request(
     request: &ProviderRequest,
+    idle_timeout: Duration,
 ) -> Result<OpenAiCompatibleClient, ProviderRequestError> {
     openai_client_from_parts(
         &request.provider_id,
@@ -24,11 +28,13 @@ pub(crate) fn openai_client_for_request(
         request.base_url.as_deref(),
         request.api_key.as_ref(),
         request.api_key_env.as_deref(),
+        idle_timeout,
     )
 }
 
 pub(crate) fn openai_client_for_prepared_request(
     request: &PreparedConversationRequest,
+    idle_timeout: Duration,
 ) -> Result<OpenAiCompatibleClient, ProviderRequestError> {
     openai_client_from_parts(
         request.provider_id(),
@@ -36,6 +42,7 @@ pub(crate) fn openai_client_for_prepared_request(
         request.base_url(),
         request.api_key(),
         request.api_key_env(),
+        idle_timeout,
     )
 }
 
@@ -45,6 +52,7 @@ fn openai_client_from_parts(
     base_url: Option<&str>,
     api_key: Option<&runtime_domain::provider::ProviderApiKey>,
     api_key_env: Option<&str>,
+    idle_timeout: Duration,
 ) -> Result<OpenAiCompatibleClient, ProviderRequestError> {
     let config = match provider_kind {
         ProviderKind::OpenAiCompatible | ProviderKind::OpenAiResponses => {
@@ -57,6 +65,7 @@ fn openai_client_from_parts(
                 provider_id,
                 base_url,
                 optional_api_key_from_parts(provider_id, provider_kind, api_key, api_key_env)?,
+                idle_timeout,
             )
         }
         ProviderKind::OpenAi => {
@@ -72,6 +81,7 @@ fn openai_client_from_parts(
                     api_key,
                     api_key_env,
                 )?),
+                idle_timeout,
             )
         }
         provider_kind => {
@@ -102,10 +112,13 @@ fn openai_config_for_base_url(
     provider_id: &str,
     base_url: &str,
     api_key: Option<String>,
+    idle_timeout: Duration,
 ) -> Result<OpenAiClientConfig, ProviderRequestError> {
-    OpenAiClientConfig::new(base_url, api_key).map_err(|_| ProviderRequestError::InvalidBaseUrl {
-        provider_id: provider_id.to_string(),
-        base_url: base_url.to_string(),
+    OpenAiClientConfig::new(base_url, api_key, idle_timeout).map_err(|_| {
+        ProviderRequestError::InvalidBaseUrl {
+            provider_id: provider_id.to_string(),
+            base_url: base_url.to_string(),
+        }
     })
 }
 
@@ -171,7 +184,10 @@ fn start_model_list_worker() -> Result<ModelListWorker, ProviderRequestError> {
                     while let Ok(job) = receiver.recv() {
                         let result = runtime.block_on(async {
                             tokio::time::timeout(Duration::from_secs(3), async {
-                                let client = openai_client_for_request(&job.request)?;
+                                let client = openai_client_for_request(
+                                    &job.request,
+                                    MODEL_LIST_IDLE_TIMEOUT,
+                                )?;
                                 let models = client.list_models().await?;
                                 Ok(models.into_iter().map(|model| model.id).collect::<Vec<_>>())
                             })
@@ -260,7 +276,7 @@ mod tests {
             items: vec![user_item("hello")],
         };
 
-        assert!(openai_client_for_request(&request).is_ok());
+        assert!(openai_client_for_request(&request, std::time::Duration::from_secs(30)).is_ok());
     }
 
     #[test]
@@ -275,7 +291,7 @@ mod tests {
             items: vec![user_item("hello")],
         };
 
-        let error = openai_client_for_request(&request)
+        let error = openai_client_for_request(&request, std::time::Duration::from_secs(30))
             .expect_err("official OpenAI provider should require API key");
 
         assert!(error.to_string().contains("requires API key"));
@@ -293,7 +309,8 @@ mod tests {
             items: vec![user_item("hello")],
         };
 
-        let client = openai_client_for_request(&request).expect("client should build");
+        let client = openai_client_for_request(&request, std::time::Duration::from_secs(30))
+            .expect("client should build");
 
         assert!(matches!(
             client,
@@ -313,7 +330,7 @@ mod tests {
             items: vec![user_item("hello")],
         };
 
-        let error = openai_client_for_request(&request)
+        let error = openai_client_for_request(&request, std::time::Duration::from_secs(30))
             .expect_err("invalid base URL should fail before building client");
 
         assert!(matches!(
@@ -335,9 +352,10 @@ mod tests {
             items: vec![user_item("hello")],
         };
 
-        let error = openai_client_for_request(&request).expect_err(
-            "non OpenAI-compatible provider is unsupported by the conversation adapter",
-        );
+        let error = openai_client_for_request(&request, std::time::Duration::from_secs(30))
+            .expect_err(
+                "non OpenAI-compatible provider is unsupported by the conversation adapter",
+            );
 
         assert!(error.to_string().contains("unsupported provider kind"));
     }

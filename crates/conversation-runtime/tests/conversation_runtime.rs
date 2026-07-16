@@ -68,9 +68,14 @@ async fn conversation_loop_respects_pre_cancelled_token_before_network_request()
     cancellation.cancel();
 
     let executor = ToolExecutorRegistry::new();
-    let error = run_conversation_turn_with_cancellation(&request, executor, &cancellation)
-        .await
-        .expect_err("pre-cancelled request should stop before sending");
+    let error = run_conversation_turn_with_cancellation(
+        &request,
+        executor,
+        &cancellation,
+        std::time::Duration::from_secs(30),
+    )
+    .await
+    .expect_err("pre-cancelled request should stop before sending");
 
     assert_eq!(error.to_string(), "conversation turn cancelled");
 }
@@ -90,9 +95,14 @@ async fn conversation_loop_respects_pre_cancelled_token_when_tools_are_registere
     cancellation.cancel();
 
     let executor = ToolExecutorRegistry::new();
-    let error = run_conversation_turn_with_cancellation(&request, executor, &cancellation)
-        .await
-        .expect_err("pre-cancelled tool request should stop before sending");
+    let error = run_conversation_turn_with_cancellation(
+        &request,
+        executor,
+        &cancellation,
+        std::time::Duration::from_secs(30),
+    )
+    .await
+    .expect_err("pre-cancelled tool request should stop before sending");
 
     assert_eq!(error.to_string(), "conversation turn cancelled");
 }

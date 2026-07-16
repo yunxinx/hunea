@@ -41,6 +41,8 @@ impl RuntimeRequestPolicy {
             .unwrap_or_else(|| Duration::from_secs(1))
     }
 
+    /// `timeout` 返回单次 provider HTTP 请求的 idle timeout：
+    /// 约束建连与流式响应数据块之间的空闲间隔，不限制一个 turn 的总时长。
     pub fn timeout(&self) -> Duration {
         self.timeout
     }

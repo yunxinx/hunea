@@ -498,9 +498,15 @@ pub(super) fn prompt_overlay_skill_order_label(row: &PromptOverlayInactiveRow) -
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct PromptOverlayToolSelection<'a> {
+    pub(super) row_id: Option<&'a str>,
+    pub(super) column: PromptOverlayToolColumn,
+}
+
 pub(super) fn prompt_overlay_tool_lines(
     rows: &[PromptOverlayInactiveRow],
-    selected_row_id: Option<&str>,
+    selection: PromptOverlayToolSelection<'_>,
     scroll: usize,
     focused: bool,
     width: usize,
@@ -520,29 +526,110 @@ pub(super) fn prompt_overlay_tool_lines(
 
     rows.iter()
         .map(|row| {
-            let selected = selected_row_id == Some(prompt_overlay_inactive_row_id(row).as_str());
-            let content_width = width.saturating_sub(PROMPT_OVERLAY_ROW_PREFIX_WIDTH).max(1);
-            let (item_style, marker_style, marker) =
-                prompt_overlay_selection_styles(selected, focused, palette);
-            let label = prompt_overlay_tool_row_text(row, content_width);
-            prompt_overlay_list_line(
-                marker,
-                marker_style,
-                truncate_display_width_with_ellipsis(&label, content_width),
-                item_style,
-            )
+            let selected = selection.row_id == Some(prompt_overlay_inactive_row_id(row).as_str());
+            prompt_overlay_tool_row_line(row, selected, focused, selection.column, width, palette)
         })
         .skip(scroll)
         .take(body_height)
         .collect()
 }
 
-pub(super) fn prompt_overlay_tool_row_text(row: &PromptOverlayInactiveRow, width: usize) -> String {
-    let name_width = prompt_overlay_right_inactive_name_width(width);
+/// Tools tab 单行渲染：On/Guide 双 checkbox 列 + 选中列高亮，交互样式对照
+/// `prompt_overlay_dynamic_row_line`。
+pub(super) fn prompt_overlay_tool_row_line(
+    row: &PromptOverlayInactiveRow,
+    selected: bool,
+    focused: bool,
+    selected_column: PromptOverlayToolColumn,
+    width: usize,
+    palette: crate::theme::TerminalPalette,
+) -> Line<'static> {
+    let content_width = width.saturating_sub(PROMPT_OVERLAY_ROW_PREFIX_WIDTH).max(1);
+    let (item_style, marker_style, marker) =
+        prompt_overlay_selection_styles(selected, focused, palette);
+    let highlighted_cell_style = if selected && focused {
+        command_accent_text_style(palette)
+            .bold()
+            .add_modifier(Modifier::UNDERLINED)
+    } else {
+        item_style
+    };
+    let name_width = prompt_overlay_tool_name_width(content_width);
     let left_pad = " ".repeat(PROMPT_OVERLAY_OUTER_PADDING);
-    let sel = prompt_overlay_center_text(
+    let gap = " ".repeat(PROMPT_OVERLAY_COLUMN_GAP);
+    let enablement_style = if selected_column == PromptOverlayToolColumn::Enablement {
+        highlighted_cell_style
+    } else {
+        item_style
+    };
+    // 工具本体被禁用（或无 guidelines）时 Guide 列不可操作：不参与列高亮并弱化显示。
+    let guidelines_operable = match row {
+        PromptOverlayInactiveRow::ToolCandidate { tool } => {
+            tool.tool_enabled && tool.selection.can_select()
+        }
+        _ => false,
+    };
+    let guidelines_style = if !guidelines_operable {
+        tertiary_text_style(palette)
+    } else if selected_column == PromptOverlayToolColumn::Guidelines {
+        highlighted_cell_style
+    } else {
+        item_style
+    };
+    let enablement = prompt_overlay_tool_checkbox_spans(
+        row,
+        PromptOverlayToolColumn::Enablement,
+        enablement_style,
+        item_style,
+    );
+    let guidelines = prompt_overlay_tool_checkbox_spans(
+        row,
+        PromptOverlayToolColumn::Guidelines,
+        guidelines_style,
+        item_style,
+    );
+    let ord = left_pad_display_width(
+        &prompt_overlay_tool_order_label(row),
+        PROMPT_OVERLAY_RIGHT_ORD_WIDTH,
+    );
+    let name = prompt_overlay_tool_name_cell(row, name_width);
+    let scope = format!(
+        "{:<width$}",
+        prompt_overlay_origin_label(prompt_overlay_tool_origin(row)),
+        width = PROMPT_OVERLAY_RIGHT_SCOPE_WIDTH
+    );
+    let trailing = " ".repeat(PROMPT_OVERLAY_SCOPE_TRAILING_PADDING);
+
+    Line::from(vec![
+        Span::styled(marker.to_string(), marker_style),
+        Span::styled(left_pad, item_style),
+        enablement.0,
+        enablement.1,
+        enablement.2,
+        Span::styled(gap.clone(), item_style),
+        guidelines.0,
+        guidelines.1,
+        guidelines.2,
+        Span::styled(gap.clone(), item_style),
+        Span::styled(ord, item_style),
+        Span::styled(gap.clone(), item_style),
+        Span::styled(name, item_style),
+        Span::styled(gap, item_style),
+        Span::styled(scope, item_style),
+        Span::styled(trailing, item_style),
+    ])
+}
+
+pub(super) fn prompt_overlay_tool_row_text(row: &PromptOverlayInactiveRow, width: usize) -> String {
+    let name_width = prompt_overlay_tool_name_width(width);
+    let left_pad = " ".repeat(PROMPT_OVERLAY_OUTER_PADDING);
+    let on = prompt_overlay_fill_cell(
+        &prompt_overlay_tool_enabled_label(row),
+        PROMPT_OVERLAY_TOOL_CHECKBOX_WIDTH,
+    );
+    let guide = prompt_overlay_center_text(
         &prompt_overlay_tool_sel_label(row),
-        PROMPT_OVERLAY_LEFT_SEL_WIDTH,
+        PROMPT_OVERLAY_TOOL_CHECKBOX_WIDTH,
     );
     let ord = left_pad_display_width(
         &prompt_overlay_tool_order_label(row),
@@ -556,5 +643,5 @@ pub(super) fn prompt_overlay_tool_row_text(row: &PromptOverlayInactiveRow, width
     );
     let gap = " ".repeat(PROMPT_OVERLAY_COLUMN_GAP);
     let trailing = " ".repeat(PROMPT_OVERLAY_SCOPE_TRAILING_PADDING);
-    format!("{left_pad}{sel}{gap}{ord}{gap}{name}{gap}{scope}{trailing}")
+    format!("{left_pad}{on}{gap}{guide}{gap}{ord}{gap}{name}{gap}{scope}{trailing}")
 }

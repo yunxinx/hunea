@@ -109,6 +109,7 @@ pub(in crate::prompt_assembly) fn body_for_entry(
         PromptSourceKind::ToolGuidelines => Some(resolve_tool_guidelines_body(
             scope,
             context.tool_selection_state,
+            context.tool_enablement_state,
             context.tool_definitions,
             context.global_state,
             context.project_state,

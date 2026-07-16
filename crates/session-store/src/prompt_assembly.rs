@@ -8,8 +8,9 @@ use runtime_domain::{
         PromptSourceKind,
         persistence::{
             PersistedPromptAssemblyEntry, PersistedSkillDiscoverySkillEntry,
-            PersistedToolSelectionEntry, PromptAssemblyScope, PromptAssemblyScopeState,
-            StoredPromptBody, sort_prompt_assembly_entries, sort_skill_discovery_skill_entries,
+            PersistedToolEnablementEntry, PersistedToolSelectionEntry, PromptAssemblyScope,
+            PromptAssemblyScopeState, StoredPromptBody, sort_prompt_assembly_entries,
+            sort_skill_discovery_skill_entries, sort_tool_enablement_entries,
             sort_tool_selection_entries,
         },
     },
@@ -61,6 +62,10 @@ pub(crate) fn save_global_prompt_assembly_state(
         )?;
         transaction.execute(
             "DELETE FROM prompt_assembly_tool_selections WHERE scope = ?1",
+            params![scope],
+        )?;
+        transaction.execute(
+            "DELETE FROM prompt_assembly_tool_enablement WHERE scope = ?1",
             params![scope],
         )?;
         transaction.execute(
@@ -163,6 +168,19 @@ pub(crate) fn save_global_prompt_assembly_state(
                     tool.enabled,
                     tool.requested_order.map(i64::from),
                 ],
+            )?;
+        }
+
+        let mut tool_enablement = state.tool_enablement().to_vec();
+        sort_tool_enablement_entries(&mut tool_enablement);
+        for tool in tool_enablement {
+            transaction.execute(
+                "INSERT INTO prompt_assembly_tool_enablement (
+                        scope,
+                        tool_name,
+                        enabled
+                    ) VALUES (?1, ?2, ?3)",
+                params![scope, tool.tool_name, tool.enabled],
             )?;
         }
 
@@ -317,6 +335,22 @@ pub(crate) fn load_global_prompt_assembly_state(
             .collect::<Result<Vec<_>, _>>()?;
         sort_tool_selection_entries(&mut tool_selections);
 
+        let mut tool_enablement_statement = conn.prepare(
+            "SELECT tool_name, enabled
+                 FROM prompt_assembly_tool_enablement
+                 WHERE scope = ?1
+                 ORDER BY tool_name ASC",
+        )?;
+        let mut tool_enablement = tool_enablement_statement
+            .query_map(params![scope], |row| {
+                Ok(PersistedToolEnablementEntry {
+                    tool_name: row.get(0)?,
+                    enabled: row.get(1)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        sort_tool_enablement_entries(&mut tool_enablement);
+
         let mut dynamic_environment_statement = conn.prepare(
             "SELECT snapshot_kind, source_kind, enabled
                  FROM prompt_assembly_dynamic_environment_sources
@@ -346,6 +380,7 @@ pub(crate) fn load_global_prompt_assembly_state(
         state.set_entries(entries);
         state.set_skill_discovery_skills(skill_discovery_skills);
         state.set_tool_selections(tool_selections);
+        state.set_tool_enablement(tool_enablement);
         state.set_dynamic_environment_sources(dynamic_environment_sources);
         state.set_extra_prompts(extra_prompts);
         Ok(state)
@@ -487,6 +522,16 @@ mod tests {
             title: "shared-rules".to_string(),
             body: "global rules".to_string(),
         }]);
+        state.set_tool_enablement(vec![
+            PersistedToolEnablementEntry {
+                tool_name: "bash".to_string(),
+                enabled: false,
+            },
+            PersistedToolEnablementEntry {
+                tool_name: "read".to_string(),
+                enabled: true,
+            },
+        ]);
         state
     }
 
@@ -555,6 +600,16 @@ mod tests {
                 requested_order: None,
             },
         ]);
+        state.set_tool_enablement(vec![
+            PersistedToolEnablementEntry {
+                tool_name: "tool-10".to_string(),
+                enabled: false,
+            },
+            PersistedToolEnablementEntry {
+                tool_name: "tool-2".to_string(),
+                enabled: true,
+            },
+        ]);
 
         crate::store::PromptAssemblyStore::save_global_prompt_assembly_state(&store, &state)
             .await
@@ -586,6 +641,14 @@ mod tests {
                 .map(|entry| entry.tool_name.as_str())
                 .collect::<Vec<_>>(),
             vec!["tool-2", "tool-10"]
+        );
+        assert_eq!(
+            loaded
+                .tool_enablement()
+                .iter()
+                .map(|entry| (entry.tool_name.as_str(), entry.enabled))
+                .collect::<Vec<_>>(),
+            vec![("tool-2", true), ("tool-10", false)]
         );
     }
 

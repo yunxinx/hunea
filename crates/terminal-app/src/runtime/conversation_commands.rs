@@ -201,7 +201,7 @@ impl AppRuntimeCoordinator {
             .extend(self.manual_skill_runtime_events(target.clone(), &manual_skill_activities));
         self.conversation_worker.start(
             prepared_request,
-            self.workspace_tools.clone(),
+            self.session_workspace_tools.clone(),
             self.options.runtime_request_policy.clone(),
         );
         Ok(RuntimeCommandReceipt::ConversationStarted { activity_label })

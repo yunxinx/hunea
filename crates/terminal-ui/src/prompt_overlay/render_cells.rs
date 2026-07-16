@@ -1,18 +1,65 @@
 use super::*;
 
+/// On 列：工具本体启用状态；禁用的工具不进入 provider 请求。
+pub(super) fn prompt_overlay_tool_enabled_label(row: &PromptOverlayInactiveRow) -> String {
+    match row {
+        PromptOverlayInactiveRow::ToolCandidate { tool } => {
+            if tool.tool_enabled { "[x]" } else { "[ ]" }.to_string()
+        }
+        _ => "-".to_string(),
+    }
+}
+
+/// Guide 列：guidelines 注入选择；无 guidelines 的工具显示 `-`。
 pub(super) fn prompt_overlay_tool_sel_label(row: &PromptOverlayInactiveRow) -> String {
     match row {
         PromptOverlayInactiveRow::ToolCandidate { tool } => {
             if !tool.selection.can_select() {
                 "-".to_string()
             } else if tool.selection.is_selected() {
-                "●".to_string()
+                "[x]".to_string()
             } else {
-                "○".to_string()
+                "[ ]".to_string()
             }
         }
         _ => "-".to_string(),
     }
+}
+
+pub(super) fn prompt_overlay_tool_checkbox_label(
+    row: &PromptOverlayInactiveRow,
+    column: PromptOverlayToolColumn,
+) -> String {
+    match column {
+        PromptOverlayToolColumn::Enablement => prompt_overlay_tool_enabled_label(row),
+        PromptOverlayToolColumn::Guidelines => prompt_overlay_tool_sel_label(row),
+    }
+}
+
+/// `prompt_overlay_tool_checkbox_hit_test` 判定鼠标列坐标落在 On/Guide 哪个开关列，
+/// 布局对照 `prompt_overlay_dynamic_checkbox_hit_test`。
+pub(super) fn prompt_overlay_tool_checkbox_hit_test(
+    column: u16,
+    body_area: Rect,
+) -> Option<PromptOverlayToolColumn> {
+    if body_area.width == 0 || column < body_area.x {
+        return None;
+    }
+
+    let relative_column = usize::from(column.saturating_sub(body_area.x));
+    let enablement_start = PROMPT_OVERLAY_ROW_PREFIX_WIDTH + PROMPT_OVERLAY_OUTER_PADDING;
+    let enablement_end = enablement_start.saturating_add(PROMPT_OVERLAY_TOOL_CHECKBOX_WIDTH);
+    if relative_column >= enablement_start && relative_column < enablement_end {
+        return Some(PromptOverlayToolColumn::Enablement);
+    }
+
+    let guidelines_start = enablement_end.saturating_add(PROMPT_OVERLAY_COLUMN_GAP);
+    let guidelines_end = guidelines_start.saturating_add(PROMPT_OVERLAY_TOOL_CHECKBOX_WIDTH);
+    if relative_column >= guidelines_start && relative_column < guidelines_end {
+        return Some(PromptOverlayToolColumn::Guidelines);
+    }
+
+    None
 }
 
 pub(super) fn prompt_overlay_tool_name_cell(
@@ -164,7 +211,7 @@ pub(super) fn prompt_overlay_dynamic_plain_row_text(
 ) -> String {
     let name_width = prompt_overlay_dynamic_name_width(width);
     let left_pad = " ".repeat(PROMPT_OVERLAY_OUTER_PADDING);
-    let baseline = prompt_overlay_center_text(
+    let baseline = prompt_overlay_fill_cell(
         &prompt_overlay_dynamic_checkbox_label(row, DynamicEnvironmentSnapshotKind::Baseline),
         PROMPT_OVERLAY_DYNAMIC_CHECKBOX_WIDTH,
     );
@@ -206,15 +253,84 @@ pub(super) fn prompt_overlay_dynamic_checkbox_spans(
     padding_style: Style,
 ) -> (Span<'static>, Span<'static>, Span<'static>) {
     let label = prompt_overlay_dynamic_checkbox_label(row, snapshot_kind);
-    let label_width = display_width(&label).min(PROMPT_OVERLAY_DYNAMIC_CHECKBOX_WIDTH);
-    let left_padding = PROMPT_OVERLAY_DYNAMIC_CHECKBOX_WIDTH.saturating_sub(label_width) / 2;
-    let right_padding = PROMPT_OVERLAY_DYNAMIC_CHECKBOX_WIDTH
+    match snapshot_kind {
+        // Base 是首列，左对齐使其与其他 tab 的首列起始位置一致。
+        DynamicEnvironmentSnapshotKind::Baseline => prompt_overlay_leading_cell_spans(
+            label,
+            PROMPT_OVERLAY_DYNAMIC_CHECKBOX_WIDTH,
+            checkbox_style,
+            padding_style,
+        ),
+        DynamicEnvironmentSnapshotKind::Changes => prompt_overlay_centered_cell_spans(
+            label,
+            PROMPT_OVERLAY_DYNAMIC_CHECKBOX_WIDTH,
+            checkbox_style,
+            padding_style,
+        ),
+    }
+}
+
+pub(super) fn prompt_overlay_tool_checkbox_spans(
+    row: &PromptOverlayInactiveRow,
+    column: PromptOverlayToolColumn,
+    checkbox_style: Style,
+    padding_style: Style,
+) -> (Span<'static>, Span<'static>, Span<'static>) {
+    let label = prompt_overlay_tool_checkbox_label(row, column);
+    match column {
+        // On 是首列，左对齐使其与其他 tab 的首列起始位置一致。
+        PromptOverlayToolColumn::Enablement => prompt_overlay_leading_cell_spans(
+            label,
+            PROMPT_OVERLAY_TOOL_CHECKBOX_WIDTH,
+            checkbox_style,
+            padding_style,
+        ),
+        PromptOverlayToolColumn::Guidelines => prompt_overlay_centered_cell_spans(
+            label,
+            PROMPT_OVERLAY_TOOL_CHECKBOX_WIDTH,
+            checkbox_style,
+            padding_style,
+        ),
+    }
+}
+
+/// `prompt_overlay_centered_cell_spans` 把 label 居中到固定宽度 cell，label 与两侧
+/// padding 使用独立样式，供 checkbox 列渲染复用。
+pub(super) fn prompt_overlay_centered_cell_spans(
+    label: String,
+    width: usize,
+    cell_style: Style,
+    padding_style: Style,
+) -> (Span<'static>, Span<'static>, Span<'static>) {
+    let label_width = display_width(&label).min(width);
+    let left_padding = width.saturating_sub(label_width) / 2;
+    let right_padding = width
         .saturating_sub(label_width)
         .saturating_sub(left_padding);
 
     (
         Span::styled(" ".repeat(left_padding), padding_style),
-        Span::styled(label, checkbox_style),
+        Span::styled(label, cell_style),
+        Span::styled(" ".repeat(right_padding), padding_style),
+    )
+}
+
+/// `prompt_overlay_leading_cell_spans` 把 label 左对齐到固定宽度 cell。
+///
+/// 首列（On/Base）用左对齐使起始位置与其他 tab 的首列一致，
+/// 避免居中带来的额外 1 格偏移。
+pub(super) fn prompt_overlay_leading_cell_spans(
+    label: String,
+    width: usize,
+    cell_style: Style,
+    padding_style: Style,
+) -> (Span<'static>, Span<'static>, Span<'static>) {
+    let label_width = display_width(&label).min(width);
+    let right_padding = width.saturating_sub(label_width);
+
+    (
+        Span::styled(String::new(), padding_style),
+        Span::styled(label, cell_style),
         Span::styled(" ".repeat(right_padding), padding_style),
     )
 }
@@ -275,7 +391,12 @@ pub(super) fn prompt_overlay_dynamic_origin(row: &PromptOverlayInactiveRow) -> P
 pub(super) fn prompt_overlay_dynamic_header_text(width: usize) -> String {
     let name_width = prompt_overlay_dynamic_name_width(width);
     let left_pad = " ".repeat(PROMPT_OVERLAY_OUTER_PADDING);
-    let baseline = prompt_overlay_center_text("Base", PROMPT_OVERLAY_DYNAMIC_CHECKBOX_WIDTH);
+    // Base 是首列，左对齐与其他 tab 的首列 header 起始位置一致。
+    let baseline = format!(
+        "{:<width$}",
+        "Base",
+        width = PROMPT_OVERLAY_DYNAMIC_CHECKBOX_WIDTH
+    );
     let changes = prompt_overlay_center_text("Change", PROMPT_OVERLAY_DYNAMIC_CHECKBOX_WIDTH);
     let name = format!(
         "{:<width$}",
@@ -293,9 +414,15 @@ pub(super) fn prompt_overlay_dynamic_header_text(width: usize) -> String {
 }
 
 pub(super) fn prompt_overlay_tool_header_text(width: usize) -> String {
-    let name_width = prompt_overlay_right_inactive_name_width(width);
+    let name_width = prompt_overlay_tool_name_width(width);
     let left_pad = " ".repeat(PROMPT_OVERLAY_OUTER_PADDING);
-    let sel = prompt_overlay_center_text("Sel", PROMPT_OVERLAY_LEFT_SEL_WIDTH);
+    // On 是首列，左对齐与其他 tab 的首列 header 起始位置一致。
+    let on = format!(
+        "{:<width$}",
+        "On",
+        width = PROMPT_OVERLAY_TOOL_CHECKBOX_WIDTH
+    );
+    let guide = prompt_overlay_center_text("Guide", PROMPT_OVERLAY_TOOL_CHECKBOX_WIDTH);
     let ord = left_pad_display_width("Ord", PROMPT_OVERLAY_RIGHT_ORD_WIDTH);
     let name = format!(
         "{:<width$}",
@@ -309,7 +436,7 @@ pub(super) fn prompt_overlay_tool_header_text(width: usize) -> String {
     );
     let gap = " ".repeat(PROMPT_OVERLAY_COLUMN_GAP);
     let trailing = " ".repeat(PROMPT_OVERLAY_SCOPE_TRAILING_PADDING);
-    format!("{left_pad}{sel}{gap}{ord}{gap}{name}{gap}{scope}{trailing}")
+    format!("{left_pad}{on}{gap}{guide}{gap}{ord}{gap}{name}{gap}{scope}{trailing}")
 }
 
 pub(super) fn prompt_overlay_shadowed_count_marker(shadowed_count: usize) -> Option<String> {
@@ -386,6 +513,17 @@ pub(super) fn prompt_overlay_right_inactive_name_width(width: usize) -> usize {
         .saturating_sub(PROMPT_OVERLAY_RIGHT_SCOPE_WIDTH)
         .saturating_sub(PROMPT_OVERLAY_SCOPE_TRAILING_PADDING)
         .saturating_sub(PROMPT_OVERLAY_COLUMN_GAP * 3)
+        .max(12)
+}
+
+pub(super) fn prompt_overlay_tool_name_width(width: usize) -> usize {
+    width
+        .saturating_sub(PROMPT_OVERLAY_OUTER_PADDING)
+        .saturating_sub(PROMPT_OVERLAY_TOOL_CHECKBOX_WIDTH * 2)
+        .saturating_sub(PROMPT_OVERLAY_RIGHT_ORD_WIDTH)
+        .saturating_sub(PROMPT_OVERLAY_RIGHT_SCOPE_WIDTH)
+        .saturating_sub(PROMPT_OVERLAY_SCOPE_TRAILING_PADDING)
+        .saturating_sub(PROMPT_OVERLAY_COLUMN_GAP * 4)
         .max(12)
 }
 

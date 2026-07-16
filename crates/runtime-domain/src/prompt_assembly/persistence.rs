@@ -15,9 +15,11 @@ pub use reference_id::{
 };
 pub use scope::PromptAssemblyScope;
 pub use sort::{
-    sort_prompt_assembly_entries, sort_skill_discovery_skill_entries, sort_tool_selection_entries,
+    sort_prompt_assembly_entries, sort_skill_discovery_skill_entries, sort_tool_enablement_entries,
+    sort_tool_selection_entries,
 };
 pub use state::{
-    PersistedPromptAssemblyEntry, PersistedSkillDiscoverySkillEntry, PersistedToolSelectionEntry,
-    PromptAssemblyScopeState, StoredPromptBody, extra_prompt_bodies_by_reference,
+    PersistedPromptAssemblyEntry, PersistedSkillDiscoverySkillEntry, PersistedToolEnablementEntry,
+    PersistedToolSelectionEntry, PromptAssemblyScopeState, StoredPromptBody,
+    extra_prompt_bodies_by_reference,
 };

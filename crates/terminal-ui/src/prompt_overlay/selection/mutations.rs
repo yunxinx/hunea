@@ -109,18 +109,35 @@ impl Model {
                 })
             }
             PromptOverlaySelection::ToolCandidate(tool) => {
-                if !tool.selection.can_select() {
-                    return None;
+                // 交互对照 Dynamic tab：`x` 切换当前选中列（On=启停 / Guide=guidelines）。
+                match self.prompt_overlay_tool_selected_column() {
+                    PromptOverlayToolColumn::Enablement => {
+                        Some(AppEffect::ApplyPromptAssemblyEditMutation {
+                            mutation: PromptAssemblyMutation::scoped(
+                                tool.selection_scope,
+                                PromptAssemblyScopedMutationKind::SetToolEnabled {
+                                    tool_name: tool.name,
+                                    enabled: !tool.tool_enabled,
+                                },
+                            ),
+                        })
+                    }
+                    PromptOverlayToolColumn::Guidelines => {
+                        // 工具本体被禁用时 guidelines 不会注入，Guide 列不可操作。
+                        if !tool.tool_enabled || !tool.selection.can_select() {
+                            return None;
+                        }
+                        Some(AppEffect::ApplyPromptAssemblyEditMutation {
+                            mutation: PromptAssemblyMutation::scoped(
+                                tool.selection_scope,
+                                PromptAssemblyScopedMutationKind::SetToolSelected {
+                                    tool_name: tool.name,
+                                    selected: !tool.selection.is_selected(),
+                                },
+                            ),
+                        })
+                    }
                 }
-                Some(AppEffect::ApplyPromptAssemblyEditMutation {
-                    mutation: PromptAssemblyMutation::scoped(
-                        tool.selection_scope,
-                        PromptAssemblyScopedMutationKind::SetToolSelected {
-                            tool_name: tool.name,
-                            selected: !tool.selection.is_selected(),
-                        },
-                    ),
-                })
             }
             PromptOverlaySelection::DynamicEnvironmentCandidate(source) => {
                 let snapshot_kind = self.prompt_overlay_dynamic_selected_snapshot_kind();

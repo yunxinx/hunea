@@ -30,6 +30,9 @@ macro_rules! scope_state {
     (@assign $state:ident, tool_selections : $value:expr) => {
         $state.set_tool_selections($value);
     };
+    (@assign $state:ident, tool_enablement : $value:expr) => {
+        $state.set_tool_enablement($value);
+    };
     (@assign $state:ident, dynamic_environment_sources : $value:expr) => {
         $state.set_dynamic_environment_sources($value);
     };

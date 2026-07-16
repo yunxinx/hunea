@@ -123,7 +123,10 @@ impl Model {
             ),
             PromptOverlayInactiveTab::Tools => prompt_overlay_tool_lines(
                 &self.prompt_overlay_inactive_rows(PromptOverlayInactiveTab::Tools),
-                state.inactive_selected_row_id.as_deref(),
+                PromptOverlayToolSelection {
+                    row_id: state.inactive_selected_row_id.as_deref(),
+                    column: state.tool_selected_column,
+                },
                 state.inactive_scroll,
                 state.focus == PromptOverlayFocus::Inactive,
                 usize::from(body_area.width),

@@ -15,7 +15,7 @@ fn render_uses_single_header_row_with_right_aligned_tabs_and_table_headers() {
     assert!(!rows.contains("scope=global"));
     assert!(!rows.contains("Next New Session"));
     assert!(rows.contains("[Skill]"));
-    assert!(rows.contains("Custom Prompts"));
+    assert!(rows.contains("Prompts"));
     assert!(rows.contains("Sel"));
     assert!(rows.contains("Ord"));
     assert!(rows.contains("Source"));
@@ -546,7 +546,7 @@ fn selected_header_tab_uses_surface_background_and_trailing_padding() {
         .find("[Skill]")
         .expect("selected skill tab should render");
     let skill_index = header_row[..skill_byte_index].chars().count();
-    let trailing_index = skill_index + "[Skill] Custom Prompts Tools Dynamic".chars().count();
+    let trailing_index = skill_index + "[Skill] Prompts Tools Dynamic".chars().count();
 
     assert_eq!(
         buffer[(u16::try_from(skill_index).expect("tab index should fit"), 0)].bg,
@@ -578,7 +578,7 @@ fn right_header_tabs_are_all_underlined() {
     model.open_prompt_overlay();
 
     let buffer = render_model_buffer(&mut model, 90, 16);
-    for label in ["[Skill]", "Custom Prompts", "Tools", "Dynamic"] {
+    for label in ["[Skill]", "Prompts", "Tools", "Dynamic"] {
         let (column, row) =
             find_buffer_text_position(&buffer, label).expect("header tab should render");
         assert_text_cells_are_underlined_at(&buffer, label, row, column);
@@ -709,7 +709,7 @@ fn mouse_click_on_right_header_tab_switches_focus_and_tab() {
 
     let buffer = render_model_buffer(&mut model, 120, 16);
     let (column, row) =
-        find_buffer_text_position(&buffer, "Custom Prompts").expect("header tab should render");
+        find_buffer_text_position(&buffer, "Prompts").expect("header tab should render");
     click_left(&mut model, column, row);
 
     let state = model
@@ -1312,6 +1312,7 @@ fn tools_tab_shows_ord_column_and_supports_reorder() {
             prompt_guidelines: Some("Prefer rg over grep.".to_string()),
             origin: PromptSourceOrigin::Builtin,
             selection_scope: PromptAssemblyScope::Global,
+            tool_enabled: true,
             selection: PromptAssemblySelectionState::from_parts(true, true, Some(1)),
         },
         PromptAssemblyToolCandidate {
@@ -1321,6 +1322,7 @@ fn tools_tab_shows_ord_column_and_supports_reorder() {
             prompt_guidelines: Some("Use for direct file reads.".to_string()),
             origin: PromptSourceOrigin::Builtin,
             selection_scope: PromptAssemblyScope::Global,
+            tool_enabled: true,
             selection: PromptAssemblySelectionState::from_parts(true, true, Some(2)),
         },
     ];
@@ -1534,5 +1536,127 @@ fn prompt_overlay_close_shows_system_message_for_current_empty_session_notice() 
             .transcript_plain_items()
             .iter()
             .any(|item| item.contains("Prompt updated for current empty session."))
+    );
+}
+
+#[test]
+fn tools_tab_column_selection_routes_x_between_enablement_and_guidelines() {
+    let mut model = ready_model();
+    model.prompt_assembly.candidates.tools = vec![
+        PromptAssemblyToolCandidate {
+            name: "bash".to_string(),
+            label: Some("Bash".to_string()),
+            description: Some("run shell commands".to_string()),
+            prompt_guidelines: Some("Prefer rg over grep.".to_string()),
+            origin: PromptSourceOrigin::Builtin,
+            selection_scope: PromptAssemblyScope::Global,
+            tool_enabled: true,
+            selection: PromptAssemblySelectionState::from_parts(true, true, Some(1)),
+        },
+        PromptAssemblyToolCandidate {
+            name: "write_file".to_string(),
+            label: Some("Write file".to_string()),
+            description: Some("write workspace files".to_string()),
+            prompt_guidelines: Some("Read before writing.".to_string()),
+            origin: PromptSourceOrigin::Builtin,
+            selection_scope: PromptAssemblyScope::Global,
+            tool_enabled: false,
+            selection: PromptAssemblySelectionState::from_parts(true, true, Some(2)),
+        },
+        PromptAssemblyToolCandidate {
+            name: "view_image".to_string(),
+            label: Some("View image".to_string()),
+            description: Some("inspect workspace images".to_string()),
+            prompt_guidelines: None,
+            origin: PromptSourceOrigin::Builtin,
+            selection_scope: PromptAssemblyScope::Global,
+            tool_enabled: false,
+            selection: PromptAssemblySelectionState::Unselectable,
+        },
+    ];
+    model.set_window(140, 16);
+    model.open_prompt_overlay();
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
+
+    let rows = rendered_rows(&render_model_buffer(&mut model, 140, 16)).join("\n");
+    assert!(rows.contains("On"), "tool enablement column should render");
+    assert!(rows.contains("Guide"), "guidelines column should render");
+    assert!(rows.contains("[x]"), "checkbox cells should render");
+    assert!(
+        rows.contains("x toggle"),
+        "footer should describe the column toggle"
+    );
+
+    // 默认选中 On 列：x 切换工具启停。
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('x'))),
+        super::OverlayInputResult::Effect(AppEffect::ApplyPromptAssemblyEditMutation {
+            mutation: PromptAssemblyMutation::scoped(
+                PromptAssemblyScope::Global,
+                PromptAssemblyScopedMutationKind::SetToolEnabled {
+                    tool_name: "bash".to_string(),
+                    enabled: false,
+                },
+            ),
+        })
+    );
+
+    // → 切到 Guide 列：x 切换 guidelines 注入。
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Right));
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('x'))),
+        super::OverlayInputResult::Effect(AppEffect::ApplyPromptAssemblyEditMutation {
+            mutation: PromptAssemblyMutation::scoped(
+                PromptAssemblyScope::Global,
+                PromptAssemblyScopedMutationKind::SetToolSelected {
+                    tool_name: "bash".to_string(),
+                    selected: false,
+                },
+            ),
+        })
+    );
+
+    // 工具本体已禁用（write_file 带 guidelines）：Guide 列 x 为 no-op。
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('j')));
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('x'))),
+        super::OverlayInputResult::Handled,
+        "guidelines column should be a no-op for a disabled tool even when it has guidelines"
+    );
+
+    // 无 guidelines 的工具：Guide 列 x 同样为 no-op。
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('j')));
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('x'))),
+        super::OverlayInputResult::Handled,
+        "guidelines column should be a no-op for tools without guidelines"
+    );
+
+    // ← 切回 On 列：x 重新启用该工具。
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Left));
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('x'))),
+        super::OverlayInputResult::Effect(AppEffect::ApplyPromptAssemblyEditMutation {
+            mutation: PromptAssemblyMutation::scoped(
+                PromptAssemblyScope::Global,
+                PromptAssemblyScopedMutationKind::SetToolEnabled {
+                    tool_name: "view_image".to_string(),
+                    enabled: true,
+                },
+            ),
+        })
+    );
+
+    // Tools tab 聚焦时 ←/→ 只切列，不切换左右 pane。
+    assert_eq!(
+        model
+            .prompt_overlay
+            .as_ref()
+            .expect("prompt overlay should stay open")
+            .focus,
+        super::PromptOverlayFocus::Inactive,
+        "column navigation should not move focus back to the active pane"
     );
 }

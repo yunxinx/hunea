@@ -86,11 +86,15 @@ impl Model {
                 self.open_prompt_overlay_skill_preview(skill);
             }
             PromptOverlaySelection::ToolCandidate(tool) => {
+                let preview_notice = (!tool.tool_enabled).then(|| {
+                    "Disabled tool: excluded from provider requests once this change takes effect."
+                        .to_string()
+                });
                 let body = tool.prompt_guidelines.unwrap_or_default();
                 self.open_prompt_overlay_plain_text_preview(
                     tool.label.unwrap_or(tool.name),
                     &body,
-                    None,
+                    preview_notice,
                 );
             }
             PromptOverlaySelection::DynamicEnvironmentCandidate(source) => {

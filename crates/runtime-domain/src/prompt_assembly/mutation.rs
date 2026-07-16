@@ -89,6 +89,11 @@ pub enum PromptAssemblyScopedMutationKind {
         tool_name: String,
         direction: PromptAssemblyMoveDirection,
     },
+    /// 切换工具本体启用/禁用；禁用的工具不进入 provider 请求，guidelines 随之不注入。
+    SetToolEnabled {
+        tool_name: String,
+        enabled: bool,
+    },
     ActivateLongLivedSkill {
         skill_name: String,
     },

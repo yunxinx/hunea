@@ -28,7 +28,8 @@ impl AppRuntimeCoordinator {
 
     /// `prompt_assembly_update_notice` 在 commit 后判断是否需要通知用户。
     ///
-    /// 仅当 prelude / dynamic env 实际变化时返回 `Some`，并同步更新当前空会话的 provider 配置。
+    /// 仅当 prelude / dynamic env / 工具启停实际变化时返回 `Some`；
+    /// 命中当前空会话时同步更新 provider 配置与 session 工具集。
     fn prompt_assembly_update_notice(
         &mut self,
         session_prompt_config_changed: bool,
@@ -46,6 +47,8 @@ impl AppRuntimeCoordinator {
                     .set_dynamic_environment_session_config(Some(
                         dynamic_environment_session_config.clone(),
                     ));
+                self.session_workspace_tools =
+                    super::session_tools_for_manager(&self.workspace_tools, Some(manager));
                 Some(PromptAssemblyUpdateNotice::CurrentEmptySessionUpdated)
             }
             PromptSessionConfigRefreshTarget::NextNewSession => {
@@ -122,8 +125,13 @@ impl AppRuntimeCoordinator {
             .initial_dynamic_environment_session_config
             .as_ref()
             != Some(&dynamic_environment_session_config);
+        // 工具启停可能不影响 prelude（如禁用无 guidelines 的工具），单独参与变化检测；
+        // 基线取上一份管理快照，与 initial_prompt_prelude 的更新节奏一致。
+        let tool_enablement_changed =
+            super::manager_disabled_tool_names(self.options.prompt_assembly_manager.as_ref())
+                != super::manager_disabled_tool_names(Some(&manager));
         let notice = self.prompt_assembly_update_notice(
-            prelude_changed || dynamic_environment_config_changed,
+            prelude_changed || dynamic_environment_config_changed || tool_enablement_changed,
             &manager,
             &dynamic_environment_session_config,
         );
@@ -133,7 +141,6 @@ impl AppRuntimeCoordinator {
             Some(dynamic_environment_session_config);
         self.pending_runtime_events
             .push(RuntimeEvent::PromptAssemblyUpdated { manager, notice });
-        self.prompt_assembly_edit_session = None;
         Ok(())
     }
 

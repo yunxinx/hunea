@@ -192,6 +192,8 @@ pub(super) fn resolve_prompt_assembly_manager_snapshot_with_overrides(
     );
     let tool_selection_state =
         merged_tool_selection_state(global_state, project_state, tool_definitions);
+    let tool_enablement_state =
+        merged_tool_enablement_state(global_state, project_state, tool_definitions);
     let dynamic_environment_selection_state =
         merged_dynamic_environment_selection_state(global_state, project_state);
     let dynamic_environment_observations = observe_dynamic_environment_inventory(work_dir);
@@ -206,6 +208,7 @@ pub(super) fn resolve_prompt_assembly_manager_snapshot_with_overrides(
         skill_discovery_skill_state: &skill_discovery_skill_state,
         tool_definitions,
         tool_selection_state: &tool_selection_state,
+        tool_enablement_state: &tool_enablement_state,
         dynamic_environment_selection_state: &dynamic_environment_selection_state,
         dynamic_environment_observations: &dynamic_environment_observations,
         global_state,
@@ -312,6 +315,7 @@ pub(super) fn resolve_prompt_assembly_manager_snapshot_with_overrides(
             tools: tool_candidate_inventory(
                 tool_definitions,
                 &tool_selection_state,
+                &tool_enablement_state,
                 global_state,
                 project_state,
             ),

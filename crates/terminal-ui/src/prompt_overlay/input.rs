@@ -32,14 +32,18 @@ impl Model {
                 OverlayInputResult::Handled
             }
             KeyCode::Left | KeyCode::Char('h') if key.modifiers.is_empty() => {
-                if self.move_prompt_overlay_dynamic_snapshot_column(-1) {
+                if self.move_prompt_overlay_dynamic_snapshot_column(-1)
+                    || self.move_prompt_overlay_tool_column(-1)
+                {
                     return OverlayInputResult::Handled;
                 }
                 self.set_prompt_overlay_focus(PromptOverlayFocus::Active);
                 OverlayInputResult::Handled
             }
             KeyCode::Right | KeyCode::Char('l') if key.modifiers.is_empty() => {
-                if self.move_prompt_overlay_dynamic_snapshot_column(1) {
+                if self.move_prompt_overlay_dynamic_snapshot_column(1)
+                    || self.move_prompt_overlay_tool_column(1)
+                {
                     return OverlayInputResult::Handled;
                 }
                 self.set_prompt_overlay_focus(PromptOverlayFocus::Inactive);
@@ -219,9 +223,17 @@ impl Model {
                     visible_offset,
                     layout.right_body,
                 );
+                let tool_column = self.prompt_overlay_tool_column_for_mouse_down(
+                    column,
+                    visible_offset,
+                    layout.right_body,
+                );
                 self.select_prompt_overlay_inactive_row(visible_offset);
                 if let Some(snapshot_kind) = snapshot_kind {
                     self.set_prompt_overlay_dynamic_snapshot_kind(snapshot_kind);
+                }
+                if let Some(tool_column) = tool_column {
+                    self.set_prompt_overlay_tool_column(tool_column);
                 }
             }
             return OverlayInputResult::Handled;
@@ -312,6 +324,66 @@ impl Model {
             .as_ref()
             .map(|state| state.dynamic_selected_snapshot_kind)
             .unwrap_or(DynamicEnvironmentSnapshotKind::Baseline)
+    }
+
+    /// `move_prompt_overlay_tool_column` 在 Tools tab 聚焦时用 `←/→` 切换 On/Guide 列，
+    /// 交互对照 `move_prompt_overlay_dynamic_snapshot_column`。
+    pub(super) fn move_prompt_overlay_tool_column(&mut self, delta: isize) -> bool {
+        let Some(state) = self.prompt_overlay.as_mut() else {
+            return false;
+        };
+        if state.focus != PromptOverlayFocus::Inactive
+            || state.inactive_tab != PromptOverlayInactiveTab::Tools
+        {
+            return false;
+        }
+
+        state.tool_selected_column = if delta.is_negative() {
+            PromptOverlayToolColumn::Enablement
+        } else {
+            PromptOverlayToolColumn::Guidelines
+        };
+        true
+    }
+
+    pub(super) fn set_prompt_overlay_tool_column(&mut self, column: PromptOverlayToolColumn) {
+        let Some(state) = self.prompt_overlay.as_mut() else {
+            return;
+        };
+        if state.inactive_tab != PromptOverlayInactiveTab::Tools {
+            return;
+        }
+        state.tool_selected_column = column;
+    }
+
+    pub(super) fn prompt_overlay_tool_column_for_mouse_down(
+        &self,
+        column: u16,
+        visible_offset: usize,
+        body_area: Rect,
+    ) -> Option<PromptOverlayToolColumn> {
+        let state = self.prompt_overlay.as_ref()?;
+        if state.inactive_tab != PromptOverlayInactiveTab::Tools {
+            return None;
+        }
+
+        let row_index = state.inactive_scroll.saturating_add(visible_offset);
+        let rows = self.prompt_overlay_inactive_rows(PromptOverlayInactiveTab::Tools);
+        if !matches!(
+            rows.get(row_index),
+            Some(PromptOverlayInactiveRow::ToolCandidate { .. })
+        ) {
+            return None;
+        }
+
+        prompt_overlay_tool_checkbox_hit_test(column, body_area)
+    }
+
+    pub(super) fn prompt_overlay_tool_selected_column(&self) -> PromptOverlayToolColumn {
+        self.prompt_overlay
+            .as_ref()
+            .map(|state| state.tool_selected_column)
+            .unwrap_or(PromptOverlayToolColumn::Enablement)
     }
 
     pub(super) fn move_prompt_overlay_selection(&mut self, direction: ListNavigationDirection) {

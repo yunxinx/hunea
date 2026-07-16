@@ -17,11 +17,12 @@ use super::scope::PromptAssemblyScope;
 use super::sort::{
     sorted_prompt_assembly_entries, sorted_prompt_assembly_entry_refs,
     sorted_skill_discovery_skill_entries, sorted_skill_discovery_skill_entry_refs,
+    sorted_tool_enablement_entries, sorted_tool_enablement_entry_refs,
     sorted_tool_selection_entries, sorted_tool_selection_entry_refs,
 };
 use super::state::{
-    PersistedPromptAssemblyEntry, PersistedSkillDiscoverySkillEntry, PersistedToolSelectionEntry,
-    PromptAssemblyScopeState, StoredPromptBody,
+    PersistedPromptAssemblyEntry, PersistedSkillDiscoverySkillEntry, PersistedToolEnablementEntry,
+    PersistedToolSelectionEntry, PromptAssemblyScopeState, StoredPromptBody,
 };
 
 const PROJECT_PROMPT_ASSEMBLY_VERSION: u32 = 1;
@@ -74,6 +75,8 @@ struct ProjectPromptAssemblyFile {
     skill_discovery_skills: Vec<PersistedSkillDiscoverySkillEntry>,
     #[serde(default)]
     tool_selections: Vec<PersistedToolSelectionEntry>,
+    #[serde(default)]
+    tool_enablement: Vec<PersistedToolEnablementEntry>,
 }
 
 #[derive(Debug, Serialize)]
@@ -82,6 +85,7 @@ struct ProjectPromptAssemblyFileForWrite<'a> {
     entries: Vec<&'a PersistedPromptAssemblyEntry>,
     skill_discovery_skills: Vec<&'a PersistedSkillDiscoverySkillEntry>,
     tool_selections: Vec<&'a PersistedToolSelectionEntry>,
+    tool_enablement: Vec<&'a PersistedToolEnablementEntry>,
 }
 
 /// `project_prompt_assembly_path` 返回项目级 prompt assembly TOML 路径。
@@ -123,6 +127,7 @@ pub fn load_project_prompt_assembly_state(
     let tool_guidelines_override =
         read_optional_text_file(&prompts_dir.join(PROJECT_TOOL_GUIDELINES_OVERRIDE_FILE_NAME))?;
     let tool_selections = sorted_tool_selection_entries(config.tool_selections);
+    let tool_enablement = sorted_tool_enablement_entries(config.tool_enablement);
     let entry_titles = entries
         .iter()
         .filter(|entry| entry.kind == PromptSourceKind::ExtraPrompt)
@@ -137,6 +142,7 @@ pub fn load_project_prompt_assembly_state(
     state.set_entries(entries);
     state.set_skill_discovery_skills(skill_discovery_skills);
     state.set_tool_selections(tool_selections);
+    state.set_tool_enablement(tool_enablement);
     state.set_extra_prompts(extra_prompts);
     Ok(state)
 }
@@ -209,6 +215,7 @@ pub fn save_project_prompt_assembly_state(
             state.skill_discovery_skills(),
         ),
         tool_selections: sorted_tool_selection_entry_refs(state.tool_selections()),
+        tool_enablement: sorted_tool_enablement_entry_refs(state.tool_enablement()),
     };
     let encoded =
         toml::to_string_pretty(&config).map_err(|source| ProjectPromptAssemblyError::Encode {
@@ -231,6 +238,7 @@ fn read_project_prompt_assembly_file(
                 entries: Vec::new(),
                 skill_discovery_skills: Vec::new(),
                 tool_selections: Vec::new(),
+                tool_enablement: Vec::new(),
             });
         }
         Err(source) => {
@@ -458,6 +466,16 @@ mod tests {
             title: "repo-review-rules".to_string(),
             body: "always check tests".to_string(),
         }]);
+        state.set_tool_enablement(vec![
+            PersistedToolEnablementEntry {
+                tool_name: "bash".to_string(),
+                enabled: false,
+            },
+            PersistedToolEnablementEntry {
+                tool_name: "read".to_string(),
+                enabled: true,
+            },
+        ]);
         state
     }
 
@@ -472,6 +490,28 @@ mod tests {
             .expect("project prompt assembly should load");
 
         assert_eq!(loaded, state);
+    }
+
+    #[test]
+    fn project_scope_loads_legacy_file_without_tool_enablement_as_default() {
+        let work_dir = temp_test_dir("project-legacy-tool-enablement");
+        let config_path = project_prompt_assembly_path(&work_dir);
+        fs::create_dir_all(config_path.parent().expect("config parent should exist"))
+            .expect("config dir should exist");
+        fs::write(
+            &config_path,
+            "version = 1\n\n[[tool_selections]]\ntool_name = \"bash\"\nenabled = true\nrequested_order = 1\n",
+        )
+        .expect("legacy config should write");
+
+        let loaded = load_project_prompt_assembly_state(&work_dir)
+            .expect("legacy project prompt assembly should load");
+
+        assert!(
+            loaded.tool_enablement().is_empty(),
+            "legacy file without tool_enablement should default to no explicit entries"
+        );
+        assert_eq!(loaded.tool_selections().len(), 1);
     }
 
     #[test]

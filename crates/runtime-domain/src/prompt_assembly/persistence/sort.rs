@@ -2,7 +2,8 @@ use crate::text::natural_sort_text_cmp;
 
 use super::super::requested_order_sort_key;
 use super::state::{
-    PersistedPromptAssemblyEntry, PersistedSkillDiscoverySkillEntry, PersistedToolSelectionEntry,
+    PersistedPromptAssemblyEntry, PersistedSkillDiscoverySkillEntry, PersistedToolEnablementEntry,
+    PersistedToolSelectionEntry,
 };
 
 /// `sort_prompt_assembly_entries` 按领域展示顺序就地排序 persisted source entries。
@@ -91,4 +92,31 @@ fn tool_selection_entry_order(
     requested_order_sort_key(left.requested_order)
         .cmp(&requested_order_sort_key(right.requested_order))
         .then_with(|| natural_sort_text_cmp(&left.tool_name, &right.tool_name))
+}
+
+/// `sort_tool_enablement_entries` 按 tool_name 自然序就地排序 tool enablement entries。
+pub fn sort_tool_enablement_entries(entries: &mut [PersistedToolEnablementEntry]) {
+    entries.sort_by(tool_enablement_entry_order);
+}
+
+pub(super) fn sorted_tool_enablement_entries(
+    mut entries: Vec<PersistedToolEnablementEntry>,
+) -> Vec<PersistedToolEnablementEntry> {
+    sort_tool_enablement_entries(&mut entries);
+    entries
+}
+
+pub(super) fn sorted_tool_enablement_entry_refs(
+    entries: &[PersistedToolEnablementEntry],
+) -> Vec<&PersistedToolEnablementEntry> {
+    let mut entries = entries.iter().collect::<Vec<_>>();
+    entries.sort_by(|left, right| tool_enablement_entry_order(left, right));
+    entries
+}
+
+fn tool_enablement_entry_order(
+    left: &PersistedToolEnablementEntry,
+    right: &PersistedToolEnablementEntry,
+) -> std::cmp::Ordering {
+    natural_sort_text_cmp(&left.tool_name, &right.tool_name)
 }

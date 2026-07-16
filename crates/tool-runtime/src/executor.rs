@@ -254,6 +254,25 @@ impl ToolExecutorRegistry {
             .collect()
     }
 
+    /// `filtered` 按工具名筛选出一个新注册表，只保留 `keep_tool` 返回 true 的工具。
+    ///
+    /// 返回的注册表持有独立的内部 map（工具实例以 `Arc` 共享）；
+    /// `Clone` 共享内部状态，因此禁用工具必须走本方法而不是在 clone 上 `remove`。
+    #[must_use]
+    pub fn filtered(&self, keep_tool: impl Fn(&str) -> bool) -> Self {
+        let tools = self
+            .tools
+            .read()
+            .expect("tool registry lock should not be poisoned")
+            .iter()
+            .filter(|(name, _)| keep_tool(name))
+            .map(|(name, tool)| (name.clone(), Arc::clone(tool)))
+            .collect::<BTreeMap<_, _>>();
+        Self {
+            tools: Arc::new(RwLock::new(tools)),
+        }
+    }
+
     /// `permission_preview` 读取指定工具的审批前结构化变更预览。
     pub fn permission_preview(
         &self,
@@ -309,5 +328,63 @@ impl ToolExecutor for ToolExecutorRegistry {
         }
 
         Box::pin(async move { tool.execute_with_context(call, context).await })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct StubTool {
+        name: &'static str,
+    }
+
+    impl Tool for StubTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::new(self.name)
+        }
+
+        fn execute<'a>(
+            &'a self,
+            call: ToolCall,
+            _cancellation: &'a CancellationToken,
+        ) -> ToolExecutionFuture<'a> {
+            Box::pin(async move { ToolResult::success(call.call_id, String::new()) })
+        }
+    }
+
+    #[test]
+    fn filtered_keeps_subset_and_leaves_source_registry_untouched() {
+        let mut registry = ToolExecutorRegistry::new();
+        registry.insert(StubTool { name: "read" });
+        registry.insert(StubTool { name: "bash" });
+
+        let filtered = registry.filtered(|name| name != "bash");
+
+        let filtered_names = filtered
+            .definitions()
+            .definitions()
+            .map(|definition| definition.name.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(filtered_names, vec!["read".to_string()]);
+
+        let source_names = registry
+            .definitions()
+            .definitions()
+            .map(|definition| definition.name.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(source_names, vec!["bash".to_string(), "read".to_string()]);
+    }
+
+    #[test]
+    fn filtered_registry_map_is_independent_from_source() {
+        let mut registry = ToolExecutorRegistry::new();
+        registry.insert(StubTool { name: "read" });
+        let mut filtered = registry.filtered(|_| true);
+
+        filtered.remove("read");
+
+        assert_eq!(registry.definitions().definitions().count(), 1);
+        assert_eq!(filtered.definitions().definitions().count(), 0);
     }
 }

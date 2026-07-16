@@ -23,11 +23,14 @@ pub(in crate::prompt_assembly) fn format_tool_guidelines_body(
 
 pub(in crate::prompt_assembly) fn render_tool_guidelines_generated_body(
     tool_state: &[PersistedToolSelectionEntry],
+    tool_enablement: &[PersistedToolEnablementEntry],
     tool_defs: &[ToolDefinition],
 ) -> String {
+    let disabled_tools = disabled_tool_names(tool_enablement);
     let tools = tool_state
         .iter()
         .filter(|entry| entry.enabled)
+        .filter(|entry| !disabled_tools.contains(entry.tool_name.as_str()))
         .filter_map(|entry| {
             tool_defs
                 .iter()
@@ -42,11 +45,13 @@ pub(in crate::prompt_assembly) fn render_tool_guidelines_generated_body(
 pub(in crate::prompt_assembly) fn resolve_tool_guidelines_body(
     scope: PromptAssemblyScope,
     tool_state: &[PersistedToolSelectionEntry],
+    tool_enablement: &[PersistedToolEnablementEntry],
     tool_defs: &[ToolDefinition],
     global_state: &PromptAssemblyScopeState,
     project_state: &PromptAssemblyScopeState,
 ) -> String {
-    let generated_body = render_tool_guidelines_generated_body(tool_state, tool_defs);
+    let generated_body =
+        render_tool_guidelines_generated_body(tool_state, tool_enablement, tool_defs);
     let override_body = match scope {
         PromptAssemblyScope::Global => global_state.tool_guidelines_override(),
         PromptAssemblyScope::Project => project_state
@@ -187,9 +192,50 @@ pub(in crate::prompt_assembly) fn merged_tool_selection_state(
     state
 }
 
+/// `merged_tool_enablement_state` 合并 global/project 的工具启停记录并覆盖全部注册工具。
+///
+/// project 按 tool_name 覆盖 global；未记录的工具默认启用。
+/// 输出顺序跟随 `tool_defs`（registry 按名排序），保证确定性。
+pub(in crate::prompt_assembly) fn merged_tool_enablement_state(
+    global_state: &PromptAssemblyScopeState,
+    project_state: &PromptAssemblyScopeState,
+    tool_defs: &[ToolDefinition],
+) -> Vec<PersistedToolEnablementEntry> {
+    let mut enabled_by_name = HashMap::<&str, bool>::new();
+    for entry in global_state.tool_enablement() {
+        enabled_by_name.insert(entry.tool_name.as_str(), entry.enabled);
+    }
+    for entry in project_state.tool_enablement() {
+        enabled_by_name.insert(entry.tool_name.as_str(), entry.enabled);
+    }
+
+    tool_defs
+        .iter()
+        .map(|def| PersistedToolEnablementEntry {
+            tool_name: def.name.clone(),
+            enabled: enabled_by_name
+                .get(def.name.as_str())
+                .copied()
+                .unwrap_or(true),
+        })
+        .collect()
+}
+
+/// `disabled_tool_names` 投影出被禁用的工具名集合，供 guidelines 生成与 registry 过滤使用。
+pub(in crate::prompt_assembly) fn disabled_tool_names(
+    tool_enablement: &[PersistedToolEnablementEntry],
+) -> HashSet<&str> {
+    tool_enablement
+        .iter()
+        .filter(|entry| !entry.enabled)
+        .map(|entry| entry.tool_name.as_str())
+        .collect()
+}
+
 pub(in crate::prompt_assembly) fn tool_candidate_inventory(
     tool_defs: &[ToolDefinition],
     tool_state: &[PersistedToolSelectionEntry],
+    tool_enablement: &[PersistedToolEnablementEntry],
     global_state: &PromptAssemblyScopeState,
     project_state: &PromptAssemblyScopeState,
 ) -> Vec<PromptAssemblyToolCandidate> {
@@ -202,26 +248,39 @@ pub(in crate::prompt_assembly) fn tool_candidate_inventory(
         .enumerate()
         .map(|(index, entry)| (entry.tool_name.as_str(), index + 1))
         .collect::<HashMap<_, _>>();
-    let mut inventory = tool_guideline_definitions(tool_defs)
-        .map(|def| PromptAssemblyToolCandidate {
-            name: def.name.clone(),
-            label: def.label.clone(),
-            description: def.description.clone(),
-            prompt_guidelines: def.prompt_guidelines.clone(),
-            origin: PromptSourceOrigin::Builtin,
-            selection_scope: tool_guidelines_scope(
-                global_state,
-                project_state,
-                PromptAssemblyScope::Global,
-            ),
-            selection: PromptAssemblySelectionState::from_parts(
-                true,
-                merged_state_by_name
+    let enabled_by_name = tool_enablement
+        .iter()
+        .map(|entry| (entry.tool_name.as_str(), entry.enabled))
+        .collect::<HashMap<_, _>>();
+    let mut inventory = tool_defs
+        .iter()
+        .map(|def| {
+            let has_guidelines = def.prompt_guidelines.is_some();
+            PromptAssemblyToolCandidate {
+                name: def.name.clone(),
+                label: def.label.clone(),
+                description: def.description.clone(),
+                prompt_guidelines: def.prompt_guidelines.clone(),
+                origin: PromptSourceOrigin::Builtin,
+                selection_scope: tool_guidelines_scope(
+                    global_state,
+                    project_state,
+                    PromptAssemblyScope::Global,
+                ),
+                tool_enabled: enabled_by_name
                     .get(def.name.as_str())
-                    .map(|entry| entry.enabled)
+                    .copied()
                     .unwrap_or(true),
-                selected_order_by_name.get(def.name.as_str()).copied(),
-            ),
+                selection: PromptAssemblySelectionState::from_parts(
+                    has_guidelines,
+                    has_guidelines
+                        && merged_state_by_name
+                            .get(def.name.as_str())
+                            .map(|entry| entry.enabled)
+                            .unwrap_or(true),
+                    selected_order_by_name.get(def.name.as_str()).copied(),
+                ),
+            }
         })
         .collect::<Vec<_>>();
     inventory.sort_by(|left, right| {
@@ -252,6 +311,18 @@ pub(in crate::prompt_assembly) fn set_tool_selected(
         tool_name: tool_name.to_string(),
         enabled: selected,
         requested_order: Some(next_order),
+    });
+}
+
+/// `set_tool_enabled` 记录单个工具本体的启停选择；显式保留 enabled=true 的记录。
+pub(in crate::prompt_assembly) fn set_tool_enabled(
+    state: &mut PromptAssemblyScopeState,
+    tool_name: &str,
+    enabled: bool,
+) {
+    state.upsert_tool_enablement(PersistedToolEnablementEntry {
+        tool_name: tool_name.to_string(),
+        enabled,
     });
 }
 

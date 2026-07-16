@@ -19,6 +19,16 @@ pub(crate) enum PromptOverlayInactiveTab {
     Dynamic,
 }
 
+/// `PromptOverlayToolColumn` 表示 Tools tab 当前选中的开关列，交互对照 Dynamic tab 的
+/// snapshot 列选择：`←/→` 切列、`x` 切换当前列。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PromptOverlayToolColumn {
+    /// 工具本体启停（On 列）。
+    Enablement,
+    /// guidelines 注入选择（Guide 列）。
+    Guidelines,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum PromptOverlayExpandedRow {
     ActiveSource {
@@ -62,7 +72,7 @@ impl PromptOverlayInactiveTab {
     pub(super) fn label(self) -> &'static str {
         match self {
             Self::LongLivedSkills => "Skill",
-            Self::ExtraPrompts => "Custom Prompts",
+            Self::ExtraPrompts => "Prompts",
             Self::Tools => "Tools",
             Self::Dynamic => "Dynamic",
         }
@@ -80,6 +90,7 @@ pub(crate) struct PromptOverlayState {
     pub(crate) inactive_scroll: usize,
     pub(crate) inactive_selected_row_id: Option<String>,
     pub(super) dynamic_selected_snapshot_kind: DynamicEnvironmentSnapshotKind,
+    pub(super) tool_selected_column: PromptOverlayToolColumn,
     pub(super) expanded_row: Option<PromptOverlayExpandedRow>,
     pub(super) dialog: Option<PromptOverlayDialog>,
     pub(crate) preview: Option<preview::PromptOverlayPreviewState>,
@@ -100,6 +111,7 @@ impl Default for PromptOverlayState {
             inactive_scroll: 0,
             inactive_selected_row_id: None,
             dynamic_selected_snapshot_kind: DynamicEnvironmentSnapshotKind::Baseline,
+            tool_selected_column: PromptOverlayToolColumn::Enablement,
             expanded_row: None,
             dialog: None,
             preview: None,

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     sync::Arc,
@@ -13,8 +13,8 @@ use runtime_domain::dynamic_environment::{
     enabled_dynamic_environment_sources,
 };
 use runtime_domain::prompt_assembly::persistence::{
-    PersistedPromptAssemblyEntry, PersistedSkillDiscoverySkillEntry, PersistedToolSelectionEntry,
-    PromptAssemblyScope, PromptAssemblyScopeState, StoredPromptBody,
+    PersistedPromptAssemblyEntry, PersistedSkillDiscoverySkillEntry, PersistedToolEnablementEntry,
+    PersistedToolSelectionEntry, PromptAssemblyScope, PromptAssemblyScopeState, StoredPromptBody,
     load_project_prompt_assembly_state,
 };
 use runtime_domain::prompt_assembly::{
@@ -160,6 +160,7 @@ struct PromptAssemblyResolutionContext<'a> {
     skill_discovery_skill_state: &'a [PersistedSkillDiscoverySkillEntry],
     tool_definitions: &'a [ToolDefinition],
     tool_selection_state: &'a [PersistedToolSelectionEntry],
+    tool_enablement_state: &'a [PersistedToolEnablementEntry],
     dynamic_environment_selection_state: &'a [DynamicEnvironmentSourceSelection],
     dynamic_environment_observations:
         &'a HashMap<DynamicEnvironmentSourceKind, DynamicEnvironmentObservation>,

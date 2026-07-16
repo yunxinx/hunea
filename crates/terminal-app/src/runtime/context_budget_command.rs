@@ -30,7 +30,8 @@ impl AppRuntimeCoordinator {
             return Ok(RuntimeCommandReceipt::Accepted);
         };
         let items = self.provider_conversation.context_budget_probe_items();
-        let tool_definitions = context_budget_tool_definitions_for_worker(&self.workspace_tools);
+        let tool_definitions =
+            context_budget_tool_definitions_for_worker(&self.session_workspace_tools);
         if let Err(error) = self
             .context_budget_worker
             .load_snapshot(ContextBudgetSnapshotRequest {

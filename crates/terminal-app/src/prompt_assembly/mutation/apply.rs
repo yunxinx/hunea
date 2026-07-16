@@ -164,6 +164,18 @@ fn apply_scoped_mutation_to_scope_states(
                 direction,
             )
         }
+        PromptAssemblyScopedMutationKind::SetToolEnabled { tool_name, enabled } => {
+            if !tool_definitions.iter().any(|def| def.name == tool_name) {
+                return Ok(());
+            }
+            let scope = tool_guidelines_scope(global_state, project_state, scope);
+            set_tool_enabled(
+                scope_state_mut(global_state, project_state, scope),
+                &tool_name,
+                enabled,
+            );
+            Ok(())
+        }
         PromptAssemblyScopedMutationKind::ActivateLongLivedSkill { skill_name } => {
             activate_long_lived_skill(global_state, project_state, scope, &skill_name);
             Ok(())

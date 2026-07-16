@@ -971,3 +971,85 @@ fn create_extra_prompt_keeps_supplied_legacy_default_body_verbatim() {
     assert_eq!(created.title, "New prompt");
     assert_eq!(created.body, "# New prompt".to_string());
 }
+#[test]
+fn set_tool_enabled_persists_explicit_enablement_into_global_scope() {
+    let work_dir = temp_dir("set-tool-enabled");
+    let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+
+    apply_prompt_assembly_mutation(
+        store.clone(),
+        &work_dir,
+        &test_config_dir(&work_dir),
+        PromptAssemblyMutation::scoped(
+            PromptAssemblyScope::Global,
+            PromptAssemblyScopedMutationKind::SetToolEnabled {
+                tool_name: "bash".to_string(),
+                enabled: false,
+            },
+        ),
+        &builtin_tool_definitions(),
+    )
+    .expect("set tool enabled should succeed");
+
+    let global_state = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime should build")
+        .block_on(store.load_global_prompt_assembly_state())
+        .expect("global prompt assembly state should load");
+    assert_eq!(
+        global_state.tool_enablement(),
+        vec![PersistedToolEnablementEntry {
+            tool_name: "bash".to_string(),
+            enabled: false,
+        }]
+    );
+}
+#[test]
+fn set_tool_enabled_covers_unguided_tools_and_ignores_unknown_names() {
+    let work_dir = temp_dir("set-tool-enabled-unguided");
+    let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+
+    apply_prompt_assembly_mutation(
+        store.clone(),
+        &work_dir,
+        &test_config_dir(&work_dir),
+        PromptAssemblyMutation::scoped(
+            PromptAssemblyScope::Global,
+            PromptAssemblyScopedMutationKind::SetToolEnabled {
+                tool_name: "authorize_search_download".to_string(),
+                enabled: false,
+            },
+        ),
+        &tool_definitions_with_unguided_tool(),
+    )
+    .expect("set unguided tool enabled should succeed");
+    apply_prompt_assembly_mutation(
+        store.clone(),
+        &work_dir,
+        &test_config_dir(&work_dir),
+        PromptAssemblyMutation::scoped(
+            PromptAssemblyScope::Global,
+            PromptAssemblyScopedMutationKind::SetToolEnabled {
+                tool_name: "not_a_registered_tool".to_string(),
+                enabled: false,
+            },
+        ),
+        &tool_definitions_with_unguided_tool(),
+    )
+    .expect("unknown tool should be ignored without error");
+
+    let global_state = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime should build")
+        .block_on(store.load_global_prompt_assembly_state())
+        .expect("global prompt assembly state should load");
+    assert_eq!(
+        global_state.tool_enablement(),
+        vec![PersistedToolEnablementEntry {
+            tool_name: "authorize_search_download".to_string(),
+            enabled: false,
+        }]
+    );
+}

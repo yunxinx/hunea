@@ -71,6 +71,10 @@ impl Model {
             self.selected_prompt_overlay_selection(),
             Some(PromptOverlaySelection::DiscoveredSkill(_))
         );
+        let selected_tool_candidate = matches!(
+            self.selected_prompt_overlay_selection(),
+            Some(PromptOverlaySelection::ToolCandidate(_))
+        );
         let selected_previewable = self.selected_prompt_overlay_selection().is_some();
         if actions.can_edit() {
             parts.push("e/ctrl+g edit");
@@ -82,7 +86,13 @@ impl Model {
             parts.push("d remove");
         }
         if actions.can_toggle_selection() {
-            parts.push("x disable");
+            if selected_tool_candidate {
+                // Tools tab 是列选择交互：←/→ 切列，x 切换当前列。
+                parts.push("←/→ column");
+                parts.push("x toggle");
+            } else {
+                parts.push("x disable");
+            }
         }
         if selected_core {
             parts.push("r restore");

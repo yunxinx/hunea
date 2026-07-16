@@ -68,6 +68,37 @@ fn tool_definitions_from_registry(workspace_tools: &ToolExecutorRegistry) -> Vec
         .collect()
 }
 
+/// `manager_disabled_tool_names` 投影管理快照中被禁用的工具名集合；无快照视为无禁用。
+fn manager_disabled_tool_names(
+    manager: Option<&PromptAssemblyManagerSnapshot>,
+) -> std::collections::HashSet<String> {
+    manager
+        .map(|manager| {
+            manager
+                .candidates
+                .tools
+                .iter()
+                .filter(|tool| !tool.tool_enabled)
+                .map(|tool| tool.name.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `session_tools_for_manager` 依据 prompt assembly 管理快照过滤出本 session 生效的工具集。
+///
+/// 与 prelude 的生效时机一致：coordinator 构造、`Reset`（新 session）时计算；
+/// `/prompt` commit 命中当前空会话时同步重算，否则等待下一次新会话。
+/// 始终返回独立快照（`filtered`），避免与全量 registry 共享内部状态导致
+/// 后续注册的工具在"有无禁用记录"两种路径下可见性不一致。
+fn session_tools_for_manager(
+    workspace_tools: &ToolExecutorRegistry,
+    manager: Option<&PromptAssemblyManagerSnapshot>,
+) -> ToolExecutorRegistry {
+    let disabled_tools = manager_disabled_tool_names(manager);
+    workspace_tools.filtered(|tool_name| !disabled_tools.contains(tool_name))
+}
+
 /// `AppRuntimeOptions` 保存 app 层对话运行时所需的配置。
 #[derive(Clone)]
 pub(crate) struct AppRuntimeOptions {
@@ -94,6 +125,9 @@ pub(crate) struct AppRuntimeCoordinator {
     provider_conversation: ProviderConversation,
     model_refresh: ModelRefreshWorker,
     workspace_tools: ToolExecutorRegistry,
+    /// 本 session 生效的工具集（按 enablement 过滤后的视图）；
+    /// `workspace_tools` 保持全量，供 `/prompt` inventory 展示所有工具。
+    session_workspace_tools: ToolExecutorRegistry,
     prompt_assembly_tool_definitions: Vec<ToolDefinition>,
     session_store_worker: SessionStoreWorker,
     context_budget_worker: ContextBudgetWorker,
@@ -136,6 +170,8 @@ impl AppRuntimeCoordinator {
         let workspace_tools =
             conversation_workspace_tools(&options.managed_search_tools, &options.hunea_config_dir);
         let prompt_assembly_tool_definitions = tool_definitions_from_registry(&workspace_tools);
+        let session_workspace_tools =
+            session_tools_for_manager(&workspace_tools, options.prompt_assembly_manager.as_ref());
         let provider_conversation = fresh_provider_conversation(&options)?;
         let dynamic_environment_observer = Arc::clone(&options.dynamic_environment_observer);
         let runtime_event_notifier = RuntimeEventNotifier::default();
@@ -145,6 +181,7 @@ impl AppRuntimeCoordinator {
             provider_conversation,
             model_refresh: ModelRefreshWorker::new(runtime_event_notifier.clone()),
             workspace_tools,
+            session_workspace_tools,
             prompt_assembly_tool_definitions,
             session_store_worker: SessionStoreWorker::new(runtime_event_notifier.clone()),
             context_budget_worker: ContextBudgetWorker::new(runtime_event_notifier.clone())
@@ -234,6 +271,10 @@ impl AppRuntimeCoordinator {
                     &self.options.hunea_config_dir,
                 );
                 self.refresh_prompt_assembly_tool_definitions();
+                self.session_workspace_tools = session_tools_for_manager(
+                    &self.workspace_tools,
+                    self.options.prompt_assembly_manager.as_ref(),
+                );
                 self.pending_runtime_events.clear();
                 self.manual_skill_activity_sequence = 0;
                 self.prompt_assembly_edit_session = None;

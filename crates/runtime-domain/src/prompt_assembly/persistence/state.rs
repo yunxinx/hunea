@@ -35,6 +35,16 @@ pub struct PersistedToolSelectionEntry {
     pub requested_order: Option<u16>,
 }
 
+/// `PersistedToolEnablementEntry` 表示单个工具本体的启用/禁用状态。
+///
+/// 与 `PersistedToolSelectionEntry`（guidelines 注入选择）语义不同：
+/// 启停覆盖全部注册工具且无排序语义，未记录的工具默认启用。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedToolEnablementEntry {
+    pub tool_name: String,
+    pub enabled: bool,
+}
+
 /// `StoredPromptBody` 表示持久化的 prompt 文本实体。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredPromptBody {
@@ -53,6 +63,7 @@ pub struct PromptAssemblyScopeState {
     entries: Vec<PersistedPromptAssemblyEntry>,
     skill_discovery_skills: Vec<PersistedSkillDiscoverySkillEntry>,
     tool_selections: Vec<PersistedToolSelectionEntry>,
+    tool_enablement: Vec<PersistedToolEnablementEntry>,
     dynamic_environment_sources: Vec<DynamicEnvironmentSourceSelection>,
     extra_prompts: Vec<StoredPromptBody>,
 }
@@ -69,6 +80,7 @@ impl PromptAssemblyScopeState {
             entries: Vec::new(),
             skill_discovery_skills: Vec::new(),
             tool_selections: Vec::new(),
+            tool_enablement: Vec::new(),
             dynamic_environment_sources: Vec::new(),
             extra_prompts: Vec::new(),
         }
@@ -247,6 +259,36 @@ impl PromptAssemblyScopeState {
     /// `swap_tool_selections` 交换两个 tool 选择项。
     pub fn swap_tool_selections(&mut self, left: usize, right: usize) {
         self.tool_selections.swap(left, right);
+    }
+
+    /// `tool_enablement` 返回工具本体启停的持久化状态。
+    #[must_use]
+    pub fn tool_enablement(&self) -> &[PersistedToolEnablementEntry] {
+        &self.tool_enablement
+    }
+
+    /// `set_tool_enablement` 替换工具本体启停状态。
+    pub fn set_tool_enablement(&mut self, tool_enablement: Vec<PersistedToolEnablementEntry>) {
+        self.tool_enablement = tool_enablement;
+    }
+
+    /// `tool_enablement_mut` 返回指定工具启停项的可变引用。
+    pub fn tool_enablement_mut(
+        &mut self,
+        tool_name: &str,
+    ) -> Option<&mut PersistedToolEnablementEntry> {
+        self.tool_enablement
+            .iter_mut()
+            .find(|entry| entry.tool_name == tool_name)
+    }
+
+    /// `upsert_tool_enablement` 按 tool_name 插入或替换工具启停项。
+    pub fn upsert_tool_enablement(&mut self, entry: PersistedToolEnablementEntry) {
+        if let Some(existing) = self.tool_enablement_mut(&entry.tool_name) {
+            *existing = entry;
+        } else {
+            self.tool_enablement.push(entry);
+        }
     }
 
     /// `dynamic_environment_sources` 返回 dynamic environment source 选择。
@@ -451,6 +493,17 @@ mod tests {
         assert_eq!(state.tool_selections().len(), 1);
         assert!(!state.tool_selections()[0].enabled);
         assert_eq!(state.tool_selections()[0].requested_order, Some(2));
+
+        state.upsert_tool_enablement(PersistedToolEnablementEntry {
+            tool_name: "bash".to_string(),
+            enabled: false,
+        });
+        state.upsert_tool_enablement(PersistedToolEnablementEntry {
+            tool_name: "bash".to_string(),
+            enabled: true,
+        });
+        assert_eq!(state.tool_enablement().len(), 1);
+        assert!(state.tool_enablement()[0].enabled);
     }
 
     #[test]

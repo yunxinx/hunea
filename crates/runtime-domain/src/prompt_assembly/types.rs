@@ -258,6 +258,9 @@ pub struct PromptAssemblyToolCandidate {
     pub prompt_guidelines: Option<String>,
     pub origin: PromptSourceOrigin,
     pub selection_scope: PromptAssemblyScope,
+    /// 工具本体是否启用；禁用的工具不进入 provider 请求。
+    pub tool_enabled: bool,
+    /// guidelines 注入选择；无 guidelines 的工具为 `Unselectable`。
     pub selection: PromptAssemblySelectionState,
 }
 

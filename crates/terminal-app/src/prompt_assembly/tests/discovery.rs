@@ -350,7 +350,7 @@ fn manager_snapshot_skill_inventory_uses_dense_selected_order() {
     );
 }
 #[test]
-fn manager_snapshot_tool_inventory_filters_unguided_tools_and_uses_dense_selected_order() {
+fn manager_snapshot_tool_inventory_lists_unguided_tools_as_unselectable() {
     let work_dir = temp_dir("tool-order-dense");
 
     let snapshot = resolve_prompt_assembly_manager_snapshot(
@@ -387,14 +387,31 @@ fn manager_snapshot_tool_inventory_filters_unguided_tools_and_uses_dense_selecte
         &tool_definitions_with_unguided_tool(),
     );
 
+    // 全部注册工具都进入 inventory；无 guidelines 的工具不可选且排在有序工具之后。
     assert_eq!(
         snapshot
             .candidates
             .tools
             .iter()
-            .map(|tool| (tool.name.as_str(), tool.selection.selected_order()))
+            .map(|tool| (
+                tool.name.as_str(),
+                tool.selection.selected_order(),
+                tool.selection.can_select(),
+            ))
             .collect::<Vec<_>>(),
-        vec![("bash", Some(1)), ("read_file", Some(2))]
+        vec![
+            ("bash", Some(1), true),
+            ("read_file", Some(2), true),
+            ("authorize_search_download", None, false),
+        ]
+    );
+    assert!(
+        snapshot
+            .candidates
+            .tools
+            .iter()
+            .all(|tool| tool.tool_enabled),
+        "tools without explicit enablement records should default to enabled"
     );
     assert!(
         snapshot

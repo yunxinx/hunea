@@ -829,3 +829,228 @@ fn disabling_dynamic_environment_changes_waits_for_next_new_session() {
     );
     cleanup(&root);
 }
+#[test]
+fn session_tools_for_manager_filters_disabled_tools_and_keeps_full_registry() {
+    use runtime_domain::prompt_assembly::persistence::PromptAssemblyScope;
+    use runtime_domain::prompt_assembly::{
+        PromptAssemblyManagerSnapshot, PromptAssemblySelectionState, PromptAssemblyToolCandidate,
+        PromptSourceOrigin,
+    };
+    use tool_runtime::{Tool, ToolCall, ToolDefinition, ToolExecutionFuture, ToolResult};
+
+    struct StubTool {
+        name: &'static str,
+    }
+
+    impl Tool for StubTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::new(self.name)
+        }
+
+        fn execute<'a>(
+            &'a self,
+            call: ToolCall,
+            _cancellation: &'a tokio_util::sync::CancellationToken,
+        ) -> ToolExecutionFuture<'a> {
+            Box::pin(async move { ToolResult::success(call.call_id, String::new()) })
+        }
+    }
+
+    fn tool_candidate(name: &str, tool_enabled: bool) -> PromptAssemblyToolCandidate {
+        PromptAssemblyToolCandidate {
+            name: name.to_string(),
+            label: None,
+            description: None,
+            prompt_guidelines: None,
+            origin: PromptSourceOrigin::Builtin,
+            selection_scope: PromptAssemblyScope::Global,
+            tool_enabled,
+            selection: PromptAssemblySelectionState::Unselectable,
+        }
+    }
+
+    let mut workspace_tools = tool_runtime::ToolExecutorRegistry::new();
+    workspace_tools.insert(StubTool { name: "bash" });
+    workspace_tools.insert(StubTool { name: "read" });
+
+    let mut manager = PromptAssemblyManagerSnapshot::default();
+    manager.candidates.tools = vec![tool_candidate("bash", false), tool_candidate("read", true)];
+
+    let session_tools = super::super::session_tools_for_manager(&workspace_tools, Some(&manager));
+    assert_eq!(
+        session_tools
+            .definitions()
+            .definitions()
+            .map(|definition| definition.name.clone())
+            .collect::<Vec<_>>(),
+        vec!["read".to_string()],
+        "disabled tools should be excluded from the session registry"
+    );
+    assert_eq!(
+        workspace_tools.definitions().definitions().count(),
+        2,
+        "full registry should stay untouched for /prompt inventory"
+    );
+
+    let unfiltered = super::super::session_tools_for_manager(&workspace_tools, None);
+    assert_eq!(
+        unfiltered.definitions().definitions().count(),
+        2,
+        "missing manager snapshot should keep every tool enabled"
+    );
+}
+#[test]
+fn disabling_tool_on_empty_session_updates_session_tools_immediately() {
+    let root = temp_test_dir("tool-enablement-empty-session");
+    let work_dir = root.join("repo");
+    fs::create_dir_all(&work_dir).expect("work dir should exist");
+    let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        session_store: Some(store),
+        session_header_template: Some(SessionHeader {
+            session_id: SessionId::new(),
+            work_dir: work_dir.clone(),
+            session_name: None,
+            initial_model: "qwen3".to_string(),
+            git_head: None,
+            cli_version: None,
+        }),
+        ..AppRuntimeOptions::default()
+    });
+    let disabled_tool_name = coordinator.prompt_assembly_tool_definitions()[0]
+        .name
+        .clone();
+    assert!(
+        coordinator
+            .session_workspace_tools
+            .definitions()
+            .definitions()
+            .any(|definition| definition.name == disabled_tool_name),
+        "tool should start enabled in the session registry"
+    );
+
+    coordinator
+        .begin_prompt_assembly_edit()
+        .expect("begin prompt assembly edit should load working copy");
+    coordinator
+        .apply_prompt_assembly_edit_mutation(PromptAssemblyMutation::scoped(
+            PromptAssemblyScope::Global,
+            PromptAssemblyScopedMutationKind::SetToolEnabled {
+                tool_name: disabled_tool_name.clone(),
+                enabled: false,
+            },
+        ))
+        .expect("tool enablement mutation should apply to working copy");
+    coordinator
+        .commit_prompt_assembly_edit()
+        .expect("commit should persist and emit updated event");
+    let (_, notice) = wait_for_runtime_event(
+        &mut coordinator,
+        |event| match event {
+            RuntimeEvent::PromptAssemblyUpdated { manager, notice } => Some((manager, notice)),
+            _ => None,
+        },
+        "prompt assembly updated event",
+    );
+
+    // 空会话：即使 prelude 未变化（该工具可能无 guidelines），启停变化也应触发
+    // 当前会话通知，并立即从 session 工具集移除该工具。
+    assert_eq!(
+        notice,
+        Some(PromptAssemblyUpdateNotice::CurrentEmptySessionUpdated)
+    );
+    assert!(
+        !coordinator
+            .session_workspace_tools
+            .definitions()
+            .definitions()
+            .any(|definition| definition.name == disabled_tool_name),
+        "disabled tool should leave the session registry immediately on an empty session"
+    );
+    assert!(
+        coordinator
+            .workspace_tools
+            .definitions()
+            .definitions()
+            .any(|definition| definition.name == disabled_tool_name),
+        "full registry should keep the tool for /prompt inventory"
+    );
+    cleanup(&root);
+}
+#[test]
+fn disabling_tool_on_started_session_waits_for_next_new_session_reset() {
+    let root = temp_test_dir("tool-enablement-started-session");
+    let work_dir = root.join("repo");
+    fs::create_dir_all(&work_dir).expect("work dir should exist");
+    let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        session_store: Some(store),
+        session_header_template: Some(SessionHeader {
+            session_id: SessionId::new(),
+            work_dir: work_dir.clone(),
+            session_name: None,
+            initial_model: "qwen3".to_string(),
+            git_head: None,
+            cli_version: None,
+        }),
+        ..AppRuntimeOptions::default()
+    });
+    coordinator
+        .provider_conversation
+        .append_items(vec![ConversationItem::text(Role::User, "already started")])
+        .expect("seed history should succeed");
+    let disabled_tool_name = coordinator.prompt_assembly_tool_definitions()[0]
+        .name
+        .clone();
+
+    coordinator
+        .begin_prompt_assembly_edit()
+        .expect("begin prompt assembly edit should load working copy");
+    coordinator
+        .apply_prompt_assembly_edit_mutation(PromptAssemblyMutation::scoped(
+            PromptAssemblyScope::Global,
+            PromptAssemblyScopedMutationKind::SetToolEnabled {
+                tool_name: disabled_tool_name.clone(),
+                enabled: false,
+            },
+        ))
+        .expect("tool enablement mutation should apply to working copy");
+    coordinator
+        .commit_prompt_assembly_edit()
+        .expect("commit should persist and emit updated event");
+    let (_, notice) = wait_for_runtime_event(
+        &mut coordinator,
+        |event| match event {
+            RuntimeEvent::PromptAssemblyUpdated { manager, notice } => Some((manager, notice)),
+            _ => None,
+        },
+        "prompt assembly updated event",
+    );
+
+    assert_eq!(
+        notice,
+        Some(PromptAssemblyUpdateNotice::NextNewSessionUpdated)
+    );
+    assert!(
+        coordinator
+            .session_workspace_tools
+            .definitions()
+            .definitions()
+            .any(|definition| definition.name == disabled_tool_name),
+        "started session should keep its tool set until the next new session"
+    );
+
+    coordinator
+        .handle_runtime_command(RuntimeCommand::Reset)
+        .expect("reset should succeed");
+
+    assert!(
+        !coordinator
+            .session_workspace_tools
+            .definitions()
+            .definitions()
+            .any(|definition| definition.name == disabled_tool_name),
+        "disabled tool should leave the session registry after reset"
+    );
+    cleanup(&root);
+}

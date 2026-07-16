@@ -529,3 +529,92 @@ fn missing_source_check_counts_missing_entries_without_blocking_snapshot_resolut
             })
     );
 }
+#[test]
+fn resolve_manager_snapshot_excludes_disabled_tool_guidelines_from_prelude() {
+    let work_dir = temp_dir("tool-enablement-guidelines");
+
+    let resolved = resolve_prompt_assembly_manager_snapshot(
+        &work_dir,
+        &test_config_dir(&work_dir),
+        &scope_state! {
+            scope: PromptAssemblyScope::Global,
+            tool_enablement: vec![PersistedToolEnablementEntry {
+                tool_name: "bash".to_string(),
+                enabled: false,
+            }],
+        },
+        &PromptAssemblyScopeState::new(PromptAssemblyScope::Project),
+        &builtin_tool_definitions(),
+    );
+
+    let guidelines_section = resolved
+        .resolution
+        .prelude
+        .sections
+        .iter()
+        .find(|section| section.kind == PromptSourceKind::ToolGuidelines)
+        .expect("tool guidelines section should stay present for enabled tools");
+    assert!(
+        !guidelines_section.body.contains("bash"),
+        "disabled tool guidelines should not be injected"
+    );
+    assert!(
+        guidelines_section.body.contains("read_file"),
+        "enabled tool guidelines should stay injected"
+    );
+
+    let bash_candidate = resolved
+        .candidates
+        .tools
+        .iter()
+        .find(|tool| tool.name == "bash")
+        .expect("disabled tool should stay listed in the inventory");
+    assert!(!bash_candidate.tool_enabled);
+    assert!(
+        bash_candidate.selection.is_selected(),
+        "guidelines selection should stay untouched by tool enablement"
+    );
+}
+#[test]
+fn project_tool_enablement_overrides_global_disable() {
+    let work_dir = temp_dir("tool-enablement-scope-merge");
+
+    let resolved = resolve_prompt_assembly_manager_snapshot(
+        &work_dir,
+        &test_config_dir(&work_dir),
+        &scope_state! {
+            scope: PromptAssemblyScope::Global,
+            tool_enablement: vec![PersistedToolEnablementEntry {
+                tool_name: "bash".to_string(),
+                enabled: false,
+            }],
+        },
+        &scope_state! {
+            scope: PromptAssemblyScope::Project,
+            tool_enablement: vec![PersistedToolEnablementEntry {
+                tool_name: "bash".to_string(),
+                enabled: true,
+            }],
+        },
+        &builtin_tool_definitions(),
+    );
+
+    let bash_candidate = resolved
+        .candidates
+        .tools
+        .iter()
+        .find(|tool| tool.name == "bash")
+        .expect("bash should stay listed in the inventory");
+    assert!(
+        bash_candidate.tool_enabled,
+        "project scope should override global disable"
+    );
+    let guidelines_section = resolved
+        .resolution
+        .prelude
+        .sections
+        .iter()
+        .find(|section| section.kind == PromptSourceKind::ToolGuidelines)
+        .expect("tool guidelines section should exist");
+    assert!(guidelines_section.body.contains("bash"));
+}

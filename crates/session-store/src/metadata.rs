@@ -313,6 +313,13 @@ fn initialize_database_schema(conn: &Connection) -> Result<(), SessionStoreError
             PRIMARY KEY (scope, tool_name)
         );
 
+        CREATE TABLE IF NOT EXISTS prompt_assembly_tool_enablement (
+            scope TEXT NOT NULL,
+            tool_name TEXT NOT NULL,
+            enabled INTEGER NOT NULL,
+            PRIMARY KEY (scope, tool_name)
+        );
+
         CREATE TABLE IF NOT EXISTS prompt_assembly_dynamic_environment_sources (
             scope TEXT NOT NULL,
             snapshot_kind TEXT NOT NULL,

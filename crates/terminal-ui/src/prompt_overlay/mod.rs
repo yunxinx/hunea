@@ -55,7 +55,9 @@ use render_support::*;
 use state::PromptOverlayExpandedRow;
 #[cfg(test)]
 pub(crate) use state::PromptOverlayPendingEditor;
-pub(crate) use state::{PromptOverlayFocus, PromptOverlayInactiveTab, PromptOverlayState};
+pub(crate) use state::{
+    PromptOverlayFocus, PromptOverlayInactiveTab, PromptOverlayState, PromptOverlayToolColumn,
+};
 
 #[cfg(test)]
 mod tests;
@@ -69,6 +71,7 @@ const PROMPT_OVERLAY_LEFT_SEL_WIDTH: usize = 3;
 const PROMPT_OVERLAY_LEFT_ORD_WIDTH: usize = 3;
 const PROMPT_OVERLAY_RIGHT_ORD_WIDTH: usize = 3;
 const PROMPT_OVERLAY_DYNAMIC_CHECKBOX_WIDTH: usize = "Change".len();
+const PROMPT_OVERLAY_TOOL_CHECKBOX_WIDTH: usize = "Guide".len();
 const PROMPT_OVERLAY_LEFT_KIND_WIDTH: usize = "instructions".len();
 const PROMPT_OVERLAY_LEFT_SCOPE_WIDTH: usize = 7;
 const PROMPT_OVERLAY_RIGHT_SCOPE_WIDTH: usize = 7;

@@ -36,9 +36,11 @@ impl Model {
                     can_reorder_active: true,
                 }
             }
-            Some(PromptOverlaySelection::ToolCandidate(_)) => {
+            Some(PromptOverlaySelection::ToolCandidate(tool)) => {
                 PromptOverlayActionAvailability::SelectableCandidate {
-                    can_reorder_active: true,
+                    // 排序只作用于 guidelines 注入顺序；禁用的工具 guidelines 不注入，
+                    // 与 Guide 列不可操作的语义保持一致，同样不可排序。
+                    can_reorder_active: tool.tool_enabled && tool.selection.can_select(),
                 }
             }
             Some(PromptOverlaySelection::DynamicEnvironmentCandidate(_)) => {

@@ -282,6 +282,8 @@ impl RuntimeEventApply for Model {
                 );
                 self.finish_stream_activity_with_work_summary();
                 self.reset_runtime_final_body_divider_state();
+                // 非贴底或被全屏层遮挡时，最终消息本身不可见，累计左侧常驻 pill 计数。
+                self.note_message_finished_for_attention_pill();
             }
             RuntimeEvent::Failed { message, .. } => {
                 self.close_runtime_permission_approval_panel();
@@ -348,6 +350,8 @@ impl Model {
 
     fn apply_session_resume_payload(&mut self, payload: SessionResumePayload) {
         self.close_runtime_permission_approval_panel();
+        // 切换会话后旧的待办提示不再成立，pill 状态归零。
+        self.reset_attention_pills();
         // 上下文占用描述的是切换前会话的历史;v1 不在 resume 路径恢复
         // 新会话的占用数据,因此切换后先隐藏,等待下一次请求完成再显示。
         self.set_last_context_usage(None);

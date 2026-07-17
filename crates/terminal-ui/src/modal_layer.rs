@@ -113,16 +113,6 @@ impl Model {
             }
         }
     }
-
-    pub(crate) fn close_fullscreen_modal_layers(&mut self) {
-        self.close_transcript_overlay();
-        self.close_prompt_overlay();
-        self.session_preview = None;
-        self.session_picker = None;
-        self.copy_picker = None;
-        self.entry_tree = None;
-        self.message_history_picker = None;
-    }
 }
 
 #[cfg(test)]
@@ -161,11 +151,11 @@ mod tests {
         model.open_transcript_overlay();
         assert_eq!(model.top_modal_layer(), Some(ModalLayer::TranscriptOverlay));
 
-        open_fullscreen_tool_approval(&mut model);
-        assert_eq!(
-            model.top_modal_layer(),
-            Some(ModalLayer::ToolApprovalFullscreenPreview)
-        );
+        // 全屏层活跃时审批预览升级被抑制，审批面板后台打开，不抢占顶层。
+        open_fullscreen_capable_tool_approval(&mut model);
+        assert!(model.tool_approval_panel_active());
+        assert!(!model.tool_approval_fullscreen_preview_active());
+        assert_eq!(model.top_modal_layer(), Some(ModalLayer::TranscriptOverlay));
     }
 
     #[test]
@@ -208,11 +198,8 @@ mod tests {
     fn key_dispatch_routes_top_fullscreen_tool_approval_effect() {
         let mut model = Model::new(StartupBannerOptions::default());
         model.set_window(80, 12);
-        model.open_session_preview(
-            "session-under-approval".to_string(),
-            Transcript::new(default_palette(), None),
-        );
-        open_fullscreen_tool_approval(&mut model);
+        open_fullscreen_capable_tool_approval(&mut model);
+        assert!(model.tool_approval_fullscreen_preview_active());
 
         let effect = press_key(&mut model, KeyCode::Enter);
         assert_eq!(
@@ -227,7 +214,39 @@ mod tests {
     }
 
     #[test]
-    fn inline_tool_approval_replaces_hidden_fullscreen_modal_input() {
+    fn tool_approval_fullscreen_upgrade_defers_until_modal_layer_closes() {
+        let mut model = Model::new(StartupBannerOptions::default());
+        model.set_window(80, 12);
+        model.open_session_preview(
+            "session-under-approval".to_string(),
+            Transcript::new(default_palette(), None),
+        );
+
+        open_fullscreen_capable_tool_approval(&mut model);
+        assert!(model.tool_approval_panel_active());
+        assert!(!model.tool_approval_fullscreen_preview_active());
+        assert_eq!(model.top_modal_layer(), Some(ModalLayer::SessionPreview));
+        assert!(model.attention_pill_approval_pending_for_test());
+
+        // 关闭全屏层后延迟升级生效，Enter 由审批面板消费。
+        assert_eq!(press_key(&mut model, KeyCode::Esc), None);
+        assert!(model.tool_approval_fullscreen_preview_active());
+        assert_eq!(
+            model.top_modal_layer(),
+            Some(ModalLayer::ToolApprovalFullscreenPreview)
+        );
+        assert_eq!(
+            press_key(&mut model, KeyCode::Enter),
+            Some(AppEffect::RespondRuntimePermission {
+                target: RuntimeTarget::provider("local", "qwen3"),
+                request_id: "permission-write".to_string(),
+                option_id: Some("allow-once".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn inline_tool_approval_stays_behind_fullscreen_modal_until_it_closes() {
         let mut model = Model::new(StartupBannerOptions::default());
         model.set_window(80, 12);
         model.open_session_picker_loading();
@@ -235,7 +254,14 @@ mod tests {
 
         open_inline_tool_approval(&mut model);
 
+        // 审批面板后台打开：picker 仍在顶层并优先消费按键，不误触审批。
         assert!(model.tool_approval_panel_active());
+        assert_eq!(model.top_modal_layer(), Some(ModalLayer::SessionPicker));
+        assert!(model.attention_pill_approval_pending_for_test());
+        assert_eq!(press_key(&mut model, KeyCode::Enter), None);
+        assert!(model.tool_approval_panel_active());
+
+        assert_eq!(press_key(&mut model, KeyCode::Esc), None);
         assert_eq!(model.top_modal_layer(), None);
         assert_eq!(
             press_key(&mut model, KeyCode::Enter),
@@ -245,6 +271,20 @@ mod tests {
                 option_id: Some("allow-once".to_string()),
             })
         );
+    }
+
+    #[test]
+    fn inline_tool_approval_on_pinned_main_screen_shows_no_pill() {
+        let mut model = Model::new(StartupBannerOptions::default());
+        model.set_window(80, 12);
+        // v3 起 pill 触发条件是"面板不可见"：主界面无 pill 仅对贴底成立。
+        assert!(model.document_pinned_to_bottom());
+
+        open_inline_tool_approval(&mut model);
+
+        assert!(model.tool_approval_panel_active());
+        assert!(!model.attention_pill_approval_pending_for_test());
+        assert_eq!(model.active_toast_text_for_test(), None);
     }
 
     #[test]
@@ -366,7 +406,7 @@ mod tests {
         );
     }
 
-    fn open_fullscreen_tool_approval(model: &mut Model) {
+    fn open_fullscreen_capable_tool_approval(model: &mut Model) {
         let content = (1..=30)
             .map(|line| format!("line {line}"))
             .collect::<Vec<_>>()
@@ -387,7 +427,7 @@ mod tests {
                 content,
             )),
         );
-        assert!(model.tool_approval_fullscreen_preview_active());
+        assert!(model.tool_approval_panel_active());
     }
 
     fn open_inline_tool_approval(model: &mut Model) {

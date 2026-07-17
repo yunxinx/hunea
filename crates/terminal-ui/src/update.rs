@@ -204,6 +204,11 @@ impl Model {
                 column,
                 row,
             } => {
+                // 常驻 pill 浮在最上层，命中时优先于模态层与主界面消费。
+                let pill_result = self.handle_attention_pill_mouse_down(button, column, row);
+                if !pill_result.is_ignored() {
+                    return pill_result.into_effect();
+                }
                 let result = self.handle_overlay_mouse_down(button, column, row);
                 if !result.is_ignored() {
                     return result.into_effect();
@@ -382,7 +387,9 @@ impl Model {
         let Some(layer) = self.top_modal_layer() else {
             return OverlayInputResult::Ignored;
         };
-        self.handle_modal_layer_key(layer, key)
+        let result = self.handle_modal_layer_key(layer, key);
+        self.sync_tool_approval_preview_mode_if_modal_layer_closed(layer);
+        result
     }
 
     fn handle_modal_layer_key_before_global_shortcuts(
@@ -395,17 +402,30 @@ impl Model {
         else {
             return OverlayInputResult::Ignored;
         };
-        self.handle_modal_layer_key(layer, key)
+        let result = self.handle_modal_layer_key(layer, key);
+        self.sync_tool_approval_preview_mode_if_modal_layer_closed(layer);
+        result
     }
 
     fn handle_current_modal_or_panel_key(&mut self, key: KeyEvent) -> OverlayInputResult {
+        // 顶层全屏模态先消费按键；审批面板可能在全屏层后台打开，不得抢先误触。
+        let result = self.handle_top_modal_layer_key(key);
+        if !result.is_ignored() {
+            return result;
+        }
         if self.tool_approval_panel_active() {
+            // 盲批防护：面板打开但不可见（非贴底屏外或被全屏层遮挡）时吞掉其按键——
+            // 零状态变更、零 AppEffect，防止 Enter 盲批；也不放行，避免 Esc 落入
+            // 全局退出确认、字符落入 composer。滚轮等滚动输入不经此分支，照常滚动。
+            if !self.tool_approval_panel_visible() {
+                return OverlayInputResult::Handled;
+            }
             return self.handle_tool_approval_panel_key(key);
         }
         if self.context_budget_active() {
             return self.handle_context_budget_key(key);
         }
-        self.handle_top_modal_layer_key(key)
+        OverlayInputResult::Ignored
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Option<AppEffect> {

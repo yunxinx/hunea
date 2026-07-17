@@ -14,6 +14,12 @@ impl Model {
         DOCUMENT_MOUSE_WHEEL_DELTA
     }
 
+    /// 用户当前是否贴底跟随：仅在 follow_bottom 且未处于手动滚动时成立。
+    /// 自动滚动到底部的行为只允许在该谓词成立时发生，避免打断用户回看历史。
+    pub(crate) fn document_pinned_to_bottom(&self) -> bool {
+        self.document_runtime.follow_bottom && !self.document_runtime.manual_scroll
+    }
+
     pub(crate) fn preserved_viewport_state_for_transcript_refresh(
         &mut self,
     ) -> Option<ViewportState> {
@@ -356,6 +362,7 @@ impl Model {
         follow_bottom: bool,
         manual_scroll: bool,
     ) {
+        let was_pinned_to_bottom = self.document_pinned_to_bottom();
         let document_offset =
             self.clamp_document_viewport_offset(document_offset, layout.line_count());
         self.document_runtime.viewport_y = document_offset;
@@ -368,6 +375,15 @@ impl Model {
             follow_bottom,
             manual_scroll,
         );
+        // 贴底状态变化的汇聚点：回到贴底且无遮挡时，新消息与审批面板均已可见。
+        self.clear_new_message_pill_if_pinned();
+        self.sync_tool_approval_attention_visibility();
+        if !was_pinned_to_bottom && self.document_pinned_to_bottom() {
+            // 贴底恢复：让非贴底期间被抑制的审批预览 fullscreen 升级延迟生效。
+            // sync_tool_approval_preview_mode 只改面板自身状态，不回调视口方法，无重入；
+            // 升级改变后续 layout，调用方在 apply 之后不得再消费本次传入的 layout。
+            self.sync_tool_approval_preview_mode();
+        }
     }
 
     pub(crate) fn document_viewport_line_indices_for_mode(

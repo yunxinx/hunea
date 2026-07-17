@@ -50,7 +50,7 @@ impl Model {
         self.reset_chat_interrupt_esc_count();
         self.bump_stream_activity_revision();
         self.sync_composer_height();
-        if self.document_runtime.follow_bottom {
+        if self.document_pinned_to_bottom() {
             self.sync_document_viewport_to_bottom();
         }
     }
@@ -78,7 +78,7 @@ impl Model {
             self.reset_chat_interrupt_esc_count();
             self.bump_stream_activity_revision();
             self.sync_composer_height();
-            if self.document_runtime.follow_bottom {
+            if self.document_pinned_to_bottom() {
                 self.sync_document_viewport_to_bottom();
             }
             return;
@@ -89,7 +89,7 @@ impl Model {
 
         self.bump_stream_activity_revision();
         self.sync_composer_height();
-        if self.document_runtime.follow_bottom {
+        if self.document_pinned_to_bottom() {
             self.sync_document_viewport_to_bottom();
         }
     }
@@ -108,7 +108,7 @@ impl Model {
 
         self.bump_stream_activity_revision();
         self.sync_composer_height();
-        if self.document_runtime.follow_bottom {
+        if self.document_pinned_to_bottom() {
             self.sync_document_viewport_to_bottom();
         }
     }
@@ -139,7 +139,7 @@ impl Model {
         self.reset_chat_interrupt_esc_count();
         self.bump_stream_activity_revision();
         self.sync_composer_height();
-        if self.document_runtime.follow_bottom {
+        if self.document_pinned_to_bottom() {
             self.sync_document_viewport_to_bottom();
         }
     }
@@ -189,7 +189,7 @@ impl Model {
         activity.pause_at(now);
         self.bump_stream_activity_revision();
         self.sync_composer_height();
-        if self.document_runtime.follow_bottom {
+        if self.document_pinned_to_bottom() {
             self.sync_document_viewport_to_bottom();
         }
     }
@@ -208,7 +208,7 @@ impl Model {
 
         self.bump_stream_activity_revision();
         self.sync_composer_height();
-        if self.document_runtime.follow_bottom {
+        if self.document_pinned_to_bottom() {
             self.sync_document_viewport_to_bottom();
         }
     }
@@ -246,7 +246,7 @@ impl Model {
         }
         activity.is_thinking = is_thinking;
         self.bump_stream_activity_revision();
-        if self.document_runtime.follow_bottom {
+        if self.document_pinned_to_bottom() {
             self.sync_document_viewport_to_bottom();
         }
     }
@@ -257,7 +257,7 @@ impl Model {
         };
         activity.record_output_tokens(total_tokens, now);
         self.bump_stream_activity_revision();
-        if self.document_runtime.follow_bottom {
+        if self.document_pinned_to_bottom() {
             self.sync_document_viewport_to_bottom();
         }
     }
@@ -269,7 +269,7 @@ impl Model {
         };
         activity.add_input_tokens(token_delta, now);
         self.bump_stream_activity_revision();
-        if self.document_runtime.follow_bottom {
+        if self.document_pinned_to_bottom() {
             self.sync_document_viewport_to_bottom();
         }
     }
@@ -280,7 +280,7 @@ impl Model {
         };
         activity.record_input_tokens(total_tokens, now);
         self.bump_stream_activity_revision();
-        if self.document_runtime.follow_bottom {
+        if self.document_pinned_to_bottom() {
             self.sync_document_viewport_to_bottom();
         }
     }

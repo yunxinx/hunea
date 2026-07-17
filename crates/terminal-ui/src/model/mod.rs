@@ -146,6 +146,7 @@ pub struct Model {
     pub(super) has_dark_background: bool,
     pub(super) notice_state: NoticeState,
     pub(super) toast_state: ToastState,
+    pub(super) attention_pill: crate::attention_pill::AttentionPillState,
     pub(super) pending_prompt_assembly_notice: Option<PromptAssemblyUpdateNotice>,
     pub(super) status_line_revision: usize,
     pub(super) stream_activity_revision: usize,
@@ -326,6 +327,7 @@ impl Model {
             has_dark_background: true,
             notice_state: NoticeState::default(),
             toast_state: ToastState::default(),
+            attention_pill: crate::attention_pill::AttentionPillState::default(),
             pending_prompt_assembly_notice: None,
             status_line_revision: 1,
             stream_activity_revision: 1,
@@ -400,7 +402,7 @@ impl Model {
 
         self.last_request_metrics = metrics;
         self.bump_status_line_revision();
-        if self.document_runtime.follow_bottom {
+        if self.document_pinned_to_bottom() {
             self.sync_document_viewport_to_bottom();
         }
     }
@@ -418,7 +420,7 @@ impl Model {
 
         self.last_context_usage = usage;
         self.bump_status_line_revision();
-        if self.document_runtime.follow_bottom {
+        if self.document_pinned_to_bottom() {
             self.sync_document_viewport_to_bottom();
         }
     }
@@ -560,6 +562,7 @@ impl Model {
         };
         self.notice_state = NoticeState::default();
         self.toast_state = ToastState::default();
+        self.reset_attention_pills();
         self.bump_status_line_revision();
         self.sync_transcript_render();
         self.sync_composer_height();

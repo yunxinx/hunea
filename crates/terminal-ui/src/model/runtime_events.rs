@@ -8,9 +8,25 @@ use super::{
     Model,
     runtime_response::{BufferedRuntimeResponse, strip_displayed_reasoning_prefix},
 };
-use crate::{ReasoningDisplayMode, Sender};
+use crate::{ReasoningDisplayMode, Sender, document::ViewportState};
 
 impl Model {
+    /// runtime 侧 transcript 变更后的统一视口同步：非手动滚动时恢复贴底跟随。
+    ///
+    /// 手动滚动期间到达的 runtime 内容不得强制贴底；恢复贴底由用户滚回底部触发。
+    /// 该策略必须集中在此处，散布到各调用点曾导致"部分事件保留视口、部分事件
+    /// 强制贴底"的不一致。本地 UI 变更（如折叠 reasoning）不适用本方法——
+    /// 那类刷新不应改变 follow 状态。
+    fn sync_viewport_after_runtime_transcript_refresh(
+        &mut self,
+        preserved_viewport_state: Option<ViewportState>,
+    ) {
+        if preserved_viewport_state.is_none() {
+            self.document_runtime.follow_bottom = true;
+        }
+        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+    }
+
     pub(crate) fn append_assistant_message_from_runtime(&mut self, content: impl Into<String>) {
         let content = content.into();
         if content.is_empty() {
@@ -26,8 +42,7 @@ impl Model {
         );
         self.refresh_status_line_after_transcript_change();
         self.sync_transcript_render();
-        self.document_runtime.follow_bottom = true;
-        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+        self.sync_viewport_after_runtime_transcript_refresh(preserved_viewport_state);
     }
 
     pub(crate) fn append_runtime_response_from_runtime(
@@ -245,8 +260,7 @@ impl Model {
         }
         self.refresh_status_line_after_transcript_change();
         self.sync_transcript_render();
-        self.document_runtime.follow_bottom = true;
-        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+        self.sync_viewport_after_runtime_transcript_refresh(preserved_viewport_state);
     }
 
     fn append_assistant_message_with_reasoning_from_runtime(
@@ -274,8 +288,7 @@ impl Model {
             );
         self.refresh_status_line_after_transcript_change();
         self.sync_transcript_render();
-        self.document_runtime.follow_bottom = true;
-        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+        self.sync_viewport_after_runtime_transcript_refresh(preserved_viewport_state);
     }
 
     pub(crate) fn toggle_reasoning_item(&mut self, item_index: usize) -> bool {
@@ -285,6 +298,8 @@ impl Model {
         }
 
         self.sync_transcript_render();
+        // 折叠/展开 reasoning 是用户本地 UI 动作而非新 runtime 内容，
+        // 故意不走 sync_viewport_after_runtime_transcript_refresh：不恢复贴底。
         self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
         true
     }
@@ -303,8 +318,7 @@ impl Model {
         self.transcript_mut().append_system_message(content);
         self.refresh_status_line_after_transcript_change();
         self.sync_transcript_render();
-        self.document_runtime.follow_bottom = true;
-        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+        self.sync_viewport_after_runtime_transcript_refresh(preserved_viewport_state);
     }
 
     pub(crate) fn present_pending_prompt_assembly_notice_if_ready(&mut self) {
@@ -332,8 +346,7 @@ impl Model {
         self.transcript_mut().append_work_duration_message(duration);
         self.refresh_status_line_after_transcript_change();
         self.sync_transcript_render();
-        self.document_runtime.follow_bottom = true;
-        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+        self.sync_viewport_after_runtime_transcript_refresh(preserved_viewport_state);
     }
 
     pub(crate) fn reset_runtime_final_body_divider_state(&mut self) {
@@ -360,8 +373,7 @@ impl Model {
         self.runtime_final_body_divider_inserted = true;
         self.refresh_status_line_after_transcript_change();
         self.sync_transcript_render();
-        self.document_runtime.follow_bottom = true;
-        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+        self.sync_viewport_after_runtime_transcript_refresh(preserved_viewport_state);
     }
 
     pub(crate) fn append_tool_result_from_runtime(
@@ -378,8 +390,7 @@ impl Model {
         self.transcript_mut().append_tool_result(content, kind);
         self.refresh_status_line_after_transcript_change();
         self.sync_transcript_render();
-        self.document_runtime.follow_bottom = true;
-        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+        self.sync_viewport_after_runtime_transcript_refresh(preserved_viewport_state);
     }
 
     pub(crate) fn append_runtime_tool_activity_from_runtime(
@@ -397,8 +408,7 @@ impl Model {
         }
         self.refresh_status_line_after_transcript_change();
         self.sync_transcript_render();
-        self.document_runtime.follow_bottom = true;
-        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+        self.sync_viewport_after_runtime_transcript_refresh(preserved_viewport_state);
         item_index
     }
 
@@ -412,8 +422,7 @@ impl Model {
         }
         self.refresh_status_line_after_transcript_change();
         self.sync_transcript_render();
-        self.document_runtime.follow_bottom = true;
-        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+        self.sync_viewport_after_runtime_transcript_refresh(preserved_viewport_state);
         true
     }
 
@@ -445,10 +454,7 @@ impl Model {
         }
         self.refresh_status_line_after_transcript_change();
         self.sync_transcript_render();
-        if preserved_viewport_state.is_none() {
-            self.document_runtime.follow_bottom = true;
-        }
-        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+        self.sync_viewport_after_runtime_transcript_refresh(preserved_viewport_state);
         true
     }
 
@@ -466,8 +472,7 @@ impl Model {
         }
         self.refresh_status_line_after_transcript_change();
         self.sync_transcript_render();
-        self.document_runtime.follow_bottom = true;
-        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+        self.sync_viewport_after_runtime_transcript_refresh(preserved_viewport_state);
         true
     }
 
@@ -482,8 +487,7 @@ impl Model {
         }
         self.refresh_status_line_after_transcript_change();
         self.sync_transcript_render();
-        self.document_runtime.follow_bottom = true;
-        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+        self.sync_viewport_after_runtime_transcript_refresh(preserved_viewport_state);
         true
     }
 
@@ -504,10 +508,7 @@ impl Model {
         }
         self.refresh_status_line_after_transcript_change();
         self.sync_transcript_render();
-        if preserved_viewport_state.is_none() {
-            self.document_runtime.follow_bottom = true;
-        }
-        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+        self.sync_viewport_after_runtime_transcript_refresh(preserved_viewport_state);
         true
     }
 }

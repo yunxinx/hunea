@@ -564,3 +564,60 @@ fn stream_activity_state_updates_reuse_the_stable_tail_layout() {
         "activity state changes must share the stable tail allocation"
     );
 }
+
+/// 构造已手动向上滚动（非贴底）的 model，返回滚动后的 viewport offset。
+fn manually_scrolled_model() -> (Model, usize) {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.set_window(40, 6);
+    model.set_palette(default_palette(), true);
+    for index in 0..20 {
+        model.append_assistant_message_from_runtime(format!("history message {index}"));
+    }
+    model.scroll_document_by(-4);
+    assert!(model.document_runtime.manual_scroll);
+    assert!(!model.document_pinned_to_bottom());
+    let viewport_y = model.document_runtime.viewport_y;
+    (model, viewport_y)
+}
+
+#[test]
+fn stream_activity_state_changes_keep_viewport_during_manual_scroll() {
+    let (mut model, viewport_y) = manually_scrolled_model();
+
+    model.show_stream_activity_with_header("Working");
+    model.show_stream_activity_retry_header("Retrying");
+    model.clear_stream_activity_retry_header();
+    model.pause_stream_activity();
+    model.resume_stream_activity();
+    model.set_stream_activity_output_tokens(128);
+    model.set_stream_activity_input_tokens(64);
+    model.set_stream_activity_thinking(true);
+    model.clear_stream_activity();
+
+    assert_eq!(
+        model.document_runtime.viewport_y, viewport_y,
+        "stream activity changes must not move a manually scrolled viewport"
+    );
+    assert!(model.document_runtime.manual_scroll);
+    assert!(!model.document_pinned_to_bottom());
+}
+
+#[test]
+fn stream_activity_still_follows_bottom_when_pinned() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.set_window(40, 6);
+    model.set_palette(default_palette(), true);
+    for index in 0..20 {
+        model.append_assistant_message_from_runtime(format!("history message {index}"));
+    }
+    assert!(model.document_pinned_to_bottom());
+    let pinned_viewport_y = model.document_runtime.viewport_y;
+
+    model.show_stream_activity_with_header("Working");
+
+    assert!(model.document_pinned_to_bottom());
+    assert!(
+        model.document_runtime.viewport_y >= pinned_viewport_y,
+        "pinned viewport must keep following the growing bottom"
+    );
+}

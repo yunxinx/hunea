@@ -90,6 +90,22 @@ impl Model {
             && self.tool_approval_panel.preview_is_fullscreen
     }
 
+    /// 审批面板当前是否对用户可见：面板打开、未被其他全屏层遮挡、且视口贴底
+    /// （内联面板是文档 tail 段，非贴底时在屏外）。审批自身的 fullscreen preview
+    /// 是审批流程的全屏形态，视为可见。
+    ///
+    /// 该谓词是审批 pill 触发/消失、fullscreen 升级抑制与屏外按键门控的单一事实源。
+    pub(crate) fn tool_approval_panel_visible(&self) -> bool {
+        if !self.tool_approval_panel.is_open {
+            return false;
+        }
+        match self.top_modal_layer() {
+            Some(crate::modal_layer::ModalLayer::ToolApprovalFullscreenPreview) => true,
+            Some(_) => false,
+            None => self.document_pinned_to_bottom(),
+        }
+    }
+
     pub(super) fn open_tool_approval_panel(
         &mut self,
         source: ToolApprovalSource,
@@ -106,7 +122,8 @@ impl Model {
         details: Vec<ToolApprovalDetail>,
         preview: Option<ToolApprovalPreview>,
     ) {
-        self.close_fullscreen_modal_layers();
+        // 不关闭已激活的全屏层：面板在后台静默打开，用户退出全屏层后立即可见。
+        let is_runtime_permission = matches!(source, ToolApprovalSource::RuntimePermission { .. });
         self.pause_stream_activity();
         self.close_context_budget();
         self.close_model_panel();
@@ -125,7 +142,23 @@ impl Model {
         self.tool_approval_panel_revision = self.tool_approval_panel_revision.saturating_add(1);
         self.close_composer_attached_ui();
         self.sync_composer_height();
-        self.sync_document_viewport_for_composer_cursor();
+        if self.document_pinned_to_bottom() {
+            self.sync_document_viewport_for_composer_cursor();
+        } else if is_runtime_permission {
+            // 面板是文档 tail 段，非贴底时追 composer 光标等同强制拉底；
+            // runtime 发起的审批保持视口不动，改由左侧审批 pill 提示。
+            self.sync_document_viewport_preserving_position();
+        } else {
+            // 用户主动打开的预览面板：按键即预期看到面板，恢复贴底使其可见。
+            // 否则面板屏外时按键门控会吞掉包括 Esc 在内的全部面板按键，
+            // 而 Preview 来源不置审批 pill，用户将失去键盘关闭面板的途径。
+            self.sync_document_viewport_to_bottom();
+        }
+        if is_runtime_permission && !self.tool_approval_panel_visible() {
+            // 面板打开但不可见（被全屏层遮挡或非贴底）：置常驻审批 pill，
+            // 由可见性收敛点（层关闭 / 贴底恢复）或审批处理清除。
+            self.mark_tool_approval_attention_pending();
+        }
     }
 
     pub(crate) fn close_tool_approval_panel(&mut self) {
@@ -134,11 +167,17 @@ impl Model {
         }
 
         self.tool_approval_panel = ToolApprovalPanelState::default();
+        self.clear_tool_approval_attention();
         self.clear_runtime_tool_activity_approval_suspensions_from_runtime();
         self.resume_stream_activity();
         self.tool_approval_panel_revision = self.tool_approval_panel_revision.saturating_add(1);
         self.sync_composer_height();
-        self.sync_document_viewport_for_composer_cursor();
+        if self.document_pinned_to_bottom() {
+            self.sync_document_viewport_for_composer_cursor();
+        } else {
+            // 非贴底时保持视口位置；面板行数减少由 offset clamp 兜底。
+            self.sync_document_viewport_preserving_position();
+        }
     }
 
     pub(crate) fn close_runtime_permission_approval_panel(&mut self) {
@@ -177,6 +216,13 @@ impl Model {
             self.tool_approval_panel.preview_scroll_offset = 0;
             return;
         }
+        // 面板不可见（被其他全屏层遮挡或非贴底）时抑制 fullscreen 升级，
+        // 避免审批预览换一种方式抢屏；层关闭 / 贴底恢复汇聚点会重新 sync，延迟升级生效。
+        if !self.tool_approval_panel_visible() {
+            self.tool_approval_panel.preview_is_fullscreen = false;
+            self.tool_approval_panel.preview_scroll_offset = 0;
+            return;
+        }
 
         let width = usize::from(self.width.max(1));
         let height = usize::from(self.height.max(1));
@@ -186,6 +232,20 @@ impl Model {
             self.complete_startup_banner_entrance();
         }
         self.clamp_tool_approval_fullscreen_preview_scroll();
+    }
+
+    /// 全屏模态层经输入分发关闭后，重新同步被抑制的审批预览升级，
+    /// 并按新的可见性收敛两种 attention pill 的消失条件。
+    pub(crate) fn sync_tool_approval_preview_mode_if_modal_layer_closed(
+        &mut self,
+        previous_layer: crate::modal_layer::ModalLayer,
+    ) {
+        if self.top_modal_layer() == Some(previous_layer) {
+            return;
+        }
+        self.sync_tool_approval_preview_mode();
+        self.sync_tool_approval_attention_visibility();
+        self.clear_new_message_pill_if_pinned();
     }
 
     pub(crate) fn scroll_tool_approval_fullscreen_preview_by(&mut self, delta_lines: isize) {

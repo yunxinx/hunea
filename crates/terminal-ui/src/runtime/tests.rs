@@ -434,3 +434,108 @@ fn find_text(buffer: &Buffer, needle: &str) -> Option<(u16, u16)> {
     }
     None
 }
+
+fn message_finished_event() -> RuntimeEvent {
+    RuntimeEvent::MessageFinished {
+        target: Some(RuntimeTarget::provider("local", "qwen3")),
+        response: ConversationResponse::assistant_text("final answer"),
+        finish_reason: None,
+        metrics: None,
+        context_usage: None,
+    }
+}
+
+fn scrollable_model() -> Model {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.set_window(40, 6);
+    model.set_palette(default_palette(), true);
+    for index in 0..20 {
+        model.append_assistant_message_from_runtime(format!("history message {index}"));
+    }
+    model
+}
+
+#[test]
+fn message_finished_while_pinned_shows_no_pill_and_follows_bottom() {
+    let mut model = scrollable_model();
+    assert!(model.document_pinned_to_bottom());
+
+    model.apply_runtime_event(message_finished_event());
+
+    assert_eq!(model.attention_pill_new_message_count_for_test(), None);
+    assert!(model.document_pinned_to_bottom());
+}
+
+#[test]
+fn message_finished_while_scrolled_up_shows_pill_and_keeps_viewport() {
+    let mut model = scrollable_model();
+    model.scroll_document_by(-4);
+    assert!(!model.document_pinned_to_bottom());
+    let viewport_y = model.document_runtime.viewport_y;
+
+    model.apply_runtime_event(message_finished_event());
+
+    assert_eq!(model.attention_pill_new_message_count_for_test(), Some(1));
+    assert!(!model.document_pinned_to_bottom());
+    assert_eq!(
+        model.document_runtime.viewport_y, viewport_y,
+        "final message must not move a manually scrolled viewport"
+    );
+}
+
+#[test]
+fn message_finished_behind_fullscreen_modal_shows_pill_and_keeps_layer() {
+    let mut model = scrollable_model();
+    model.open_session_picker_loading();
+    assert!(model.top_modal_layer().is_some());
+
+    model.apply_runtime_event(message_finished_event());
+
+    assert_eq!(model.attention_pill_new_message_count_for_test(), Some(1));
+    assert!(
+        model.top_modal_layer().is_some(),
+        "final message must not close the active fullscreen modal layer"
+    );
+}
+
+#[test]
+fn assistant_delta_flush_keeps_viewport_during_manual_scroll() {
+    let mut model = scrollable_model();
+    model.scroll_document_by(-4);
+    let viewport_y = model.document_runtime.viewport_y;
+
+    model.apply_runtime_event(RuntimeEvent::AssistantDelta {
+        target: RuntimeTarget::provider("local", "qwen3"),
+        content: "streamed content".to_string(),
+    });
+    model.flush_runtime_response_buffer();
+
+    assert_eq!(
+        model.document_runtime.viewport_y, viewport_y,
+        "flushed streamed content must not move a manually scrolled viewport"
+    );
+    assert!(!model.document_pinned_to_bottom());
+}
+
+#[test]
+fn session_resume_replay_restores_bottom_follow() {
+    let mut model = scrollable_model();
+    model.scroll_document_by(-4);
+    assert!(!model.document_pinned_to_bottom());
+
+    model.apply_runtime_event(RuntimeEvent::SessionResumed {
+        payload: SessionResumePayload {
+            session_id: "session-replay".to_string(),
+            transcript: vec![TranscriptReplayItem::Message {
+                role: TranscriptReplayRole::Assistant,
+                content: "replayed".to_string(),
+            }],
+            restored_model: None,
+        },
+    });
+
+    assert!(
+        model.document_runtime.follow_bottom,
+        "session replay must rebuild the transcript pinned to bottom"
+    );
+}

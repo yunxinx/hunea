@@ -68,6 +68,7 @@ pub fn render(model: &mut Model, frame: &mut RenderFrame<'_>) {
     }
 
     if render_active_overlay(model, frame, area) {
+        model.render_attention_pills(frame, area);
         model.render_toast(frame, area);
         return;
     }
@@ -113,6 +114,7 @@ pub fn render(model: &mut Model, frame: &mut RenderFrame<'_>) {
         ));
     }
 
+    model.render_attention_pills(frame, area);
     model.render_toast(frame, area);
 }
 

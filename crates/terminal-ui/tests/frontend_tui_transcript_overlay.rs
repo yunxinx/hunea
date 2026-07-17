@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{buffer::Buffer, layout::Rect};
 use runtime_domain::model_catalog::ModelSelection;
-use terminal_ui::{AppEvent, Model, ModelOptions, StartupBannerOptions};
+use terminal_ui::{AppEvent, Model, ModelOptions, ScrollAnimationMode, StartupBannerOptions};
 
 mod common;
 
@@ -13,6 +13,9 @@ fn ready_model(width: u16, height: u16) -> Model {
         ModelOptions {
             model_catalog: single_model_catalog(),
             selected_model: Some(ModelSelection::new("local", "qwen3")),
+            // 本测试关注 overlay 与主视图的滚动同步而非滚轮动力学：
+            // 关闭平滑滚动让滚轮瞬时位移（drain 推进点在 runner，集成测试无法驱动）。
+            scroll_animation: ScrollAnimationMode::Off,
             ..ModelOptions::default()
         },
     );

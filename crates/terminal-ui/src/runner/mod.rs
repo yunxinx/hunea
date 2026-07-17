@@ -206,6 +206,9 @@ pub fn run_with_runtime_coordinator(
         if render_needed {
             let frame_time = Instant::now();
             model.advance_toast_at(frame_time);
+            // 平滑滚动的位移发生在渲染前的推进点：与 toast 同用 frame_time，
+            // drain 未收敛时由 event_pipeline 的动画 deadline 驱动下一帧。
+            model.advance_smooth_scroll_at(frame_time);
             terminal.draw(|area, buffer| model.render_to_buffer_at(frame_time, area, buffer))?;
             // 不同全屏界面对鼠标的需求不同：transcript 需要滚轮转方向键，
             // resume picker 则完全交还给终端以保留原生选区和滚动。

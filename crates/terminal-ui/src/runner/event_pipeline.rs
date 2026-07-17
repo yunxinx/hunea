@@ -66,6 +66,7 @@ fn next_animation_deadline(model: &Model, now: Instant) -> Option<Instant> {
         model.startup_banner_entrance_next_frame_deadline_at(now),
         model.toast_next_frame_deadline_at(now),
         model.tool_activity_next_frame_deadline_at(now),
+        model.smooth_scroll_next_frame_deadline_at(now),
     ]
     .into_iter()
     .flatten()
@@ -191,6 +192,32 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn smooth_scroll_pending_requests_render_frames_until_drained() {
+        let mut model = Model::new(StartupBannerOptions::default());
+        model.update(crate::AppEvent::StartupReadyTimeout);
+        model.set_window(40, 8);
+        let now = Instant::now();
+        model.document_mouse_wheel_at(-3, now);
+
+        assert_eq!(
+            loop_wait_plan(&model, now),
+            LoopWaitPlan::Wait {
+                duration: Duration::from_millis(8),
+                render_on_timeout: true,
+            }
+        );
+
+        // 模拟主循环：动画 deadline 命中后在渲染前推进 drain，直至 pending 收敛。
+        let mut frame_time = now;
+        while let Some(deadline) = model.smooth_scroll_next_frame_deadline_at(frame_time) {
+            frame_time = deadline;
+            model.advance_smooth_scroll_at(frame_time);
+        }
+
+        assert_eq!(loop_wait_plan(&model, frame_time), LoopWaitPlan::Block);
     }
 
     #[test]

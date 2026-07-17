@@ -33,6 +33,10 @@ pub enum AppConfigError {
         path: Option<PathBuf>,
         value: String,
     },
+    InvalidScrollAnimation {
+        path: Option<PathBuf>,
+        value: String,
+    },
     InvalidStatusLineItem {
         path: Option<PathBuf>,
         value: String,
@@ -121,6 +125,19 @@ impl fmt::Display for AppConfigError {
             Self::InvalidMotionMode { path: None, value } => {
                 write!(f, "unknown tui.motion {:?}", value)
             }
+            Self::InvalidScrollAnimation {
+                path: Some(path),
+                value,
+            } => write!(
+                f,
+                "validate config file {}: tui.scroll_animation must be \"off\", \"snappy\", \"fast\", \"smooth\", \"gentle\", or \"glide\", got {:?}",
+                path.display(),
+                value
+            ),
+            Self::InvalidScrollAnimation { path: None, value } => write!(
+                f,
+                "tui.scroll_animation must be \"off\", \"snappy\", \"fast\", \"smooth\", \"gentle\", or \"glide\", got {value:?}"
+            ),
             Self::InvalidStatusLineItem {
                 path: Some(path),
                 value,
@@ -296,6 +313,7 @@ impl std::error::Error for AppConfigError {
             Self::Write { source, .. } => Some(source),
             Self::InvalidStyleMode { .. }
             | Self::InvalidMotionMode { .. }
+            | Self::InvalidScrollAnimation { .. }
             | Self::InvalidStatusLineItem { .. }
             | Self::InvalidExternalEditorCommand { .. }
             | Self::ExternalEditorMustWait { .. }

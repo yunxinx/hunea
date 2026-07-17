@@ -4,8 +4,8 @@ use runtime_domain::model_catalog::ModelSelection;
 
 use crate::{
     document::{
-        LayoutCache, RestoreState, StableTailLayoutCache, TailLayoutCache, TranscriptCache,
-        ViewportCache, ViewportState,
+        LayoutCache, RestoreState, SmoothScrollState, StableTailLayoutCache, TailLayoutCache,
+        TranscriptCache, ViewportCache, ViewportState,
     },
     selection::{AutoScrollDirection, MousePosition, SelectionClickState, SelectionState},
 };
@@ -129,6 +129,8 @@ pub(crate) struct DocumentRuntimeState {
     pub(crate) follow_bottom: bool,
     pub(crate) manual_scroll: bool,
     pub(crate) restore: RestoreState,
+    /// 滚轮平滑滚动累加器；纯瞬态，不进 `ViewportState` 语义锚点。
+    pub(crate) smooth_scroll: SmoothScrollState,
 }
 
 /// `NoticeState` 收口底部状态行上的短暂提示、滚动提示、外部编辑器提示与退出确认。

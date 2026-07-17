@@ -52,6 +52,9 @@ pub struct TuiConfig {
     pub print_transcript_on_exit: bool,
     pub show_reasoning_content: bool,
     pub reasoning_content_display: ReasoningContentDisplay,
+    /// 滚轮平滑滚动的手感档位；`Off` 恢复固定步长瞬时跳变（无加速度），
+    /// 是平滑滚动的完整逃生通道；`motion = "reduced"` 时无论取值均为瞬时。
+    pub scroll_animation: ScrollAnimationMode,
 }
 
 /// `DebugConfig` 表示仅用于本地调试与界面预览的配置。
@@ -81,6 +84,38 @@ impl MotionMode {
             "full" => Ok(Self::Full),
             "reduced" => Ok(Self::Reduced),
             other => Err(super::AppConfigError::InvalidMotionMode {
+                path: None,
+                value: other.to_string(),
+            }),
+        }
+    }
+}
+
+/// `ScrollAnimationMode` 表示滚轮平滑滚动的手感档位。
+///
+/// 五个动画档位参数单调有序、观感可区分（档位表在 terminal-ui 的
+/// `smooth_scroll.rs`）；语义化档位替代裸参数暴露，覆盖不同终端/鼠标驱动
+/// 组合的滚轮事件流特征差异。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrollAnimationMode {
+    Off,
+    Snappy,
+    Fast,
+    Smooth,
+    Gentle,
+    Glide,
+}
+
+impl ScrollAnimationMode {
+    pub(super) fn parse(value: &str) -> Result<Self, super::AppConfigError> {
+        match value {
+            "off" => Ok(Self::Off),
+            "snappy" => Ok(Self::Snappy),
+            "fast" => Ok(Self::Fast),
+            "smooth" => Ok(Self::Smooth),
+            "gentle" => Ok(Self::Gentle),
+            "glide" => Ok(Self::Glide),
+            other => Err(super::AppConfigError::InvalidScrollAnimation {
                 path: None,
                 value: other.to_string(),
             }),

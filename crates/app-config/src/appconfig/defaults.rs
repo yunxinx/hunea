@@ -1,7 +1,7 @@
 use super::{
     BRANCH_PICKER_LIST_ROWS_DEFAULT, COMPOSER_UNDO_DEFAULT_LIMIT, Config, DebugConfig,
-    MESSAGE_HISTORY_LIMIT_DEFAULT, MotionMode, ReasoningContentDisplay, RuntimeConfig, TuiConfig,
-    UserInputStyle,
+    MESSAGE_HISTORY_LIMIT_DEFAULT, MotionMode, ReasoningContentDisplay, RuntimeConfig,
+    ScrollAnimationMode, TuiConfig, UserInputStyle,
 };
 
 impl Config {
@@ -28,6 +28,7 @@ impl Config {
                 print_transcript_on_exit: false,
                 show_reasoning_content: false,
                 reasoning_content_display: ReasoningContentDisplay::Collapsed,
+                scroll_animation: ScrollAnimationMode::Smooth,
             },
             runtime: RuntimeConfig {
                 request_retry_attempts: 3,

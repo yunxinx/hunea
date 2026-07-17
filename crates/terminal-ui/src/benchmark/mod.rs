@@ -103,6 +103,17 @@ pub struct FrameRenderSummary {
     pub flushes: usize,
 }
 
+/// `SmoothScrollDrainSummary` 收敛 smooth-scroll drain benchmark 的稳定输出特征。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SmoothScrollDrainSummary {
+    /// burst 收敛消耗的 drain 帧数。
+    pub drain_steps: usize,
+    /// 整个收敛过程实际滚动的行数。
+    pub scrolled_lines: usize,
+    /// 收敛后的 document viewport offset。
+    pub final_offset: usize,
+}
+
 /// `DocumentStressScenario` 标记当前 stress summary 对应的测量场景。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocumentStressScenario {
@@ -958,6 +969,66 @@ impl ModelRenderBench {
     /// `render_frame` 通过生产 `TerminalSurface` 运行一帧完整渲染。
     pub fn render_frame(&mut self) -> FrameRenderSummary {
         self.frame_surface.render_model(&mut self.model)
+    }
+}
+
+/// `SmoothScrollDrainBench` 测量滚轮 burst 后平滑滚动 drain 至收敛的完整路径：
+/// 每个 drain 步都会走生产 `scroll_document_by`（含 layout 重建与方向性 exactize）。
+#[derive(Debug)]
+pub struct SmoothScrollDrainBench {
+    model: Model,
+    /// 人工推进的单调时间线：注入的滚轮/帧时刻全部由它派生，
+    /// 迭代间持续前进，保证加速度窗口判定确定且互不干扰。
+    timeline: std::time::Instant,
+}
+
+impl SmoothScrollDrainBench {
+    /// `new` 预置长 transcript 并停在贴底位置，等待滚轮 burst。
+    pub fn new(item_count: usize, width: u16, height: u16) -> Self {
+        let mut model = new_warm_stress_document_model(item_count, width, height);
+        model.sync_transcript_render();
+        model.sync_document_viewport_to_bottom();
+        assert!(
+            model.smooth_scroll_enabled(),
+            "smooth scroll drain benchmark requires the default animated scroll path"
+        );
+
+        Self {
+            model,
+            timeline: std::time::Instant::now(),
+        }
+    }
+
+    /// `drain_wheel_burst` 注入一段连续快速向上滚轮 burst（触发加速度爬升），
+    /// 然后按 8ms 帧间隔推进 drain 至收敛，返回稳定摘要。
+    pub fn drain_wheel_burst(&mut self) -> SmoothScrollDrainSummary {
+        // 迭代间隔拉开 1s：远大于加速度窗口（120ms），每次测量从基线倍率起步，
+        // 迭代之间完全同构、结果可复现。
+        self.timeline += std::time::Duration::from_secs(1);
+        // 回到贴底，保证每次迭代拥有相同的起点与可滚动空间。
+        self.model.sync_document_viewport_to_bottom();
+        let start_offset = self.model.document_runtime.viewport_y;
+
+        for event_index in 0..6u64 {
+            let event_at = self.timeline + std::time::Duration::from_millis(50 * event_index);
+            self.model
+                .document_mouse_wheel_at(-Model::document_mouse_wheel_delta(), event_at);
+        }
+
+        let mut frame_at = self.timeline + std::time::Duration::from_millis(300);
+        let mut drain_steps = 0usize;
+        while self.model.document_runtime.smooth_scroll.is_settling() {
+            frame_at += std::time::Duration::from_millis(8);
+            self.model.advance_smooth_scroll_at(frame_at);
+            drain_steps += 1;
+        }
+
+        let final_offset = self.model.document_runtime.viewport_y;
+        SmoothScrollDrainSummary {
+            drain_steps,
+            scrolled_lines: start_offset.saturating_sub(final_offset),
+            final_offset,
+        }
     }
 }
 

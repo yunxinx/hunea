@@ -5,7 +5,7 @@ use super::{
     file_config::{FileConfig, FileRuntimeConfig},
     types::{
         Config, EscRewindMode, KeyboardEnhancementMode, MotionMode, ReasoningContentDisplay,
-        RuntimeConfig, UserInputStyle,
+        RuntimeConfig, ScrollAnimationMode, UserInputStyle,
     },
     validate::{
         normalize_request_retry_delays, validate_branch_picker_list_rows,
@@ -206,6 +206,19 @@ pub(super) fn merge_config_file(
         *reasoning_content_display_configured = true;
     } else if enables_reasoning_without_display && !*reasoning_content_display_configured {
         config.tui.reasoning_content_display = ReasoningContentDisplay::Expanded;
+    }
+
+    if let Some(scroll_animation) = file_config.tui.scroll_animation {
+        config.tui.scroll_animation =
+            ScrollAnimationMode::parse(&scroll_animation).map_err(|error| match error {
+                AppConfigError::InvalidScrollAnimation { value, .. } => {
+                    AppConfigError::InvalidScrollAnimation {
+                        path: Some(path.to_path_buf()),
+                        value,
+                    }
+                }
+                other => other,
+            })?;
     }
 
     merge_runtime_config(&mut config.runtime, file_config.runtime, path)?;

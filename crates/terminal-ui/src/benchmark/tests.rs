@@ -48,6 +48,27 @@ fn terminal_flush_summary_matches_diff_and_writes_ansi() {
 }
 
 #[test]
+fn smooth_scroll_drain_bench_converges_and_repeats_consistently() {
+    let mut bench = SmoothScrollDrainBench::new(64, 80, 18);
+
+    let first = bench.drain_wheel_burst();
+    let second = bench.drain_wheel_burst();
+
+    assert!(
+        first.drain_steps > 1,
+        "wheel burst should drain across multiple animation frames, got {first:?}"
+    );
+    assert!(
+        first.scrolled_lines > 0,
+        "wheel burst should actually move the viewport, got {first:?}"
+    );
+    assert_eq!(
+        first, second,
+        "drain iterations must fully reset state and stay deterministic"
+    );
+}
+
+#[test]
 fn large_rust_code_block_fixture_is_fenced_and_scales_with_lines() {
     let small = large_rust_code_block_fixture(8);
     let large = large_rust_code_block_fixture(32);

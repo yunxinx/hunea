@@ -8,8 +8,8 @@ use runtime_domain::{envinfo, paths::DataDirResolution, phrases::LoadedStatusPhr
 use terminal_ui::{
     EscRewindMode as TuiEscRewindMode,
     KeyboardEnhancementPreference as TuiKeyboardEnhancementPreference, ModelOptions,
-    MotionMode as TuiMotionMode, ReasoningDisplayMode, RuntimeRequestPolicy, StatusLineItem,
-    StyleMode,
+    MotionMode as TuiMotionMode, ReasoningDisplayMode, RuntimeRequestPolicy,
+    ScrollAnimationMode as TuiScrollAnimationMode, StatusLineItem, StyleMode,
 };
 use tool_runtime::builtin::ManagedSearchToolConfig;
 
@@ -27,6 +27,19 @@ fn motion_mode_from_config(mode: app_config::appconfig::MotionMode) -> TuiMotion
     match mode {
         app_config::appconfig::MotionMode::Full => TuiMotionMode::Full,
         app_config::appconfig::MotionMode::Reduced => TuiMotionMode::Reduced,
+    }
+}
+
+fn scroll_animation_mode_from_config(
+    mode: app_config::appconfig::ScrollAnimationMode,
+) -> TuiScrollAnimationMode {
+    match mode {
+        app_config::appconfig::ScrollAnimationMode::Off => TuiScrollAnimationMode::Off,
+        app_config::appconfig::ScrollAnimationMode::Snappy => TuiScrollAnimationMode::Snappy,
+        app_config::appconfig::ScrollAnimationMode::Fast => TuiScrollAnimationMode::Fast,
+        app_config::appconfig::ScrollAnimationMode::Smooth => TuiScrollAnimationMode::Smooth,
+        app_config::appconfig::ScrollAnimationMode::Gentle => TuiScrollAnimationMode::Gentle,
+        app_config::appconfig::ScrollAnimationMode::Glide => TuiScrollAnimationMode::Glide,
     }
 }
 
@@ -151,6 +164,7 @@ fn model_options_from_configs(
         reasoning_display_mode: reasoning_display_mode_from_config(
             tui_config.reasoning_content_display,
         ),
+        scroll_animation: scroll_animation_mode_from_config(tui_config.scroll_animation),
         debug_commands_enabled: debug_config.is_some_and(|config| config.enabled),
         model_catalog: loaded_models.catalog.clone(),
         selected_model: loaded_models.selected_model.clone(),

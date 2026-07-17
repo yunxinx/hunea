@@ -89,6 +89,7 @@ mod view;
 
 pub mod theme;
 
+pub use document::ScrollAnimationMode;
 pub use external_editor::ExternalEditorLaunch;
 pub use model::{
     EscRewindMode, KeyboardEnhancementPreference, Model, ModelOptions, RequestMetrics,

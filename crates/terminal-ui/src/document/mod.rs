@@ -6,6 +6,7 @@ mod manual_scroll;
 mod selection_semantic_cache;
 mod slot_frame;
 mod slot_viewport;
+mod smooth_scroll;
 mod sync;
 mod tail;
 mod viewport_state;
@@ -24,6 +25,9 @@ pub(super) use self::manual_scroll::ManualScrollRestoreState as RestoreState;
 pub(crate) use self::slot_viewport::{
     bottom_follow_viewport_line_indices, offset_viewport_line_indices,
 };
+pub use self::smooth_scroll::ScrollAnimationMode;
+pub(super) use self::smooth_scroll::SmoothScrollState;
+pub(crate) use self::smooth_scroll::SmoothScrollTuning;
 pub(super) use self::tail::{
     DocumentStableTailLayoutCache as StableTailLayoutCache,
     DocumentTailLayoutCache as TailLayoutCache,

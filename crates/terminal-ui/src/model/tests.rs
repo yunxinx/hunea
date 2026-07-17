@@ -1880,6 +1880,8 @@ fn file_picker_mouse_wheel_scrolls_document_without_moving_popup_list() {
     );
 
     model.update(AppEvent::MouseWheel { delta_lines: -3 });
+    // 平滑滚动默认开启：位移发生在渲染帧 drain，此处直接收敛后断言。
+    model.settle_smooth_scroll_for_test();
 
     assert!(
         model.document_runtime.viewport_y < before_document_offset,
@@ -1920,6 +1922,8 @@ fn deleting_file_picker_trigger_after_mouse_wheel_keeps_manual_document_viewport
 
     let bottom_offset = model.document_runtime.viewport_y;
     model.update(AppEvent::MouseWheel { delta_lines: -3 });
+    // 平滑滚动默认开启：位移发生在渲染帧 drain，此处直接收敛后断言。
+    model.settle_smooth_scroll_for_test();
     let scrolled_offset = model.document_runtime.viewport_y;
     assert!(
         scrolled_offset < bottom_offset,
@@ -2626,6 +2630,131 @@ fn build_document_layout_exactizes_a_newly_scrolled_transcript_window() {
             .enumerate()
             .any(|(item_index, metrics)| { item_index > 16 && metrics.is_estimated() }),
         "scroll-driven exactization should stay local instead of settling the whole transcript"
+    );
+}
+
+/// 测试直接向累加器注入 pending 时使用默认档位（Smooth）的调参，
+/// 与默认构造模型的档位保持一致。
+fn smooth_tuning_for_test() -> &'static crate::document::SmoothScrollTuning {
+    crate::ScrollAnimationMode::Smooth
+        .tuning()
+        .expect("smooth tier must define a tuning")
+}
+
+/// M6 fixture：足够长的均匀 transcript + 中段手动滚动位置，
+/// 上下两侧都留有估算历史，用于观察方向性 exactize 扩展。
+fn smooth_scroll_exactize_fixture() -> Model {
+    let mut model = Model::new_with_style_mode(StartupBannerOptions::default(), StyleMode::Ms);
+    model.transcript_mut().clear();
+    model.transcript_mut().set_gap(0);
+    for index in 0..96 {
+        model.transcript_mut().append_message(
+            Sender::Assistant,
+            format!(
+                "item {index}: alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu"
+            ),
+        );
+    }
+    model.set_window(18, 6);
+    model.set_palette(default_palette(), true);
+    model.sync_transcript_render();
+
+    let layout = model.build_document_layout(crate::frame_time::FrameRenderContext::capture());
+    let mid_offset = layout.line_count() / 2;
+    apply_scrolled_offset(&mut model, mid_offset, true);
+    model
+}
+
+#[test]
+fn smooth_scroll_pending_upward_extends_exactize_window_above_viewport() {
+    let mut model = smooth_scroll_exactize_fixture();
+    let mut baseline = model.clone();
+
+    // pending 为负（向上滚动），|pending| 超过 cap，方向性扩展应取 24 行。
+    model.document_runtime.smooth_scroll.accumulate_wheel(
+        -40,
+        std::time::Instant::now(),
+        smooth_tuning_for_test(),
+    );
+    model.ensure_current_transcript_window_exact();
+
+    let index = model.transcript_render.index.clone();
+    let (start, count) = model
+        .current_visible_transcript_window_for_index(&index)
+        .expect("manual-scroll viewport should expose a visible transcript window");
+    let overscan_lines = crate::transcript::viewport_overscan_line_budget(count);
+    let extended_start = start.saturating_sub(24);
+    let extended_count = count + (start - extended_start);
+    assert!(
+        index.line_window_is_exact(extended_start, extended_count, overscan_lines),
+        "upward smooth-scroll pending should exactize the window extended 24 lines above the viewport"
+    );
+
+    // 反方向（下方）维持现状：扩展窗口覆盖的最后一个 item 之后仍留有估算历史。
+    let (_, end_item) = index
+        .item_range_for_line_window(extended_start, extended_count, overscan_lines)
+        .expect("extended transcript window should resolve to an item range");
+    assert!(
+        index
+            .metrics
+            .iter()
+            .enumerate()
+            .any(|(item_index, metrics)| item_index >= end_item && metrics.is_estimated()),
+        "upward extension must not exactize additional items below the symmetric overscan window"
+    );
+
+    // pending 为零的基线：同一向上扩展区域不应被精确化，预算与现状一致。
+    baseline.ensure_current_transcript_window_exact();
+    let baseline_index = baseline.transcript_render.index.clone();
+    let (baseline_start, baseline_count) = baseline
+        .current_visible_transcript_window_for_index(&baseline_index)
+        .expect("baseline viewport should expose a visible transcript window");
+    let baseline_overscan = crate::transcript::viewport_overscan_line_budget(baseline_count);
+    let baseline_extended_start = baseline_start.saturating_sub(24);
+    assert!(
+        !baseline_index.line_window_is_exact(
+            baseline_extended_start,
+            baseline_count + (baseline_start - baseline_extended_start),
+            baseline_overscan,
+        ),
+        "without smooth-scroll pending the exactize budget must stay symmetric (current behavior)"
+    );
+}
+
+#[test]
+fn smooth_scroll_pending_downward_extends_exactize_window_below_viewport() {
+    let mut model = smooth_scroll_exactize_fixture();
+
+    // pending 为正（向下滚动），扩展作用于窗口下方。
+    model.document_runtime.smooth_scroll.accumulate_wheel(
+        40,
+        std::time::Instant::now(),
+        smooth_tuning_for_test(),
+    );
+    model.ensure_current_transcript_window_exact();
+
+    let index = model.transcript_render.index.clone();
+    let (start, count) = model
+        .current_visible_transcript_window_for_index(&index)
+        .expect("manual-scroll viewport should expose a visible transcript window");
+    let overscan_lines = crate::transcript::viewport_overscan_line_budget(count);
+    let extended_count = count.saturating_add(24);
+    assert!(
+        index.line_window_is_exact(start, extended_count, overscan_lines),
+        "downward smooth-scroll pending should exactize the window extended 24 lines below the viewport"
+    );
+
+    // 反方向（上方）维持现状：扩展窗口覆盖的第一个 item 之前仍留有估算历史。
+    let (start_item, _) = index
+        .item_range_for_line_window(start, extended_count, overscan_lines)
+        .expect("extended transcript window should resolve to an item range");
+    assert!(
+        index
+            .metrics
+            .iter()
+            .enumerate()
+            .any(|(item_index, metrics)| item_index < start_item && metrics.is_estimated()),
+        "downward extension must not exactize additional items above the symmetric overscan window"
     );
 }
 

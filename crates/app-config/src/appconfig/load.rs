@@ -90,7 +90,7 @@ fn load_from_config_paths(
 #[cfg(test)]
 mod tests {
     use super::{load_from_paths, load_with_resolution};
-    use crate::appconfig::{AppConfigError, MotionMode, UserInputStyle};
+    use crate::appconfig::{AppConfigError, MotionMode, ScrollAnimationMode, UserInputStyle};
     use runtime_domain::paths::DataDirResolution;
     use std::{
         fs,
@@ -164,6 +164,74 @@ mod tests {
         let reduced_config = load_from_paths(Some(reduced_working_dir.as_path()), None)
             .expect("reduced motion should be accepted");
         assert_eq!(reduced_config.tui.motion, MotionMode::Reduced);
+    }
+
+    #[test]
+    fn load_defaults_scroll_animation_to_smooth_and_parses_all_tiers() {
+        let default_working_dir = temp_test_dir("load-default-scroll-animation-working");
+        let default_config = load_from_paths(Some(default_working_dir.as_path()), None)
+            .expect("missing scroll_animation config should default to smooth");
+        assert_eq!(
+            default_config.tui.scroll_animation,
+            ScrollAnimationMode::Smooth
+        );
+
+        for (value, expected) in [
+            ("off", ScrollAnimationMode::Off),
+            ("snappy", ScrollAnimationMode::Snappy),
+            ("fast", ScrollAnimationMode::Fast),
+            ("smooth", ScrollAnimationMode::Smooth),
+            ("gentle", ScrollAnimationMode::Gentle),
+            ("glide", ScrollAnimationMode::Glide),
+        ] {
+            let working_dir = temp_test_dir(&format!("load-scroll-animation-{value}-working"));
+            write_config(
+                &working_dir.join(".hunea").join("config.toml"),
+                &format!("[tui]\nscroll_animation = \"{value}\"\n"),
+            );
+            let config = load_from_paths(Some(working_dir.as_path()), None)
+                .unwrap_or_else(|error| panic!("tier {value:?} should be accepted: {error}"));
+            assert_eq!(config.tui.scroll_animation, expected);
+        }
+    }
+
+    #[test]
+    fn load_rejects_unknown_scroll_animation_mode() {
+        let working_dir = temp_test_dir("load-rejects-scroll-animation-working");
+        write_config(
+            &working_dir.join(".hunea").join("config.toml"),
+            "[tui]\nscroll_animation = \"sometimes\"\n",
+        );
+
+        let error = load_from_paths(Some(working_dir.as_path()), None)
+            .expect_err("unknown scroll animation mode should be rejected");
+
+        assert!(matches!(
+            error,
+            AppConfigError::InvalidScrollAnimation {
+                path: Some(_),
+                ref value,
+            } if value == "sometimes"
+        ));
+        // 文案必须同时带字段名与非法值，便于 CLI 启动错误定位。
+        let message = error.to_string();
+        assert!(message.contains("tui.scroll_animation"), "got: {message}");
+        assert!(message.contains("sometimes"), "got: {message}");
+    }
+
+    #[test]
+    fn load_rejects_bool_scroll_animation_as_decode_error() {
+        // 档位是字符串枚举，历史 bool 形态不属于合法值域：类型不符在
+        // TOML decode 阶段失败，而不是落入档位校验。
+        let working_dir = temp_test_dir("load-rejects-bool-scroll-animation-working");
+        write_config(
+            &working_dir.join(".hunea").join("config.toml"),
+            "[tui]\nscroll_animation = true\n",
+        );
+
+        let error = load_from_paths(Some(working_dir.as_path()), None)
+            .expect_err("bool scroll_animation should fail to decode");
+        assert!(matches!(error, AppConfigError::Decode { .. }));
     }
 
     #[test]

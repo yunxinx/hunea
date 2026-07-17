@@ -330,6 +330,7 @@ mod tests {
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
             esc_rewind_mode: EscRewindMode::Coarse,
             keyboard_enhancement: KeyboardEnhancementMode::Auto,
+            scroll_animation: app_config::appconfig::ScrollAnimationMode::Smooth,
         });
 
         assert!(options.copy_on_mouse_selection_release);
@@ -440,6 +441,7 @@ mod tests {
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
             esc_rewind_mode: EscRewindMode::Coarse,
             keyboard_enhancement: KeyboardEnhancementMode::Auto,
+            scroll_animation: app_config::appconfig::ScrollAnimationMode::Smooth,
         });
 
         assert!(options.swap_enter_and_send);
@@ -468,6 +470,7 @@ mod tests {
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
             esc_rewind_mode: EscRewindMode::Coarse,
             keyboard_enhancement: KeyboardEnhancementMode::Auto,
+            scroll_animation: app_config::appconfig::ScrollAnimationMode::Smooth,
         });
 
         assert!(!options.ctrl_c_clears_input);
@@ -496,6 +499,7 @@ mod tests {
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
             esc_rewind_mode: EscRewindMode::Coarse,
             keyboard_enhancement: KeyboardEnhancementMode::Auto,
+            scroll_animation: app_config::appconfig::ScrollAnimationMode::Smooth,
         });
 
         assert_eq!(options.esc_interrupt_presses, 3);
@@ -524,6 +528,7 @@ mod tests {
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
             esc_rewind_mode: EscRewindMode::Coarse,
             keyboard_enhancement: KeyboardEnhancementMode::Auto,
+            scroll_animation: app_config::appconfig::ScrollAnimationMode::Smooth,
         });
 
         assert!(!options.show_esc_interrupt_hint);
@@ -552,6 +557,7 @@ mod tests {
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
             esc_rewind_mode: EscRewindMode::Coarse,
             keyboard_enhancement: KeyboardEnhancementMode::Auto,
+            scroll_animation: app_config::appconfig::ScrollAnimationMode::Smooth,
         });
 
         assert!(options.show_reasoning_content);
@@ -580,6 +586,7 @@ mod tests {
             reasoning_content_display: ReasoningContentDisplay::Expanded,
             esc_rewind_mode: EscRewindMode::Coarse,
             keyboard_enhancement: KeyboardEnhancementMode::Auto,
+            scroll_animation: app_config::appconfig::ScrollAnimationMode::Smooth,
         });
 
         assert_eq!(
@@ -680,6 +687,7 @@ mod tests {
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
             esc_rewind_mode: EscRewindMode::Coarse,
             keyboard_enhancement: KeyboardEnhancementMode::Auto,
+            scroll_animation: app_config::appconfig::ScrollAnimationMode::Smooth,
         };
 
         write_terminal_replay_on_exit(&mut FailingWriter, &model, false, &config)
@@ -710,6 +718,7 @@ mod tests {
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
             esc_rewind_mode: EscRewindMode::Coarse,
             keyboard_enhancement: KeyboardEnhancementMode::Auto,
+            scroll_animation: app_config::appconfig::ScrollAnimationMode::Smooth,
         };
         let mut output = Vec::new();
 
@@ -741,6 +750,7 @@ mod tests {
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
             esc_rewind_mode: EscRewindMode::Coarse,
             keyboard_enhancement: KeyboardEnhancementMode::Auto,
+            scroll_animation: app_config::appconfig::ScrollAnimationMode::Smooth,
         }
     }
 
@@ -752,6 +762,25 @@ mod tests {
         let options = model_options_from_config(&config);
 
         assert_eq!(options.motion_mode, terminal_ui::MotionMode::Reduced);
+    }
+
+    #[test]
+    fn model_options_map_scroll_animation_tiers_without_stringly_typed_state() {
+        // 默认档位 Smooth 与逃生档位 Off 分别映射到 terminal-ui 侧同名枚举。
+        let default_options = model_options_from_config(&default_tui_config());
+        assert_eq!(
+            default_options.scroll_animation,
+            terminal_ui::ScrollAnimationMode::Smooth
+        );
+
+        let off_options = model_options_from_config(&TuiConfig {
+            scroll_animation: app_config::appconfig::ScrollAnimationMode::Off,
+            ..default_tui_config()
+        });
+        assert_eq!(
+            off_options.scroll_animation,
+            terminal_ui::ScrollAnimationMode::Off
+        );
     }
 
     fn default_runtime_config() -> RuntimeConfig {

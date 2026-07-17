@@ -209,6 +209,26 @@ fn model_render_benches(c: &mut Criterion) {
     group.finish();
 }
 
+fn smooth_scroll_benches(c: &mut Criterion) {
+    let mut group = c.benchmark_group("frontend_tui/smooth_scroll");
+
+    // 度量整个收敛过程：一次滚轮 burst（含加速度爬升）+ 按帧 drain 至 pending 清零，
+    // 每个 drain 步都走生产 scroll_document_by 路径（layout 重建 + 方向性 exactize）。
+    for item_count in [512_usize, 2048_usize] {
+        group.throughput(Throughput::Elements(item_count as u64));
+        group.bench_with_input(
+            BenchmarkId::new("drain_wheel_burst", item_count),
+            &item_count,
+            |b, &item_count| {
+                let mut bench = benchmark::SmoothScrollDrainBench::new(item_count, 80, 24);
+                b.iter(|| black_box(bench.drain_wheel_burst()));
+            },
+        );
+    }
+
+    group.finish();
+}
+
 fn terminal_grid_benches(c: &mut Criterion) {
     let width = 240_u16;
     let height = 70_u16;
@@ -259,6 +279,7 @@ criterion_group!(
         composer_benches,
         document_benches,
         model_render_benches,
+        smooth_scroll_benches,
         terminal_grid_benches,
         terminal_surface_benches
 );

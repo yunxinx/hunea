@@ -7,7 +7,7 @@ use runtime_domain::{
 };
 
 use crate::{
-    MotionMode, ReasoningDisplayMode,
+    MotionMode, ReasoningDisplayMode, ScrollAnimationMode,
     composer::DEFAULT_COMPOSER_UNDO_LIMIT,
     entry_tree::BRANCH_PICKER_LIST_ROWS_DEFAULT,
     file_picker::{FILE_PICKER_POPUP_MAX_HEIGHT, FILE_PICKER_POPUP_MIN_HEIGHT},
@@ -58,6 +58,9 @@ pub struct ModelOptions {
     pub message_history_limit: usize,
     pub show_reasoning_content: bool,
     pub reasoning_display_mode: ReasoningDisplayMode,
+    /// 滚轮平滑滚动档位；`Off` 为瞬时滚动，`MotionMode::Reduced` 时无论
+    /// 档位取值均为瞬时滚动。
+    pub scroll_animation: ScrollAnimationMode,
     pub debug_commands_enabled: bool,
     pub model_catalog: ModelCatalog,
     pub selected_model: Option<ModelSelection>,
@@ -91,6 +94,7 @@ impl Default for ModelOptions {
             message_history_limit: 100,
             show_reasoning_content: false,
             reasoning_display_mode: ReasoningDisplayMode::Collapsed,
+            scroll_animation: ScrollAnimationMode::default(),
             debug_commands_enabled: false,
             model_catalog: ModelCatalog::default(),
             selected_model: None,

@@ -1,6 +1,9 @@
 use crossterm::event::MouseButton;
 use ratatui::{buffer::Buffer, layout::Rect};
-use terminal_ui::{AppEvent, Model, StartupBannerOptions, theme::default_palette};
+use terminal_ui::{
+    AppEvent, Model, ModelOptions, ScrollAnimationMode, StartupBannerOptions,
+    theme::default_palette,
+};
 
 #[test]
 fn manual_scrollback_renders_history_progress_hint() {
@@ -43,7 +46,15 @@ fn clicking_history_progress_hint_hides_it() {
 }
 
 fn ready_model(width: u16, height: u16) -> Model {
-    let mut model = Model::new(StartupBannerOptions::default());
+    // 本测试关注滚动指示器本身而非滚轮动力学：关闭平滑滚动，
+    // 让滚轮事件瞬时位移（drain 推进点在 runner，集成测试无法驱动）。
+    let mut model = Model::new_with_options(
+        StartupBannerOptions::default(),
+        ModelOptions {
+            scroll_animation: ScrollAnimationMode::Off,
+            ..ModelOptions::default()
+        },
+    );
     model.update(AppEvent::Resized { width, height });
     model.update(AppEvent::DetectedPalette {
         palette: default_palette(),

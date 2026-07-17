@@ -18,6 +18,6 @@ pub use types::{
     COMPOSER_UNDO_DEFAULT_LIMIT, COMPOSER_UNDO_MAX_LIMIT, COMPOSER_UNDO_MIN_LIMIT, Config,
     DebugConfig, EscRewindMode, FILE_PICKER_POPUP_MAX_HEIGHT, FILE_PICKER_POPUP_MIN_HEIGHT,
     KeyboardEnhancementMode, MESSAGE_HISTORY_LIMIT_DEFAULT, MESSAGE_HISTORY_LIMIT_MAX,
-    MESSAGE_HISTORY_LIMIT_MIN, MotionMode, ReasoningContentDisplay, RuntimeConfig, TuiConfig,
-    UserInputStyle,
+    MESSAGE_HISTORY_LIMIT_MIN, MotionMode, ReasoningContentDisplay, RuntimeConfig,
+    ScrollAnimationMode, TuiConfig, UserInputStyle,
 };

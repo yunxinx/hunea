@@ -180,23 +180,10 @@ impl Model {
                 if !result.is_ignored() {
                     return result.into_effect();
                 }
-                let before_document_viewport_y = self.document_runtime.viewport_y;
-                let before_composer_viewport_y = self.composer.viewport_offset();
-                let before_follow_bottom = self.document_runtime.follow_bottom;
-                let before_manual_document_scroll = self.document_runtime.manual_scroll;
-                let had_pending_click = self.pending_composer_cursor_click.active;
-                self.scroll_document_by(delta_lines);
-                if self.document_runtime.viewport_y != before_document_viewport_y
-                    || self.composer.viewport_offset() != before_composer_viewport_y
-                    || self.document_runtime.follow_bottom != before_follow_bottom
-                    || self.document_runtime.manual_scroll != before_manual_document_scroll
-                {
-                    self.clear_pending_composer_cursor_click();
-                    if had_pending_click {
-                        self.reset_selection_click();
-                    }
-                    self.show_history_scroll_indicator();
-                }
+                // `Instant` 在事件入口采样一次传入（状态模块不取时钟）；
+                // 位移与滚动反馈副作用统一发生在 `scroll_document_by_wheel`，
+                // 平滑路径下由渲染帧 drain 触发。
+                self.document_mouse_wheel_at(delta_lines, std::time::Instant::now());
                 None
             }
             AppEvent::MouseDown {
@@ -547,17 +534,17 @@ impl Model {
             };
         }
 
-        if matches!(key.code, KeyCode::PageUp | KeyCode::PageDown)
-            && self.document_runtime.manual_scroll
-        {
-            return None;
-        }
-
         if matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) {
+            let direction: isize = if key.code == KeyCode::PageUp { -1 } else { 1 };
+            // 文档翻页优先于 composer 翻页；行为矩阵与判据收口在
+            // document/sync 的 handle_document_page_key，这里只做路由。
+            if self.handle_document_page_key(direction) {
+                return None;
+            }
+
             let old_value = self.composer_text().to_string();
             let old_line = self.composer.line();
             let old_column = self.composer.column();
-            let direction = if key.code == KeyCode::PageUp { -1 } else { 1 };
             if self.composer_mut().handle_page_key(direction) {
                 self.sync_composer_attached_picker_state();
                 self.sync_composer_height();

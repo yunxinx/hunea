@@ -69,6 +69,10 @@ pub struct Model {
     pub(super) startup_banner_entrance: StartupBannerEntranceState,
     pub(super) style_mode: StyleMode,
     pub(super) motion_mode: crate::MotionMode,
+    /// 滚轮平滑滚动档位；生效与否还需结合 motion_mode，见 `smooth_scroll_enabled`。
+    /// 档位调参在使用处经 `ScrollAnimationMode::tuning()` 取表传参，
+    /// 不注入 `DocumentRuntimeState`——避免会话重置路径静默丢档。
+    pub(super) scroll_animation: crate::ScrollAnimationMode,
     pub(super) status_line_items: Vec<StatusLineItem>,
     pub(super) status_line_2_items: Vec<StatusLineItem>,
     pub(super) external_editor: Vec<String>,
@@ -238,6 +242,7 @@ impl Model {
             startup_banner_entrance: StartupBannerEntranceState::default(),
             style_mode,
             motion_mode,
+            scroll_animation: options.scroll_animation,
             status_line_items: status_line_items.clone(),
             status_line_2_items,
             external_editor: options.external_editor,

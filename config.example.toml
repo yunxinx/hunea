@@ -15,6 +15,16 @@
 #   toast 的信息展示时限仍然保留。
 motion = "full"
 
+# `scroll_animation` 控制滚轮平滑滚动的手感档位（分帧推进 + 快速连滚加速度）。
+# - "off"：关闭平滑滚动，滚轮恢复固定 3 行/格的瞬时跳变，无加速度。
+# - "snappy"：接近瞬时，仅柔化大幅滚动。
+# - "fast"：快速收敛，少量动画。
+# - "smooth"：均衡档位，是默认值。
+# - "gentle"：更长的滑动。
+# - "glide"：最长的滑动。
+# 注意：`motion = "reduced"` 时无论此项取值，滚动均为瞬时。
+scroll_animation = "smooth"
+
 # 可选值：
 # `user_input_style` 控制“输入中的用户内容”和“发送后的用户消息”的展示风格。
 # - "cx"：当前 framed 样式。composer 与用户消息会在足够高的窗口里显示 surface frame。

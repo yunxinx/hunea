@@ -1,12 +1,19 @@
 use std::{rc::Rc, time::Instant};
 
 use super::{Model, metrics::TranscriptSyncProfile};
+
 use crate::{
     document::offset_viewport_line_indices,
     status_line::{StatusLineRenderResult, status_line_gap_before, status_line_pair_height},
     style_mode::StyleMode,
     transcript::{TranscriptEstimateBreakdown, index_only_render_result},
 };
+
+/// 平滑滚动 drain 期间沿滚动方向额外精确化的行数上限。
+/// 取约两个默认对称 overscan 上限（`MAX_VIEWPORT_OVERSCAN_LINES` 的 2 倍）：
+/// 让 drain 目的地行数在动画到达前已精确，避免逐帧动画放大「估算 → 精确」
+/// 的行数跳变，同时约束单帧 exactize 的额外增量。
+const SMOOTH_SCROLL_EXACTIZE_OVERSCAN_CAP: usize = 24;
 
 impl Model {
     pub(crate) fn sync_composer_height(&mut self) {
@@ -140,7 +147,10 @@ impl Model {
             else {
                 break;
             };
+            // 对称 overscan 预算仍按可见行数计算；方向性扩展只作用于行窗口本身，
+            // 非平滑滚动路径（pending 为零）的预算与既有行为完全一致。
             let overscan_lines = crate::transcript::viewport_overscan_line_budget(count);
+            let (start, count) = self.extend_exactize_window_toward_smooth_scroll(start, count);
             if index.line_window_is_exact(start, count, overscan_lines) {
                 break;
             }
@@ -160,6 +170,36 @@ impl Model {
         }
 
         index
+    }
+
+    /// drain 期间（smooth scroll pending 非零）沿滚动方向扩展 exactize 行窗口。
+    ///
+    /// 底层 `summary_positions_for_line_window` 的 overscan 是围绕窗口对称的
+    /// 单值，无法表达方向性预算；把行窗口本身沿 pending 符号方向延伸
+    /// `min(|pending|, cap)` 行，等价于只在滚动方向扩大 overscan——反方向
+    /// 边界与对称预算维持现状。pending 为零时窗口原样返回，行为与既有实现
+    /// 完全一致。
+    fn extend_exactize_window_toward_smooth_scroll(
+        &self,
+        start: usize,
+        count: usize,
+    ) -> (usize, usize) {
+        let pending = self.document_runtime.smooth_scroll.pending_lines();
+        if pending == 0 {
+            return (start, count);
+        }
+
+        let extension = pending
+            .unsigned_abs()
+            .min(SMOOTH_SCROLL_EXACTIZE_OVERSCAN_CAP);
+        if pending < 0 {
+            // 向上滚动：drain 目的地在窗口上方，向上延伸窗口起点。
+            let extended_start = start.saturating_sub(extension);
+            (extended_start, count + (start - extended_start))
+        } else {
+            // 向下滚动：向下延伸窗口终点；底部越界由行窗口解析自身 clamp。
+            (start, count.saturating_add(extension))
+        }
     }
 
     fn release_transcript_index_holders_for_exactization(&mut self) {

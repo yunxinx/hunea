@@ -110,6 +110,13 @@ fn config_error_rows(error: &appconfig::AppConfigError) -> Vec<(&'static str, St
             "Unknown motion mode",
             "full, reduced",
         ),
+        AppConfigError::InvalidScrollAnimation { path, value } => validation_rows(
+            path,
+            "tui.scroll_animation",
+            value,
+            "Unknown scroll animation mode",
+            "off, snappy, fast, smooth, gentle, glide",
+        ),
         AppConfigError::InvalidStatusLineItem { path, value } => validation_rows(
             path,
             "tui.status_line",

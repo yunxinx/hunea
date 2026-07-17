@@ -337,6 +337,8 @@ fn offscreen_approval_panel_keeps_document_wheel_scrolling() {
     let viewport_y = model.document_runtime.viewport_y;
 
     model.update(AppEvent::MouseWheel { delta_lines: -2 });
+    // 平滑滚动默认开启：位移发生在渲染帧 drain，此处直接收敛后断言。
+    model.settle_smooth_scroll_for_test();
 
     assert!(
         model.document_runtime.viewport_y < viewport_y,

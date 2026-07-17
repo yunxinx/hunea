@@ -1697,6 +1697,439 @@ fn document_layout_key_changes_when_fullscreen_modal_gates_inline_tail() {
     );
 }
 
+#[test]
+fn smooth_wheel_drain_converges_to_instant_scroll_offset() {
+    let mut smooth = ready_smooth_scrollback_model(crate::ModelOptions::default());
+    let mut instant = ready_smooth_scrollback_model(crate::ModelOptions::default());
+    assert!(smooth.smooth_scroll_enabled());
+    let bottom = smooth.document_runtime.viewport_y;
+    let base = std::time::Instant::now();
+
+    // 事件间隔超出加速窗口（120ms），倍率保持基线，两条路径的总增量一致可比。
+    smooth.document_mouse_wheel_at(-3, base);
+    smooth.document_mouse_wheel_at(-3, base + std::time::Duration::from_millis(500));
+    smooth.document_mouse_wheel_at(-3, base + std::time::Duration::from_millis(1000));
+    assert_eq!(
+        smooth.document_runtime.viewport_y, bottom,
+        "平滑路径的位移应延迟到渲染帧 drain，事件到达时不得跳变"
+    );
+    assert!(smooth.document_runtime.smooth_scroll.is_settling());
+
+    smooth.settle_smooth_scroll_for_test();
+    instant.scroll_document_by(-9);
+
+    assert!(smooth.document_runtime.manual_scroll);
+    assert_eq!(
+        smooth.document_runtime.viewport_y, instant.document_runtime.viewport_y,
+        "分帧 drain 收敛后的 offset 必须与一次性滚动等量增量一致"
+    );
+}
+
+#[test]
+fn mouse_wheel_event_defers_displacement_and_feedback_to_drain_when_smooth_enabled() {
+    let mut model = ready_smooth_scrollback_model(crate::ModelOptions::default());
+    let bottom = model.document_runtime.viewport_y;
+
+    model.update(crate::AppEvent::MouseWheel { delta_lines: -3 });
+
+    assert_eq!(model.document_runtime.viewport_y, bottom);
+    assert!(model.document_runtime.smooth_scroll.is_settling());
+    assert!(
+        !model.history_scroll_indicator_visible(),
+        "滚动反馈副作用与实际位移绑定，事件到达时尚未位移不应显示指示器"
+    );
+
+    model.settle_smooth_scroll_for_test();
+
+    assert!(model.document_runtime.viewport_y < bottom);
+    assert!(model.document_runtime.manual_scroll);
+    assert!(
+        model.history_scroll_indicator_visible(),
+        "drain 实际位移后应与瞬时路径一样显示历史滚动指示器"
+    );
+}
+
+#[test]
+fn wheel_scrolls_instantly_without_pending_when_scroll_animation_disabled() {
+    let mut model = ready_smooth_scrollback_model(crate::ModelOptions {
+        scroll_animation: crate::ScrollAnimationMode::Off,
+        ..crate::ModelOptions::default()
+    });
+    assert!(!model.smooth_scroll_enabled());
+    let bottom = model.document_runtime.viewport_y;
+
+    model.update(crate::AppEvent::MouseWheel { delta_lines: -3 });
+
+    assert_eq!(
+        model.document_runtime.viewport_y,
+        bottom - 3,
+        "关闭动画时应精确保持现状：3 行/格瞬时跳变"
+    );
+    assert!(!model.document_runtime.smooth_scroll.is_settling());
+    assert!(model.document_runtime.manual_scroll);
+    assert!(model.history_scroll_indicator_visible());
+}
+
+#[test]
+fn wheel_scrolls_instantly_under_reduced_motion_even_with_animation_enabled() {
+    let mut model = ready_smooth_scrollback_model(crate::ModelOptions {
+        scroll_animation: crate::ScrollAnimationMode::Smooth,
+        motion_mode: crate::MotionMode::Reduced,
+        ..crate::ModelOptions::default()
+    });
+    assert!(
+        !model.smooth_scroll_enabled(),
+        "Reduced 下无论 scroll_animation 档位取值，滚动都必须瞬时"
+    );
+    let bottom = model.document_runtime.viewport_y;
+
+    model.update(crate::AppEvent::MouseWheel { delta_lines: -3 });
+
+    assert_eq!(model.document_runtime.viewport_y, bottom - 3);
+    assert!(!model.document_runtime.smooth_scroll.is_settling());
+    assert!(model.document_runtime.manual_scroll);
+}
+
+#[test]
+fn wheel_pending_clears_when_drain_hits_top_boundary() {
+    let mut model = ready_smooth_scrollback_model(crate::ModelOptions::default());
+    model.scroll_document_by(-1000);
+    assert_eq!(model.document_runtime.viewport_y, 0);
+
+    let base = std::time::Instant::now();
+    model.document_mouse_wheel_at(-100, base);
+    assert!(model.document_runtime.smooth_scroll.is_settling());
+
+    // 首个 drain step 在顶部 clamp 后无位移，残余 pending 必须立即清空：
+    // 否则积压的向上 delta 会让紧接的向下滚动先「还债」才开始移动。
+    model.advance_smooth_scroll_at(base + std::time::Duration::from_millis(16));
+
+    assert_eq!(model.document_runtime.viewport_y, 0);
+    assert!(!model.document_runtime.smooth_scroll.is_settling());
+}
+
+#[test]
+fn wheel_pending_clears_when_drain_hits_bottom_boundary() {
+    let mut model = ready_smooth_scrollback_model(crate::ModelOptions::default());
+    assert!(model.document_pinned_to_bottom());
+    let bottom = model.document_runtime.viewport_y;
+
+    let base = std::time::Instant::now();
+    model.document_mouse_wheel_at(100, base);
+    model.advance_smooth_scroll_at(base + std::time::Duration::from_millis(16));
+
+    assert_eq!(model.document_runtime.viewport_y, bottom);
+    assert!(model.document_pinned_to_bottom());
+    assert!(!model.document_runtime.smooth_scroll.is_settling());
+}
+
+#[test]
+fn restore_target_snap_clears_wheel_pending() {
+    // 与 scroll_document_by_restores_composer_viewport_when_crossing_restore_target
+    // 同 fixture，额外携带未消耗的 pending，验证吸附路径的边界防御。
+    let mut model = ready_document_model(20, 4);
+    model.composer_mut().set_text_for_test("1\n2\n3\n4\n5\n6");
+    model.sync_composer_height();
+    model.sync_document_viewport_for_composer_cursor();
+    let restore_viewport_state = model.current_document_viewport_state();
+    let layout = model.build_document_layout(crate::frame_time::FrameRenderContext::capture());
+    model.apply_document_viewport_position(&layout, 0, 0, false, true);
+    model
+        .document_runtime
+        .restore
+        .track_composer_cursor(Some(restore_viewport_state));
+    model.document_runtime.smooth_scroll.accumulate_wheel(
+        50,
+        std::time::Instant::now(),
+        smooth_tuning_for_test(),
+    );
+
+    model.scroll_document_by(Model::document_mouse_wheel_delta());
+
+    assert!(!model.document_runtime.manual_scroll);
+    assert_eq!(
+        model.document_runtime.restore.target(),
+        ManualDocumentScrollRestoreTarget::None
+    );
+    assert!(
+        !model.document_runtime.smooth_scroll.is_settling(),
+        "吸附是滚动手势的语义终点，残余 pending 继续 drain 会把视口再拖离恢复位置"
+    );
+}
+
+#[test]
+fn downward_scroll_reaching_bottom_restores_bottom_follow_and_clears_attention_pill() {
+    let mut model = ready_smooth_scrollback_model(crate::ModelOptions::default());
+    // 状态行让 composer 不是文档最后一行，使 composer-cursor 恢复目标能
+    // 解析到底部之上；否则任何目标都落在底部，触底总被吸附路径先拦截，
+    // 无法单独覆盖 R5 自身的触底恢复分支。
+    model.status_line_items = vec![StatusLineItem::GitBranch];
+    model.git_branch = "main".to_string();
+    model.bump_status_line_revision();
+    model.composer_mut().set_text_for_test("draft");
+    model.sync_composer_height();
+    model.sync_document_viewport_to_bottom();
+    let layout = model.build_document_layout(crate::frame_time::FrameRenderContext::capture());
+    let bottom = model.document_bottom_offset(layout.line_count());
+    assert!(bottom >= 3, "fixture 需要足够的滚动空间");
+
+    // 进入手动滚动，并把恢复目标换成锚定当前位置的 composer-cursor 状态，
+    // 模拟第二段滚动手势：目标与当前位置相等（Equal），向下不触发吸附。
+    model.scroll_document_by(-1);
+    let current_state = model.current_document_viewport_state();
+    model
+        .document_runtime
+        .restore
+        .track_composer_cursor(Some(current_state));
+    model.note_message_finished_for_attention_pill();
+    assert_eq!(model.attention_pill_new_message_count_for_test(), Some(1));
+    model.document_runtime.smooth_scroll.accumulate_wheel(
+        30,
+        std::time::Instant::now(),
+        smooth_tuning_for_test(),
+    );
+
+    model.scroll_document_by(3);
+
+    assert!(
+        model.document_pinned_to_bottom(),
+        "手动滚动中向下触底应恢复贴底跟随"
+    );
+    assert!(!model.document_runtime.restore.is_pending());
+    assert_eq!(
+        model.attention_pill_new_message_count_for_test(),
+        None,
+        "贴底恢复经 apply_document_viewport_position 汇聚点清除新消息 pill"
+    );
+    assert!(!model.document_runtime.smooth_scroll.is_settling());
+}
+
+#[test]
+fn selection_drag_auto_scroll_to_bottom_does_not_restore_bottom_follow() {
+    let mut model = ready_smooth_scrollback_model(crate::ModelOptions::default());
+    model.status_line_items = vec![StatusLineItem::GitBranch];
+    model.git_branch = "main".to_string();
+    model.bump_status_line_revision();
+    model.composer_mut().set_text_for_test("draft");
+    model.sync_composer_height();
+    model.sync_document_viewport_to_bottom();
+    let layout = model.build_document_layout(crate::frame_time::FrameRenderContext::capture());
+    let bottom = model.document_bottom_offset(layout.line_count());
+    assert!(bottom >= 3, "fixture 需要足够的滚动空间");
+
+    // 进入手动滚动，恢复目标换成锚定当前位置的 composer-cursor（与 R5 测试
+    // 同构）：向下触底不会被 restore-target 吸附拦截，只可能命中 R5 分支。
+    model.scroll_document_by(-1);
+    let current_state = model.current_document_viewport_state();
+    model
+        .document_runtime
+        .restore
+        .track_composer_cursor(Some(current_state));
+    // 模拟拖选进行中。
+    model
+        .selection_runtime
+        .selection
+        .begin(crate::selection::SelectionPoint::default());
+    assert!(model.selection_runtime.selection.is_dragging());
+
+    // 拖选自动滚动逐行下滚触底：R5 被 is_dragging 守卫排除，不恢复贴底
+    // （那属于「回到最新」语义，与「扩大选区」冲突，streaming 时致选区跳变）。
+    model.scroll_document_by(1000);
+
+    assert!(
+        !model.document_pinned_to_bottom(),
+        "拖选触底不应恢复贴底跟随"
+    );
+    assert!(model.document_runtime.manual_scroll);
+}
+
+#[test]
+fn smooth_scroll_freezes_while_fullscreen_overlay_obscures_document() {
+    let mut model = ready_smooth_scrollback_model(crate::ModelOptions::default());
+    let base = std::time::Instant::now();
+    model.document_mouse_wheel_at(-60, base);
+    assert!(model.document_runtime.smooth_scroll.is_settling());
+
+    // 打开全屏 transcript 覆盖层后推进 drain：主文档被遮挡，动画冻结定格，
+    // 残余 pending 清空，避免关闭覆盖层后主视口位置与离开时不同。
+    model.open_transcript_overlay();
+    assert!(model.top_modal_layer().is_some());
+    model.advance_smooth_scroll_at(base + std::time::Duration::from_millis(8));
+
+    assert!(!model.document_runtime.smooth_scroll.is_settling());
+}
+
+#[test]
+fn upward_scroll_from_bottom_does_not_restore_bottom_follow() {
+    let mut model = ready_smooth_scrollback_model(crate::ModelOptions::default());
+    assert!(model.document_pinned_to_bottom());
+    let bottom = model.document_runtime.viewport_y;
+
+    model.scroll_document_by(-3);
+
+    assert!(!model.document_pinned_to_bottom());
+    assert!(model.document_runtime.manual_scroll);
+    assert_eq!(model.document_runtime.viewport_y, bottom - 3);
+}
+
+#[test]
+fn page_keys_page_the_document_during_manual_scroll() {
+    let mut model = ready_smooth_scrollback_model(crate::ModelOptions::default());
+    model.scroll_document_by(-1000);
+    assert_eq!(model.document_runtime.viewport_y, 0);
+    let page = model.document_viewport_height() - 1;
+    model.document_runtime.smooth_scroll.accumulate_wheel(
+        30,
+        std::time::Instant::now(),
+        smooth_tuning_for_test(),
+    );
+
+    press_page_key(&mut model, KeyCode::PageDown);
+
+    assert_eq!(model.document_runtime.viewport_y, page);
+    assert!(model.document_runtime.manual_scroll);
+    assert!(
+        !model.document_runtime.smooth_scroll.is_settling(),
+        "翻页是瞬时 snap，必须先清空平滑滚动残余（快慢分治）"
+    );
+
+    press_page_key(&mut model, KeyCode::PageUp);
+    assert_eq!(model.document_runtime.viewport_y, 0);
+
+    // 顶部再翻一页：clamp 后无位移，不得 panic 或改变状态。
+    press_page_key(&mut model, KeyCode::PageUp);
+    assert_eq!(model.document_runtime.viewport_y, 0);
+}
+
+#[test]
+fn manual_page_down_to_bottom_restores_bottom_follow() {
+    let mut model = ready_smooth_scrollback_model(crate::ModelOptions::default());
+    model.scroll_document_by(-1000);
+    assert!(model.document_runtime.manual_scroll);
+
+    // 文档高度有限，翻页次数必然有界；上限只是防死循环的保险丝。
+    for _ in 0..1000 {
+        if model.document_pinned_to_bottom() {
+            break;
+        }
+        press_page_key(&mut model, KeyCode::PageDown);
+    }
+
+    assert!(
+        model.document_pinned_to_bottom(),
+        "手动滚动中 PageDown 翻到底后应恢复贴底"
+    );
+}
+
+#[test]
+fn page_up_from_pinned_bottom_with_short_composer_pages_the_document() {
+    let mut model = ready_smooth_scrollback_model(crate::ModelOptions::default());
+    assert!(model.document_pinned_to_bottom());
+    let bottom = model.document_runtime.viewport_y;
+    let page = model.document_viewport_height() - 1;
+
+    press_page_key(&mut model, KeyCode::PageUp);
+
+    assert!(
+        model.document_runtime.manual_scroll,
+        "贴底 + 单屏 composer 的 PageUp 应向上翻文档页并进入手动滚动"
+    );
+    assert_eq!(model.document_runtime.viewport_y, bottom - page);
+}
+
+#[test]
+fn page_up_from_pinned_bottom_with_long_composer_keeps_composer_paging() {
+    let mut model = ready_smooth_scrollback_model(crate::ModelOptions::default());
+    model
+        .composer_mut()
+        .set_text_for_test("1\n2\n3\n4\n5\n6\n7\n8\n9\n10");
+    model.sync_composer_height();
+    model.sync_document_viewport_to_bottom();
+    let layout = model.build_document_layout(crate::frame_time::FrameRenderContext::capture());
+    assert!(
+        !model.composer_fits_single_viewport(&layout),
+        "fixture 需要超过一屏的 composer 草稿"
+    );
+    let composer_cursor_line_before = model.composer.line();
+
+    press_page_key(&mut model, KeyCode::PageUp);
+
+    assert!(
+        !model.document_runtime.manual_scroll,
+        "长草稿的 PageUp 保留 composer 翻页，不得进入文档手动滚动"
+    );
+    // composer 翻页语义是光标按页上移，视口仅在光标越出时跟随；
+    // 断言光标行以覆盖「按键确实路由到 composer」这一路由事实。
+    assert!(
+        model.composer.line() < composer_cursor_line_before,
+        "composer 光标应向上翻页"
+    );
+}
+
+#[test]
+fn page_down_when_pinned_keeps_bottom_follow() {
+    let mut model = ready_smooth_scrollback_model(crate::ModelOptions::default());
+    assert!(model.document_pinned_to_bottom());
+
+    press_page_key(&mut model, KeyCode::PageDown);
+
+    assert!(
+        model.document_pinned_to_bottom(),
+        "贴底时文档已无页可翻，PageDown 维持现有 composer 路径"
+    );
+    assert!(!model.document_runtime.manual_scroll);
+}
+
+#[test]
+fn page_keys_do_not_panic_with_tiny_viewport() {
+    let mut model = ready_smooth_scrollback_model(crate::ModelOptions::default());
+    model.set_window(20, 1);
+    model.scroll_document_by(-5);
+    assert!(model.document_runtime.manual_scroll);
+
+    // 页高钳制为 max(height - 1, 1)，高度 1 时按 1 行推进，不得 panic。
+    press_page_key(&mut model, KeyCode::PageDown);
+    press_page_key(&mut model, KeyCode::PageUp);
+
+    model.set_window(20, 0);
+    press_page_key(&mut model, KeyCode::PageUp);
+    press_page_key(&mut model, KeyCode::PageDown);
+}
+
+fn press_page_key(model: &mut Model, code: KeyCode) {
+    model.update(crate::AppEvent::Key(KeyEvent::from(code)));
+}
+
+/// 测试直接向累加器注入 pending 时使用默认档位（Smooth）的调参，
+/// 与 `ModelOptions::default()` 构造的模型档位保持一致。
+fn smooth_tuning_for_test() -> &'static SmoothScrollTuning {
+    crate::ScrollAnimationMode::Smooth
+        .tuning()
+        .expect("smooth tier must define a tuning")
+}
+
+fn ready_smooth_scrollback_model(options: crate::ModelOptions) -> Model {
+    let mut model = Model::new_with_options(
+        StartupBannerOptions::default(),
+        crate::ModelOptions {
+            style_mode: StyleMode::Ms,
+            ..options
+        },
+    );
+    model.transcript_mut().clear();
+    for index in 0..24 {
+        model
+            .transcript_mut()
+            .append_message(Sender::Assistant, format!("history line {index}"));
+    }
+    model.sync_transcript_render();
+    model.set_window(20, 4);
+    model.set_palette(default_palette(), true);
+    // 模拟真实渲染循环建立的贴底位置，使向上滚动有可移动空间。
+    model.sync_document_viewport_to_bottom();
+    model
+}
+
 fn ready_document_model(width: u16, height: u16) -> Model {
     let mut model = Model::new_with_style_mode(StartupBannerOptions::default(), StyleMode::Ms);
     model.transcript_mut().clear();

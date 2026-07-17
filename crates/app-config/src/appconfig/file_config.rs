@@ -34,6 +34,7 @@ pub(super) struct FileTuiConfig {
     pub(super) print_transcript_on_exit: Option<bool>,
     pub(super) show_reasoning_content: Option<bool>,
     pub(super) reasoning_content_display: Option<String>,
+    pub(super) scroll_animation: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

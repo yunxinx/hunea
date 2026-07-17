@@ -394,6 +394,9 @@ impl<'cwd> MarkdownRenderer<'cwd> {
                 .next()
                 .map(str::trim)
                 .filter(|lang| !lang.is_empty())
+                // 纯文本语言标记（如 text）与无语言 fence 等价：丢掉 lang，
+                // 避免被 syntect 识别后走高亮路径，样式与纯 ``` 不一致。
+                .filter(|lang| !is_plain_text_code_lang(lang))
                 .map(str::to_string),
             CodeBlockKind::Indented => None,
         };
@@ -406,7 +409,10 @@ impl<'cwd> MarkdownRenderer<'cwd> {
     fn end_code_block(&mut self) {
         if let Some(lang) = self.code_block_lang.take() {
             let code = std::mem::take(&mut self.code_block_buffer);
-            let code_style = self.code_style();
+            // 有语言但高亮失败（未知语言 / 超限 / 禁用高亮）时回退为无背景样式，
+            // 与纯 ``` / 已高亮代码块一致，不再叠加 surface。
+            // 纯文本语言标记在 start_code_block 已滤成 None，不会进入此分支。
+            let fallback_style = self.highlighted_code_style();
             let highlighted = self
                 .should_highlight_code
                 .then(|| {
@@ -434,7 +440,7 @@ impl<'cwd> MarkdownRenderer<'cwd> {
                         block.newline();
                     }
                 } else {
-                    block.append_text(&code, code_style);
+                    block.append_text(&code, fallback_style);
                 }
             }
         }
@@ -892,6 +898,14 @@ fn heading_level_number(level: HeadingLevel) -> usize {
         HeadingLevel::H5 => 5,
         HeadingLevel::H6 => 6,
     }
+}
+
+/// 判断 fenced code 的 info string 是否是纯文本语言，应按无样式 fence 渲染。
+fn is_plain_text_code_lang(lang: &str) -> bool {
+    matches!(
+        lang.to_ascii_lowercase().as_str(),
+        "text" | "txt" | "plain" | "plaintext"
+    )
 }
 
 fn heading_style(level: HeadingLevel) -> Style {

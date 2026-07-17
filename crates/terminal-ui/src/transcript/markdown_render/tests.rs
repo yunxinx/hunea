@@ -369,8 +369,37 @@ fn render_markdown_unknown_fenced_code_language_stays_plain_text() {
     assert_eq!(lines_to_plain_text(&lines), "hello");
     assert_eq!(lines.len(), 1);
     assert_eq!(
-        lines[0].spans[0].style.bg, palette.surface,
-        "未识别语言的代码块仍应保留背景色，帮助和普通正文区分"
+        lines[0].spans[0].style.bg, None,
+        "未识别语言的代码块不应叠加背景色，应与纯 ``` 代码块保持一致"
+    );
+}
+
+#[test]
+fn render_markdown_text_fenced_code_matches_plain_fence_without_styling() {
+    let palette = default_palette();
+    let text_lines = render_markdown_lines("```text\nhello world\n```", 80, palette, None);
+    let plain_lines = render_markdown_lines("```\nhello world\n```", 80, palette, None);
+
+    assert_eq!(lines_to_plain_text(&text_lines), "hello world");
+    assert!(
+        text_lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .all(|span| span.style.bg.is_none()),
+        "`text` 代码块不应叠加背景色: {text_lines:?}"
+    );
+    assert_eq!(
+        text_lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.style)
+            .collect::<Vec<_>>(),
+        plain_lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.style)
+            .collect::<Vec<_>>(),
+        "`text` 代码块应与纯 ``` 代码块渲染样式完全一致"
     );
 }
 
@@ -405,7 +434,7 @@ fn render_markdown_inline_math_uses_code_background() {
     assert_eq!(lines_to_plain_text(&lines), "energy E = mc^2 now");
     assert_eq!(
         math_span.style.bg, palette.surface,
-        "行内 math 应使用未识别语言代码块同款背景色"
+        "行内 math 应使用 code_style 的 surface 背景"
     );
 }
 
@@ -420,7 +449,7 @@ fn render_markdown_display_math_uses_literal_code_background() {
             .iter()
             .flat_map(|line| line.spans.iter())
             .all(|span| span.style.bg == palette.surface),
-        "块级 math 应使用未识别语言代码块同款背景色: {lines:?}"
+        "块级 math 应使用 code_style 的 surface 背景: {lines:?}"
     );
 }
 

@@ -1,7 +1,6 @@
-use std::collections::VecDeque;
-
 use unicode_segmentation::UnicodeSegmentation;
 
+use super::linebreak::{ProseWrapOptions, WrappedWhitespace, split_text_lines, wrap_prose_ranges};
 use super::prompt_wrap::wrap_prompt_visual_lines;
 pub(super) use crate::display_width::display_width as measure_width;
 use crate::terminal_text::sanitize_terminal_text;
@@ -28,20 +27,6 @@ const ASSISTANT_PROSE_LEAD_WORDS: &[&str] = &[
 enum WrapMode {
     Assistant,
     PlainText,
-}
-
-#[derive(Debug, Clone, Default)]
-struct WrapSegment {
-    text: String,
-    width: usize,
-    is_space: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WrapSegmentKind {
-    Space,
-    Word,
-    Breakable,
 }
 
 /// `wrap_prompt_text` 按 prompt transcript 的展示需求换行。
@@ -105,14 +90,16 @@ fn wrap_text(value: &str, width: usize, line_prefix_width: usize, mode: WrapMode
         return vec![String::new()];
     }
     if width == 0 {
-        return value.split('\n').map(ToOwned::to_owned).collect();
+        return split_text_lines(value)
+            .map(|(line, _)| line.to_owned())
+            .collect();
     }
 
     let mut logical_lines = Vec::new();
     let mut in_fence = false;
     let mut fence_marker = "";
 
-    for raw_line in value.split('\n') {
+    for (raw_line, _) in split_text_lines(value) {
         if mode == WrapMode::Assistant {
             if let Some(marker) = detect_fence_marker(raw_line) {
                 logical_lines.extend(hard_wrap_line(raw_line, width, line_prefix_width));
@@ -207,12 +194,7 @@ fn wrap_indented_prose_line(
         return hard_wrap_line(&(prefix + remainder), width, line_prefix_width);
     }
 
-    let mut lines = wrap_prose_segments(
-        tokenize_wrap_segments(remainder),
-        width - prefix_width,
-        width,
-        mode,
-    );
+    let mut lines = wrap_prose_with_widths(remainder, width - prefix_width, width, mode);
     if let Some(first_line) = lines.first_mut() {
         first_line.insert_str(0, &prefix);
     }
@@ -224,228 +206,31 @@ fn wrap_prose_line(line: &str, width: usize, mode: WrapMode) -> Vec<String> {
         return vec![line.to_string()];
     }
 
-    wrap_prose_segments(tokenize_wrap_segments(line), width, width, mode)
+    wrap_prose_with_widths(line, width, width, mode)
 }
 
-fn wrap_prose_segments(
-    segments: Vec<WrapSegment>,
+fn wrap_prose_with_widths(
+    line: &str,
     first_width: usize,
     continuation_width: usize,
     mode: WrapMode,
 ) -> Vec<String> {
-    if segments.is_empty() {
-        return vec![String::new()];
-    }
-
-    let mut cursor = SegmentCursor::new(segments);
-    let mut lines = Vec::new();
-    let mut current_width = if first_width == 0 {
-        continuation_width
-    } else {
-        first_width
+    let wrapped_whitespace = match mode {
+        WrapMode::Assistant => WrappedWhitespace::PreserveMultiple,
+        WrapMode::PlainText => WrappedWhitespace::Discard,
     };
-
-    while cursor.has_more() {
-        lines.push(consume_prose_line(&mut cursor, current_width, mode));
-        current_width = continuation_width;
-    }
-
-    lines
-}
-
-fn consume_prose_line(cursor: &mut SegmentCursor, width: usize, mode: WrapMode) -> String {
-    let mut current = String::new();
-    let mut current_width = 0;
-    let mut pending_spaces = WrapSegment::default();
-
-    while let Some(segment) = cursor.next() {
-        if segment.is_space {
-            if current_width == 0 {
-                if segment.width <= width {
-                    current.push_str(&segment.text);
-                    current_width += segment.width;
-                    continue;
-                }
-
-                let (fitted, overflow) = split_segment_to_width(segment, width);
-                current.push_str(&fitted.text);
-                if !overflow.text.is_empty() {
-                    cursor.push_front([overflow]);
-                }
-                return current;
-            }
-
-            pending_spaces.text.push_str(&segment.text);
-            pending_spaces.width += segment.width;
-            pending_spaces.is_space = true;
-            continue;
-        }
-
-        if current_width == 0 {
-            if segment.width <= width {
-                current.push_str(&segment.text);
-                current_width += segment.width;
-                continue;
-            }
-
-            let (fitted, overflow) = split_segment_to_width(segment, width);
-            current.push_str(&fitted.text);
-            if !overflow.text.is_empty() {
-                cursor.push_front([overflow]);
-            }
-            return current;
-        }
-
-        if current_width + pending_spaces.width + segment.width <= width {
-            current.push_str(&pending_spaces.text);
-            current.push_str(&segment.text);
-            current_width += pending_spaces.width + segment.width;
-            pending_spaces = WrapSegment::default();
-            continue;
-        }
-
-        if !pending_spaces.text.is_empty()
-            && should_preserve_wrapped_spaces(mode, pending_spaces.width)
-        {
-            cursor.push_front([pending_spaces, segment]);
-            return current;
-        }
-
-        cursor.push_front([segment]);
-        return current;
-    }
-
-    if !pending_spaces.text.is_empty() {
-        if current_width + pending_spaces.width <= width {
-            current.push_str(&pending_spaces.text);
-            return current;
-        }
-
-        cursor.push_front([pending_spaces]);
-    }
-
-    current
-}
-
-fn should_preserve_wrapped_spaces(mode: WrapMode, pending_space_width: usize) -> bool {
-    mode == WrapMode::Assistant && pending_space_width > 1
-}
-
-fn tokenize_wrap_segments(line: &str) -> Vec<WrapSegment> {
-    if line.is_empty() {
-        return Vec::new();
-    }
-
-    let mut segments = Vec::new();
-    let mut current = String::new();
-    let mut current_width = 0;
-    let mut current_kind = WrapSegmentKind::Word;
-    let mut has_current = false;
-
-    let flush_current = |segments: &mut Vec<WrapSegment>,
-                         current: &mut String,
-                         current_width: &mut usize,
-                         current_kind: &mut WrapSegmentKind,
-                         has_current: &mut bool| {
-        if !*has_current {
-            return;
-        }
-
-        segments.push(WrapSegment {
-            text: std::mem::take(current),
-            width: *current_width,
-            is_space: *current_kind == WrapSegmentKind::Space,
-        });
-        *current_width = 0;
-        *has_current = false;
-    };
-
-    for cluster in UnicodeSegmentation::graphemes(line, true) {
-        let cluster_kind = wrap_segment_kind(cluster);
-        if !has_current {
-            has_current = true;
-            current_kind = cluster_kind;
-        } else if should_start_new_wrap_segment(current_kind, cluster_kind) {
-            flush_current(
-                &mut segments,
-                &mut current,
-                &mut current_width,
-                &mut current_kind,
-                &mut has_current,
-            );
-            has_current = true;
-            current_kind = cluster_kind;
-        }
-
-        current.push_str(cluster);
-        current_width += measure_width(cluster);
-    }
-
-    flush_current(
-        &mut segments,
-        &mut current,
-        &mut current_width,
-        &mut current_kind,
-        &mut has_current,
-    );
-
-    segments
-}
-
-#[derive(Debug, Clone)]
-struct SegmentCursor {
-    segments: Vec<WrapSegment>,
-    buffered: VecDeque<WrapSegment>,
-    index: usize,
-}
-
-impl SegmentCursor {
-    fn new(segments: Vec<WrapSegment>) -> Self {
-        Self {
-            segments,
-            buffered: VecDeque::new(),
-            index: 0,
-        }
-    }
-
-    fn has_more(&self) -> bool {
-        !self.buffered.is_empty() || self.index < self.segments.len()
-    }
-
-    fn next(&mut self) -> Option<WrapSegment> {
-        if let Some(segment) = self.buffered.pop_front() {
-            return Some(segment);
-        }
-
-        let segment = self.segments.get(self.index)?.clone();
-        self.index += 1;
-        Some(segment)
-    }
-
-    fn push_front<const N: usize>(&mut self, segments: [WrapSegment; N]) {
-        for segment in segments.into_iter().rev() {
-            if !segment.text.is_empty() {
-                self.buffered.push_front(segment);
-            }
-        }
-    }
-}
-
-fn split_segment_to_width(segment: WrapSegment, width: usize) -> (WrapSegment, WrapSegment) {
-    let (fitted_text, overflow_text) = split_text_to_width(&segment.text, width);
-
-    (
-        WrapSegment {
-            width: measure_width(&fitted_text),
-            text: fitted_text,
-            is_space: segment.is_space,
-        },
-        WrapSegment {
-            width: measure_width(&overflow_text),
-            text: overflow_text,
-            is_space: segment.is_space,
+    wrap_prose_ranges(
+        line,
+        ProseWrapOptions {
+            first_width,
+            continuation_width,
+            wrapped_whitespace,
+            trim_trailing_whitespace: false,
         },
     )
+    .into_iter()
+    .map(|wrapped| line[wrapped.visible].to_string())
+    .collect()
 }
 
 fn hard_wrap_line(line: &str, width: usize, line_prefix_width: usize) -> Vec<String> {
@@ -695,29 +480,6 @@ pub(in crate::transcript) fn detect_fence_marker(line: &str) -> Option<&'static 
     None
 }
 
-pub(super) fn is_space_cluster(cluster: &str) -> bool {
-    !cluster.is_empty() && cluster.chars().all(char::is_whitespace)
-}
-
-pub(crate) fn wrap_segment_kind(cluster: &str) -> WrapSegmentKind {
-    if is_space_cluster(cluster) {
-        return WrapSegmentKind::Space;
-    }
-
-    if measure_width(cluster) > 1 {
-        return WrapSegmentKind::Breakable;
-    }
-
-    WrapSegmentKind::Word
-}
-
-pub(crate) fn should_start_new_wrap_segment(
-    current_kind: WrapSegmentKind,
-    next_kind: WrapSegmentKind,
-) -> bool {
-    current_kind != next_kind || next_kind == WrapSegmentKind::Breakable
-}
-
 #[cfg(test)]
 mod tests {
     use super::{wrap_assistant_text, wrap_plain_text, wrap_prompt_text};
@@ -822,6 +584,31 @@ mod tests {
     }
 
     #[test]
+    fn wrap_assistant_text_never_starts_wrapped_line_with_closing_punctuation() {
+        assert_eq!(wrap_assistant_text("你，好", 4, 0), vec!["你，", "好"]);
+    }
+
+    #[test]
+    fn wrap_prompt_text_never_starts_wrapped_line_with_closing_punctuation() {
+        assert_eq!(wrap_prompt_text("你，好", 4, 0), vec!["你，", "好"]);
+    }
+
+    #[test]
+    fn wrap_assistant_text_honors_unicode_mandatory_breaks() {
+        assert_eq!(wrap_assistant_text("a\u{2028}b", 10, 0), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn wrap_assistant_text_treats_crlf_as_one_mandatory_break() {
+        assert_eq!(wrap_assistant_text("a\r\nb", 10, 0), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn wrap_prompt_text_treats_crlf_as_one_mandatory_break() {
+        assert_eq!(wrap_prompt_text("a\r\nb", 10, 0), vec!["a", "b"]);
+    }
+
+    #[test]
     fn wrap_prompt_text_expands_tabs_for_display_width() {
         assert_eq!(wrap_prompt_text("a\tb", 9, 0), vec!["a       b"]);
     }
@@ -860,9 +647,10 @@ mod tests {
 
     #[test]
     fn wrap_assistant_text_keeps_path_mentions_on_prose_path() {
+        // UAX #14：路径在 `/` 处断行，而非任意列硬切。
         assert_eq!(
             wrap_assistant_text("Open ./cmd/main.go and rerun", 8, 0),
-            vec!["Open", "./cmd/ma", "in.go", "and", "rerun"]
+            vec!["Open ./", "cmd/", "main.go", "and", "rerun"]
         );
     }
 

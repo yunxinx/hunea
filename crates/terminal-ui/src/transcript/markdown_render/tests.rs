@@ -1037,6 +1037,21 @@ fn render_markdown_uses_cjk_breakpoints_in_mixed_prose() {
 }
 
 #[test]
+fn render_markdown_never_starts_wrapped_line_with_closing_punctuation() {
+    let lines = render_markdown_lines("你，好", 4, default_palette(), None);
+
+    assert_eq!(lines_to_plain_text(&lines), "你，\n好");
+}
+
+#[test]
+fn render_markdown_keeps_cross_style_family_grapheme_on_one_line() {
+    let lines = render_markdown_lines("👨‍`👩‍`👧", 2, default_palette(), None);
+
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines_to_plain_text(&lines), "👨‍👩‍👧");
+}
+
+#[test]
 fn render_markdown_metrics_skip_code_highlighting_but_match_rendered_plain_text_shape() {
     let markdown = r#"# Title
 

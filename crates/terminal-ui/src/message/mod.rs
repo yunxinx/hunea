@@ -48,7 +48,10 @@ use self::{
         render_assistant_message_metrics,
     },
     user::{render_user_message_lines, render_user_plain_text},
-    user_estimate::{estimate_user_message_metrics_fast, measure_user_message_metrics},
+    user_estimate::{
+        can_reuse_user_line_count_when_widening, estimate_user_message_metrics_fast,
+        measure_user_message_metrics,
+    },
 };
 #[cfg(test)]
 use super::transcript::{TranscriptEstimateSource, wrap_prompt_visual_lines};
@@ -71,6 +74,7 @@ pub struct MessageItem {
     working_dir: Option<Rc<Path>>,
     style_mode: StyleMode,
     render_cache_key: u64,
+    can_reuse_user_line_count_when_widening: bool,
 }
 
 #[cfg(test)]
@@ -107,6 +111,8 @@ impl MessageItem {
         let content = content.into();
         let render_cache_key =
             message_item_render_cache_key(sender, &content, style_mode, source_message.as_ref());
+        let can_reuse_user_line_count_when_widening =
+            sender == Sender::User && can_reuse_user_line_count_when_widening(&content);
         let content = Rc::from(content);
         Self {
             sender,
@@ -115,6 +121,7 @@ impl MessageItem {
             working_dir,
             style_mode,
             render_cache_key,
+            can_reuse_user_line_count_when_widening,
         }
     }
 
@@ -233,6 +240,7 @@ impl MessageItem {
                 width,
                 palette,
                 self.style_mode,
+                self.can_reuse_user_line_count_when_widening,
                 previous_metrics,
             ),
             Sender::Assistant => estimate_assistant_message_metrics_fast(

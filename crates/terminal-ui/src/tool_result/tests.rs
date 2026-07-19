@@ -2799,9 +2799,9 @@ fn wrapped_result_uses_two_space_continuation_prefix() {
     assert_eq!(
         lines,
         vec![
-            "● Very-lon".to_string(),
-            "  g-comman".to_string(),
-            "  d".to_string(),
+            "● Very-".to_string(),
+            "  long-".to_string(),
+            "  command".to_string(),
         ]
     );
 }

@@ -1,8 +1,9 @@
 use unicode_segmentation::UnicodeSegmentation;
 
+use super::linebreak::{ProseWrapOptions, WrappedWhitespace, split_text_lines, wrap_prose_ranges};
 use super::wrap::{
-    leading_space_count, measure_width, render_cluster_for_display, should_start_new_wrap_segment,
-    split_short_indent, split_text_to_width, wrap_segment_kind,
+    leading_space_count, measure_width, render_cluster_for_display, split_short_indent,
+    split_text_to_width,
 };
 use crate::terminal_text::sanitize_terminal_text;
 
@@ -20,24 +21,6 @@ pub(crate) struct PromptVisualLine {
     pub(crate) visible_start_char: usize,
     pub(crate) end_char: usize,
     pub(crate) column_offsets: Vec<usize>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct DetailedWrapSegment {
-    text: String,
-    width: usize,
-    start_char: usize,
-    char_count: usize,
-    is_space: bool,
-}
-
-#[derive(Debug, Clone)]
-struct PromptWordBlock {
-    leading_spaces: DetailedWrapSegment,
-    word: DetailedWrapSegment,
-    trailing_spaces: DetailedWrapSegment,
-    has_leading_space: bool,
-    has_trailing: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -75,28 +58,29 @@ pub(crate) fn wrap_prompt_visual_lines(
         return vec![PromptVisualLine::default()];
     }
     if width == 0 {
-        return value
-            .split('\n')
+        return split_text_lines(value)
             .enumerate()
-            .map(|(logical_line, raw_line)| PromptVisualLine {
-                text: raw_line.to_string(),
-                logical_line,
-                start_char: 0,
-                visible_start_char: 0,
-                end_char: raw_line.chars().count(),
-                column_offsets: build_column_offsets(raw_line),
-            })
+            .map(
+                |(logical_line, (line, hides_carriage_return))| PromptVisualLine {
+                    text: line.to_string(),
+                    logical_line,
+                    start_char: 0,
+                    visible_start_char: 0,
+                    end_char: line.chars().count() + usize::from(hides_carriage_return),
+                    column_offsets: build_column_offsets(line),
+                },
+            )
             .collect();
     }
 
     let mut lines = Vec::new();
-    for (logical_line, raw_line) in value.split('\n').enumerate() {
-        lines.extend(wrap_prompt_logical_line(
-            raw_line,
-            width,
-            line_prefix_width,
-            logical_line,
-        ));
+    for (logical_line, (raw_line, hides_carriage_return)) in split_text_lines(value).enumerate() {
+        let mut wrapped =
+            wrap_prompt_logical_line(raw_line, width, line_prefix_width, logical_line);
+        if hides_carriage_return && let Some(last) = wrapped.last_mut() {
+            last.end_char += 1;
+        }
+        lines.extend(wrapped);
     }
 
     if lines.is_empty() {
@@ -200,385 +184,65 @@ fn wrap_prompt_prose_line(
     base_char_offset: usize,
     logical_line: usize,
 ) -> Vec<PromptVisualLine> {
-    let segments = tokenize_detailed_segments(line);
-    if segments.is_empty() {
-        return vec![PromptVisualLine {
-            logical_line,
-            start_char: base_char_offset,
-            visible_start_char: base_char_offset,
-            end_char: base_char_offset,
-            column_offsets: vec![0],
-            ..PromptVisualLine::default()
-        }];
-    }
-
-    let mut blocks = build_prompt_word_blocks(&segments);
-    if blocks.is_empty() {
-        return hard_wrap_prompt_visible_text(
-            line,
+    let wrapped = wrap_prose_ranges(
+        line,
+        ProseWrapOptions {
             first_width,
             continuation_width,
-            base_char_offset,
-            base_char_offset,
-            logical_line,
-        );
-    }
-    if base_char_offset > 0 {
-        blocks = offset_prompt_word_blocks(&blocks, base_char_offset);
-    }
+            wrapped_whitespace: WrappedWhitespace::PreserveMultiple,
+            trim_trailing_whitespace: false,
+        },
+    );
+    let mut char_cursor = CharOffsetCursor::new(line);
 
-    let mut lines = Vec::with_capacity((blocks.len() / 2).max(1));
-    let mut current = PromptLineBuilder::default();
-    let mut current_limit = first_width.max(1);
-    let continuation_width = continuation_width.max(1);
-
-    let flush_current = |lines: &mut Vec<PromptVisualLine>, current: &mut PromptLineBuilder| {
-        if !current.has_content {
-            return;
-        }
-        lines.push(PromptVisualLine {
-            text: std::mem::take(&mut current.text),
-            logical_line,
-            start_char: current.start_char,
-            visible_start_char: current.visible_start_char,
-            end_char: current.end_char,
-            column_offsets: std::mem::take(&mut current.column_offsets),
-        });
-        *current = PromptLineBuilder::default();
-    };
-
-    for index in 0..blocks.len() {
-        let block = &blocks[index];
-        loop {
-            let at_line_start = !current.has_content;
-            let block_width = block.visible_width(at_line_start);
-            if current.width + block_width <= current_limit {
-                if should_reflow_exact_fit_block(
-                    &current,
-                    block,
-                    &blocks[index + 1..],
-                    current_limit,
-                    at_line_start,
-                    continuation_width,
-                ) {
-                    flush_current(&mut lines, &mut current);
-                    current_limit = continuation_width;
-                    continue;
-                }
-
-                current.append_block(block, at_line_start);
-                break;
-            }
-
-            if !at_line_start {
-                flush_current(&mut lines, &mut current);
-                current_limit = continuation_width;
-                continue;
-            }
-
-            let hard_wrapped = hard_wrap_prompt_visible_text(
-                &block.visible_text(true),
-                current_limit,
-                continuation_width,
-                block.raw_start_char(),
-                block.visible_start_char(true),
+    wrapped
+        .into_iter()
+        .map(|wrapped_line| {
+            // planner 输出满足行内 consumed.start ≤ visible.start ≤ consumed.end、
+            // 跨行首尾相接，因此三次查询构成单调序列，前向游标即可完成映射。
+            let start_char = base_char_offset + char_cursor.advance_to(wrapped_line.consumed.start);
+            let visible_start_char =
+                base_char_offset + char_cursor.advance_to(wrapped_line.visible.start);
+            let end_char = base_char_offset + char_cursor.advance_to(wrapped_line.consumed.end);
+            let visible = &line[wrapped_line.visible];
+            PromptVisualLine {
+                text: visible.to_string(),
                 logical_line,
-            );
-            if hard_wrapped.is_empty() {
-                break;
+                start_char,
+                visible_start_char,
+                end_char,
+                column_offsets: column_offsets(visible),
             }
-
-            if hard_wrapped.len() > 1 {
-                lines.extend(hard_wrapped[..hard_wrapped.len() - 1].iter().cloned());
-            }
-
-            let last = hard_wrapped
-                .last()
-                .cloned()
-                .expect("hard wrap should keep the final fragment");
-            current = PromptLineBuilder::from_visual_line(last);
-            current_limit = continuation_width;
-            break;
-        }
-    }
-
-    if current.has_content {
-        flush_current(&mut lines, &mut current);
-    }
-    if lines.is_empty() {
-        return vec![PromptVisualLine {
-            logical_line,
-            start_char: base_char_offset,
-            visible_start_char: base_char_offset,
-            end_char: base_char_offset,
-            column_offsets: vec![0],
-            ..PromptVisualLine::default()
-        }];
-    }
-
-    lines
-}
-
-fn should_reflow_exact_fit_block(
-    current: &PromptLineBuilder,
-    block: &PromptWordBlock,
-    remaining: &[PromptWordBlock],
-    current_limit: usize,
-    at_line_start: bool,
-    continuation_width: usize,
-) -> bool {
-    if at_line_start || continuation_width == 0 || remaining.is_empty() {
-        return false;
-    }
-    if current.width + block.visible_width(false) != current_limit {
-        return false;
-    }
-
-    let next_block = &remaining[0];
-    if !next_block.has_leading_space || next_block.leading_spaces.width <= 1 {
-        return false;
-    }
-
-    block.visible_width(true) + next_block.visible_width(false) <= continuation_width
-}
-
-impl PromptLineBuilder {
-    fn append_block(&mut self, block: &PromptWordBlock, at_line_start: bool) {
-        if !self.has_content {
-            self.start_char = block.raw_start_char();
-            self.visible_start_char = block.visible_start_char(at_line_start);
-            self.end_char = self.visible_start_char;
-            self.column_offsets = vec![0];
-        }
-
-        self.append_segment(
-            &block.visible_text(at_line_start),
-            block.visible_width(at_line_start),
-        );
-        self.end_char = block.raw_end_char();
-        self.has_content = true;
-    }
-
-    fn append_segment(&mut self, text: &str, width: usize) {
-        self.text.push_str(text);
-        self.width += width;
-        self.column_offsets = append_column_offset_run(
-            std::mem::take(&mut self.column_offsets),
-            text.chars().count(),
-            width,
-        );
-    }
-
-    fn from_visual_line(line: PromptVisualLine) -> Self {
-        Self {
-            width: measure_width(&line.text),
-            start_char: line.start_char,
-            visible_start_char: line.visible_start_char,
-            end_char: line.end_char,
-            column_offsets: line.column_offsets,
-            has_content: !line.text.is_empty(),
-            text: line.text,
-        }
-    }
-}
-
-impl PromptWordBlock {
-    fn visible_width(&self, at_line_start: bool) -> usize {
-        let mut width = self.word.width;
-        if self.should_render_leading_spaces(at_line_start) {
-            width += self.leading_spaces.width;
-        }
-        if self.has_trailing {
-            width += self.trailing_spaces.width;
-        }
-        width
-    }
-
-    fn visible_text(&self, at_line_start: bool) -> String {
-        let mut text = String::new();
-        if self.should_render_leading_spaces(at_line_start) {
-            text.push_str(&self.leading_spaces.text);
-        }
-        text.push_str(&self.word.text);
-        if self.has_trailing {
-            text.push_str(&self.trailing_spaces.text);
-        }
-        text
-    }
-
-    fn raw_start_char(&self) -> usize {
-        if self.has_leading_space {
-            self.leading_spaces.start_char
-        } else {
-            self.word.start_char
-        }
-    }
-
-    fn visible_start_char(&self, at_line_start: bool) -> usize {
-        if at_line_start && self.has_leading_space && self.leading_spaces.width == 1 {
-            return self.word.start_char;
-        }
-
-        self.raw_start_char()
-    }
-
-    fn should_render_leading_spaces(&self, at_line_start: bool) -> bool {
-        if !self.has_leading_space {
-            return false;
-        }
-        if !at_line_start {
-            return true;
-        }
-
-        self.leading_spaces.width > 1
-    }
-
-    fn raw_end_char(&self) -> usize {
-        if self.has_trailing {
-            self.trailing_spaces.start_char + self.trailing_spaces.char_count
-        } else {
-            self.word.start_char + self.word.char_count
-        }
-    }
-}
-
-fn build_prompt_word_blocks(segments: &[DetailedWrapSegment]) -> Vec<PromptWordBlock> {
-    let mut blocks = Vec::with_capacity(segments.len() / 2 + 1);
-    let mut pending_spaces = DetailedWrapSegment::default();
-    let mut has_pending_spaces = false;
-    let mut index = 0;
-
-    while index < segments.len() {
-        let segment = &segments[index];
-        if segment.is_space {
-            pending_spaces = segment.clone();
-            has_pending_spaces = true;
-            index += 1;
-            continue;
-        }
-
-        let mut block = PromptWordBlock {
-            leading_spaces: pending_spaces.clone(),
-            word: segment.clone(),
-            trailing_spaces: DetailedWrapSegment::default(),
-            has_leading_space: has_pending_spaces,
-            has_trailing: false,
-        };
-        pending_spaces = DetailedWrapSegment::default();
-        has_pending_spaces = false;
-
-        if index + 1 < segments.len() && segments[index + 1].is_space && index + 2 >= segments.len()
-        {
-            block.trailing_spaces = segments[index + 1].clone();
-            block.has_trailing = true;
-            index += 1;
-        }
-
-        blocks.push(block);
-        index += 1;
-    }
-
-    blocks
-}
-
-fn offset_prompt_word_blocks(
-    blocks: &[PromptWordBlock],
-    char_offset: usize,
-) -> Vec<PromptWordBlock> {
-    if char_offset == 0 {
-        return blocks.to_vec();
-    }
-
-    blocks
-        .iter()
-        .cloned()
-        .map(|mut block| {
-            block.leading_spaces.start_char += char_offset;
-            block.word.start_char += char_offset;
-            block.trailing_spaces.start_char += char_offset;
-            block
         })
         .collect()
 }
 
-fn tokenize_detailed_segments(text: &str) -> Vec<DetailedWrapSegment> {
-    if text.is_empty() {
-        return Vec::new();
+/// 把单调不减的字节偏移映射为 char 偏移的前向游标，避免物化整行的偏移表。
+struct CharOffsetCursor<'a> {
+    text: &'a str,
+    byte_offset: usize,
+    char_offset: usize,
+}
+
+impl<'a> CharOffsetCursor<'a> {
+    fn new(text: &'a str) -> Self {
+        Self {
+            text,
+            byte_offset: 0,
+            char_offset: 0,
+        }
     }
 
-    let mut segments = Vec::new();
-    let mut current = String::new();
-    let mut current_width = 0;
-    let mut current_chars = 0;
-    let mut current_start_char = 0;
-    let mut current_kind = super::wrap::WrapSegmentKind::Word;
-    let mut has_current = false;
-    let mut chars_consumed = 0;
-
-    let flush_current = |segments: &mut Vec<DetailedWrapSegment>,
-                         current: &mut String,
-                         current_width: &mut usize,
-                         current_chars: &mut usize,
-                         current_start_char: usize,
-                         current_kind: super::wrap::WrapSegmentKind,
-                         has_current: &mut bool| {
-        if !*has_current {
-            return;
-        }
-
-        segments.push(DetailedWrapSegment {
-            text: std::mem::take(current),
-            width: *current_width,
-            start_char: current_start_char,
-            char_count: *current_chars,
-            is_space: current_kind == super::wrap::WrapSegmentKind::Space,
-        });
-        *current_width = 0;
-        *current_chars = 0;
-        *has_current = false;
-    };
-
-    for cluster in UnicodeSegmentation::graphemes(text, true) {
-        let cluster_width = measure_width(cluster);
-        let cluster_chars = cluster.chars().count();
-        let cluster_kind = wrap_segment_kind(cluster);
-
-        if !has_current {
-            current_start_char = chars_consumed;
-            current_kind = cluster_kind;
-            has_current = true;
-        } else if should_start_new_wrap_segment(current_kind, cluster_kind) {
-            flush_current(
-                &mut segments,
-                &mut current,
-                &mut current_width,
-                &mut current_chars,
-                current_start_char,
-                current_kind,
-                &mut has_current,
-            );
-            current_start_char = chars_consumed;
-            current_kind = cluster_kind;
-            has_current = true;
-        }
-
-        current.push_str(cluster);
-        current_width += cluster_width;
-        current_chars += cluster_chars;
-        chars_consumed += cluster_chars;
+    /// 前进到给定的 char 边界字节偏移并返回对应 char 偏移；查询序列必须单调不减。
+    fn advance_to(&mut self, byte_offset: usize) -> usize {
+        debug_assert!(
+            byte_offset >= self.byte_offset,
+            "char offset queries must be monotone"
+        );
+        self.char_offset += self.text[self.byte_offset..byte_offset].chars().count();
+        self.byte_offset = byte_offset;
+        self.char_offset
     }
-
-    flush_current(
-        &mut segments,
-        &mut current,
-        &mut current_width,
-        &mut current_chars,
-        current_start_char,
-        current_kind,
-        &mut has_current,
-    );
-
-    segments
 }
 
 fn hard_wrap_prompt_visible_text(
@@ -775,6 +439,10 @@ fn build_column_offsets(text: &str) -> Vec<usize> {
     #[cfg(test)]
     COLUMN_OFFSET_REBUILD_CALL_COUNT.with(|count| count.set(count.get() + 1));
 
+    column_offsets(text)
+}
+
+fn column_offsets(text: &str) -> Vec<usize> {
     let mut offsets = vec![0];
     for cluster in UnicodeSegmentation::graphemes(text, true) {
         offsets =
@@ -886,6 +554,17 @@ mod tests {
         );
         assert_eq!(measure_width(&lines[0].text), 102);
         assert_eq!(lines[1].text, "是关心你的分析结果内容");
+    }
+
+    #[test]
+    fn short_indent_keeps_url_intact_when_it_fits_continuation_width() {
+        let url = "https://example.com/a";
+        for prefix in [" ", "  ", "   "] {
+            let lines = wrap_prompt_visual_lines(&format!("{prefix}{url}"), measure_width(url), 0);
+            let texts: Vec<&str> = lines.iter().map(|line| line.text.as_str()).collect();
+
+            assert_eq!(texts, vec![prefix, url], "prefix={prefix:?}");
+        }
     }
 
     fn assert_prompt_wrap_invariants(value: &str, width: usize, line_prefix_width: usize) {

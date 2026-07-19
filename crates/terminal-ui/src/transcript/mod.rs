@@ -1,6 +1,7 @@
 mod cache;
 mod item_index;
 mod items;
+mod linebreak;
 mod list;
 mod markdown;
 pub(crate) mod markdown_blocks;
@@ -34,6 +35,10 @@ pub(crate) use items::ReasoningRenderMode;
 pub(crate) use items::{
     FinalBodyDividerItem, ReasoningMessageItem, SystemMessageItem, WorkDurationMessageItem,
 };
+pub(crate) use linebreak::{
+    ProseWrapOptions, WrappedWhitespace, prose_wrap_is_monotone_when_widening, split_text_lines,
+    wrap_prose_ranges,
+};
 pub(crate) use list::{Transcript, TranscriptItem, materialize_transcript_item_render_block};
 pub(crate) use markdown::{
     assistant_markdown_options, estimate_markdown_metrics_for_tabs, render_markdown_lines,
@@ -59,6 +64,5 @@ pub(crate) use render_state::{
 pub(crate) use wrap::{
     DEFAULT_RENDER_WIDTH, display_tab_width, wrap_assistant_text, wrap_plain_text, wrap_prompt_text,
 };
-pub(crate) use wrap::{WrapSegmentKind, should_start_new_wrap_segment, wrap_segment_kind};
 #[cfg(test)]
 pub(crate) use wrap::{prompt_text_wrap_call_count, reset_prompt_text_wrap_call_count};

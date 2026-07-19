@@ -413,9 +413,13 @@ mod tests {
         let width = 40;
         let palette = default_palette();
 
+        // paragraph markdown 走不了 exact-fast，必须回退到 renderer-backed metrics；
+        // renderer 以 assistant 内容宽度（扣除 inset）渲染，故与同宽度的
+        // render_markdown_metrics 对齐，而非原始终端宽度。
+        let content_width = assistant_message_content_width(width as u16);
         assert_eq!(
             render_assistant_message_metrics(markdown, width as u16, palette, None),
-            render_markdown_metrics(markdown, width, palette, None)
+            render_markdown_metrics(markdown, content_width, palette, None)
         );
     }
 

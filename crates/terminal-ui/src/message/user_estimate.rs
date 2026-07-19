@@ -1,13 +1,17 @@
+#[cfg(test)]
+use std::cell::Cell;
+
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
     StyleMode,
-    display_width::grapheme_width,
+    display_width::{display_width, grapheme_width},
+    terminal_text::sanitize_terminal_text,
     theme::TerminalPalette,
     transcript::{
-        TranscriptEstimateKind, TranscriptEstimateSource, TranscriptFastEstimate,
-        TranscriptItemMetrics, WrapSegmentKind, display_tab_width, should_start_new_wrap_segment,
-        wrap_segment_kind,
+        ProseWrapOptions, TranscriptEstimateKind, TranscriptEstimateSource, TranscriptFastEstimate,
+        TranscriptItemMetrics, WrappedWhitespace, display_tab_width,
+        prose_wrap_is_monotone_when_widening, split_text_lines, wrap_prose_ranges,
     },
 };
 
@@ -22,86 +26,62 @@ use super::{
     user_projection::user_message_wrap_snapshot,
 };
 
+#[cfg(test)]
+thread_local! {
+    static ESTIMATE_RENDERED_PROMPT_TEXT_CALL_COUNT: Cell<usize> = const { Cell::new(0) };
+}
+
 pub(super) fn estimate_user_message_metrics_fast(
     content: &str,
     width: u16,
     palette: TerminalPalette,
     style_mode: StyleMode,
+    can_reuse_user_line_count_when_widening: bool,
     previous_metrics: Option<TranscriptItemMetrics>,
 ) -> TranscriptFastEstimate {
     let width = width.max(1);
-    let layout = match style_mode.normalized() {
-        StyleMode::Ms => UserMessageRenderLayout {
-            frame_width: usize::from(width),
-            content_width: user_message_legacy_content_width(width, style_mode),
-            line_prefix_width: user_message_inset_width(style_mode),
-            shows_prefix: true,
-            shows_frame: false,
-        },
-        StyleMode::Cc => UserMessageRenderLayout {
-            frame_width: usize::from(width),
-            content_width: user_message_compact_content_width(width, style_mode),
-            line_prefix_width: user_message_inset_width(style_mode),
-            shows_prefix: true,
-            shows_frame: false,
-        },
-        StyleMode::Cx => user_message_layout(width, style_mode),
-    };
+    let layout = user_message_estimate_layout(width, style_mode);
     let has_frame = layout.shows_frame && has_visible_user_message_frame(palette);
     let frame_line_count = usize::from(has_frame) * 2;
 
     let reused_metrics =
         previous_metrics.filter(|metrics| metrics.is_valid && metrics.width != width);
     if let Some(previous_metrics) = reused_metrics {
-        let previous_layout = match style_mode.normalized() {
-            StyleMode::Ms => UserMessageRenderLayout {
-                frame_width: usize::from(previous_metrics.width.max(1)),
-                content_width: user_message_legacy_content_width(
-                    previous_metrics.width,
-                    style_mode,
-                ),
-                line_prefix_width: user_message_inset_width(style_mode),
-                shows_prefix: true,
-                shows_frame: false,
-            },
-            StyleMode::Cc => UserMessageRenderLayout {
-                frame_width: usize::from(previous_metrics.width.max(1)),
-                content_width: user_message_compact_content_width(
-                    previous_metrics.width,
-                    style_mode,
-                ),
-                line_prefix_width: user_message_inset_width(style_mode),
-                shows_prefix: true,
-                shows_frame: false,
-            },
-            StyleMode::Cx => user_message_layout(previous_metrics.width.max(1), style_mode),
-        };
         let old_frame_line_count = frame_line_count;
         let old_content_line_count = previous_metrics
             .content_line_count
             .saturating_sub(old_frame_line_count)
             .max(1);
-
-        let old_content_width = previous_layout.content_width.max(1);
         let new_content_width = layout.content_width.max(1);
-        let (estimated_content_line_count, source) = if new_content_width >= old_content_width {
-            (
+        // content_width 随终端宽度单调不减，比较原始宽度即可判定变宽方向。
+        let widened = width >= previous_metrics.width;
+        if widened && can_reuse_user_line_count_when_widening {
+            let estimated_char_len = estimate_user_plain_text_len_on_widening(
+                previous_metrics,
+                content.len(),
+                layout,
+                style_mode,
+                has_frame,
                 old_content_line_count,
-                TranscriptEstimateSource::ReusedOnResize,
-            )
-        } else {
-            (
-                estimate_wrapped_line_count_by_display_width(
-                    content,
-                    new_content_width,
-                    layout.line_prefix_width,
-                )
-                .max(old_content_line_count),
-                TranscriptEstimateSource::Fresh,
-            )
-        };
+            );
+            return TranscriptFastEstimate {
+                content_line_count: old_content_line_count.saturating_add(frame_line_count),
+                content_char_len: previous_metrics.content_char_len.max(estimated_char_len),
+                kind: TranscriptEstimateKind::NonAssistant,
+                source: TranscriptEstimateSource::ReusedOnResize,
+            };
+        }
 
-        let content_line_count = estimated_content_line_count + frame_line_count;
+        // 变窄，或内容含 URL 原子保护 / 短缩进 / 宽空白等非单调特征时，
+        // 旧行数只能作为保守下界，需按当前宽度重新估算。
+        let estimated_content_line_count = estimate_wrapped_line_count_by_display_width(
+            content,
+            new_content_width,
+            layout.line_prefix_width,
+        )
+        .max(old_content_line_count);
+
+        let content_line_count = estimated_content_line_count.saturating_add(frame_line_count);
         let estimated_char_len = estimate_user_plain_text_len_fast(
             content,
             layout,
@@ -115,7 +95,7 @@ pub(super) fn estimate_user_message_metrics_fast(
             content_line_count,
             content_char_len,
             kind: TranscriptEstimateKind::NonAssistant,
-            source,
+            source: TranscriptEstimateSource::Fresh,
         };
     }
 
@@ -124,7 +104,7 @@ pub(super) fn estimate_user_message_metrics_fast(
         layout.content_width.max(1),
         layout.line_prefix_width,
     );
-    let content_line_count = estimated_content_line_count + frame_line_count;
+    let content_line_count = estimated_content_line_count.saturating_add(frame_line_count);
     let content_char_len = estimate_user_plain_text_len_fast(
         content,
         layout,
@@ -141,6 +121,44 @@ pub(super) fn estimate_user_message_metrics_fast(
     }
 }
 
+fn user_message_estimate_layout(width: u16, style_mode: StyleMode) -> UserMessageRenderLayout {
+    let width = width.max(1);
+    match style_mode.normalized() {
+        StyleMode::Ms => UserMessageRenderLayout {
+            frame_width: usize::from(width),
+            content_width: user_message_legacy_content_width(width, style_mode),
+            line_prefix_width: user_message_inset_width(style_mode),
+            shows_prefix: true,
+            shows_frame: false,
+        },
+        StyleMode::Cc => UserMessageRenderLayout {
+            frame_width: usize::from(width),
+            content_width: user_message_compact_content_width(width, style_mode),
+            line_prefix_width: user_message_inset_width(style_mode),
+            shows_prefix: true,
+            shows_frame: false,
+        },
+        StyleMode::Cx => user_message_layout(width, style_mode),
+    }
+}
+
+/// 判断 user prompt 是否可以在宽度变大时安全复用旧行数。
+///
+/// certificate 在消息构造期计算一次；resize 热路径只读取布尔值。任意前导
+/// 空格与 hard-wrap 控制字符都保守拒绝，避免把 prompt 特有的前缀回退规则
+/// 混入 prose planner 的单调性证明。
+pub(super) fn can_reuse_user_line_count_when_widening(content: &str) -> bool {
+    let sanitized = sanitize_terminal_text(content);
+    let content = sanitized.as_ref();
+    prose_wrap_is_monotone_when_widening(content)
+        && split_text_lines(content).all(|(line, _)| {
+            !line
+                .chars()
+                .next()
+                .is_some_and(|character| character == ' ')
+        })
+}
+
 pub(super) fn estimate_wrapped_line_count_by_display_width(
     content: &str,
     content_width: usize,
@@ -152,7 +170,7 @@ pub(super) fn estimate_wrapped_line_count_by_display_width(
     }
 
     let mut total = 0usize;
-    for raw_line in content.split('\n') {
+    for (raw_line, _) in split_text_lines(content) {
         total += estimate_prompt_logical_line_count(raw_line, content_width, line_prefix_width);
     }
 
@@ -189,11 +207,13 @@ fn estimate_prompt_logical_line_count(
             .unwrap_or("");
         let first_width = content_width.saturating_sub(leading_spaces).max(1);
 
-        if short_indent_requires_prefix_only_fallback(remainder, first_width) {
+        let (estimated_line_count, first_line_width) =
+            estimate_prompt_prose(remainder, first_width, content_width);
+        if leading_spaces.saturating_add(first_line_width) > content_width {
             return 1 + estimate_prompt_prose_line_count(remainder, content_width, content_width);
         }
 
-        return estimate_prompt_prose_line_count(remainder, first_width, content_width);
+        return estimated_line_count;
     }
 
     estimate_prompt_prose_line_count(raw_line, content_width, content_width)
@@ -204,228 +224,28 @@ fn estimate_prompt_prose_line_count(
     first_width: usize,
     continuation_width: usize,
 ) -> usize {
-    let first_width = first_width.max(1);
-    let continuation_width = continuation_width.max(1);
-    if text.is_empty() {
-        return 1;
-    }
-
-    #[derive(Clone, Copy)]
-    struct Segment<'a> {
-        text: &'a str,
-        width: usize,
-        is_space: bool,
-    }
-
-    #[derive(Clone, Copy)]
-    struct WordBlock<'a> {
-        leading_spaces: usize,
-        word: Segment<'a>,
-        trailing_spaces: usize,
-        has_leading_space: bool,
-        has_trailing: bool,
-    }
-
-    impl WordBlock<'_> {
-        fn visible_width(&self, at_line_start: bool) -> usize {
-            let mut width = self.word.width;
-            if self.has_leading_space && !(at_line_start && self.leading_spaces == 1) {
-                width += self.leading_spaces;
-            }
-            if self.has_trailing {
-                width += self.trailing_spaces;
-            }
-            width
-        }
-
-        fn visible_leading_spaces(&self, at_line_start: bool) -> usize {
-            if self.has_leading_space && !(at_line_start && self.leading_spaces == 1) {
-                self.leading_spaces
-            } else {
-                0
-            }
-        }
-    }
-
-    let mut segments = Vec::new();
-    let mut current_start = 0usize;
-    let mut current_width = 0usize;
-    let mut current_kind = None;
-
-    for (start, cluster) in UnicodeSegmentation::grapheme_indices(text, true) {
-        let kind = wrap_segment_kind(cluster);
-        if current_kind.is_none() {
-            current_start = start;
-            current_kind = Some(kind);
-        } else if current_kind.is_some_and(|existing| should_start_new_wrap_segment(existing, kind))
-        {
-            segments.push(Segment {
-                text: &text[current_start..start],
-                width: current_width,
-                is_space: current_kind == Some(WrapSegmentKind::Space),
-            });
-            current_start = start;
-            current_width = 0;
-            current_kind = Some(kind);
-        }
-
-        current_width = current_width.saturating_add(match cluster {
-            // estimated path 把 tab 当作固定 8 列宽的 stop；可见窗口 exactize 会纠正细节。
-            "\t" => 8,
-            _ => grapheme_width(cluster),
-        });
-    }
-
-    if let Some(kind) = current_kind {
-        segments.push(Segment {
-            text: &text[current_start..],
-            width: current_width,
-            is_space: kind == WrapSegmentKind::Space,
-        });
-    }
-
-    if segments.is_empty() {
-        return 1;
-    }
-
-    let mut blocks = Vec::with_capacity(segments.len() / 2 + 1);
-    let mut pending_spaces = 0usize;
-    let mut has_pending_spaces = false;
-    let mut index = 0usize;
-
-    while index < segments.len() {
-        let segment = segments[index];
-        if segment.is_space {
-            pending_spaces = segment.width;
-            has_pending_spaces = true;
-            index += 1;
-            continue;
-        }
-
-        let mut block = WordBlock {
-            leading_spaces: pending_spaces,
-            word: segment,
-            trailing_spaces: 0,
-            has_leading_space: has_pending_spaces,
-            has_trailing: false,
-        };
-        pending_spaces = 0;
-        has_pending_spaces = false;
-
-        if index + 1 < segments.len() && segments[index + 1].is_space && index + 2 >= segments.len()
-        {
-            block.trailing_spaces = segments[index + 1].width;
-            block.has_trailing = true;
-            index += 1;
-        }
-
-        blocks.push(block);
-        index += 1;
-    }
-
-    if blocks.is_empty() {
-        return estimate_hard_wrap_width_line_count(
-            segments
-                .iter()
-                .map(|segment| segment.width)
-                .sum::<usize>()
-                .max(1),
-            first_width,
-            continuation_width,
-        );
-    }
-
-    let mut line_count = 1usize;
-    let mut current_limit = first_width;
-    let mut current_width_used = 0usize;
-    let mut has_content = false;
-
-    let should_reflow_exact_fit_block =
-        |current_width_used: usize,
-         current_limit: usize,
-         continuation_width: usize,
-         block: &WordBlock<'_>,
-         remaining: &[WordBlock<'_>]| {
-            if current_width_used == 0 || continuation_width == 0 || remaining.is_empty() {
-                return false;
-            }
-            if current_width_used + block.visible_width(false) != current_limit {
-                return false;
-            }
-
-            let next_block = remaining[0];
-            if !next_block.has_leading_space || next_block.leading_spaces <= 1 {
-                return false;
-            }
-
-            // 这里要与 exact wrapper 的 reflow 规则保持一致，避免多空格前缀被错误吞进上一行。
-            block.visible_width(true) + next_block.visible_width(false) <= continuation_width
-        };
-
-    for (index, block) in blocks.iter().enumerate() {
-        loop {
-            let at_line_start = !has_content;
-            let block_width = block.visible_width(at_line_start).max(1);
-
-            if current_width_used + block_width <= current_limit {
-                if !at_line_start
-                    && should_reflow_exact_fit_block(
-                        current_width_used,
-                        current_limit,
-                        continuation_width,
-                        block,
-                        &blocks[index + 1..],
-                    )
-                {
-                    line_count += 1;
-                    current_limit = continuation_width;
-                    current_width_used = 0;
-                    has_content = false;
-                    continue;
-                }
-
-                current_width_used += block_width;
-                has_content = true;
-                break;
-            }
-
-            if !at_line_start {
-                line_count += 1;
-                current_limit = continuation_width;
-                current_width_used = 0;
-                has_content = false;
-                continue;
-            }
-
-            let leading_spaces = block.visible_leading_spaces(true);
-            let trailing_spaces = if block.has_trailing {
-                block.trailing_spaces
-            } else {
-                0
-            };
-            let (lines_used, last_line_width) = estimate_hard_wrap_word_block(
-                leading_spaces,
-                block.word.text,
-                trailing_spaces,
-                current_limit,
-                continuation_width,
-            );
-            line_count += lines_used.saturating_sub(1);
-            current_limit = continuation_width;
-            current_width_used = last_line_width;
-            has_content = true;
-            break;
-        }
-    }
-
-    line_count.max(1)
+    estimate_prompt_prose(text, first_width, continuation_width).0
 }
 
-fn short_indent_requires_prefix_only_fallback(remainder: &str, first_width: usize) -> bool {
-    UnicodeSegmentation::graphemes(remainder, true)
-        .next()
-        .map(|cluster| grapheme_width(cluster) > first_width.max(1))
-        .unwrap_or(false)
+fn estimate_prompt_prose(
+    text: &str,
+    first_width: usize,
+    continuation_width: usize,
+) -> (usize, usize) {
+    let wrapped = wrap_prose_ranges(
+        text,
+        ProseWrapOptions {
+            first_width,
+            continuation_width,
+            wrapped_whitespace: WrappedWhitespace::PreserveMultiple,
+            trim_trailing_whitespace: false,
+        },
+    );
+    let first_line_width = wrapped
+        .first()
+        .map(|line| display_width(&text[line.visible.clone()]))
+        .unwrap_or(0);
+    (wrapped.len().max(1), first_line_width)
 }
 
 pub(super) fn estimate_hard_wrap_line_count(
@@ -509,90 +329,6 @@ pub(super) fn estimate_hard_wrap_visible_text(
     (line_count.max(1), current_width_used)
 }
 
-fn estimate_hard_wrap_word_block(
-    leading_spaces: usize,
-    word: &str,
-    trailing_spaces: usize,
-    first_width: usize,
-    continuation_width: usize,
-) -> (usize, usize) {
-    let first_width = first_width.max(1);
-    let continuation_width = continuation_width.max(1);
-    if leading_spaces == 0 && word.is_empty() && trailing_spaces == 0 {
-        return (1, 0);
-    }
-
-    let mut line_count = 1usize;
-    let mut current_limit = first_width;
-    let mut current_width_used = 0usize;
-    let mut current_has_content = false;
-
-    let mut push_width = |cluster_width: usize| {
-        if current_width_used.saturating_add(cluster_width) > current_limit && current_has_content {
-            line_count = line_count.saturating_add(1);
-            current_limit = continuation_width;
-            current_width_used = 0;
-            current_has_content = false;
-        }
-
-        current_width_used = current_width_used.saturating_add(cluster_width);
-        current_has_content = true;
-    };
-
-    for _ in 0..leading_spaces {
-        push_width(1);
-    }
-
-    for cluster in UnicodeSegmentation::graphemes(word, true) {
-        let cluster_width = match cluster {
-            // estimated path 把 tab 当作固定 8 列宽的 stop；可见窗口 exactize 会纠正细节。
-            "\t" => 8,
-            _ => grapheme_width(cluster),
-        };
-        push_width(cluster_width);
-    }
-
-    for _ in 0..trailing_spaces {
-        push_width(1);
-    }
-
-    (line_count.max(1), current_width_used)
-}
-
-fn estimate_hard_wrap_width(
-    width: usize,
-    first_width: usize,
-    continuation_width: usize,
-) -> (usize, usize) {
-    let first_width = first_width.max(1);
-    let continuation_width = continuation_width.max(1);
-    if width <= first_width {
-        return (1, width);
-    }
-
-    let remaining = width.saturating_sub(first_width);
-    let additional_lines = remaining.div_ceil(continuation_width);
-    let total_lines = additional_lines.saturating_add(1);
-    let remainder = remaining % continuation_width;
-    let last_width = if remainder == 0 {
-        continuation_width
-    } else {
-        remainder
-    };
-
-    (total_lines.max(1), last_width)
-}
-
-fn estimate_hard_wrap_width_line_count(
-    width: usize,
-    first_width: usize,
-    continuation_width: usize,
-) -> usize {
-    estimate_hard_wrap_width(width, first_width, continuation_width)
-        .0
-        .max(1)
-}
-
 fn estimate_user_plain_text_len_fast(
     content: &str,
     layout: UserMessageRenderLayout,
@@ -618,11 +354,26 @@ fn estimate_user_plain_text_len_fast(
     let estimated_line_len = match style_mode.normalized() {
         StyleMode::Cx | StyleMode::Cc => {
             let prefix_width = layout.line_prefix_width.saturating_mul(content_line_count);
-            let trailing_fill_len = layout
+            let total_trailing_capacity = layout
                 .frame_width
                 .max(1)
                 .saturating_mul(content_line_count)
-                .saturating_sub(prefix_width.saturating_add(rendered_text.display_width));
+                .saturating_sub(prefix_width);
+            let line_content_capacity = layout
+                .frame_width
+                .max(1)
+                .saturating_sub(layout.line_prefix_width);
+            // 通常每条视觉行都不超过 trailing-fill 容量，因此总 fill 可由总显示宽度
+            // 精确扣除。超宽 grapheme 与 tab 会让某一行溢出；此时不能用该溢出抵消
+            // 其它行仍真实存在的 fill，退回容量总和作为保守上界。
+            let occupied_width = if rendered_text.has_tab
+                || rendered_text.max_grapheme_width > line_content_capacity
+            {
+                0
+            } else {
+                rendered_text.display_width
+            };
+            let trailing_fill_len = total_trailing_capacity.saturating_sub(occupied_width);
             text_with_prefixes.saturating_add(trailing_fill_len)
         }
         StyleMode::Ms => text_with_prefixes,
@@ -632,13 +383,53 @@ fn estimate_user_plain_text_len_fast(
     plain_text_len
 }
 
+fn estimate_user_plain_text_len_on_widening(
+    previous_metrics: TranscriptItemMetrics,
+    content_byte_len: usize,
+    layout: UserMessageRenderLayout,
+    style_mode: StyleMode,
+    has_frame: bool,
+    content_line_count: usize,
+) -> usize {
+    let previous_layout = user_message_estimate_layout(previous_metrics.width, style_mode);
+    let frame_width_delta = layout
+        .frame_width
+        .saturating_sub(previous_layout.frame_width);
+
+    // certificate 保证内容行不会增加。Cx/Cc 的普通空格可见性变化会被
+    // trailing fill 抵消，每个保留行最多增长 frame_width_delta；Ms 没有 fill，
+    // 需用原始 byte length 加旧行数前缀建立不扫描正文的保守上界。
+    let content_char_len = match style_mode.normalized() {
+        StyleMode::Cx | StyleMode::Cc => previous_metrics
+            .content_char_len
+            .saturating_add(content_line_count.saturating_mul(frame_width_delta)),
+        StyleMode::Ms => content_byte_len
+            .saturating_add(user_message_prefix(style_mode).len())
+            .saturating_add(
+                content_line_count
+                    .saturating_sub(1)
+                    .saturating_mul(layout.line_prefix_width),
+            ),
+    };
+    let frame_fill_delta = usize::from(has_frame)
+        .saturating_mul(2)
+        .saturating_mul(frame_width_delta);
+
+    content_char_len.saturating_add(frame_fill_delta)
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct PromptTextEstimate {
     byte_len: usize,
     display_width: usize,
+    max_grapheme_width: usize,
+    has_tab: bool,
 }
 
 fn estimate_rendered_prompt_text(content: &str) -> PromptTextEstimate {
+    #[cfg(test)]
+    ESTIMATE_RENDERED_PROMPT_TEXT_CALL_COUNT.with(|count| count.set(count.get() + 1));
+
     let mut estimate = PromptTextEstimate::default();
     for cluster in UnicodeSegmentation::graphemes(content, true) {
         if cluster == "\n" {
@@ -648,14 +439,26 @@ fn estimate_rendered_prompt_text(content: &str) -> PromptTextEstimate {
             let width = display_tab_width(0);
             estimate.byte_len = estimate.byte_len.saturating_add(width);
             estimate.display_width = estimate.display_width.saturating_add(width);
+            estimate.max_grapheme_width = estimate.max_grapheme_width.max(width);
+            estimate.has_tab = true;
         } else {
+            let width = grapheme_width(cluster);
             estimate.byte_len = estimate.byte_len.saturating_add(cluster.len());
-            estimate.display_width = estimate
-                .display_width
-                .saturating_add(grapheme_width(cluster));
+            estimate.display_width = estimate.display_width.saturating_add(width);
+            estimate.max_grapheme_width = estimate.max_grapheme_width.max(width);
         }
     }
     estimate
+}
+
+#[cfg(test)]
+pub(super) fn reset_estimate_rendered_prompt_text_call_count() {
+    ESTIMATE_RENDERED_PROMPT_TEXT_CALL_COUNT.set(0);
+}
+
+#[cfg(test)]
+pub(super) fn estimate_rendered_prompt_text_call_count() -> usize {
+    ESTIMATE_RENDERED_PROMPT_TEXT_CALL_COUNT.get()
 }
 
 pub(super) fn measure_user_message_metrics(

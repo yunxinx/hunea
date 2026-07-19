@@ -10,7 +10,12 @@ pub(crate) enum TranscriptEstimateKind {
     NonAssistant,
 }
 
-/// `TranscriptEstimateSource` 标记 estimated metrics 是重新估算还是在 resize 时复用缓存语义。
+/// `TranscriptEstimateSource` 标记本次 estimated metrics 与旧 metrics 的关系。
+///
+/// `ReusedOnResize` 表示旧 metrics 主导了结果：user 路径在变宽且内容行数
+/// 随宽度单调时复用旧行数，并按当前宽度 O(1) 更新 char_len 上界；assistant
+/// 路径把旧 char_len 折入下界。`Fresh` 表示行数按当前宽度重新估算，旧 metrics
+/// 至多作为保守下界。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum TranscriptEstimateSource {
     #[default]
@@ -35,7 +40,9 @@ pub(crate) struct TranscriptEstimateBreakdown {
     pub(crate) startup_banner_item_count: usize,
     pub(crate) other_non_assistant_item_count: usize,
     pub(crate) non_assistant_item_count: usize,
+    /// resize 估算中旧 metrics 主导结果的 assistant item 数（见 `TranscriptEstimateSource`）。
     pub(crate) assistant_resize_reuse_count: usize,
+    /// resize 估算中旧 metrics 主导结果的 user item 数（见 `TranscriptEstimateSource`）。
     pub(crate) user_resize_reuse_count: usize,
     pub(crate) assistant_estimate_time: Duration,
     pub(crate) user_estimate_time: Duration,

@@ -28,6 +28,7 @@ tachyonfx.workspace = true
 terminal-light.workspace = true
 tokio.workspace = true
 two-face.workspace = true
+unicode-linebreak.workspace = true
 unicode-segmentation.workspace = true
 unicode-width.workspace = true
 url.workspace = true

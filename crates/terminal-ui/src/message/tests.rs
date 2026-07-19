@@ -21,9 +21,10 @@ use std::{path::PathBuf, rc::Rc};
 fn assistant_plain_output_preserves_the_raw_command_text() {
     let item = MessageItem::new(Sender::Assistant, "go test ./...");
 
+    // 宽度 6：plain 路径按 UAX #14 断点换行（`./...` 在标准位置断开）。
     assert_eq!(
         item.render_plain_text(6, default_palette()),
-        "go\ntest\n./..."
+        "go\ntest .\n/..."
     );
 }
 
@@ -621,6 +622,19 @@ fn user_fast_estimate_uses_cjk_breakpoints_in_mixed_prose() {
 }
 
 #[test]
+fn user_fast_estimate_stays_conservative_for_short_indent_kinsoku_overflow() {
+    let content = " 你，好";
+    let exact_line_count = wrap_prompt_visual_lines(content, 3, 0).len();
+    let estimated_line_count = estimate_wrapped_line_count_by_display_width(content, 3, 0);
+
+    assert_eq!(exact_line_count, 3);
+    assert!(
+        estimated_line_count >= exact_line_count,
+        "fast estimate must include the prefix-only line created by kinsoku overflow: exact={exact_line_count}, estimated={estimated_line_count}"
+    );
+}
+
+#[test]
 fn user_fast_estimate_stays_conservative_for_tabbed_narrow_literal_wraps() {
     let palette = default_palette();
     let item = MessageItem::new_with_style_mode(Sender::User, "a\tb", StyleMode::Cx);
@@ -788,6 +802,21 @@ fn user_fast_estimate_keeps_plain_text_len_conservative_when_visible_line_overfl
 }
 
 #[test]
+fn user_fast_estimate_keeps_trailing_fill_when_another_line_overflows() {
+    let palette = default_palette();
+    let item = MessageItem::new_with_style_mode(Sender::User, "中\n", StyleMode::Cx);
+    let width = 3_u16;
+    let exact = item.measure_render_metrics(width, palette);
+    let estimated = item.estimate_render_metrics_fast(width, palette, None);
+
+    assert_eq!(exact, (4, 16));
+    assert!(
+        estimated.content_char_len >= exact.1,
+        "an overwide line must not cancel the trailing fill reserved by another line: exact={exact:?}, estimated={estimated:?}"
+    );
+}
+
+#[test]
 fn user_fast_estimate_does_not_materialize_wrapped_prompt_lines() {
     let item = MessageItem::new_with_style_mode(
         Sender::User,
@@ -863,6 +892,341 @@ fn user_fast_estimate_resize_reuse_stays_conservative_for_narrower_prose_wraps()
         estimated.content_line_count >= new_exact_line_count,
         "resize reuse should stay conservative after narrowing prose wraps: exact={new_exact_line_count}, estimated={estimated:?}, old_exact={old_exact_line_count}"
     );
+}
+
+#[test]
+fn user_fast_estimate_resize_reuse_stays_conservative_when_wider_wrap_has_more_rows() {
+    let palette = default_palette();
+    let item =
+        MessageItem::new_with_style_mode(Sender::User, "  www.example.com/path 中", StyleMode::Cx);
+    let old_width = 23_u16; // Cx 模式下 content_width == 19。
+    let new_width = 24_u16; // URL 可完整放入 continuation line，实际行数反而增加。
+
+    let (old_exact_line_count, old_exact_plain_text_len) =
+        item.measure_render_metrics(old_width, palette);
+    let previous_metrics = TranscriptItemMetrics {
+        item_index: 0,
+        width: old_width,
+        cache_key: item.render_cache_key(),
+        content_line_count: old_exact_line_count,
+        content_char_len: old_exact_plain_text_len,
+        quality: crate::transcript::TranscriptItemMetricsQuality::Exact,
+        is_valid: true,
+    };
+
+    let (new_exact_line_count, _) = item.measure_render_metrics(new_width, palette);
+    let estimated = item.estimate_render_metrics_fast(new_width, palette, Some(previous_metrics));
+
+    assert_eq!(new_exact_line_count, old_exact_line_count + 1);
+    assert_eq!(
+        estimated.source,
+        crate::transcript::TranscriptEstimateSource::Fresh,
+        "width-sensitive content must skip the monotone reuse shortcut"
+    );
+    assert!(
+        estimated.content_line_count >= new_exact_line_count,
+        "resize reuse must stay conservative when a wider URL wrap gains a row: old_exact={old_exact_line_count}, new_exact={new_exact_line_count}, estimated={estimated:?}"
+    );
+}
+
+#[test]
+fn user_fast_estimate_reuses_old_line_count_for_monotone_prose_when_wider() {
+    let palette = default_palette();
+    let item = MessageItem::new_with_style_mode(
+        Sender::User,
+        "keep scrollback anchored while the composer draft keeps growing",
+        StyleMode::Cx,
+    );
+    let old_width = 24_u16;
+    let new_width = 48_u16;
+
+    let (old_exact_line_count, old_exact_plain_text_len) =
+        item.measure_render_metrics(old_width, palette);
+    let (new_exact_line_count, _) = item.measure_render_metrics(new_width, palette);
+    assert!(
+        old_exact_line_count > new_exact_line_count,
+        "scenario must actually rewrap: old_exact={old_exact_line_count}, new_exact={new_exact_line_count}"
+    );
+
+    let previous_metrics = TranscriptItemMetrics {
+        item_index: 0,
+        width: old_width,
+        cache_key: item.render_cache_key(),
+        content_line_count: old_exact_line_count,
+        content_char_len: old_exact_plain_text_len,
+        quality: crate::transcript::TranscriptItemMetricsQuality::Exact,
+        is_valid: true,
+    };
+    let estimated = item.estimate_render_metrics_fast(new_width, palette, Some(previous_metrics));
+
+    assert_eq!(
+        estimated.source,
+        crate::transcript::TranscriptEstimateSource::ReusedOnResize,
+        "monotone prose must keep the O(1) wider-reuse shortcut"
+    );
+    assert_eq!(estimated.content_line_count, old_exact_line_count);
+    assert!(estimated.content_line_count >= new_exact_line_count);
+}
+
+#[test]
+fn user_fast_estimate_widened_reuse_covers_current_plain_text_len() {
+    let palette = default_palette();
+
+    for style_mode in [StyleMode::Cx, StyleMode::Cc] {
+        let item = MessageItem::new_with_style_mode(Sender::User, "hello", style_mode);
+        let old_width = 12_u16;
+        let new_width = 20_u16;
+        let (old_exact_line_count, old_exact_plain_text_len) =
+            item.measure_render_metrics(old_width, palette);
+        let (new_exact_line_count, new_exact_plain_text_len) =
+            item.measure_render_metrics(new_width, palette);
+        let previous_metrics = TranscriptItemMetrics {
+            item_index: 0,
+            width: old_width,
+            cache_key: item.render_cache_key(),
+            content_line_count: old_exact_line_count,
+            content_char_len: old_exact_plain_text_len,
+            quality: crate::transcript::TranscriptItemMetricsQuality::Exact,
+            is_valid: true,
+        };
+
+        assert_eq!(old_exact_line_count, new_exact_line_count);
+        assert!(
+            new_exact_plain_text_len > old_exact_plain_text_len,
+            "fixture must expose width-dependent trailing fill: style_mode={style_mode:?}"
+        );
+
+        let estimated =
+            item.estimate_render_metrics_fast(new_width, palette, Some(previous_metrics));
+
+        assert_eq!(estimated.source, TranscriptEstimateSource::ReusedOnResize);
+        assert!(
+            estimated.content_char_len >= new_exact_plain_text_len,
+            "widened reuse must cover current-width plain text: style_mode={style_mode:?}, old_exact={old_exact_plain_text_len}, new_exact={new_exact_plain_text_len}, estimated={estimated:?}"
+        );
+    }
+}
+
+#[test]
+fn user_fast_estimate_widened_reuse_covers_legacy_plain_text_when_break_moves() {
+    let palette = default_palette();
+    let item = MessageItem::new_with_style_mode(Sender::User, "a -a", StyleMode::Ms);
+    let old_width = 4_u16;
+    let new_width = 5_u16;
+    let old_exact = item.measure_render_metrics(old_width, palette);
+    let new_exact = item.measure_render_metrics(new_width, palette);
+    let previous_metrics = TranscriptItemMetrics {
+        item_index: 0,
+        width: old_width,
+        cache_key: item.render_cache_key(),
+        content_line_count: old_exact.0,
+        content_char_len: old_exact.1,
+        quality: crate::transcript::TranscriptItemMetricsQuality::Exact,
+        is_valid: true,
+    };
+
+    assert_eq!(old_exact, (2, 7));
+    assert_eq!(new_exact, (2, 8));
+
+    let estimated = item.estimate_render_metrics_fast(new_width, palette, Some(previous_metrics));
+
+    assert_eq!(estimated.source, TranscriptEstimateSource::ReusedOnResize);
+    assert!(estimated.content_char_len >= new_exact.1);
+}
+
+#[test]
+fn user_fast_estimate_widened_reuse_does_not_scan_prompt_text() {
+    let palette = default_palette();
+
+    for style_mode in [StyleMode::Cx, StyleMode::Cc, StyleMode::Ms] {
+        let item = MessageItem::new_with_style_mode(
+            Sender::User,
+            "keep the resize path constant time for ordinary prose",
+            style_mode,
+        );
+        let old_width = 24_u16;
+        let previous = item.measure_render_metrics(old_width, palette);
+        let previous_metrics = TranscriptItemMetrics {
+            item_index: 0,
+            width: old_width,
+            cache_key: item.render_cache_key(),
+            content_line_count: previous.0,
+            content_char_len: previous.1,
+            quality: crate::transcript::TranscriptItemMetricsQuality::Exact,
+            is_valid: true,
+        };
+
+        user_estimate::reset_estimate_rendered_prompt_text_call_count();
+        let estimated = item.estimate_render_metrics_fast(48, palette, Some(previous_metrics));
+
+        assert_eq!(estimated.source, TranscriptEstimateSource::ReusedOnResize);
+        assert_eq!(
+            user_estimate::estimate_rendered_prompt_text_call_count(),
+            0,
+            "widened reuse must derive plain-text length without scanning content: style_mode={style_mode:?}"
+        );
+    }
+}
+
+#[test]
+fn user_widening_reuse_certificate_rejects_width_sensitive_content() {
+    for content in [
+        "see https://example.com/a/b",
+        "bare www.example.com/path token",
+        " short-indented line",
+        "  two-space indented line",
+        "    four-space literal block",
+        "\tliteral line stays on the hard-wrap path",
+        "double  spaced words",
+        "wide\u{3000}space",
+        "inline\u{2028}separator",
+        "inline\u{2029}separator",
+        "windows\r\nline ending",
+        "multi\nline with one  run",
+    ] {
+        assert!(
+            !user_estimate::can_reuse_user_line_count_when_widening(content),
+            "expected width-sensitive: {content:?}"
+        );
+    }
+}
+
+#[test]
+fn user_widening_reuse_certificate_accepts_monotone_prose() {
+    for content in [
+        "keep scrollback anchored while the composer draft keeps growing",
+        "你好，世界。混排 prose 行数同样单调",
+        "src/main.rs mentioned inline",
+    ] {
+        assert!(
+            user_estimate::can_reuse_user_line_count_when_widening(content),
+            "did not expect width-sensitive: {content:?}"
+        );
+    }
+}
+
+#[test]
+fn user_fast_estimate_widened_reuse_is_conservative_for_certified_corpus() {
+    let palette = default_palette();
+    let widths = [5_u16, 6, 7, 8, 10, 12, 16, 24, 40, 64];
+    let corpus = [
+        "",
+        "ordinary prose wraps only at stable break opportunities",
+        "你好，世界。混排 prose 行数同样单调",
+        "src/main.rs remains ordinary prose",
+        "emoji 👨\u{200d}👩\u{200d}👧 and e\u{301} stay intact",
+        "first logical line\nsecond logical line",
+        "alpha-beta/gamma keeps UAX break opportunities stable",
+    ];
+
+    for style_mode in [StyleMode::Cx, StyleMode::Cc, StyleMode::Ms] {
+        for content in corpus {
+            assert!(
+                user_estimate::can_reuse_user_line_count_when_widening(content),
+                "fixture must be certified: {content:?}"
+            );
+            let item = MessageItem::new_with_style_mode(Sender::User, content, style_mode);
+
+            for (old_index, old_width) in widths.iter().copied().enumerate() {
+                let (old_line_count, old_plain_text_len) =
+                    item.measure_render_metrics(old_width, palette);
+                let previous_metrics = TranscriptItemMetrics {
+                    item_index: 0,
+                    width: old_width,
+                    cache_key: item.render_cache_key(),
+                    content_line_count: old_line_count,
+                    content_char_len: old_plain_text_len,
+                    quality: crate::transcript::TranscriptItemMetricsQuality::Exact,
+                    is_valid: true,
+                };
+
+                for new_width in widths.iter().copied().skip(old_index + 1) {
+                    let (new_line_count, new_plain_text_len) =
+                        item.measure_render_metrics(new_width, palette);
+                    let estimated = item.estimate_render_metrics_fast(
+                        new_width,
+                        palette,
+                        Some(previous_metrics),
+                    );
+
+                    assert!(
+                        new_line_count <= old_line_count,
+                        "certificate accepted non-monotone line count: style_mode={style_mode:?}, content={content:?}, old_width={old_width}, new_width={new_width}, old={old_line_count}, new={new_line_count}"
+                    );
+                    assert_eq!(estimated.source, TranscriptEstimateSource::ReusedOnResize);
+                    assert!(
+                        estimated.content_line_count >= new_line_count,
+                        "reused line estimate undercounted: style_mode={style_mode:?}, content={content:?}, old_width={old_width}, new_width={new_width}, exact={new_line_count}, estimated={estimated:?}"
+                    );
+                    assert!(
+                        estimated.content_char_len >= new_plain_text_len,
+                        "reused plain-text estimate undercounted: style_mode={style_mode:?}, content={content:?}, old_width={old_width}, new_width={new_width}, exact={new_plain_text_len}, estimated={estimated:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn user_fast_estimate_resize_chain_stays_conservative_from_estimated_metrics() {
+    let palette = default_palette();
+    let widths = [5_u16, 7, 10, 16, 24, 40];
+    let corpus = [
+        "ordinary prose wraps only at stable break opportunities",
+        "你好，世界。混排 prose 行数同样单调",
+        "src/main.rs remains ordinary prose",
+        "emoji 👨\u{200d}👩\u{200d}👧 and e\u{301} stay intact",
+        "first logical line\nsecond logical line",
+    ];
+
+    for style_mode in [StyleMode::Cx, StyleMode::Cc, StyleMode::Ms] {
+        for content in corpus {
+            let item = MessageItem::new_with_style_mode(Sender::User, content, style_mode);
+            for (old_index, old_width) in widths.iter().copied().enumerate() {
+                let (old_exact_line_count, old_exact_plain_text_len) =
+                    item.measure_render_metrics(old_width, palette);
+                let old_estimate = item.estimate_render_metrics_fast(old_width, palette, None);
+                assert!(
+                    old_estimate.content_line_count >= old_exact_line_count,
+                    "cold estimate undercounted certified line count: style_mode={style_mode:?}, content={content:?}, width={old_width}, exact={old_exact_line_count}, estimated={old_estimate:?}"
+                );
+                assert!(
+                    old_estimate.content_char_len >= old_exact_plain_text_len,
+                    "cold estimate undercounted certified plain text: style_mode={style_mode:?}, content={content:?}, width={old_width}, exact={old_exact_plain_text_len}, estimated={old_estimate:?}"
+                );
+
+                let previous_metrics = TranscriptItemMetrics {
+                    item_index: 0,
+                    width: old_width,
+                    cache_key: item.render_cache_key(),
+                    content_line_count: old_estimate.content_line_count,
+                    content_char_len: old_estimate.content_char_len,
+                    quality: crate::transcript::TranscriptItemMetricsQuality::Estimated,
+                    is_valid: true,
+                };
+
+                for new_width in widths.iter().copied().skip(old_index + 1) {
+                    let (new_exact_line_count, new_exact_plain_text_len) =
+                        item.measure_render_metrics(new_width, palette);
+                    let estimated = item.estimate_render_metrics_fast(
+                        new_width,
+                        palette,
+                        Some(previous_metrics),
+                    );
+                    assert_eq!(estimated.source, TranscriptEstimateSource::ReusedOnResize);
+                    assert!(
+                        estimated.content_line_count >= new_exact_line_count,
+                        "resize chain undercounted certified line count: style_mode={style_mode:?}, content={content:?}, old_width={old_width}, new_width={new_width}, exact={new_exact_line_count}, estimated={estimated:?}"
+                    );
+                    assert!(
+                        estimated.content_char_len >= new_exact_plain_text_len,
+                        "resize chain undercounted certified plain text: style_mode={style_mode:?}, content={content:?}, old_width={old_width}, new_width={new_width}, exact={new_exact_plain_text_len}, estimated={estimated:?}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn plain_line(line: Line<'static>) -> String {

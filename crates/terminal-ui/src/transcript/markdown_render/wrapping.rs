@@ -1,5 +1,3 @@
-use std::collections::VecDeque;
-
 use ratatui::{
     style::Style,
     text::{Line, Span},
@@ -8,7 +6,10 @@ use unicode_segmentation::UnicodeSegmentation;
 
 pub(super) use crate::display_width::display_width as measure_width;
 use crate::display_width::grapheme_width;
-use crate::transcript::wrap::{WrapSegmentKind, should_start_new_wrap_segment, wrap_segment_kind};
+use crate::transcript::linebreak::{
+    ProseWrapOptions, WrappedWhitespace, flatten_styled_text, project_wrapped_styles,
+    wrap_prose_ranges,
+};
 
 const DISPLAY_TAB_WIDTH: usize = 8;
 
@@ -238,98 +239,40 @@ pub(super) fn measure_wrapped_logical_line(line: LogicalLine, width: usize) -> (
     )
 }
 
-#[derive(Debug, Clone)]
-struct StyledSegment {
-    text: String,
-    style: Style,
-    width: usize,
-    is_space: bool,
-}
-
 fn wrap_prose_chunks(
     chunks: &[StyledChunk],
     first_width: usize,
     continuation_width: usize,
 ) -> Vec<Vec<StyledChunk>> {
-    let segments = tokenize_chunks(chunks);
-    if segments.is_empty() {
+    let (flat, style_ranges) = flatten_styled_text(
+        chunks
+            .iter()
+            .map(|chunk| (chunk.text.as_str(), chunk.style)),
+    );
+    if flat.is_empty() {
         return vec![Vec::new()];
     }
 
-    let mut cursor = VecDeque::from(segments);
-    let mut lines = Vec::new();
-    let mut current_width = first_width.max(1);
-
-    while !cursor.is_empty() {
-        lines.push(consume_prose_line(&mut cursor, current_width));
-        current_width = continuation_width.max(1);
-    }
-
-    if lines.is_empty() {
-        vec![Vec::new()]
-    } else {
-        lines
-    }
-}
-
-fn consume_prose_line(cursor: &mut VecDeque<StyledSegment>, width: usize) -> Vec<StyledChunk> {
-    let mut line = Vec::new();
-    let mut line_width = 0;
-    let mut pending_spaces = Vec::new();
-    let mut pending_space_width = 0;
-
-    while let Some(segment) = cursor.pop_front() {
-        if segment.is_space {
-            if line_width == 0 {
-                if segment.width <= width {
-                    push_chunk(&mut line, segment.text, segment.style);
-                    line_width += segment.width;
-                } else {
-                    let (fitted, overflow) = split_segment_to_width(segment, width);
-                    push_chunk(&mut line, fitted.text, fitted.style);
-                    if overflow.width > 0 {
-                        cursor.push_front(overflow);
-                    }
-                }
-                continue;
-            }
-
-            pending_space_width += segment.width;
-            pending_spaces.push(segment);
-            continue;
-        }
-
-        if line_width == 0 {
-            if segment.width <= width {
-                push_chunk(&mut line, segment.text, segment.style);
-                line_width += segment.width;
-            } else {
-                let (fitted, overflow) = split_segment_to_width(segment, width);
-                push_chunk(&mut line, fitted.text, fitted.style);
-                if overflow.width > 0 {
-                    cursor.push_front(overflow);
-                }
-                break;
-            }
-            continue;
-        }
-
-        if line_width + pending_space_width + segment.width <= width {
-            for space in pending_spaces.drain(..) {
-                push_chunk(&mut line, space.text, space.style);
-            }
-            pending_space_width = 0;
-            push_chunk(&mut line, segment.text, segment.style);
-            line_width = chunk_width(&line);
-            continue;
-        }
-
-        cursor.push_front(segment);
-        break;
-    }
-
-    trim_trailing_space_chunks(&mut line);
-    line
+    let wrapped = wrap_prose_ranges(
+        &flat,
+        ProseWrapOptions {
+            first_width,
+            continuation_width,
+            wrapped_whitespace: WrappedWhitespace::Discard,
+            trim_trailing_whitespace: true,
+        },
+    );
+    project_wrapped_styles(&flat, &style_ranges, &wrapped)
+        .into_iter()
+        .map(|line| {
+            line.into_iter()
+                .map(|styled| StyledChunk {
+                    text: flat[styled.range].to_string(),
+                    style: styled.style,
+                })
+                .collect()
+        })
+        .collect()
 }
 
 fn hard_wrap_chunks(
@@ -363,94 +306,6 @@ fn hard_wrap_chunks(
     } else {
         lines
     }
-}
-
-fn tokenize_chunks(chunks: &[StyledChunk]) -> Vec<StyledSegment> {
-    let mut segments = Vec::new();
-
-    for chunk in chunks {
-        let mut current = String::new();
-        let mut current_width = 0;
-        let mut current_kind = None;
-
-        for grapheme in UnicodeSegmentation::graphemes(chunk.text.as_str(), true) {
-            let kind = wrap_segment_kind(grapheme);
-            match current_kind {
-                Some(existing) if should_start_new_wrap_segment(existing, kind) => {
-                    segments.push(StyledSegment {
-                        text: std::mem::take(&mut current),
-                        style: chunk.style,
-                        width: current_width,
-                        is_space: existing == WrapSegmentKind::Space,
-                    });
-                    current_width = 0;
-                    current_kind = Some(kind);
-                }
-                None => current_kind = Some(kind),
-                _ => {}
-            }
-
-            current.push_str(grapheme);
-            current_width += grapheme_width(grapheme);
-        }
-
-        if let Some(kind) = current_kind {
-            segments.push(StyledSegment {
-                text: current,
-                style: chunk.style,
-                width: current_width,
-                is_space: kind == WrapSegmentKind::Space,
-            });
-        }
-    }
-
-    segments
-}
-
-fn split_segment_to_width(segment: StyledSegment, width: usize) -> (StyledSegment, StyledSegment) {
-    let (fitted_text, overflow_text) = split_text_to_width(&segment.text, width);
-
-    (
-        StyledSegment {
-            width: measure_width(&fitted_text),
-            text: fitted_text,
-            style: segment.style,
-            is_space: segment.is_space,
-        },
-        StyledSegment {
-            width: measure_width(&overflow_text),
-            text: overflow_text,
-            style: segment.style,
-            is_space: segment.is_space,
-        },
-    )
-}
-
-fn split_text_to_width(text: &str, width: usize) -> (String, String) {
-    if text.is_empty() || width == 0 {
-        return (String::new(), text.to_string());
-    }
-
-    let mut fitted = String::new();
-    let mut current_width = 0;
-    let mut byte_offset = 0;
-
-    for grapheme in UnicodeSegmentation::graphemes(text, true) {
-        let grapheme_width = measure_width(grapheme);
-        if current_width > 0 && current_width + grapheme_width > width {
-            break;
-        }
-
-        fitted.push_str(grapheme);
-        current_width += grapheme_width;
-        byte_offset += grapheme.len();
-    }
-
-    if byte_offset == 0 {
-        return (text.to_string(), String::new());
-    }
-
-    (fitted, text[byte_offset..].to_string())
 }
 
 pub(super) fn push_chunk(chunks: &mut Vec<StyledChunk>, text: impl Into<String>, style: Style) {

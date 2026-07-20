@@ -23,6 +23,7 @@ use runtime_domain::{
 
 use super::{
     ReasoningDisplayMode, StartupBannerOptions,
+    command_panel::{COMMAND_MENU_ROWS_MAX, COMMAND_MENU_ROWS_MIN, FloatingCommandMenuState},
     composer::{Composer, PendingComposerCursorClick},
     context_budget::ContextBudgetState,
     copy_picker::CopyPickerState,
@@ -56,7 +57,7 @@ mod runtime_response;
 mod state;
 
 pub use metrics::RequestMetrics;
-pub use options::{EscRewindMode, KeyboardEnhancementPreference, ModelOptions};
+pub use options::{CommandMenuMode, EscRewindMode, KeyboardEnhancementPreference, ModelOptions};
 use runtime_response::{RuntimeResponseBuffer, StreamedRuntimeReasoning};
 use state::{DocumentRuntimeState, NoticeState, SelectionRuntimeState};
 pub(crate) use state::{PendingReasoningToggleClick, SelectedModelState};
@@ -108,6 +109,7 @@ pub struct Model {
     pub(super) command_panel_selected: usize,
     pub(super) command_panel_scroll: usize,
     pub(super) dismissed_command_panel_query: Option<String>,
+    pub(super) floating_command_menu: Option<FloatingCommandMenuState>,
     pub(super) file_picker: Option<FilePickerState>,
     pub(super) skill_picker: Option<SkillPickerState>,
     pub(super) custom_prompt_picker: Option<CustomPromptPickerState>,
@@ -122,6 +124,8 @@ pub struct Model {
     pub(super) blind_recall: BlindRecallState,
     pub(super) esc_interrupt_presses: u8,
     pub(super) esc_rewind_mode: EscRewindMode,
+    pub(super) command_menu_mode: CommandMenuMode,
+    pub(super) command_menu_rows: u16,
     pub(super) show_esc_interrupt_hint: bool,
     pub(super) file_picker_popup_height: u16,
     pub(super) branch_picker_list_rows: u16,
@@ -283,6 +287,7 @@ impl Model {
             command_panel_selected: 0,
             command_panel_scroll: 0,
             dismissed_command_panel_query: None,
+            floating_command_menu: None,
             file_picker: None,
             skill_picker: None,
             custom_prompt_picker: None,
@@ -297,6 +302,10 @@ impl Model {
             blind_recall: BlindRecallState::default(),
             esc_interrupt_presses: options.esc_interrupt_presses.clamp(1, 3),
             esc_rewind_mode: options.esc_rewind_mode,
+            command_menu_mode: options.command_menu_mode,
+            command_menu_rows: options
+                .command_menu_rows
+                .clamp(COMMAND_MENU_ROWS_MIN, COMMAND_MENU_ROWS_MAX),
             show_esc_interrupt_hint: options.show_esc_interrupt_hint,
             file_picker_popup_height: options
                 .file_picker_popup_height
@@ -550,6 +559,7 @@ impl Model {
         self.command_panel_selected = 0;
         self.command_panel_scroll = 0;
         self.dismissed_command_panel_query = None;
+        self.floating_command_menu = None;
         self.file_picker = None;
         self.skill_picker = None;
         self.custom_prompt_picker = None;

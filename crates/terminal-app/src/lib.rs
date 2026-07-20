@@ -34,8 +34,8 @@ use runtime::{AppRuntimeCoordinator, AppRuntimeOptions, tool_definitions_for_man
 
 #[cfg(test)]
 use app_config::appconfig::{
-    BRANCH_PICKER_LIST_ROWS_DEFAULT, DebugConfig, EscRewindMode, KeyboardEnhancementMode,
-    ReasoningContentDisplay, RuntimeConfig, UserInputStyle,
+    BRANCH_PICKER_LIST_ROWS_DEFAULT, COMMAND_MENU_ROWS_DEFAULT, CommandMenuMode, DebugConfig,
+    EscRewindMode, KeyboardEnhancementMode, ReasoningContentDisplay, RuntimeConfig, UserInputStyle,
 };
 #[cfg(test)]
 use options_mapping::{
@@ -329,6 +329,8 @@ mod tests {
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
             esc_rewind_mode: EscRewindMode::Coarse,
+            command_menu_mode: CommandMenuMode::Slash,
+            command_menu_rows: COMMAND_MENU_ROWS_DEFAULT,
             keyboard_enhancement: KeyboardEnhancementMode::Auto,
             scroll_animation: app_config::appconfig::ScrollAnimationMode::Smooth,
         });
@@ -440,6 +442,8 @@ mod tests {
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
             esc_rewind_mode: EscRewindMode::Coarse,
+            command_menu_mode: CommandMenuMode::Slash,
+            command_menu_rows: COMMAND_MENU_ROWS_DEFAULT,
             keyboard_enhancement: KeyboardEnhancementMode::Auto,
             scroll_animation: app_config::appconfig::ScrollAnimationMode::Smooth,
         });
@@ -469,6 +473,8 @@ mod tests {
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
             esc_rewind_mode: EscRewindMode::Coarse,
+            command_menu_mode: CommandMenuMode::Slash,
+            command_menu_rows: COMMAND_MENU_ROWS_DEFAULT,
             keyboard_enhancement: KeyboardEnhancementMode::Auto,
             scroll_animation: app_config::appconfig::ScrollAnimationMode::Smooth,
         });
@@ -498,6 +504,8 @@ mod tests {
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
             esc_rewind_mode: EscRewindMode::Coarse,
+            command_menu_mode: CommandMenuMode::Slash,
+            command_menu_rows: COMMAND_MENU_ROWS_DEFAULT,
             keyboard_enhancement: KeyboardEnhancementMode::Auto,
             scroll_animation: app_config::appconfig::ScrollAnimationMode::Smooth,
         });
@@ -527,6 +535,8 @@ mod tests {
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
             esc_rewind_mode: EscRewindMode::Coarse,
+            command_menu_mode: CommandMenuMode::Slash,
+            command_menu_rows: COMMAND_MENU_ROWS_DEFAULT,
             keyboard_enhancement: KeyboardEnhancementMode::Auto,
             scroll_animation: app_config::appconfig::ScrollAnimationMode::Smooth,
         });
@@ -556,6 +566,8 @@ mod tests {
             show_reasoning_content: true,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
             esc_rewind_mode: EscRewindMode::Coarse,
+            command_menu_mode: CommandMenuMode::Slash,
+            command_menu_rows: COMMAND_MENU_ROWS_DEFAULT,
             keyboard_enhancement: KeyboardEnhancementMode::Auto,
             scroll_animation: app_config::appconfig::ScrollAnimationMode::Smooth,
         });
@@ -585,6 +597,8 @@ mod tests {
             show_reasoning_content: true,
             reasoning_content_display: ReasoningContentDisplay::Expanded,
             esc_rewind_mode: EscRewindMode::Coarse,
+            command_menu_mode: CommandMenuMode::Slash,
+            command_menu_rows: COMMAND_MENU_ROWS_DEFAULT,
             keyboard_enhancement: KeyboardEnhancementMode::Auto,
             scroll_animation: app_config::appconfig::ScrollAnimationMode::Smooth,
         });
@@ -686,6 +700,8 @@ mod tests {
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
             esc_rewind_mode: EscRewindMode::Coarse,
+            command_menu_mode: CommandMenuMode::Slash,
+            command_menu_rows: COMMAND_MENU_ROWS_DEFAULT,
             keyboard_enhancement: KeyboardEnhancementMode::Auto,
             scroll_animation: app_config::appconfig::ScrollAnimationMode::Smooth,
         };
@@ -717,6 +733,8 @@ mod tests {
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
             esc_rewind_mode: EscRewindMode::Coarse,
+            command_menu_mode: CommandMenuMode::Slash,
+            command_menu_rows: COMMAND_MENU_ROWS_DEFAULT,
             keyboard_enhancement: KeyboardEnhancementMode::Auto,
             scroll_animation: app_config::appconfig::ScrollAnimationMode::Smooth,
         };
@@ -749,8 +767,52 @@ mod tests {
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
             esc_rewind_mode: EscRewindMode::Coarse,
+            command_menu_mode: CommandMenuMode::Slash,
+            command_menu_rows: COMMAND_MENU_ROWS_DEFAULT,
             keyboard_enhancement: KeyboardEnhancementMode::Auto,
             scroll_animation: app_config::appconfig::ScrollAnimationMode::Smooth,
+        }
+    }
+
+    #[test]
+    fn command_menu_rows_constants_match_terminal_ui() {
+        // app-config 与 terminal-ui 各自持有 COMMAND_MENU_ROWS_* 数值（crate 边界不互相依赖）；
+        // 漂移会让配置校验通过但 UI clamp 到错误范围，或反向。
+        assert_eq!(
+            app_config::appconfig::COMMAND_MENU_ROWS_MIN,
+            terminal_ui::COMMAND_MENU_ROWS_MIN
+        );
+        assert_eq!(
+            app_config::appconfig::COMMAND_MENU_ROWS_MAX,
+            terminal_ui::COMMAND_MENU_ROWS_MAX
+        );
+        assert_eq!(
+            app_config::appconfig::COMMAND_MENU_ROWS_DEFAULT,
+            terminal_ui::COMMAND_MENU_ROWS_DEFAULT
+        );
+    }
+
+    #[test]
+    fn model_options_map_command_menu_modes() {
+        for (config_mode, expected) in [
+            (
+                app_config::appconfig::CommandMenuMode::Slash,
+                terminal_ui::CommandMenuMode::Slash,
+            ),
+            (
+                app_config::appconfig::CommandMenuMode::Floating,
+                terminal_ui::CommandMenuMode::Floating,
+            ),
+            (
+                app_config::appconfig::CommandMenuMode::Both,
+                terminal_ui::CommandMenuMode::Both,
+            ),
+        ] {
+            let options = model_options_from_config(&TuiConfig {
+                command_menu_mode: config_mode,
+                ..default_tui_config()
+            });
+            assert_eq!(options.command_menu_mode, expected);
         }
     }
 

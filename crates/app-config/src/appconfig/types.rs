@@ -8,6 +8,15 @@ pub const BRANCH_PICKER_LIST_ROWS_MIN: u16 = 3;
 pub const BRANCH_PICKER_LIST_ROWS_MAX: u16 = 14;
 /// Branch picker 默认显示 7 个分支行，与 file picker 默认密度一致。
 pub const BRANCH_PICKER_LIST_ROWS_DEFAULT: u16 = 7;
+/// 悬浮命令菜单至少显示 7 个命令行，与内联斜杠菜单默认密度一致。
+///
+/// 与 `terminal-ui` 的 `COMMAND_MENU_ROWS_*` 数值必须保持一致；
+/// `terminal-app` 有同步测试防止两边漂移。
+pub const COMMAND_MENU_ROWS_MIN: u16 = 7;
+/// 悬浮命令菜单最多显示 21 个命令行，避免遮挡过多上下文。
+pub const COMMAND_MENU_ROWS_MAX: u16 = 21;
+/// 悬浮命令菜单默认显示 7 个命令行。
+pub const COMMAND_MENU_ROWS_DEFAULT: u16 = 7;
 /// Composer undo 至少保留 1 条，确保开启撤回时有明确效果。
 pub const COMPOSER_UNDO_MIN_LIMIT: usize = 1;
 /// Composer undo 最多保留 200 条，避免配置误填导致草稿快照无限增长。
@@ -43,6 +52,8 @@ pub struct TuiConfig {
     pub ctrl_c_clears_input: bool,
     pub esc_interrupt_presses: u8,
     pub esc_rewind_mode: EscRewindMode,
+    pub command_menu_mode: CommandMenuMode,
+    pub command_menu_rows: u16,
     pub keyboard_enhancement: KeyboardEnhancementMode,
     pub show_esc_interrupt_hint: bool,
     pub file_picker_popup_height: u16,
@@ -130,6 +141,19 @@ pub enum EscRewindMode {
     Entry,
 }
 
+/// `CommandMenuMode` 表示命令菜单的触发方式：
+/// `Slash` 仅 `/` 开头内联斜杠菜单；`Floating` 仅 `Ctrl+O` 悬浮命令菜单
+/// （`/` 回落为普通文本）；`Both` 两种方式同时可用。
+///
+/// 与 `terminal-ui::CommandMenuMode` 变体一一对应，由 `terminal-app` 映射；
+/// 新增变体时两边与映射必须同步更新。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandMenuMode {
+    Slash,
+    Floating,
+    Both,
+}
+
 /// `KeyboardEnhancementMode` 控制 kitty keyboard enhancement 的启用策略：
 /// `Auto` 按环境自动判定（WSL 内的 VSCode 终端禁用），`On`/`Off` 强制指定。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,6 +220,20 @@ impl EscRewindMode {
             "coarse" => Ok(Self::Coarse),
             "entry" => Ok(Self::Entry),
             other => Err(super::AppConfigError::InvalidEscRewindMode {
+                path: None,
+                value: other.to_string(),
+            }),
+        }
+    }
+}
+
+impl CommandMenuMode {
+    pub(super) fn parse(value: &str) -> Result<Self, super::AppConfigError> {
+        match value {
+            "slash" => Ok(Self::Slash),
+            "floating" => Ok(Self::Floating),
+            "both" => Ok(Self::Both),
+            other => Err(super::AppConfigError::InvalidCommandMenuMode {
                 path: None,
                 value: other.to_string(),
             }),

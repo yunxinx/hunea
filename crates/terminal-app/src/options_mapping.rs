@@ -6,7 +6,7 @@ use app_config::appconfig::{
 use conversation_runtime::models::LoadedModelCatalog;
 use runtime_domain::{envinfo, paths::DataDirResolution, phrases::LoadedStatusPhrases};
 use terminal_ui::{
-    EscRewindMode as TuiEscRewindMode,
+    CommandMenuMode as TuiCommandMenuMode, EscRewindMode as TuiEscRewindMode,
     KeyboardEnhancementPreference as TuiKeyboardEnhancementPreference, ModelOptions,
     MotionMode as TuiMotionMode, ReasoningDisplayMode, RuntimeRequestPolicy,
     ScrollAnimationMode as TuiScrollAnimationMode, StatusLineItem, StyleMode,
@@ -154,6 +154,8 @@ fn model_options_from_configs(
         ctrl_c_clears_input: tui_config.ctrl_c_clears_input,
         esc_interrupt_presses: tui_config.esc_interrupt_presses,
         esc_rewind_mode: esc_rewind_mode_from_config(tui_config.esc_rewind_mode),
+        command_menu_mode: command_menu_mode_from_config(tui_config.command_menu_mode),
+        command_menu_rows: tui_config.command_menu_rows,
         keyboard_enhancement: keyboard_enhancement_from_config(tui_config.keyboard_enhancement),
         show_esc_interrupt_hint: tui_config.show_esc_interrupt_hint,
         file_picker_popup_height: tui_config.file_picker_popup_height,
@@ -178,6 +180,16 @@ fn esc_rewind_mode_from_config(mode: app_config::appconfig::EscRewindMode) -> Tu
     match mode {
         app_config::appconfig::EscRewindMode::Coarse => TuiEscRewindMode::Coarse,
         app_config::appconfig::EscRewindMode::Entry => TuiEscRewindMode::Entry,
+    }
+}
+
+fn command_menu_mode_from_config(
+    mode: app_config::appconfig::CommandMenuMode,
+) -> TuiCommandMenuMode {
+    match mode {
+        app_config::appconfig::CommandMenuMode::Slash => TuiCommandMenuMode::Slash,
+        app_config::appconfig::CommandMenuMode::Floating => TuiCommandMenuMode::Floating,
+        app_config::appconfig::CommandMenuMode::Both => TuiCommandMenuMode::Both,
     }
 }
 

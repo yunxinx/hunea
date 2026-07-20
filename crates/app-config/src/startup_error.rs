@@ -1,7 +1,7 @@
 use crate::appconfig::{
     self, AppConfigError, BRANCH_PICKER_LIST_ROWS_MAX, BRANCH_PICKER_LIST_ROWS_MIN,
-    COMPOSER_UNDO_MAX_LIMIT, COMPOSER_UNDO_MIN_LIMIT, FILE_PICKER_POPUP_MAX_HEIGHT,
-    FILE_PICKER_POPUP_MIN_HEIGHT,
+    COMMAND_MENU_ROWS_MAX, COMMAND_MENU_ROWS_MIN, COMPOSER_UNDO_MAX_LIMIT, COMPOSER_UNDO_MIN_LIMIT,
+    FILE_PICKER_POPUP_MAX_HEIGHT, FILE_PICKER_POPUP_MIN_HEIGHT,
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -166,6 +166,13 @@ fn config_error_rows(error: &appconfig::AppConfigError) -> Vec<(&'static str, St
             "Unknown Esc rewind mode",
             "coarse, entry",
         ),
+        AppConfigError::InvalidCommandMenuMode { path, value } => validation_rows(
+            path,
+            "tui.command_menu_mode",
+            value,
+            "Unknown command menu mode",
+            "slash, floating, both",
+        ),
         AppConfigError::InvalidKeyboardEnhancementMode { path, value } => validation_rows(
             path,
             "tui.keyboard_enhancement",
@@ -194,6 +201,18 @@ fn config_error_rows(error: &appconfig::AppConfigError) -> Vec<(&'static str, St
                 (
                     "Expected",
                     format!("{BRANCH_PICKER_LIST_ROWS_MIN}..{BRANCH_PICKER_LIST_ROWS_MAX}"),
+                ),
+            ],
+        ),
+        AppConfigError::InvalidCommandMenuRows { path, value } => rows_with_optional_file(
+            path,
+            vec![
+                ("Setting", "tui.command_menu_rows".to_string()),
+                ("Value", value.to_string()),
+                ("Reason", "Invalid command menu rows".to_string()),
+                (
+                    "Expected",
+                    format!("{COMMAND_MENU_ROWS_MIN}..{COMMAND_MENU_ROWS_MAX}"),
                 ),
             ],
         ),

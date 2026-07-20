@@ -5,8 +5,9 @@ use std::{
 };
 
 use app_config::appconfig::{
-    AppConfigError, EscRewindMode, KeyboardEnhancementMode, ReasoningContentDisplay,
-    UserInputStyle, load_from_paths, persist_managed_search_tool_authorization_to_path,
+    AppConfigError, CommandMenuMode, EscRewindMode, KeyboardEnhancementMode,
+    ReasoningContentDisplay, UserInputStyle, load_from_paths,
+    persist_managed_search_tool_authorization_to_path,
     persist_managed_search_tool_rejection_to_path, read_managed_search_authorization,
 };
 use runtime_domain::session::ManagedSearchTool;
@@ -24,6 +25,7 @@ fn load_defaults_to_cx_when_no_config_exists() {
     assert!(config.tui.status_line_2.is_empty());
     assert_eq!(config.tui.file_picker_popup_height, 7);
     assert_eq!(config.tui.branch_picker_list_rows, 7);
+    assert_eq!(config.tui.command_menu_rows, 7);
     assert_eq!(config.tui.composer_undo_limit, 50);
     assert_eq!(config.tui.message_history_limit, 100);
     assert!(!config.debug.enabled);
@@ -328,6 +330,51 @@ fn load_defaults_esc_rewind_mode_to_coarse() {
 }
 
 #[test]
+fn load_defaults_command_menu_mode_to_slash() {
+    let working_dir = temp_test_dir("load-default-command-menu-mode-working");
+    let user_config_dir = temp_test_dir("load-default-command-menu-mode-config");
+
+    let config = load_from_paths(Some(working_dir.as_path()), Some(user_config_dir.as_path()))
+        .expect("missing config files should keep command menu mode at slash");
+
+    assert_eq!(config.tui.command_menu_mode, CommandMenuMode::Slash);
+}
+
+#[test]
+fn load_accepts_configured_command_menu_modes() {
+    for (raw_value, expected) in [
+        ("floating", CommandMenuMode::Floating),
+        ("both", CommandMenuMode::Both),
+        ("slash", CommandMenuMode::Slash),
+    ] {
+        let working_dir = temp_test_dir(&format!("load-command-menu-mode-{raw_value}-working"));
+        write_config(
+            &working_dir.join(".hunea").join("config.toml"),
+            &format!("[tui]\ncommand_menu_mode = \"{raw_value}\"\n"),
+        );
+
+        let config = load_from_paths(Some(working_dir.as_path()), None)
+            .expect("command_menu_mode should accept slash/floating/both");
+
+        assert_eq!(config.tui.command_menu_mode, expected);
+    }
+}
+
+#[test]
+fn load_rejects_invalid_command_menu_mode() {
+    let working_dir = temp_test_dir("load-invalid-command-menu-mode-working");
+    write_config(
+        &working_dir.join(".hunea").join("config.toml"),
+        "[tui]\ncommand_menu_mode = \"popup\"\n",
+    );
+
+    let error = load_from_paths(Some(working_dir.as_path()), None)
+        .expect_err("command_menu_mode should only accept slash, floating or both");
+
+    assert!(error.to_string().contains("tui.command_menu_mode"));
+}
+
+#[test]
 fn load_defaults_keyboard_enhancement_to_auto() {
     let working_dir = temp_test_dir("load-default-keyboard-enhancement-working");
     let user_config_dir = temp_test_dir("load-default-keyboard-enhancement-config");
@@ -612,6 +659,20 @@ fn load_accepts_configured_branch_picker_list_rows() {
 }
 
 #[test]
+fn load_accepts_configured_command_menu_rows() {
+    let working_dir = temp_test_dir("load-command-menu-rows-working");
+    write_config(
+        &working_dir.join(".hunea").join("config.toml"),
+        "[tui]\ncommand_menu_rows = 21\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("command menu rows should accept values up to 21");
+
+    assert_eq!(config.tui.command_menu_rows, 21);
+}
+
+#[test]
 fn load_accepts_configured_composer_undo_limit() {
     let working_dir = temp_test_dir("load-composer-undo-limit-working");
     write_config(
@@ -775,6 +836,44 @@ fn load_rejects_branch_picker_list_rows_below_minimum() {
         error
             .to_string()
             .contains("tui.branch_picker_list_rows must be between 3 and 14"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn load_rejects_command_menu_rows_below_minimum() {
+    let working_dir = temp_test_dir("load-low-command-menu-rows-working");
+    write_config(
+        &working_dir.join(".hunea").join("config.toml"),
+        "[tui]\ncommand_menu_rows = 6\n",
+    );
+
+    let error = load_from_paths(Some(working_dir.as_path()), None)
+        .expect_err("command menu rows should reject values below 7");
+
+    assert!(
+        error
+            .to_string()
+            .contains("tui.command_menu_rows must be between 7 and 21"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn load_rejects_command_menu_rows_above_maximum() {
+    let working_dir = temp_test_dir("load-high-command-menu-rows-working");
+    write_config(
+        &working_dir.join(".hunea").join("config.toml"),
+        "[tui]\ncommand_menu_rows = 22\n",
+    );
+
+    let error = load_from_paths(Some(working_dir.as_path()), None)
+        .expect_err("command menu rows should reject values above 21");
+
+    assert!(
+        error
+            .to_string()
+            .contains("tui.command_menu_rows must be between 7 and 21"),
         "unexpected error: {error}"
     );
 }

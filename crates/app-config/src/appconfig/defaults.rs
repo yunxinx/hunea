@@ -1,7 +1,7 @@
 use super::{
-    BRANCH_PICKER_LIST_ROWS_DEFAULT, COMPOSER_UNDO_DEFAULT_LIMIT, Config, DebugConfig,
-    MESSAGE_HISTORY_LIMIT_DEFAULT, MotionMode, ReasoningContentDisplay, RuntimeConfig,
-    ScrollAnimationMode, TuiConfig, UserInputStyle,
+    BRANCH_PICKER_LIST_ROWS_DEFAULT, COMMAND_MENU_ROWS_DEFAULT, COMPOSER_UNDO_DEFAULT_LIMIT,
+    Config, DebugConfig, MESSAGE_HISTORY_LIMIT_DEFAULT, MotionMode, ReasoningContentDisplay,
+    RuntimeConfig, ScrollAnimationMode, TuiConfig, UserInputStyle,
 };
 
 impl Config {
@@ -19,6 +19,8 @@ impl Config {
                 ctrl_c_clears_input: true,
                 esc_interrupt_presses: 2,
                 esc_rewind_mode: super::EscRewindMode::Coarse,
+                command_menu_mode: super::CommandMenuMode::Slash,
+                command_menu_rows: COMMAND_MENU_ROWS_DEFAULT,
                 keyboard_enhancement: super::KeyboardEnhancementMode::Auto,
                 show_esc_interrupt_hint: true,
                 file_picker_popup_height: 7,

@@ -54,22 +54,17 @@ impl Model {
         self.model_panel.is_open
     }
 
+    /// 打开 model panel；不触碰 composer 文本，命令文本的清理由内联命令
+    /// 执行路径统一负责。布局同步与 `close_model_panel` 对称：面板替换
+    /// composer 区域，高度与 viewport 需按面板状态重算。
     pub(crate) fn open_model_panel(&mut self) {
-        let old_value = self.composer_text().to_string();
-        let old_line = self.composer.line();
-        let old_column = self.composer.column();
-
-        self.composer.reset_text_and_move_to_end(String::new());
         self.close_context_budget();
         self.close_tool_approval_panel();
         self.model_panel.is_open = true;
         self.model_panel.search_query.clear();
         self.sync_model_panel_to_selection();
-        self.sync_command_panel_navigation();
-        self.sync_composer_attached_picker_state();
-        self.sync_external_editor_helper_after_draft_change(&old_value);
         self.sync_composer_height();
-        self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
+        self.sync_document_viewport_for_composer_cursor();
     }
 
     pub(crate) fn close_model_panel(&mut self) {

@@ -8,6 +8,7 @@ use runtime_domain::{
 
 use crate::{
     MotionMode, ReasoningDisplayMode, ScrollAnimationMode,
+    command_panel::COMMAND_MENU_ROWS_DEFAULT,
     composer::DEFAULT_COMPOSER_UNDO_LIMIT,
     entry_tree::BRANCH_PICKER_LIST_ROWS_DEFAULT,
     file_picker::{FILE_PICKER_POPUP_MAX_HEIGHT, FILE_PICKER_POPUP_MIN_HEIGHT},
@@ -21,6 +22,19 @@ use crate::{
 pub enum EscRewindMode {
     Coarse,
     Entry,
+}
+
+/// `CommandMenuMode` 表示命令菜单的触发方式：
+/// `Slash` 仅 `/` 开头内联斜杠菜单；`Floating` 仅 `Ctrl+O` 悬浮命令菜单
+/// （`/` 回落为普通文本）；`Both` 两种方式同时可用。
+///
+/// 与 `app-config::CommandMenuMode` 变体一一对应，由 `terminal-app` 映射；
+/// 新增变体时两边与映射必须同步更新。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandMenuMode {
+    Slash,
+    Floating,
+    Both,
 }
 
 /// `KeyboardEnhancementPreference` 控制 kitty keyboard enhancement 的启用策略：
@@ -48,6 +62,8 @@ pub struct ModelOptions {
     pub ctrl_c_clears_input: bool,
     pub esc_interrupt_presses: u8,
     pub esc_rewind_mode: EscRewindMode,
+    pub command_menu_mode: CommandMenuMode,
+    pub command_menu_rows: u16,
     /// 由 runner 在进入终端会话时消费，决定是否 Push keyboard enhancement flags；
     /// 不进入 `Model` 状态。
     pub keyboard_enhancement: KeyboardEnhancementPreference,
@@ -85,6 +101,8 @@ impl Default for ModelOptions {
             ctrl_c_clears_input: true,
             esc_interrupt_presses: 2,
             esc_rewind_mode: EscRewindMode::Coarse,
+            command_menu_mode: CommandMenuMode::Slash,
+            command_menu_rows: COMMAND_MENU_ROWS_DEFAULT,
             keyboard_enhancement: KeyboardEnhancementPreference::Auto,
             show_esc_interrupt_hint: true,
             file_picker_popup_height: 7

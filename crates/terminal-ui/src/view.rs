@@ -105,7 +105,14 @@ pub fn render(model: &mut Model, frame: &mut RenderFrame<'_>) {
         frame.render_widget(floating_layer, area);
     }
 
-    if let Some(cursor_y) = document.cursor_y.checked_sub(viewport.resolved_offset)
+    if model.floating_command_menu_active() {
+        model.render_floating_command_menu(frame, area);
+    }
+
+    // 悬浮命令菜单打开期间键盘焦点在菜单查询（自绘 caret），
+    // 不再定位 composer 终端光标——与模态层隐藏光标的惯例一致。
+    if !model.floating_command_menu_active()
+        && let Some(cursor_y) = document.cursor_y.checked_sub(viewport.resolved_offset)
         && cursor_y < viewport.lines.len()
     {
         frame.set_cursor_position((

@@ -4,15 +4,15 @@ use super::{
     error::AppConfigError,
     file_config::{FileConfig, FileRuntimeConfig},
     types::{
-        Config, EscRewindMode, KeyboardEnhancementMode, MotionMode, ReasoningContentDisplay,
-        RuntimeConfig, ScrollAnimationMode, UserInputStyle,
+        CommandMenuMode, Config, EscRewindMode, KeyboardEnhancementMode, MotionMode,
+        ReasoningContentDisplay, RuntimeConfig, ScrollAnimationMode, UserInputStyle,
     },
     validate::{
         normalize_request_retry_delays, validate_branch_picker_list_rows,
-        validate_composer_undo_limit, validate_external_editor, validate_file_picker_popup_height,
-        validate_message_history_limit, validate_request_retry_attempts,
-        validate_request_timeout_seconds, validate_status_line_items_for_path,
-        validate_tool_max_turns,
+        validate_command_menu_rows, validate_composer_undo_limit, validate_external_editor,
+        validate_file_picker_popup_height, validate_message_history_limit,
+        validate_request_retry_attempts, validate_request_timeout_seconds,
+        validate_status_line_items_for_path, validate_tool_max_turns,
     },
 };
 
@@ -147,6 +147,23 @@ pub(super) fn merge_config_file(
                 }
                 other => other,
             })?;
+    }
+
+    if let Some(command_menu_mode) = file_config.tui.command_menu_mode {
+        config.tui.command_menu_mode =
+            CommandMenuMode::parse(&command_menu_mode).map_err(|error| match error {
+                AppConfigError::InvalidCommandMenuMode { value, .. } => {
+                    AppConfigError::InvalidCommandMenuMode {
+                        path: Some(path.to_path_buf()),
+                        value,
+                    }
+                }
+                other => other,
+            })?;
+    }
+
+    if let Some(rows) = file_config.tui.command_menu_rows {
+        config.tui.command_menu_rows = validate_command_menu_rows(rows, path)?;
     }
 
     if let Some(keyboard_enhancement) = file_config.tui.keyboard_enhancement {

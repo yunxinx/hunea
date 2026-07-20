@@ -89,10 +89,12 @@ mod view;
 
 pub mod theme;
 
+pub use command_panel::{COMMAND_MENU_ROWS_DEFAULT, COMMAND_MENU_ROWS_MAX, COMMAND_MENU_ROWS_MIN};
 pub use document::ScrollAnimationMode;
 pub use external_editor::ExternalEditorLaunch;
 pub use model::{
-    EscRewindMode, KeyboardEnhancementPreference, Model, ModelOptions, RequestMetrics,
+    CommandMenuMode, EscRewindMode, KeyboardEnhancementPreference, Model, ModelOptions,
+    RequestMetrics,
 };
 pub use motion::MotionMode;
 pub use runner::{

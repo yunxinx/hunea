@@ -274,6 +274,7 @@ impl Model {
         self.close_skill_picker();
         self.close_custom_prompt_picker();
         self.close_context_budget();
+        self.close_floating_command_menu();
         self.command_panel_selected = 0;
         self.command_panel_scroll = 0;
     }

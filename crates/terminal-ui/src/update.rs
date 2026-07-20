@@ -167,6 +167,12 @@ impl Model {
                     self.cancel_exit_confirmation();
                     None
                 } else {
+                    // 悬浮命令菜单打开时，粘贴进入其过滤查询而非 composer。
+                    let menu_result = self.handle_floating_command_menu_paste(&text);
+                    if !menu_result.is_ignored() {
+                        self.cancel_exit_confirmation();
+                        return menu_result.into_effect();
+                    }
                     self.handle_paste(&text)
                 }
             }
@@ -179,6 +185,11 @@ impl Model {
                 let result = self.handle_overlay_mouse_wheel(delta_lines);
                 if !result.is_ignored() {
                     return result.into_effect();
+                }
+                // 悬浮命令菜单打开时滚轮作用于命令列表，不再滚动下层文档。
+                let menu_result = self.handle_floating_command_menu_mouse_wheel(delta_lines);
+                if !menu_result.is_ignored() {
+                    return menu_result.into_effect();
                 }
                 // `Instant` 在事件入口采样一次传入（状态模块不取时钟）；
                 // 位移与滚动反馈副作用统一发生在 `scroll_document_by_wheel`，
@@ -196,6 +207,12 @@ impl Model {
                 if !pill_result.is_ignored() {
                     return pill_result.into_effect();
                 }
+                // 悬浮命令菜单不是模态层，需在此提前拦截：内部点击选中/消费，
+                // 外部点击关闭浮窗，避免落入下层 composer 或文档。
+                let menu_result = self.handle_floating_command_menu_mouse_down(button, column, row);
+                if !menu_result.is_ignored() {
+                    return menu_result.into_effect();
+                }
                 let result = self.handle_overlay_mouse_down(button, column, row);
                 if !result.is_ignored() {
                     return result.into_effect();
@@ -211,6 +228,10 @@ impl Model {
                 if !result.is_ignored() {
                     return result.into_effect();
                 }
+                let menu_result = self.handle_floating_command_menu_pointer_blocker();
+                if !menu_result.is_ignored() {
+                    return menu_result.into_effect();
+                }
                 self.handle_mouse_up(button, column, row)
             }
             AppEvent::MouseDrag {
@@ -221,6 +242,10 @@ impl Model {
                 let result = self.handle_overlay_pointer_passthrough_blocker();
                 if !result.is_ignored() {
                     return result.into_effect();
+                }
+                let menu_result = self.handle_floating_command_menu_pointer_blocker();
+                if !menu_result.is_ignored() {
+                    return menu_result.into_effect();
                 }
                 self.handle_mouse_drag(button, column, row)
             }
@@ -470,6 +495,11 @@ impl Model {
             return result.into_effect();
         }
 
+        let result = self.handle_floating_command_menu_key(key);
+        if !result.is_ignored() {
+            return result.into_effect();
+        }
+
         let result = self.handle_transcript_overlay_global_key(key);
         if !result.is_ignored() {
             return result.into_effect();
@@ -498,6 +528,16 @@ impl Model {
             return self
                 .maybe_prepare_external_editor_launch()
                 .map(AppEffect::LaunchExternalEditor);
+        }
+
+        // 悬浮命令菜单未启用时不占用 Ctrl+O，让按键正常落入后续处理链。
+        // 修饰键与 composer 快捷键一致：仅 Ctrl，排除 Ctrl+Alt(+Shift) 等组合。
+        if key.code == KeyCode::Char('o')
+            && is_ctrl_only(key.modifiers)
+            && self.floating_command_menu_enabled()
+        {
+            self.toggle_floating_command_menu();
+            return None;
         }
 
         let result = self.handle_file_picker_key(key);

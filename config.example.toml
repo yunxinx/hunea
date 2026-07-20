@@ -25,6 +25,17 @@ motion = "full"
 # 注意：`motion = "reduced"` 时无论此项取值，滚动均为瞬时。
 scroll_animation = "smooth"
 
+# `command_menu_mode` 控制命令菜单（斜杠命令）的触发方式。
+# - "slash"：仅在输入框以 `/` 开头时内联触发斜杠命令菜单，是默认值。
+# - "floating"：`/` 不再触发菜单（视为普通文本），改由 `Ctrl+O` 打开悬浮命令菜单。
+# - "both"：两种方式同时可用，`/` 内联菜单与 `Ctrl+O` 悬浮菜单互不干扰。
+command_menu_mode = "slash"
+
+# `command_menu_rows` 控制 `Ctrl+O` 悬浮命令菜单一次显示的命令行数，
+# 超出的命令可上下滚动，浮窗右侧显示滚动条。
+# 取值范围 7..21，默认 7 行。
+command_menu_rows = 7
+
 # 可选值：
 # `user_input_style` 控制“输入中的用户内容”和“发送后的用户消息”的展示风格。
 # - "cx"：当前 framed 样式。composer 与用户消息会在足够高的窗口里显示 surface frame。

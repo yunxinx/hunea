@@ -71,6 +71,19 @@ pub(super) fn validate_branch_picker_list_rows(
     Ok(value as u16)
 }
 
+pub(super) fn validate_command_menu_rows(value: usize, path: &Path) -> Result<u16, AppConfigError> {
+    if !(usize::from(super::COMMAND_MENU_ROWS_MIN)..=usize::from(super::COMMAND_MENU_ROWS_MAX))
+        .contains(&value)
+    {
+        return Err(AppConfigError::InvalidCommandMenuRows {
+            path: Some(path.to_path_buf()),
+            value,
+        });
+    }
+
+    Ok(value as u16)
+}
+
 pub(super) fn validate_composer_undo_limit(
     value: usize,
     path: &Path,

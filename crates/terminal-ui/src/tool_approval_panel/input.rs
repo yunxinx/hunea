@@ -25,7 +25,7 @@ impl Model {
         if self.tool_approval_fullscreen_preview_active() {
             return self.handle_tool_approval_fullscreen_preview_key(key);
         }
-        if self.tool_approval_panel.preview.is_some() {
+        if self.tool_approval_panel.file_preview.is_some() {
             return self.handle_tool_approval_inline_file_preview_key(key);
         }
 
@@ -107,12 +107,16 @@ impl Model {
                 OverlayInputResult::Handled
             }
             KeyCode::Home => {
-                self.tool_approval_panel.preview_scroll_offset = 0;
+                if let Some(state) = self.tool_approval_panel.file_preview.as_mut() {
+                    state.scroll_offset = 0;
+                }
                 OverlayInputResult::Handled
             }
             KeyCode::End => {
-                self.tool_approval_panel.preview_scroll_offset =
-                    file_preview_fullscreen_max_offset(self);
+                let max_offset = file_preview_fullscreen_max_offset(self);
+                if let Some(state) = self.tool_approval_panel.file_preview.as_mut() {
+                    state.scroll_offset = max_offset;
+                }
                 OverlayInputResult::Handled
             }
             _ => OverlayInputResult::Handled, // 模态覆盖层吞掉未绑定输入，防止落入 composer

@@ -20,6 +20,7 @@ use super::{
         runtime_skill_usage_descriptor, runtime_tool_activity_display_title,
         specific_search_tool_activity_parts, style_for_color, tool_activity_group_family,
     },
+    diff::runtime_tool_activity_has_diff_content,
 };
 
 #[derive(Debug, Clone)]
@@ -56,7 +57,9 @@ impl ExplorationDisplayLine {
 }
 
 pub(super) fn is_groupable_exploration_tool_call(call: &RuntimeToolActivity) -> bool {
-    call.status != RuntimeToolActivityStatus::Failed && tool_activity_group_family(call).is_some()
+    call.status != RuntimeToolActivityStatus::Failed
+        && tool_activity_group_family(call).is_some()
+        && !runtime_tool_activity_has_diff_content(call)
 }
 
 pub(super) fn standalone_exploration_tool_call(

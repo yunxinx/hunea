@@ -5,7 +5,8 @@ mod styles;
 pub(crate) use page_rule::{build_labeled_rule, build_page_rule};
 pub(crate) use palette::{
     ContextBudgetColorSlot, TerminalBackgroundColor, context_budget_empty_color,
-    context_budget_slot_color, palette_detection_from_background,
+    context_budget_slot_color, diff_emphasis_tint, diff_row_tint,
+    palette_detection_from_background,
 };
 pub use palette::{
     PaletteDetection, TerminalColorCapability, TerminalPalette, default_palette, detect_palette,

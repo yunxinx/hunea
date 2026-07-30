@@ -229,6 +229,51 @@ fn smooth_scroll_benches(c: &mut Criterion) {
     group.finish();
 }
 
+fn tool_result_diff_benches(c: &mut Criterion) {
+    let width = 120_u16;
+    let mut group = c.benchmark_group("frontend_tui/tool_result_diff");
+
+    for (name, scenario) in tool_result_diff_scenarios() {
+        group.bench_function(BenchmarkId::new("cold_build", name), |b| {
+            // 每轮 fixture 在计时外创建和析构，避免上一轮 presentation 的析构污染 cold 指标。
+            b.iter_batched_ref(
+                || benchmark::ToolResultDiffBench::new(scenario, width),
+                |bench| black_box(bench.render()),
+                BatchSize::PerIteration,
+            );
+        });
+
+        let cache_hit = benchmark::ToolResultDiffBench::new(scenario, width);
+        black_box(cache_hit.render());
+        group.bench_function(BenchmarkId::new("cache_hit_active_render", name), |b| {
+            b.iter(|| black_box(cache_hit.render()));
+        });
+    }
+
+    group.finish();
+}
+
+fn tool_result_diff_scenarios() -> [(&'static str, benchmark::ToolResultDiffScenario); 4] {
+    [
+        (
+            "whole_file_rewrite",
+            benchmark::ToolResultDiffScenario::WholeFileRewrite,
+        ),
+        (
+            "scattered_edits",
+            benchmark::ToolResultDiffScenario::ScatteredEdits,
+        ),
+        (
+            "block_replacement",
+            benchmark::ToolResultDiffScenario::BlockReplacement,
+        ),
+        (
+            "reordered_file",
+            benchmark::ToolResultDiffScenario::ReorderedFile,
+        ),
+    ]
+}
+
 fn terminal_grid_benches(c: &mut Criterion) {
     let width = 240_u16;
     let height = 70_u16;
@@ -280,6 +325,7 @@ criterion_group!(
         document_benches,
         model_render_benches,
         smooth_scroll_benches,
+        tool_result_diff_benches,
         terminal_grid_benches,
         terminal_surface_benches
 );

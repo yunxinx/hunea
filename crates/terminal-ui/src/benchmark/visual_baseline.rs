@@ -4,6 +4,9 @@ use ratatui::{
     buffer::{Buffer, Cell, CellDiffOption},
     layout::{Position, Rect},
 };
+use runtime_domain::session::{
+    RuntimeToolActivity, RuntimeToolActivityContent, RuntimeToolActivityStatus, RuntimeToolKind,
+};
 
 use crate::{
     Model, ModelOptions, Sender, StartupBannerOptions, StyleMode,
@@ -50,6 +53,38 @@ fn cx_dark_conversation_matches_full_frame_golden() {
         width,
         height,
         include_str!("goldens/cx_dark_conversation.golden"),
+    );
+}
+
+#[test]
+fn inline_diff_matches_full_frame_golden() {
+    let width = 64;
+    let height = 14;
+    let mut model = baseline_model(StyleMode::Cx, width, height, true);
+    model.append_runtime_tool_activity_from_runtime(RuntimeToolActivity {
+        activity_id: "call-inline-diff".to_string(),
+        title: "Edit src/greeting.rs".to_string(),
+        kind: RuntimeToolKind::Edit,
+        status: RuntimeToolActivityStatus::Completed,
+        content: vec![RuntimeToolActivityContent::Diff {
+            path: "src/greeting.rs".to_string(),
+            old_text: Some(
+                "fn greet(name: &str) {\n    println!(\"Hello, {name}!\");\n}\n".to_string(),
+            ),
+            new_text: "fn greet(name: &str) {\n    println!(\"Welcome, {name}!\");\n}\n"
+                .to_string(),
+            is_truncated: false,
+        }],
+        locations: Vec::new(),
+        raw_input: None,
+        raw_output: None,
+    });
+
+    assert_frame_golden(
+        &mut model,
+        width,
+        height,
+        include_str!("goldens/inline_diff.golden"),
     );
 }
 
@@ -156,12 +191,18 @@ fn baseline_model(
 
 fn assert_frame_golden(model: &mut Model, width: u16, height: u16, expected: &str) {
     let area = Rect::new(0, 0, width, height);
-    let mut buffer = Buffer::empty(area);
-    let cursor = model.render_to_buffer_at(std::time::Instant::now(), area, &mut buffer);
-    let actual = canonical_frame_snapshot(&buffer, cursor);
+    let frame_time = std::time::Instant::now();
 
-    if actual != expected {
-        panic!("frame golden mismatch; actual snapshot follows:\n{actual}");
+    for render_index in 1..=2 {
+        let mut buffer = Buffer::empty(area);
+        let cursor = model.render_to_buffer_at(frame_time, area, &mut buffer);
+        let actual = canonical_frame_snapshot(&buffer, cursor);
+
+        if actual != expected {
+            panic!(
+                "frame golden mismatch on render {render_index}; actual snapshot follows:\n{actual}"
+            );
+        }
     }
 }
 

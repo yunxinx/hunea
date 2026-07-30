@@ -1,0 +1,35 @@
+size=64x14
+cursor=2,7
+cells:
+00|●·Edited·src/greeting.rs·(+1·-1)································|
+01|······1····fn·greet(name:·&str)·{·······························|
+02|······2·-······println!("Hello,·{name}!");······················|
+03|······2·+······println!("Welcome,·{name}!");····················|
+04|······3····}····················································|
+05|································································|
+06|▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄|
+07|›·Enter·to·send·Prompt··········································|
+08|▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀|
+09|································································|
+10|································································|
+11|································································|
+12|································································|
+13|································································|
+styles:
+00|00..01 fg=Rgb(166, 220, 176) bg=Reset underline=Reset modifiers=BOLD diff=None
+00|02..07 fg=Reset bg=Reset underline=Reset modifiers=BOLD diff=None
+00|26..27 fg=Rgb(166, 220, 176) bg=Reset underline=Reset modifiers=NONE diff=None
+00|29..30 fg=Rgb(255, 153, 153) bg=Reset underline=Reset modifiers=NONE diff=None
+02|00..24 fg=Rgb(255, 153, 153) bg=Rgb(64, 44, 44) underline=Reset modifiers=NONE diff=None
+02|25..29 fg=Rgb(255, 153, 153) bg=Rgb(96, 58, 58) underline=Reset modifiers=BOLD diff=None
+02|30..41 fg=Rgb(255, 153, 153) bg=Rgb(64, 44, 44) underline=Reset modifiers=NONE diff=None
+02|42..63 fg=Reset bg=Rgb(64, 44, 44) underline=Reset modifiers=NONE diff=None
+03|00..24 fg=Rgb(166, 220, 176) bg=Rgb(38, 58, 44) underline=Reset modifiers=NONE diff=None
+03|25..31 fg=Rgb(166, 220, 176) bg=Rgb(52, 84, 62) underline=Reset modifiers=BOLD diff=None
+03|32..43 fg=Rgb(166, 220, 176) bg=Rgb(38, 58, 44) underline=Reset modifiers=NONE diff=None
+03|44..63 fg=Reset bg=Rgb(38, 58, 44) underline=Reset modifiers=NONE diff=None
+06|00..63 fg=Rgb(46, 46, 46) bg=Reset underline=Reset modifiers=NONE diff=None
+07|00..01 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+07|02..21 fg=Rgb(166, 166, 166) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+07|22..63 fg=Rgb(245, 245, 245) bg=Rgb(46, 46, 46) underline=Reset modifiers=NONE diff=None
+08|00..63 fg=Rgb(46, 46, 46) bg=Reset underline=Reset modifiers=NONE diff=None

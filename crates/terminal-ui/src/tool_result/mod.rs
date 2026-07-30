@@ -1,5 +1,6 @@
 mod activity;
 mod approval;
+mod diff;
 mod exploration;
 mod item;
 mod state;
@@ -18,6 +19,6 @@ pub(crate) use item::{
     ToolResultKind,
 };
 use item::{
-    TOOL_ACTIVITY_COMPACT_EDGE_LINES, TOOL_ACTIVITY_DIFF_LINE_NUMBER_WIDTH,
-    TOOL_EXPLORATION_BRANCH_PREFIX, TOOL_EXPLORATION_CHILD_PREFIX, ToolResultBody,
+    TOOL_ACTIVITY_COMPACT_EDGE_LINES, TOOL_EXPLORATION_BRANCH_PREFIX,
+    TOOL_EXPLORATION_CHILD_PREFIX, ToolResultBody,
 };

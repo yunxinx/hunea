@@ -363,11 +363,19 @@ impl Transcript {
             return false;
         };
 
-        let mut tool_result = tool_result.clone();
-        if !tool_result.update_runtime_tool_activity(update) {
+        let Some(updated_items) = tool_result
+            .clone()
+            .into_updated_runtime_tool_activity_items(update)
+        else {
             return false;
-        }
-        self.replace_item(item_index, TranscriptItem::ToolResult(tool_result));
+        };
+        self.replace_item_with_items(
+            item_index,
+            updated_items
+                .into_iter()
+                .map(TranscriptItem::ToolResult)
+                .collect(),
+        );
         true
     }
 
@@ -764,6 +772,20 @@ impl Transcript {
     fn replace_item(&mut self, index: usize, item: TranscriptItem) {
         Rc::make_mut(&mut self.items)[index] = Rc::new(item);
         self.items_version = self.items_version.saturating_add(1);
+        self.metrics_cache.mark_metrics_dirty_from(index);
+        self.screen_cache.mark_dirty_from(index);
+    }
+
+    fn replace_item_with_items(&mut self, index: usize, items: Vec<TranscriptItem>) {
+        debug_assert!(!items.is_empty());
+        if items.len() == 1 {
+            self.replace_item(index, items.into_iter().next().expect("长度已经验证为 1"));
+            return;
+        }
+
+        Rc::make_mut(&mut self.items).splice(index..=index, items.into_iter().map(Rc::new));
+        self.items_version = self.items_version.saturating_add(1);
+        // 项数变化后，该位置之后的 metrics、位置索引与 screen block 都需要重建。
         self.metrics_cache.mark_metrics_dirty_from(index);
         self.screen_cache.mark_dirty_from(index);
     }

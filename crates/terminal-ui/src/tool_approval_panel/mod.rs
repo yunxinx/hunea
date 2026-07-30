@@ -19,8 +19,11 @@ use super::{
     transcript::markdown_highlight::{highlight_code_chunks, wrap_highlight_chunks},
 };
 use file_preview::{
-    FilePreviewRenderCache, build_file_preview_panel_lines, file_preview_fullscreen_max_offset,
+    FilePreviewState, build_file_preview_panel_lines, file_preview_fullscreen_max_offset,
+    file_preview_panel_line_count,
 };
+#[cfg(test)]
+use file_preview::{file_preview_item_build_count, reset_file_preview_item_build_count};
 use runtime_domain::session::RuntimeTarget;
 
 /// `ToolApprovalPanelState` 保存通用工具审批面板的展示与导航状态。
@@ -31,10 +34,7 @@ pub(super) struct ToolApprovalPanelState {
     pub(super) source: Option<ToolApprovalSource>,
     pub(super) title: String,
     pub(super) details: Vec<ToolApprovalDetail>,
-    pub(super) preview: Option<ToolApprovalPreview>,
-    pub(super) preview_is_fullscreen: bool,
-    pub(super) preview_scroll_offset: usize,
-    pub(super) preview_render_cache: Option<FilePreviewRenderCache>,
+    file_preview: Option<FilePreviewState>,
 }
 
 /// `ToolApprovalSource` 描述工具审批确认后需要回到哪个运行时来源。
@@ -86,8 +86,11 @@ impl Model {
 
     pub(crate) fn tool_approval_fullscreen_preview_active(&self) -> bool {
         self.tool_approval_panel.is_open
-            && self.tool_approval_panel.preview.is_some()
-            && self.tool_approval_panel.preview_is_fullscreen
+            && self
+                .tool_approval_panel
+                .file_preview
+                .as_ref()
+                .is_some_and(|state| state.is_fullscreen)
     }
 
     /// 审批面板当前是否对用户可见：面板打开、未被其他全屏层遮挡、且视口贴底
@@ -133,10 +136,7 @@ impl Model {
             source: Some(source),
             title,
             details,
-            preview,
-            preview_is_fullscreen: false,
-            preview_scroll_offset: 0,
-            preview_render_cache: None,
+            file_preview: preview.map(FilePreviewState::new),
         };
         self.sync_tool_approval_preview_mode();
         self.tool_approval_panel_revision = self.tool_approval_panel_revision.saturating_add(1);
@@ -190,7 +190,7 @@ impl Model {
     }
 
     pub(crate) fn current_inline_tool_approval_panel_render_result(
-        &self,
+        &mut self,
     ) -> ToolApprovalPanelRenderResult {
         if !self.tool_approval_panel_active() {
             return ToolApprovalPanelRenderResult::default();
@@ -205,30 +205,35 @@ impl Model {
     }
 
     pub(crate) fn sync_tool_approval_preview_mode(&mut self) {
-        if !self.tool_approval_panel.is_open || self.tool_approval_panel.preview.is_none() {
-            self.tool_approval_panel.preview_is_fullscreen = false;
-            self.tool_approval_panel.preview_scroll_offset = 0;
-            self.tool_approval_panel.preview_render_cache = None;
+        if !self.tool_approval_panel.is_open || self.tool_approval_panel.file_preview.is_none() {
             return;
         }
         if !self.has_window {
-            self.tool_approval_panel.preview_is_fullscreen = false;
-            self.tool_approval_panel.preview_scroll_offset = 0;
+            if let Some(state) = self.tool_approval_panel.file_preview.as_mut() {
+                state.is_fullscreen = false;
+                state.scroll_offset = 0;
+            }
             return;
         }
         // 面板不可见（被其他全屏层遮挡或非贴底）时抑制 fullscreen 升级，
         // 避免审批预览换一种方式抢屏；层关闭 / 贴底恢复汇聚点会重新 sync，延迟升级生效。
         if !self.tool_approval_panel_visible() {
-            self.tool_approval_panel.preview_is_fullscreen = false;
-            self.tool_approval_panel.preview_scroll_offset = 0;
+            if let Some(state) = self.tool_approval_panel.file_preview.as_mut() {
+                state.is_fullscreen = false;
+                state.scroll_offset = 0;
+            }
             return;
         }
 
         let width = usize::from(self.width.max(1));
         let height = usize::from(self.height.max(1));
-        let panel_line_count = build_file_preview_panel_lines(self, width).len();
-        self.tool_approval_panel.preview_is_fullscreen = panel_line_count > height;
-        if self.tool_approval_panel.preview_is_fullscreen {
+        // 模式判断只读取 cache 中的行数；不能为了计数先完整 clone 一份 inline panel。
+        let panel_line_count = file_preview_panel_line_count(self, width);
+        let is_fullscreen = panel_line_count > height;
+        if let Some(state) = self.tool_approval_panel.file_preview.as_mut() {
+            state.is_fullscreen = is_fullscreen;
+        }
+        if is_fullscreen {
             self.complete_startup_banner_entrance();
         }
         self.clamp_tool_approval_fullscreen_preview_scroll();
@@ -256,32 +261,43 @@ impl Model {
         let max_offset = file_preview_fullscreen_max_offset(self);
         let current = self
             .tool_approval_panel
-            .preview_scroll_offset
+            .file_preview
+            .as_ref()
+            .map(|state| state.scroll_offset)
+            .unwrap_or_default()
             .min(max_offset);
         let next = if delta_lines.is_negative() {
             current.saturating_sub(delta_lines.unsigned_abs())
         } else {
             current.saturating_add(delta_lines as usize).min(max_offset)
         };
-        self.tool_approval_panel.preview_scroll_offset = next;
+        if let Some(state) = self.tool_approval_panel.file_preview.as_mut() {
+            state.scroll_offset = next;
+        }
     }
 
     fn clamp_tool_approval_fullscreen_preview_scroll(&mut self) {
-        if !self.tool_approval_panel.preview_is_fullscreen {
-            self.tool_approval_panel.preview_scroll_offset = 0;
+        let is_fullscreen = self
+            .tool_approval_panel
+            .file_preview
+            .as_ref()
+            .is_some_and(|state| state.is_fullscreen);
+        if !is_fullscreen {
+            if let Some(state) = self.tool_approval_panel.file_preview.as_mut() {
+                state.scroll_offset = 0;
+            }
             return;
         }
         let max_offset = file_preview_fullscreen_max_offset(self);
-        self.tool_approval_panel.preview_scroll_offset = self
-            .tool_approval_panel
-            .preview_scroll_offset
-            .min(max_offset);
+        if let Some(state) = self.tool_approval_panel.file_preview.as_mut() {
+            state.scroll_offset = state.scroll_offset.min(max_offset);
+        }
     }
 }
 
-fn build_panel_lines(model: &Model, width: usize) -> Vec<Line<'static>> {
+fn build_panel_lines(model: &mut Model, width: usize) -> Vec<Line<'static>> {
     let width = width.max(1);
-    if model.tool_approval_panel.preview.is_some() {
+    if model.tool_approval_panel.file_preview.is_some() {
         return build_file_preview_panel_lines(model, width);
     }
 

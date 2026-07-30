@@ -285,6 +285,165 @@ fn single_exploration_tool_activity_renders_as_standalone_transcript_item() {
 }
 
 #[test]
+fn search_activity_with_diff_is_rendered_as_runtime_item() {
+    let mut transcript = Transcript::new(default_palette(), None);
+
+    transcript.append_runtime_tool_activity(diff_read_activity(
+        "call-search-diff",
+        RuntimeToolKind::Search,
+        "Search generated patch",
+        "generated.rs",
+    ));
+
+    let rendered = transcript.plain_items();
+    assert_eq!(rendered.len(), 1);
+    assert!(
+        rendered[0].contains("(+1 -1)")
+            && rendered[0].contains("old value")
+            && rendered[0].contains("new value"),
+        "Search + Diff 应作为普通 activity 完整渲染：{rendered:?}"
+    );
+    assert!(!rendered[0].contains("Explored"));
+}
+
+#[test]
+fn standalone_exploration_update_with_diff_becomes_runtime_item() {
+    let mut transcript = Transcript::new(default_palette(), None);
+    let item_index = transcript.append_runtime_tool_activity(RuntimeToolActivity {
+        activity_id: "call-read-diff".to_string(),
+        title: "Read generated.rs".to_string(),
+        kind: RuntimeToolKind::Read,
+        status: RuntimeToolActivityStatus::InProgress,
+        content: Vec::new(),
+        locations: Vec::new(),
+        raw_input: None,
+        raw_output: None,
+    });
+    assert!(transcript.update_runtime_tool_activity(
+        item_index,
+        RuntimeToolActivityUpdate {
+            activity_id: "call-read-diff".to_string(),
+            status: Some(RuntimeToolActivityStatus::Completed),
+            content: Some(diff_content("generated.rs")),
+            ..RuntimeToolActivityUpdate::default()
+        },
+    ));
+
+    let rendered = transcript.plain_items();
+    assert_eq!(rendered.len(), 1);
+    assert!(
+        rendered[0].contains("(+1 -1)")
+            && rendered[0].contains("old value")
+            && rendered[0].contains("new value"),
+        "更新后出现 Diff 的单项 exploration 应转为普通 activity：{rendered:?}"
+    );
+}
+
+#[test]
+fn grouped_exploration_update_with_diff_preserves_every_activity() {
+    let mut transcript = Transcript::new(default_palette(), None);
+    transcript.append_runtime_tool_activity(RuntimeToolActivity {
+        activity_id: "call-read-cargo".to_string(),
+        title: "Read Cargo.toml".to_string(),
+        kind: RuntimeToolKind::Read,
+        status: RuntimeToolActivityStatus::Completed,
+        content: vec![RuntimeToolActivityContent::Text("[package]".to_string())],
+        locations: Vec::new(),
+        raw_input: None,
+        raw_output: None,
+    });
+    let item_index = transcript.append_runtime_tool_activity(RuntimeToolActivity {
+        activity_id: "call-read-diff".to_string(),
+        title: "Read generated.rs".to_string(),
+        kind: RuntimeToolKind::Read,
+        status: RuntimeToolActivityStatus::InProgress,
+        content: Vec::new(),
+        locations: Vec::new(),
+        raw_input: None,
+        raw_output: None,
+    });
+    let trailing_item_index = transcript.append_runtime_tool_activity(RuntimeToolActivity {
+        activity_id: "call-read-readme".to_string(),
+        title: "Read README.md".to_string(),
+        kind: RuntimeToolKind::Read,
+        status: RuntimeToolActivityStatus::Completed,
+        content: vec![RuntimeToolActivityContent::Text("# Hunea".to_string())],
+        locations: Vec::new(),
+        raw_input: None,
+        raw_output: None,
+    });
+
+    assert_eq!(item_index, 0);
+    assert_eq!(
+        trailing_item_index, 0,
+        "三个 Read activity 应先进入同一 exploration"
+    );
+    assert!(transcript.update_runtime_tool_activity(
+        item_index,
+        RuntimeToolActivityUpdate {
+            activity_id: "call-read-diff".to_string(),
+            status: Some(RuntimeToolActivityStatus::Completed),
+            content: Some(diff_content("generated.rs")),
+            ..RuntimeToolActivityUpdate::default()
+        },
+    ));
+
+    let rendered = transcript.plain_items();
+    assert_eq!(
+        rendered.len(),
+        3,
+        "含 Diff 的 activity 应从 exploration 中拆出"
+    );
+    assert!(rendered[0].contains("Cargo.toml"));
+    assert!(
+        rendered[1].contains("(+1 -1)")
+            && rendered[1].contains("old value")
+            && rendered[1].contains("new value"),
+        "拆分后必须保留并完整渲染 Diff：{rendered:?}"
+    );
+    assert!(rendered[2].contains("README.md"));
+    assert_eq!(
+        transcript.runtime_tool_activity_index("call-read-cargo"),
+        Some(0)
+    );
+    assert_eq!(
+        transcript.runtime_tool_activity_index("call-read-diff"),
+        Some(1)
+    );
+    assert_eq!(
+        transcript.runtime_tool_activity_index("call-read-readme"),
+        Some(2)
+    );
+}
+
+fn diff_read_activity(
+    activity_id: &str,
+    kind: RuntimeToolKind,
+    title: &str,
+    path: &str,
+) -> RuntimeToolActivity {
+    RuntimeToolActivity {
+        activity_id: activity_id.to_string(),
+        title: title.to_string(),
+        kind,
+        status: RuntimeToolActivityStatus::Completed,
+        content: diff_content(path),
+        locations: Vec::new(),
+        raw_input: None,
+        raw_output: None,
+    }
+}
+
+fn diff_content(path: &str) -> Vec<RuntimeToolActivityContent> {
+    vec![RuntimeToolActivityContent::Diff {
+        path: path.to_string(),
+        old_text: Some("old value\n".to_string()),
+        new_text: "new value\n".to_string(),
+        is_truncated: false,
+    }]
+}
+
+#[test]
 fn exploration_tool_activities_coalesce_into_single_transcript_item() {
     let mut transcript = Transcript::new(default_palette(), None);
 

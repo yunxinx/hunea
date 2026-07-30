@@ -48,7 +48,6 @@ base16ct = { version = "1.0.0", features = ["alloc"] }
 color-eyre = "0.6.5"
 criterion = { version = "0.8.2", features = ["html_reports"] }
 crossterm = { version = "0.29.0", features = ["event-stream"] }
-diffy = "0.5.0"
 directories = "6"
 flate2 = "1"
 futures-util = "0.3.31"
@@ -76,6 +75,7 @@ serde_json = "1"
 yaml_serde = "0.10.4"
 semver = "1.0.28"
 sha2 = "0.11"
+similar = { version = "3.1", features = ["inline", "unicode"] }
 syntect = { version = "5", default-features = false, features = ["parsing"] }
 tar = "0.4"
 tachyonfx = { version = "0.25.0", default-features = false, features = ["std", "std-duration"] }

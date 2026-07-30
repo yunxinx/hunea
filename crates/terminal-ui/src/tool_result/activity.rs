@@ -2,6 +2,7 @@ use std::{
     collections::BTreeMap,
     env,
     path::{Component, Path, PathBuf},
+    rc::Rc,
     time::Instant,
 };
 
@@ -23,14 +24,18 @@ use runtime_domain::session::{
 
 use super::{
     TOOL_ACTIVITY_ACTIVE_MARKER_BLINK_INTERVAL, TOOL_ACTIVITY_COMPACT_EDGE_LINES,
-    TOOL_ACTIVITY_DIFF_LINE_NUMBER_WIDTH, ToolActivityRenderMode,
+    ToolActivityRenderMode,
+    diff::{
+        DiffPresentations, RuntimeDiffDetailLine, RuntimeDiffPresentation,
+        runtime_tool_activity_has_diff_content,
+    },
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum RuntimeToolActivityDetailBlock {
     Text(Vec<String>),
     SecondaryText(Vec<String>),
-    Diff(Vec<RuntimeDiffDetailLine>),
+    Diff(Rc<[RuntimeDiffDetailLine]>),
     ExecuteTranscript(RuntimeExecuteTranscriptBlock),
     ExecuteFooter(RuntimeExecuteFooterLine),
 }
@@ -52,22 +57,6 @@ pub(super) struct RuntimeExecuteFooterLine {
 pub(super) enum RuntimeExecuteFooterStatus {
     Success,
     Failed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct RuntimeDiffDetailLine {
-    pub(super) line_number: Option<usize>,
-    pub(super) text: String,
-    pub(super) kind: RuntimeDiffDetailLineKind,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum RuntimeDiffDetailLineKind {
-    Context,
-    Insert,
-    Delete,
-    Separator,
-    Omitted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,11 +106,14 @@ fn is_debug_detailed_render_mode(render_mode: ToolActivityRenderMode) -> bool {
 
 pub(super) fn runtime_tool_activity_detail_blocks(
     call: &RuntimeToolActivity,
+    diff_presentations: &DiffPresentations,
     render_mode: ToolActivityRenderMode,
     permission_waiting: bool,
     terminal_snapshots: &BTreeMap<String, RuntimeTerminalSnapshot>,
 ) -> Vec<RuntimeToolActivityDetailBlock> {
-    if !is_debug_detailed_render_mode(render_mode) {
+    // Diff 是需要完整展示的语义结果，不能套用 Read/Search 的普通结果折叠规则。
+    if !is_debug_detailed_render_mode(render_mode) && !runtime_tool_activity_has_diff_content(call)
+    {
         if should_collapse_runtime_read_tool_activity(call) {
             return Vec::new();
         }
@@ -139,6 +131,7 @@ pub(super) fn runtime_tool_activity_detail_blocks(
     if is_execute_like_tool_call(call) {
         return execute_tool_call_detail_blocks(
             call,
+            diff_presentations,
             render_mode,
             permission_waiting,
             terminal_snapshots,
@@ -147,7 +140,7 @@ pub(super) fn runtime_tool_activity_detail_blocks(
 
     let mut blocks = Vec::new();
 
-    for content in &call.content {
+    for (index, content) in call.content.iter().enumerate() {
         if call.status == RuntimeToolActivityStatus::Failed
             && let RuntimeToolActivityContent::Text(text) = content
         {
@@ -158,6 +151,7 @@ pub(super) fn runtime_tool_activity_detail_blocks(
         }
         blocks.extend(runtime_tool_activity_content_blocks(
             content,
+            diff_presentations.presentation_for_content(index),
             render_mode,
             terminal_snapshots,
         ));
@@ -184,6 +178,7 @@ pub(super) fn runtime_tool_activity_detail_blocks(
 
 fn execute_tool_call_detail_blocks(
     call: &RuntimeToolActivity,
+    diff_presentations: &DiffPresentations,
     render_mode: ToolActivityRenderMode,
     permission_waiting: bool,
     terminal_snapshots: &BTreeMap<String, RuntimeTerminalSnapshot>,
@@ -223,7 +218,7 @@ fn execute_tool_call_detail_blocks(
     }
 
     let mut blocks = Vec::new();
-    for content in &call.content {
+    for (index, content) in call.content.iter().enumerate() {
         if should_hide_execute_text_content(content) {
             continue;
         }
@@ -237,6 +232,7 @@ fn execute_tool_call_detail_blocks(
         }
         blocks.extend(runtime_tool_activity_content_blocks(
             content,
+            diff_presentations.presentation_for_content(index),
             render_mode,
             terminal_snapshots,
         ));
@@ -453,6 +449,7 @@ fn is_execute_protocol_copy_text(text: &str) -> bool {
 
 fn runtime_tool_activity_content_blocks(
     content: &RuntimeToolActivityContent,
+    diff_presentation: Option<Rc<RuntimeDiffPresentation>>,
     render_mode: ToolActivityRenderMode,
     terminal_snapshots: &BTreeMap<String, RuntimeTerminalSnapshot>,
 ) -> Vec<RuntimeToolActivityDetailBlock> {
@@ -501,17 +498,21 @@ fn runtime_tool_activity_content_blocks(
                 render_mode,
             ))]
         }
-        RuntimeToolActivityContent::Diff {
-            path: _,
-            old_text,
-            new_text,
-            is_truncated,
-        } => vec![RuntimeToolActivityDetailBlock::Diff(
-            truncate_diff_detail_block(
-                diff_detail_lines_with_truncation(old_text.as_deref(), new_text, *is_truncated),
-                render_mode,
-            ),
-        )],
+        RuntimeToolActivityContent::Diff { .. } => {
+            // `DiffPresentations` 的对位由构造保证，Diff content 恒有 presentation；
+            // 缺失只可能是 presentation 与 call 不同源，debug 构建下直接炸出来，
+            // release 下返回空 block 而非现场重算——避免恢复隐藏的重复 diff 路径。
+            let Some(presentation) = diff_presentation else {
+                debug_assert!(
+                    false,
+                    "diff content must carry a presentation built from the same tool activity"
+                );
+                return Vec::new();
+            };
+            vec![RuntimeToolActivityDetailBlock::Diff(
+                presentation.lines_for_render_mode(render_mode),
+            )]
+        }
         RuntimeToolActivityContent::Terminal { terminal_id } => {
             vec![RuntimeToolActivityDetailBlock::SecondaryText(
                 terminal_detail_lines(terminal_snapshots.get(terminal_id), render_mode),
@@ -613,31 +614,6 @@ fn truncate_detail_block_with_edge(
     truncated
 }
 
-fn truncate_diff_detail_block(
-    lines: Vec<RuntimeDiffDetailLine>,
-    render_mode: ToolActivityRenderMode,
-) -> Vec<RuntimeDiffDetailLine> {
-    if is_full_detail_render_mode(render_mode) {
-        return lines;
-    }
-    let edge = TOOL_ACTIVITY_COMPACT_EDGE_LINES;
-    let limit = edge.saturating_mul(2);
-    if lines.len() <= limit {
-        return lines;
-    }
-
-    let omitted = lines.len().saturating_sub(limit);
-    let mut truncated = Vec::with_capacity(limit + 1);
-    truncated.extend(lines.iter().take(edge).cloned());
-    truncated.push(RuntimeDiffDetailLine {
-        line_number: None,
-        text: format!("⋮ +{omitted} lines ({TRANSCRIPT_DETAIL_HINT})"),
-        kind: RuntimeDiffDetailLineKind::Omitted,
-    });
-    truncated.extend(lines.iter().skip(lines.len().saturating_sub(edge)).cloned());
-    truncated
-}
-
 fn text_lines(text: &str) -> Vec<String> {
     let lines: Vec<String> = text.lines().map(str::to_string).collect();
     if lines.is_empty() {
@@ -647,101 +623,18 @@ fn text_lines(text: &str) -> Vec<String> {
     }
 }
 
-fn diff_detail_lines(old_text: Option<&str>, new_text: &str) -> Vec<RuntimeDiffDetailLine> {
-    let Some(old_text) = old_text else {
-        return text_lines(new_text)
-            .into_iter()
-            .enumerate()
-            .map(|(index, line)| RuntimeDiffDetailLine {
-                line_number: Some(index + 1),
-                text: line,
-                kind: RuntimeDiffDetailLineKind::Insert,
-            })
-            .collect();
-    };
-
-    let patch = diffy::create_patch(old_text, new_text);
-    let mut lines = Vec::new();
-    for (hunk_index, hunk) in patch.hunks().iter().enumerate() {
-        if hunk_index > 0 {
-            lines.push(RuntimeDiffDetailLine {
-                line_number: None,
-                text: "⋮".to_string(),
-                kind: RuntimeDiffDetailLineKind::Separator,
-            });
-        }
-
-        let mut old_line = hunk.old_range().start();
-        let mut new_line = hunk.new_range().start();
-        for line in hunk.lines() {
-            match line {
-                diffy::Line::Insert(text) => {
-                    lines.push(RuntimeDiffDetailLine {
-                        line_number: Some(new_line),
-                        text: text.trim_end_matches('\n').to_string(),
-                        kind: RuntimeDiffDetailLineKind::Insert,
-                    });
-                    new_line += 1;
-                }
-                diffy::Line::Delete(text) => {
-                    lines.push(RuntimeDiffDetailLine {
-                        line_number: Some(old_line),
-                        text: text.trim_end_matches('\n').to_string(),
-                        kind: RuntimeDiffDetailLineKind::Delete,
-                    });
-                    old_line += 1;
-                }
-                diffy::Line::Context(text) => {
-                    lines.push(RuntimeDiffDetailLine {
-                        line_number: Some(new_line),
-                        text: text.trim_end_matches('\n').to_string(),
-                        kind: RuntimeDiffDetailLineKind::Context,
-                    });
-                    old_line += 1;
-                    new_line += 1;
-                }
-            }
-        }
-    }
-
-    lines
-}
-
-fn diff_detail_lines_with_truncation(
-    old_text: Option<&str>,
-    new_text: &str,
-    is_truncated: bool,
-) -> Vec<RuntimeDiffDetailLine> {
-    let mut lines = diff_detail_lines(old_text, new_text);
-    if is_truncated {
-        lines.insert(
-            0,
-            RuntimeDiffDetailLine {
-                line_number: None,
-                text: "⋮ preview truncated; showing partial diff".to_string(),
-                kind: RuntimeDiffDetailLineKind::Omitted,
-            },
-        );
-    }
-    lines
-}
-
-fn line_count(text: &str) -> usize {
-    if text.is_empty() {
-        0
-    } else {
-        text.lines().count()
-    }
-}
-
 pub(super) fn runtime_tool_activity_diff_header_chunks(
     call: &RuntimeToolActivity,
+    diff_presentations: &DiffPresentations,
     palette: TerminalPalette,
 ) -> Option<Vec<HighlightChunk>> {
     let summaries = call
         .content
         .iter()
-        .filter_map(runtime_diff_summary)
+        .enumerate()
+        .filter_map(|(index, content)| {
+            runtime_diff_summary(content, diff_presentations.for_content(index))
+        })
         .collect::<Vec<_>>();
     if summaries.is_empty() {
         return None;
@@ -783,7 +676,10 @@ pub(super) fn runtime_tool_activity_diff_header_chunks(
     Some(chunks)
 }
 
-fn runtime_diff_summary(content: &RuntimeToolActivityContent) -> Option<RuntimeDiffSummary> {
+fn runtime_diff_summary(
+    content: &RuntimeToolActivityContent,
+    presentation: Option<&RuntimeDiffPresentation>,
+) -> Option<RuntimeDiffSummary> {
     let RuntimeToolActivityContent::Diff {
         path,
         old_text,
@@ -793,39 +689,30 @@ fn runtime_diff_summary(content: &RuntimeToolActivityContent) -> Option<RuntimeD
     else {
         return None;
     };
-    let old_line_count = old_text.as_deref().map(line_count).unwrap_or(0);
-    let new_line_count = line_count(new_text);
-    let (added, removed) = runtime_diff_added_removed(old_text.as_deref(), new_text);
-    let change_kind = if old_line_count == 0 && new_line_count > 0 {
-        RuntimeDiffChangeKind::Added
-    } else if old_line_count > 0 && new_line_count == 0 {
-        RuntimeDiffChangeKind::Deleted
-    } else {
-        RuntimeDiffChangeKind::Edited
+    // Diff content 恒有对位 presentation；缺失只可能是 presentation 与 call 不同源，
+    // debug 构建下直接炸出来，release 下降级为无 diff 标题。
+    let Some(presentation) = presentation else {
+        debug_assert!(
+            false,
+            "diff content must carry a presentation built from the same tool activity"
+        );
+        return None;
+    };
+    // `old_text` 的 Option 表达文件是否已存在，不能把 `None` 与已有空文件 `Some("")` 合并。
+    let change_kind = match old_text.as_deref() {
+        None => RuntimeDiffChangeKind::Added,
+        Some(old_text) if !old_text.is_empty() && new_text.is_empty() => {
+            RuntimeDiffChangeKind::Deleted
+        }
+        Some(_) => RuntimeDiffChangeKind::Edited,
     };
 
     Some(RuntimeDiffSummary {
         path: runtime_display_path(path),
-        added,
-        removed,
+        added: presentation.added,
+        removed: presentation.removed,
         change_kind,
     })
-}
-
-fn runtime_diff_added_removed(old_text: Option<&str>, new_text: &str) -> (usize, usize) {
-    let Some(old_text) = old_text else {
-        return (line_count(new_text), 0);
-    };
-
-    diffy::create_patch(old_text, new_text)
-        .hunks()
-        .iter()
-        .flat_map(|hunk| hunk.lines())
-        .fold((0, 0), |(added, removed), line| match line {
-            diffy::Line::Insert(_) => (added + 1, removed),
-            diffy::Line::Delete(_) => (added, removed + 1),
-            diffy::Line::Context(_) => (added, removed),
-        })
 }
 
 fn runtime_diff_change_kind_label(kind: RuntimeDiffChangeKind) -> &'static str {
@@ -863,32 +750,6 @@ fn runtime_diff_count_chunks(
             style: Style::new(),
         },
     ]
-}
-
-pub(super) fn runtime_tool_activity_has_diff_content(call: &RuntimeToolActivity) -> bool {
-    call.content
-        .iter()
-        .any(|content| matches!(content, RuntimeToolActivityContent::Diff { .. }))
-}
-
-pub(super) fn runtime_diff_line_prefix(
-    line_number: Option<usize>,
-    kind: RuntimeDiffDetailLineKind,
-) -> String {
-    let sign = match kind {
-        RuntimeDiffDetailLineKind::Insert => "+",
-        RuntimeDiffDetailLineKind::Delete => "-",
-        RuntimeDiffDetailLineKind::Context
-        | RuntimeDiffDetailLineKind::Separator
-        | RuntimeDiffDetailLineKind::Omitted => " ",
-    };
-    match line_number {
-        Some(line_number) => format!(
-            "{line_number:>width$} {sign}  ",
-            width = TOOL_ACTIVITY_DIFF_LINE_NUMBER_WIDTH
-        ),
-        None => " ".repeat(TOOL_ACTIVITY_DIFF_LINE_NUMBER_WIDTH.saturating_sub(1)),
-    }
 }
 
 pub(super) fn runtime_tool_activity_location_suffix(
@@ -1352,52 +1213,6 @@ fn detect_home_dir() -> Option<PathBuf> {
             path.push(home_path);
             Some(path)
         })
-}
-
-pub(super) fn runtime_tool_activity_diff_line_style(
-    kind: RuntimeDiffDetailLineKind,
-    palette: TerminalPalette,
-) -> Style {
-    match kind {
-        RuntimeDiffDetailLineKind::Context => Style::new(),
-        RuntimeDiffDetailLineKind::Insert => Style::new().fg(palette.quote),
-        RuntimeDiffDetailLineKind::Delete => Style::new().fg(palette.system_error),
-        RuntimeDiffDetailLineKind::Separator | RuntimeDiffDetailLineKind::Omitted => {
-            Style::new().fg(palette.tertiary)
-        }
-    }
-}
-
-pub(super) fn runtime_tool_activity_diff_row_style(
-    kind: RuntimeDiffDetailLineKind,
-    palette: TerminalPalette,
-) -> Style {
-    runtime_tool_activity_diff_background(kind, palette)
-        .map(|background| Style::new().bg(background))
-        .unwrap_or_default()
-}
-
-fn runtime_tool_activity_diff_background(
-    kind: RuntimeDiffDetailLineKind,
-    palette: TerminalPalette,
-) -> Option<Color> {
-    match kind {
-        RuntimeDiffDetailLineKind::Context => None,
-        RuntimeDiffDetailLineKind::Insert => runtime_tool_activity_diff_tint(palette, true),
-        RuntimeDiffDetailLineKind::Delete => runtime_tool_activity_diff_tint(palette, false),
-        RuntimeDiffDetailLineKind::Separator | RuntimeDiffDetailLineKind::Omitted => None,
-    }
-}
-
-fn runtime_tool_activity_diff_tint(palette: TerminalPalette, is_insert: bool) -> Option<Color> {
-    let _surface = palette.surface?;
-
-    Some(match (palette.has_dark_background(), is_insert) {
-        (true, true) => Color::Rgb(38, 58, 44),
-        (true, false) => Color::Rgb(64, 44, 44),
-        (false, true) => Color::Rgb(228, 242, 230),
-        (false, false) => Color::Rgb(247, 229, 229),
-    })
 }
 
 fn runtime_tool_kind_label(kind: RuntimeToolKind) -> &'static str {

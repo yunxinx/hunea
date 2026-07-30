@@ -18,7 +18,7 @@ fn preview_layout_omits_labels_and_uses_vertical_numbered_choices() {
     model.palette = default_palette();
     open_preview_panel(&mut model);
 
-    let lines = build_panel_lines(&model, 72)
+    let lines = build_panel_lines(&mut model, 72)
         .into_iter()
         .map(|line| {
             line.spans
@@ -111,7 +111,7 @@ fn command_line_wraps_without_request_label() {
         }],
     );
 
-    let lines = build_panel_lines(&model, 28)
+    let lines = build_panel_lines(&mut model, 28)
         .into_iter()
         .map(|line| {
             line.spans
@@ -181,7 +181,7 @@ fn runtime_session_allow_option_only_renders_when_available() {
         }],
     );
 
-    let without_session = build_panel_lines(&model, 72)
+    let without_session = build_panel_lines(&mut model, 72)
         .into_iter()
         .map(|line| {
             line.spans
@@ -213,7 +213,7 @@ fn runtime_session_allow_option_only_renders_when_available() {
         }],
     );
 
-    let with_session = build_panel_lines(&model, 72)
+    let with_session = build_panel_lines(&mut model, 72)
         .into_iter()
         .map(|line| {
             line.spans
@@ -239,7 +239,7 @@ fn choices_render_vertically_for_command_approval() {
     model.palette = default_palette();
     open_preview_panel(&mut model);
 
-    let lines = build_panel_lines(&model, 72)
+    let lines = build_panel_lines(&mut model, 72)
         .into_iter()
         .map(|line| {
             line.spans
@@ -456,7 +456,7 @@ fn file_preview_panel_renders_added_diff_without_transport_json() {
         )),
     );
 
-    let lines = build_panel_lines(&model, 72)
+    let lines = build_panel_lines(&mut model, 72)
         .into_iter()
         .map(|line| {
             line.spans
@@ -764,12 +764,26 @@ fn fullscreen_file_preview_uses_overlay_mouse_policy_and_mouse_wheel_scroll() {
         !model.wants_mouse_capture(),
         "fullscreen preview should use overlay mouse policy so wheel maps to pager navigation"
     );
-    assert_eq!(model.tool_approval_panel.preview_scroll_offset, 0);
+    assert_eq!(
+        model
+            .tool_approval_panel
+            .file_preview
+            .as_ref()
+            .expect("file preview state should exist")
+            .scroll_offset,
+        0
+    );
 
     model.update(AppEvent::MouseWheel { delta_lines: 3 });
 
     assert_eq!(
-        model.tool_approval_panel.preview_scroll_offset, 3,
+        model
+            .tool_approval_panel
+            .file_preview
+            .as_ref()
+            .expect("file preview state should exist")
+            .scroll_offset,
+        3,
         "mouse wheel events should scroll the fullscreen diff if delivered directly"
     );
 
@@ -777,6 +791,38 @@ fn fullscreen_file_preview_uses_overlay_mouse_policy_and_mouse_wheel_scroll() {
     assert!(
         model.wants_mouse_capture(),
         "closing fullscreen approval should restore normal mouse capture"
+    );
+}
+
+#[test]
+fn raw_input_without_structured_diff_does_not_create_file_preview() {
+    let existing_path = std::env::current_exe()
+        .expect("the running test executable should have a filesystem path")
+        .to_string_lossy()
+        .into_owned();
+    let update = runtime_domain::session::RuntimeToolActivityUpdate {
+        activity_id: "call-edit-without-preview".to_string(),
+        title: Some(format!("Edit {existing_path}")),
+        kind: Some(runtime_domain::session::RuntimeToolKind::Edit),
+        status: Some(runtime_domain::session::RuntimeToolActivityStatus::Pending),
+        content: Some(vec![
+            runtime_domain::session::RuntimeToolActivityContent::Text(
+                "Requesting approval".to_string(),
+            ),
+        ]),
+        raw_input: Some(
+            serde_json::json!({
+                "path": existing_path,
+                "content": "replacement content"
+            })
+            .into(),
+        ),
+        ..runtime_domain::session::RuntimeToolActivityUpdate::default()
+    };
+
+    assert!(
+        ToolApprovalPreview::from_runtime_tool_activity_update(&update).is_none(),
+        "raw input cannot provide the old text required for a truthful file diff"
     );
 }
 
@@ -813,7 +859,7 @@ fn edit_preview_panel_renders_diff_instead_of_new_file_snapshot() {
         ToolApprovalPreview::from_runtime_tool_activity_update(&update),
     );
 
-    let lines = build_panel_lines(&model, 72)
+    let lines = build_panel_lines(&mut model, 72)
         .into_iter()
         .map(|line| {
             line.spans
@@ -835,6 +881,130 @@ fn edit_preview_panel_renders_diff_instead_of_new_file_snapshot() {
     assert!(
         !text.contains("      2  3. 第三项"),
         "edit preview should not render only numbered new file content: {lines:?}"
+    );
+}
+
+#[test]
+fn existing_empty_file_preview_preserves_edit_semantics() {
+    let update = runtime_domain::session::RuntimeToolActivityUpdate {
+        activity_id: "call-edit-empty".to_string(),
+        title: Some("Edit empty.rs".to_string()),
+        kind: Some(runtime_domain::session::RuntimeToolKind::Edit),
+        status: Some(runtime_domain::session::RuntimeToolActivityStatus::Pending),
+        content: Some(vec![
+            runtime_domain::session::RuntimeToolActivityContent::Diff {
+                path: "empty.rs".to_string(),
+                old_text: Some(String::new()),
+                new_text: "fn main() {}\n".to_string(),
+                is_truncated: false,
+            },
+        ]),
+        ..runtime_domain::session::RuntimeToolActivityUpdate::default()
+    };
+    let preview = ToolApprovalPreview::from_runtime_tool_activity_update(&update)
+        .expect("Diff content should create an approval preview");
+
+    assert_eq!(preview.question(), "Do you want to edit empty.rs?");
+    assert_eq!(preview.old_text(), Some(""));
+
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.palette = default_palette();
+    model.open_tool_approval_panel_with_preview(
+        ToolApprovalSource::RuntimePermission {
+            target: runtime_domain::session::RuntimeTarget::provider("local", "qwen3"),
+            request_id: "permission-edit-empty".to_string(),
+            allow_option_id: Some("allow-once".to_string()),
+            allow_always_option_id: None,
+            reject_option_id: Some("reject-once".to_string()),
+            reject_always_option_id: None,
+        },
+        "Edit empty.rs".to_string(),
+        Vec::new(),
+        Some(preview),
+    );
+
+    let text = build_panel_lines(&mut model, 72)
+        .into_iter()
+        .flat_map(|line| line.spans)
+        .map(|span| span.content.into_owned())
+        .collect::<String>();
+
+    assert!(
+        text.contains("Edited empty.rs (+1 -0)"),
+        "existing empty files must keep the edited header: {text:?}"
+    );
+}
+
+#[test]
+fn file_preview_reuses_item_within_revision_and_rebuilds_for_next_revision() {
+    reset_file_preview_item_build_count();
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.set_window(72, 80);
+    model.set_palette(default_palette(), true);
+    let update = runtime_domain::session::RuntimeToolActivityUpdate {
+        activity_id: "call-edit-cache".to_string(),
+        title: Some("Edit cached.rs".to_string()),
+        kind: Some(runtime_domain::session::RuntimeToolKind::Edit),
+        status: Some(runtime_domain::session::RuntimeToolActivityStatus::Pending),
+        content: Some(vec![
+            runtime_domain::session::RuntimeToolActivityContent::Diff {
+                path: "cached.rs".to_string(),
+                old_text: Some("let value = 1;\n".to_string()),
+                new_text: "let value = 2;\n".to_string(),
+                is_truncated: false,
+            },
+        ]),
+        ..runtime_domain::session::RuntimeToolActivityUpdate::default()
+    };
+
+    model.open_tool_approval_panel_with_preview(
+        ToolApprovalSource::RuntimePermission {
+            target: runtime_domain::session::RuntimeTarget::provider("local", "qwen3"),
+            request_id: "permission-edit-cache".to_string(),
+            allow_option_id: Some("allow-once".to_string()),
+            allow_always_option_id: None,
+            reject_option_id: Some("reject-once".to_string()),
+            reject_always_option_id: None,
+        },
+        "Edit cached.rs".to_string(),
+        Vec::new(),
+        ToolApprovalPreview::from_runtime_tool_activity_update(&update),
+    );
+
+    let _ = build_panel_lines(&mut model, 72);
+    let _ = build_panel_lines(&mut model, 72);
+    model.set_window(64, 80);
+    let _ = build_panel_lines(&mut model, 64);
+    model.set_palette(terminal_default_palette(), true);
+    let _ = build_panel_lines(&mut model, 64);
+
+    assert_eq!(
+        file_preview_item_build_count(),
+        1,
+        "one preview revision must own one reusable ToolResultItem"
+    );
+
+    model.open_tool_approval_panel_with_preview(
+        ToolApprovalSource::RuntimePermission {
+            target: runtime_domain::session::RuntimeTarget::provider("local", "qwen3"),
+            request_id: "permission-write-next".to_string(),
+            allow_option_id: Some("allow-once".to_string()),
+            allow_always_option_id: None,
+            reject_option_id: Some("reject-once".to_string()),
+            reject_always_option_id: None,
+        },
+        "Write next.rs".to_string(),
+        Vec::new(),
+        Some(ToolApprovalPreview::create_file(
+            "next.rs",
+            "fn next() {}\n",
+        )),
+    );
+
+    assert_eq!(
+        file_preview_item_build_count(),
+        2,
+        "a new preview revision must replace the previous ToolResultItem"
     );
 }
 
@@ -871,7 +1041,7 @@ fn edit_preview_panel_marks_truncated_diff_as_partial() {
         ToolApprovalPreview::from_runtime_tool_activity_update(&update),
     );
 
-    let lines = build_panel_lines(&model, 72)
+    let lines = build_panel_lines(&mut model, 72)
         .into_iter()
         .map(|line| {
             line.spans
@@ -908,7 +1078,7 @@ fn file_preview_panel_uses_single_command_bar_without_choice_picker() {
         )),
     );
 
-    let lines = build_panel_lines(&model, 72)
+    let lines = build_panel_lines(&mut model, 72)
         .into_iter()
         .map(|line| {
             line.spans
@@ -1068,7 +1238,7 @@ fn shell_command_lines_use_highlighted_styles() {
     model.palette = default_palette();
     open_preview_panel(&mut model);
 
-    let command_line = build_panel_lines(&model, 72)
+    let command_line = build_panel_lines(&mut model, 72)
         .into_iter()
         .find(|line| {
             let text = line
@@ -1102,7 +1272,7 @@ fn terminal_default_approval_command_does_not_emit_syntect_rgb_foregrounds() {
     model.palette = terminal_default_palette();
     open_preview_panel(&mut model);
 
-    let command_line = build_panel_lines(&model, 72)
+    let command_line = build_panel_lines(&mut model, 72)
         .into_iter()
         .find(|line| {
             line.spans

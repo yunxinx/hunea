@@ -28,6 +28,8 @@ use crate::runner::terminal_surface::TerminalSurface;
 
 mod tail;
 mod terminal_surface;
+#[cfg(any(test, feature = "bench-support"))]
+mod tool_result_diff;
 
 #[cfg(feature = "bench-support")]
 pub use tail::{StreamActivityTailBench, TailLayoutSummary};
@@ -36,6 +38,8 @@ pub use terminal_surface::{
     TerminalCommandSummary, TerminalFlushBench, TerminalFlushSummary, TerminalGridBench,
     TerminalGridScenario,
 };
+#[cfg(feature = "bench-support")]
+pub use tool_result_diff::{ToolResultDiffBench, ToolResultDiffScenario, ToolResultDiffSummary};
 
 /// `TextRenderSummary` 收敛一类文本渲染 benchmark 的稳定输出特征。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

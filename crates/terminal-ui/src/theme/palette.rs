@@ -153,6 +153,32 @@ pub(crate) fn context_budget_slot_color(
     }
 }
 
+/// `diff_row_tint` 返回 diff Insert/Delete 行的整行背景 tint。
+/// 终端默认配色（`surface == None`）下返回 `None`，调用方以无背景降级。
+pub(crate) fn diff_row_tint(palette: &TerminalPalette, is_insert: bool) -> Option<Color> {
+    palette.surface?;
+
+    Some(match (palette.has_dark_background(), is_insert) {
+        (true, true) => Color::Rgb(38, 58, 44),
+        (true, false) => Color::Rgb(64, 44, 44),
+        (false, true) => Color::Rgb(228, 242, 230),
+        (false, false) => Color::Rgb(247, 229, 229),
+    })
+}
+
+/// `diff_emphasis_tint` 返回 diff 行内强调段的背景 tint，与行 tint 同色相但更饱和一档。
+/// 终端默认配色下返回 `None`，调用方以 modifier 降级呈现强调段。
+pub(crate) fn diff_emphasis_tint(palette: &TerminalPalette, is_insert: bool) -> Option<Color> {
+    palette.surface?;
+
+    Some(match (palette.has_dark_background(), is_insert) {
+        (true, true) => Color::Rgb(52, 84, 62),
+        (true, false) => Color::Rgb(96, 58, 58),
+        (false, true) => Color::Rgb(198, 228, 206),
+        (false, false) => Color::Rgb(240, 206, 206),
+    })
+}
+
 /// `detect_palette` 用于非交互场景，优先探测真实背景，失败时再回退到环境变量推断。
 pub fn detect_palette() -> TerminalPalette {
     detect_palette_from_sources(detect_background, detect_dark_background_from_env)
@@ -335,7 +361,8 @@ mod tests {
     use super::{
         ContextBudgetColorSlot, TerminalBackgroundColor, context_budget_slot_color,
         default_palette, detect_dark_background_from_colorfgbg, detect_palette_from_sources,
-        is_dark_background, palette_from_background, terminal_default_palette,
+        diff_emphasis_tint, diff_row_tint, is_dark_background, palette_from_background,
+        terminal_default_palette,
     };
     use ratatui::style::Color;
 
@@ -436,6 +463,67 @@ mod tests {
             context_budget_slot_color(ContextBudgetColorSlot::ToolDefinitions, &light_palette),
             Color::Rgb(8, 145, 178)
         );
+    }
+
+    #[test]
+    fn diff_row_tints_follow_background_polarity_with_explicit_colors() {
+        let dark_palette = palette_from_background(true, Some(Color::Rgb(16, 36, 63)));
+        let light_palette = palette_from_background(false, Some(Color::Rgb(240, 240, 240)));
+
+        assert_eq!(
+            diff_row_tint(&dark_palette, true),
+            Some(Color::Rgb(38, 58, 44))
+        );
+        assert_eq!(
+            diff_row_tint(&dark_palette, false),
+            Some(Color::Rgb(64, 44, 44))
+        );
+        assert_eq!(
+            diff_row_tint(&light_palette, true),
+            Some(Color::Rgb(228, 242, 230))
+        );
+        assert_eq!(
+            diff_row_tint(&light_palette, false),
+            Some(Color::Rgb(247, 229, 229))
+        );
+    }
+
+    #[test]
+    fn diff_emphasis_tints_are_more_saturated_than_row_tints() {
+        let dark_palette = palette_from_background(true, Some(Color::Rgb(16, 36, 63)));
+        let light_palette = palette_from_background(false, Some(Color::Rgb(240, 240, 240)));
+
+        assert_eq!(
+            diff_emphasis_tint(&dark_palette, true),
+            Some(Color::Rgb(52, 84, 62))
+        );
+        assert_eq!(
+            diff_emphasis_tint(&dark_palette, false),
+            Some(Color::Rgb(96, 58, 58))
+        );
+        assert_eq!(
+            diff_emphasis_tint(&light_palette, true),
+            Some(Color::Rgb(198, 228, 206))
+        );
+        assert_eq!(
+            diff_emphasis_tint(&light_palette, false),
+            Some(Color::Rgb(240, 206, 206))
+        );
+        assert_ne!(
+            diff_emphasis_tint(&dark_palette, true),
+            diff_row_tint(&dark_palette, true),
+            "emphasis tint must stay distinguishable from the row tint"
+        );
+    }
+
+    #[test]
+    fn diff_tints_degrade_to_none_without_surface() {
+        let palette = terminal_default_palette();
+
+        assert_eq!(diff_row_tint(&palette, true), None);
+        assert_eq!(diff_row_tint(&palette, false), None);
+        assert_eq!(diff_emphasis_tint(&palette, true), None);
+        assert_eq!(diff_emphasis_tint(&palette, false), None);
     }
 
     #[test]

@@ -1,5 +1,8 @@
 use std::{
+    cell::OnceCell,
     collections::BTreeMap,
+    mem,
+    rc::Rc,
     time::{Duration, Instant},
 };
 
@@ -9,18 +12,24 @@ use ratatui::{
 };
 
 use super::activity::{
-    RuntimeDiffDetailLine, RuntimeExecuteFooterLine, RuntimeExecuteFooterStatus,
-    RuntimeExecuteTranscriptBlock, RuntimeToolActivityDetailBlock, ToolActivityGroupFamily,
-    active_marker_visible_at, execute_tool_call_shell_command, is_execute_like_tool_call,
-    is_list_dir_tool_call, is_runtime_read_tool_activity, list_dir_tool_call_title_chunks,
-    runtime_diff_line_prefix, runtime_read_tool_activity_title_chunks,
-    runtime_tool_activity_detail_blocks, runtime_tool_activity_diff_header_chunks,
-    runtime_tool_activity_diff_line_style, runtime_tool_activity_diff_row_style,
-    runtime_tool_activity_display_title, runtime_tool_activity_has_diff_content,
+    RuntimeExecuteFooterLine, RuntimeExecuteFooterStatus, RuntimeExecuteTranscriptBlock,
+    RuntimeToolActivityDetailBlock, ToolActivityGroupFamily, active_marker_visible_at,
+    execute_tool_call_shell_command, is_execute_like_tool_call, is_list_dir_tool_call,
+    is_runtime_read_tool_activity, list_dir_tool_call_title_chunks,
+    runtime_read_tool_activity_title_chunks, runtime_tool_activity_detail_blocks,
+    runtime_tool_activity_diff_header_chunks, runtime_tool_activity_display_title,
     runtime_tool_activity_location_suffix, runtime_tool_activity_status_color,
     runtime_write_tool_activity_title_chunks, style_for_color,
 };
 use super::approval::{ParsedToolResultLine, looks_like_shell_command, style_core_result_line};
+#[cfg(test)]
+use super::diff::DiffBudget;
+use super::diff::{
+    DiffPresentations, RuntimeDiffDetailLine, has_same_diff_presentation_inputs,
+    runtime_diff_line_prefix, runtime_tool_activity_diff_emphasis_style,
+    runtime_tool_activity_diff_line_style, runtime_tool_activity_diff_row_style,
+    runtime_tool_activity_has_diff_content,
+};
 use super::exploration::{
     coalesce_adjacent_target_display_lines, exploration_display_lines, exploration_group_family,
     failed_tool_call_detail_text, is_groupable_exploration_tool_call,
@@ -57,9 +66,7 @@ pub(super) const TOOL_EXPLORATION_BRANCH_PREFIX: &str = "  └ ";
 pub(super) const TOOL_EXPLORATION_CHILD_PREFIX: &str = "    ";
 const TOOL_ACTIVITY_DETAIL_PREFIX: &str = "  └ ";
 const TOOL_ACTIVITY_DETAIL_CONTINUATION_PREFIX: &str = "    ";
-pub(crate) const TOOL_ACTIVITY_LINE_NUMBER_WIDTH: usize = 7;
 pub(crate) const TOOL_ACTIVITY_ACTIVE_MARKER_BLINK_INTERVAL: Duration = Duration::from_millis(600);
-pub(super) const TOOL_ACTIVITY_DIFF_LINE_NUMBER_WIDTH: usize = TOOL_ACTIVITY_LINE_NUMBER_WIDTH;
 pub(super) const TOOL_ACTIVITY_COMPACT_EDGE_LINES: usize = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -102,10 +109,69 @@ fn runtime_finished_execute_title(title: &str) -> String {
         .to_string()
 }
 
+/// `DiffPresentationCache` 只缓存由 Diff content 派生的稳定语义结果。
+/// cache 状态不属于 item 的值语义；clone 通过 `Rc` 保留同一 content revision 的计算产物。
+#[derive(Debug, Clone, Default)]
+struct DiffPresentationCache {
+    state: OnceCell<DiffPresentationCacheState>,
+}
+
+/// 无 Diff 活动只记录枚举状态；确有 Diff 时才分配并共享 presentation。
+#[derive(Debug, Clone)]
+enum DiffPresentationCacheState {
+    NoDiff,
+    Ready(Rc<DiffPresentations>),
+}
+
+impl DiffPresentationCacheState {
+    fn presentations(&self) -> Option<&DiffPresentations> {
+        match self {
+            Self::NoDiff => None,
+            Self::Ready(presentations) => Some(presentations),
+        }
+    }
+}
+
+impl DiffPresentationCache {
+    fn get_or_build(&self, call: &RuntimeToolActivity) -> Option<&DiffPresentations> {
+        self.get_or_build_with(call, || DiffPresentations::build_for_content_revision(call))
+    }
+
+    #[cfg(test)]
+    fn get_or_build_with_budget(
+        &self,
+        call: &RuntimeToolActivity,
+        budget: DiffBudget,
+    ) -> Option<&DiffPresentations> {
+        self.get_or_build_with(call, || DiffPresentations::build(call, budget))
+    }
+
+    fn get_or_build_with(
+        &self,
+        call: &RuntimeToolActivity,
+        build: impl FnOnce() -> DiffPresentations,
+    ) -> Option<&DiffPresentations> {
+        self.state
+            .get_or_init(|| {
+                if runtime_tool_activity_has_diff_content(call) {
+                    DiffPresentationCacheState::Ready(Rc::new(build()))
+                } else {
+                    DiffPresentationCacheState::NoDiff
+                }
+            })
+            .presentations()
+    }
+
+    fn clear(&mut self) {
+        self.state.take();
+    }
+}
+
 /// `ToolResultItem` 表示只用于 TUI 展示的工具活动，不参与模型上下文。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct ToolResultItem {
     body: ToolResultBody,
+    diff_presentation_cache: DiffPresentationCache,
     render_mode: ToolActivityRenderMode,
     render_cache_key: u64,
     active_marker_started_at: Option<Instant>,
@@ -114,6 +180,21 @@ pub(crate) struct ToolResultItem {
     permission_waiting: bool,
     terminal_snapshots: BTreeMap<String, RuntimeTerminalSnapshot>,
 }
+
+impl PartialEq for ToolResultItem {
+    fn eq(&self, other: &Self) -> bool {
+        self.body == other.body
+            && self.render_mode == other.render_mode
+            && self.render_cache_key == other.render_cache_key
+            && self.active_marker_started_at == other.active_marker_started_at
+            && self.exploration_open == other.exploration_open
+            && self.approval_suspended == other.approval_suspended
+            && self.permission_waiting == other.permission_waiting
+            && self.terminal_snapshots == other.terminal_snapshots
+    }
+}
+
+impl Eq for ToolResultItem {}
 
 impl ToolResultItem {
     /// `new` 创建一条工具审批结果展示项。
@@ -164,6 +245,7 @@ impl ToolResultItem {
             active_marker_started_at_for_body(&body, &terminal_snapshots).then_some(Instant::now());
         Self {
             body,
+            diff_presentation_cache: DiffPresentationCache::default(),
             render_mode,
             render_cache_key,
             active_marker_started_at,
@@ -183,13 +265,31 @@ impl ToolResultItem {
         self.wrapped_styled_lines_with_active_marker_visible(width, palette)
     }
 
+    /// `marker_now` 驱动活动 marker 的动画/静态显示（reduced-motion 下可为冻结时间）。
     pub(crate) fn render_lines_at(
         &self,
         width: u16,
         palette: TerminalPalette,
-        now: Instant,
+        marker_now: Instant,
     ) -> Vec<Line<'static>> {
-        self.wrapped_styled_lines_at(width, palette, now)
+        self.wrapped_styled_lines_at(width, palette, marker_now)
+    }
+
+    #[cfg(test)]
+    pub(super) fn prebuild_diff_presentation_with_budget(&self, budget: DiffBudget) {
+        let ToolResultBody::RuntimeToolActivity(call) = &self.body else {
+            return;
+        };
+        self.diff_presentation_cache
+            .get_or_build_with_budget(call, budget);
+    }
+
+    #[cfg(test)]
+    pub(super) fn has_cached_no_diff_state(&self) -> bool {
+        matches!(
+            self.diff_presentation_cache.state.get(),
+            Some(DiffPresentationCacheState::NoDiff)
+        )
     }
 
     pub(crate) fn has_active_runtime_tool_activity(&self) -> bool {
@@ -245,15 +345,15 @@ impl ToolResultItem {
         width: u16,
         palette: TerminalPalette,
     ) -> Vec<Line<'static>> {
-        let now = self.active_marker_started_at.unwrap_or_else(Instant::now);
-        self.wrapped_styled_lines_at(width, palette, now)
+        let marker_now = self.active_marker_started_at.unwrap_or_else(Instant::now);
+        self.wrapped_styled_lines_at(width, palette, marker_now)
     }
 
     fn wrapped_styled_lines_at(
         &self,
         width: u16,
         palette: TerminalPalette,
-        now: Instant,
+        marker_now: Instant,
     ) -> Vec<Line<'static>> {
         if self.is_compact_approval_suspended() {
             return Vec::new();
@@ -264,10 +364,10 @@ impl ToolResultItem {
                 self.approval_wrapped_styled_lines(content, width, palette)
             }
             ToolResultBody::RuntimeToolActivity(call) => {
-                self.runtime_tool_activity_styled_lines_at(call, width, palette, now)
+                self.runtime_tool_activity_styled_lines_at(call, width, palette, marker_now)
             }
             ToolResultBody::Exploration(calls) => {
-                self.exploration_styled_lines_at(calls, width, palette, now)
+                self.exploration_styled_lines_at(calls, width, palette, marker_now)
             }
         }
     }
@@ -422,49 +522,144 @@ impl ToolResultItem {
         self.set_runtime_terminal_snapshot(snapshot)
     }
 
-    pub(crate) fn update_runtime_tool_activity(
-        &mut self,
+    /// 应用 activity 增量，并返回满足展示状态不变量的替换项。
+    ///
+    /// exploration 不拥有 Diff presentation cache；更新引入 Diff 时按原顺序拆分，
+    /// 由调用方原位替换 transcript 项，避免丢失同组的其他 activity。
+    pub(crate) fn into_updated_runtime_tool_activity_items(
+        mut self,
         update: impl Into<RuntimeToolActivityUpdate>,
-    ) -> bool {
+    ) -> Option<Vec<Self>> {
         let update = update.into();
+        let updated_activity_id = update.activity_id.clone();
         let update_status = update.status;
-        match &mut self.body {
-            ToolResultBody::RuntimeToolActivity(call) => {
-                if call.activity_id != update.activity_id {
-                    return false;
+        let diff_presentation_inputs_changed =
+            match &mut self.body {
+                ToolResultBody::RuntimeToolActivity(call) => {
+                    if call.activity_id != update.activity_id {
+                        return None;
+                    }
+                    let inputs_changed = update.content.as_deref().is_some_and(|next| {
+                        !has_same_diff_presentation_inputs(&call.content, next)
+                    });
+                    apply_runtime_tool_activity_update(
+                        call,
+                        update,
+                        &mut self.permission_waiting,
+                        &mut self.terminal_snapshots,
+                    );
+                    inputs_changed
                 }
-                apply_runtime_tool_activity_update(
-                    call,
-                    update,
-                    &mut self.permission_waiting,
-                    &mut self.terminal_snapshots,
-                );
-            }
-            ToolResultBody::Exploration(calls) => {
-                let Some(call) = calls
-                    .iter_mut()
-                    .find(|call| call.activity_id == update.activity_id)
-                else {
-                    return false;
-                };
-                let mut permission_waiting = false;
-                let mut terminal_snapshots = BTreeMap::new();
-                apply_runtime_tool_activity_update(
-                    call,
-                    update,
-                    &mut permission_waiting,
-                    &mut terminal_snapshots,
-                );
-            }
-            ToolResultBody::Approval { .. } => return false,
+                ToolResultBody::Exploration(calls) => {
+                    let call = calls
+                        .iter_mut()
+                        .find(|call| call.activity_id == update.activity_id)?;
+                    let inputs_changed = update.content.as_deref().is_some_and(|next| {
+                        !has_same_diff_presentation_inputs(&call.content, next)
+                    });
+                    let mut permission_waiting = false;
+                    let mut terminal_snapshots = BTreeMap::new();
+                    apply_runtime_tool_activity_update(
+                        call,
+                        update,
+                        &mut permission_waiting,
+                        &mut terminal_snapshots,
+                    );
+                    inputs_changed
+                }
+                ToolResultBody::Approval { .. } => return None,
+            };
+        if diff_presentation_inputs_changed {
+            self.diff_presentation_cache.clear();
         }
         if update_status.is_some_and(|status| status != RuntimeToolActivityStatus::Pending) {
             self.approval_suspended = false;
             self.permission_waiting = false;
         }
+
+        if matches!(
+            &self.body,
+            ToolResultBody::Exploration(calls)
+                if calls.iter().any(runtime_tool_activity_has_diff_content)
+        ) {
+            return Some(self.into_diff_safe_items(&updated_activity_id));
+        }
+
         self.refresh_active_marker_started_at();
         self.refresh_render_cache_key();
-        true
+        Some(vec![self])
+    }
+
+    /// 将含 Diff 的失效 exploration 拆成连续 exploration 与普通 runtime item。
+    fn into_diff_safe_items(self, updated_activity_id: &str) -> Vec<Self> {
+        debug_assert!(matches!(&self.body, ToolResultBody::Exploration(_)));
+        let Self {
+            body: ToolResultBody::Exploration(calls),
+            diff_presentation_cache: _,
+            render_mode,
+            render_cache_key: _,
+            active_marker_started_at,
+            exploration_open,
+            approval_suspended,
+            permission_waiting,
+            terminal_snapshots,
+        } = self
+        else {
+            unreachable!("只有 exploration 需要按 Diff 边界规范化");
+        };
+
+        let mut bodies = Vec::new();
+        let mut exploration_calls = Vec::new();
+        for call in calls {
+            if runtime_tool_activity_has_diff_content(&call) {
+                if !exploration_calls.is_empty() {
+                    bodies.push(ToolResultBody::Exploration(mem::take(
+                        &mut exploration_calls,
+                    )));
+                }
+                bodies.push(ToolResultBody::RuntimeToolActivity(call));
+            } else {
+                exploration_calls.push(call);
+            }
+        }
+        if !exploration_calls.is_empty() {
+            bodies.push(ToolResultBody::Exploration(exploration_calls));
+        }
+
+        debug_assert!(!bodies.is_empty());
+        let last_body_index = bodies.len().saturating_sub(1);
+        let mut terminal_snapshots = Some(terminal_snapshots);
+        bodies
+            .into_iter()
+            .enumerate()
+            .map(|(body_index, body)| {
+                let is_updated_runtime = matches!(
+                    &body,
+                    ToolResultBody::RuntimeToolActivity(call)
+                        if call.activity_id == updated_activity_id
+                );
+                let keeps_exploration_open = body_index == last_body_index
+                    && exploration_open
+                    && matches!(&body, ToolResultBody::Exploration(_));
+                let mut item = Self::from_body(body, render_mode);
+                item.exploration_open = keeps_exploration_open;
+
+                if is_updated_runtime {
+                    item.approval_suspended = approval_suspended;
+                    item.permission_waiting = permission_waiting;
+                    item.terminal_snapshots = terminal_snapshots.take().unwrap_or_default();
+                }
+
+                item.refresh_active_marker_started_at();
+                if item.active_marker_started_at.is_some() {
+                    // 拆分只改变展示归属，不应重启动画的时间原点。
+                    item.active_marker_started_at =
+                        active_marker_started_at.or(item.active_marker_started_at);
+                }
+                item.refresh_render_cache_key();
+                item
+            })
+            .collect()
     }
 
     /// `set_approval_suspended` 临时隐藏正在等待审批的 compact 工具活动。
@@ -507,10 +702,10 @@ impl ToolResultItem {
         calls: &[RuntimeToolActivity],
         width: u16,
         palette: TerminalPalette,
-        now: Instant,
+        marker_now: Instant,
     ) -> Vec<Line<'static>> {
         if let Some(call) = standalone_exploration_tool_call(calls) {
-            return self.single_exploration_tool_call_lines_at(call, width, palette, now);
+            return self.single_exploration_tool_call_lines_at(call, width, palette, marker_now);
         }
 
         let width = usize::from(width.max(1));
@@ -532,7 +727,7 @@ impl ToolResultItem {
                 })
             });
             let marker_visible = active_started_at
-                .map(|started_at| active_marker_visible_at(started_at, now))
+                .map(|started_at| active_marker_visible_at(started_at, marker_now))
                 .unwrap_or(true);
             let marker_color = if active_started_at.is_some() || self.exploration_open {
                 palette.main
@@ -574,7 +769,7 @@ impl ToolResultItem {
         {
             append_message_block(
                 &mut lines,
-                self.failed_exploration_tool_call_lines_at(call, width, palette, now),
+                self.failed_exploration_tool_call_lines_at(call, width, palette, marker_now),
             );
         }
 
@@ -586,10 +781,19 @@ impl ToolResultItem {
         call: &RuntimeToolActivity,
         width: u16,
         palette: TerminalPalette,
-        now: Instant,
+        marker_now: Instant,
     ) -> Vec<Line<'static>> {
         let width = usize::from(width.max(1));
-        self.runtime_tool_activity_header_lines_at(call, width, palette, now, self.exploration_open)
+        // exploration 分组只承载不含 Diff content 的 call，使用空表避免占用主 item 的 cache。
+        let diff_presentations = DiffPresentations::default();
+        self.runtime_tool_activity_header_lines_at(
+            call,
+            &diff_presentations,
+            width,
+            palette,
+            marker_now,
+            self.exploration_open,
+        )
     }
 
     fn failed_exploration_tool_call_lines_at(
@@ -597,10 +801,17 @@ impl ToolResultItem {
         call: &RuntimeToolActivity,
         width: usize,
         palette: TerminalPalette,
-        now: Instant,
+        marker_now: Instant,
     ) -> Vec<Line<'static>> {
-        let mut lines =
-            self.runtime_tool_activity_header_lines_at(call, width, palette, now, false);
+        let diff_presentations = DiffPresentations::default();
+        let mut lines = self.runtime_tool_activity_header_lines_at(
+            call,
+            &diff_presentations,
+            width,
+            palette,
+            marker_now,
+            false,
+        );
         lines.extend(wrap_failed_exploration_detail_line(
             &failed_tool_call_detail_text(call),
             width,
@@ -733,16 +944,30 @@ impl ToolResultItem {
         call: &RuntimeToolActivity,
         width: u16,
         palette: TerminalPalette,
-        now: Instant,
+        marker_now: Instant,
     ) -> Vec<Line<'static>> {
         let width = usize::from(width.max(1));
+        // presentation 按 content revision 懒构建一次；瞬态 marker 重绘只复用稳定结果。
+        let empty_diff_presentations = DiffPresentations::default();
+        let diff_presentations = self
+            .diff_presentation_cache
+            .get_or_build(call)
+            .unwrap_or(&empty_diff_presentations);
         let mut lines = if self.should_use_detailed_execute_transcript(call) {
             Vec::new()
         } else {
-            self.runtime_tool_activity_header_lines_at(call, width, palette, now, false)
+            self.runtime_tool_activity_header_lines_at(
+                call,
+                diff_presentations,
+                width,
+                palette,
+                marker_now,
+                false,
+            )
         };
         for block in runtime_tool_activity_detail_blocks(
             call,
+            diff_presentations,
             self.render_mode,
             self.permission_waiting,
             &self.terminal_snapshots,
@@ -774,6 +999,7 @@ impl ToolResultItem {
     fn runtime_tool_activity_header_lines_at(
         &self,
         call: &RuntimeToolActivity,
+        diff_presentations: &DiffPresentations,
         width: usize,
         palette: TerminalPalette,
         now: Instant,
@@ -804,7 +1030,7 @@ impl ToolResultItem {
             text: marker_text.to_string(),
             style: status_style,
         }];
-        chunks.extend(self.runtime_tool_activity_title_chunks(call, palette));
+        chunks.extend(self.runtime_tool_activity_title_chunks(call, diff_presentations, palette));
 
         if !is_runtime_read_tool_activity(call)
             && !is_list_dir_tool_call(call)
@@ -827,9 +1053,12 @@ impl ToolResultItem {
     fn runtime_tool_activity_title_chunks(
         &self,
         call: &RuntimeToolActivity,
+        diff_presentations: &DiffPresentations,
         palette: TerminalPalette,
     ) -> Vec<HighlightChunk> {
-        if let Some(chunks) = runtime_tool_activity_diff_header_chunks(call, palette) {
+        if let Some(chunks) =
+            runtime_tool_activity_diff_header_chunks(call, diff_presentations, palette)
+        {
             return chunks;
         }
 
@@ -1120,23 +1349,23 @@ impl ToolResultItem {
                 let prefix_width = display_width(prefix.as_str());
                 let content_width = width.saturating_sub(prefix_width).max(1);
                 let line_style = runtime_tool_activity_diff_line_style(content.kind, palette);
-                let wrapped = wrap_highlight_chunks(
-                    &[vec![HighlightChunk {
-                        text: content.text.clone(),
-                        style: line_style,
-                    }]],
-                    content_width,
-                );
-
-                if wrapped.is_empty() {
-                    let mut line = Line::from(vec![Span::styled(prefix, line_style)]);
-                    line.style = line
-                        .style
-                        .patch(runtime_tool_activity_diff_row_style(content.kind, palette));
-                    return vec![line];
-                }
-
-                wrapped
+                let emphasis_style =
+                    runtime_tool_activity_diff_emphasis_style(content.kind, palette);
+                let chunks = content
+                    .segments
+                    .iter()
+                    .map(|segment| HighlightChunk {
+                        text: segment.text.clone(),
+                        style: if segment.is_emphasized {
+                            line_style.patch(emphasis_style)
+                        } else {
+                            line_style
+                        },
+                    })
+                    .collect::<Vec<_>>();
+                // `wrap_highlight_chunks` 对每个逻辑行至少产出一行（空正文即空 span 列表），
+                // 因此这里不需要空结果分支：空行会自然渲染成只有 gutter 的一行。
+                wrap_highlight_chunks(&[chunks], content_width)
                     .into_iter()
                     .enumerate()
                     .map(|(wrapped_index, content_spans)| {

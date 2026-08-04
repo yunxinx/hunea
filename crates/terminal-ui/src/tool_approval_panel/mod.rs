@@ -24,7 +24,9 @@ use file_preview::{
 };
 #[cfg(test)]
 use file_preview::{file_preview_item_build_count, reset_file_preview_item_build_count};
-use runtime_domain::session::RuntimeTarget;
+use runtime_domain::session::{
+    RuntimePermissionOption, RuntimePermissionOptionKind, RuntimeTarget,
+};
 
 /// `ToolApprovalPanelState` 保存通用工具审批面板的展示与导航状态。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -34,6 +36,7 @@ pub(super) struct ToolApprovalPanelState {
     pub(super) source: Option<ToolApprovalSource>,
     pub(super) title: String,
     pub(super) details: Vec<ToolApprovalDetail>,
+    pub(super) runtime_options: Vec<RuntimePermissionOption>,
     file_preview: Option<FilePreviewState>,
 }
 
@@ -69,7 +72,16 @@ enum ToolApprovalChoice {
 }
 
 impl ToolApprovalChoice {
-    fn display_label(self) -> &'static str {
+    fn option_kind(self) -> RuntimePermissionOptionKind {
+        match self {
+            Self::Allow => RuntimePermissionOptionKind::AllowOnce,
+            Self::AllowInSession => RuntimePermissionOptionKind::AllowAlways,
+            Self::Deny => RuntimePermissionOptionKind::RejectOnce,
+            Self::DenyInSession => RuntimePermissionOptionKind::RejectAlways,
+        }
+    }
+
+    fn fallback_display_label(self) -> &'static str {
         match self {
             Self::Allow => "Yes",
             Self::AllowInSession => "Yes, allow similar requests during this session",
@@ -136,6 +148,7 @@ impl Model {
             source: Some(source),
             title,
             details,
+            runtime_options: Vec::new(),
             file_preview: preview.map(FilePreviewState::new),
         };
         self.sync_tool_approval_preview_mode();
@@ -159,6 +172,19 @@ impl Model {
             // 由可见性收敛点（层关闭 / 贴底恢复）或审批处理清除。
             self.mark_tool_approval_attention_pending();
         }
+    }
+
+    pub(crate) fn set_runtime_permission_options(&mut self, options: Vec<RuntimePermissionOption>) {
+        if !matches!(
+            self.tool_approval_panel.source,
+            Some(ToolApprovalSource::RuntimePermission { .. })
+        ) {
+            return;
+        }
+        self.tool_approval_panel.runtime_options = options;
+        self.sync_tool_approval_preview_mode();
+        self.sync_composer_height();
+        self.tool_approval_panel_revision = self.tool_approval_panel_revision.saturating_add(1);
     }
 
     pub(crate) fn close_tool_approval_panel(&mut self) {
@@ -379,38 +405,52 @@ fn append_detail_lines(model: &Model, width: usize, lines: &mut Vec<Line<'static
     }
 }
 
-fn append_choice_lines(model: &Model, _width: usize, lines: &mut Vec<Line<'static>>) {
+fn append_choice_lines(model: &Model, width: usize, lines: &mut Vec<Line<'static>>) {
     for (index, choice) in tool_approval_choices(&model.tool_approval_panel)
         .into_iter()
         .enumerate()
     {
         let selected = index == model.tool_approval_panel.selected;
-        lines.push(approval_choice_line(
-            model,
-            index,
-            selected,
-            choice.display_label(),
-        ));
+        let label = choice.display_label(&model.tool_approval_panel);
+        append_approval_choice_lines(model, index, selected, &label, width, lines);
     }
 }
 
-pub(super) fn approval_choice_line(
+impl ToolApprovalChoice {
+    fn display_label(self, state: &ToolApprovalPanelState) -> String {
+        state
+            .runtime_options
+            .iter()
+            .find(|option| option.kind == self.option_kind())
+            .map(|option| option.name.trim())
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| self.fallback_display_label().to_string())
+    }
+}
+
+pub(super) fn append_approval_choice_lines(
     model: &Model,
     index: usize,
     selected: bool,
     label: &str,
-) -> Line<'static> {
+    width: usize,
+    lines: &mut Vec<Line<'static>>,
+) {
     let marker = if selected { "➜ " } else { "  " };
     let style = if selected {
         primary_text_style(model.palette).bold()
     } else {
         secondary_text_style(model.palette)
     };
-    Line::from(vec![
-        Span::raw("  "),
-        Span::styled(marker, secondary_text_style(model.palette)),
-        Span::styled(format!("{}. {label}", index + 1), style),
-    ])
+    append_wrapped_inline_value(
+        lines,
+        width,
+        marker,
+        &format!("{}. {label}", index + 1),
+        style,
+        secondary_text_style(model.palette),
+    );
 }
 
 fn tool_approval_choices(state: &ToolApprovalPanelState) -> Vec<ToolApprovalChoice> {
@@ -445,6 +485,10 @@ fn tool_approval_choices(state: &ToolApprovalPanelState) -> Vec<ToolApprovalChoi
         ],
         None => Vec::new(),
     }
+}
+
+fn tool_approval_choice_picker_visible(state: &ToolApprovalPanelState) -> bool {
+    !state.runtime_options.is_empty() && !tool_approval_choices(state).is_empty()
 }
 
 #[cfg(test)]

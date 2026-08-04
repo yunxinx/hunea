@@ -826,6 +826,7 @@ fn show_runtime_permission_request(
     }
     let title = runtime_permission_title(&request);
     let details = runtime_permission_details(&request);
+    let options = request.options.clone();
     model.clear_status_notice();
     model.open_tool_approval_panel_with_preview(
         ToolApprovalSource::RuntimePermission {
@@ -852,6 +853,7 @@ fn show_runtime_permission_request(
         details,
         preview,
     );
+    model.set_runtime_permission_options(options);
 }
 
 fn runtime_permission_title(request: &RuntimePermissionRequest) -> String {

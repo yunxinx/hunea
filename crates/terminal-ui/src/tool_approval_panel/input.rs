@@ -7,7 +7,7 @@ use crate::{
 use super::{
     ToolApprovalChoice, ToolApprovalPanelState, ToolApprovalSource,
     file_preview::file_preview_fullscreen_content_height, file_preview_fullscreen_max_offset,
-    tool_approval_choices,
+    tool_approval_choice_picker_visible, tool_approval_choices,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,50 +35,39 @@ impl Model {
             return result;
         }
 
-        match key.code {
-            KeyCode::Up | KeyCode::Down if key.modifiers.is_empty() => {
-                move_tool_approval_selection(
-                    &mut self.tool_approval_panel,
-                    if key.code == KeyCode::Up {
-                        ToolApprovalSelectionMove::Up
-                    } else {
-                        ToolApprovalSelectionMove::Down
-                    },
-                );
-                self.tool_approval_panel_revision =
-                    self.tool_approval_panel_revision.saturating_add(1);
-                OverlayInputResult::Handled
-            }
-            KeyCode::Left | KeyCode::Right if key.modifiers.is_empty() => {
-                move_tool_approval_selection(
-                    &mut self.tool_approval_panel,
-                    if key.code == KeyCode::Left {
-                        ToolApprovalSelectionMove::Left
-                    } else {
-                        ToolApprovalSelectionMove::Right
-                    },
-                );
-                self.tool_approval_panel_revision =
-                    self.tool_approval_panel_revision.saturating_add(1);
-                OverlayInputResult::Handled
-            }
-            _ => OverlayInputResult::Handled, // 模态覆盖层吞掉未绑定输入，防止落入 composer
-        }
+        self.move_tool_approval_selection_for_key(&key);
+        OverlayInputResult::Handled // 模态覆盖层吞掉未绑定输入，防止落入 composer
     }
 
     fn handle_tool_approval_fullscreen_preview_key(&mut self, key: KeyEvent) -> OverlayInputResult {
-        if let Some(result) =
-            self.apply_tool_approval_choice_key(key, ToolApprovalEnterChoice::PreferredAllow)
-        {
+        let has_choice_picker = tool_approval_choice_picker_visible(&self.tool_approval_panel);
+        let enter_choice = if has_choice_picker {
+            ToolApprovalEnterChoice::Selected
+        } else {
+            ToolApprovalEnterChoice::PreferredAllow
+        };
+        if let Some(result) = self.apply_tool_approval_choice_key(key, enter_choice) {
             return result;
         }
 
+        if has_choice_picker && self.move_tool_approval_selection_for_key(&key) {
+            return OverlayInputResult::Handled;
+        }
+
         match key.code {
-            KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
+            KeyCode::Up if key.modifiers.is_empty() => {
                 self.scroll_tool_approval_fullscreen_preview_by(-1);
                 OverlayInputResult::Handled
             }
-            KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
+            KeyCode::Down if key.modifiers.is_empty() => {
+                self.scroll_tool_approval_fullscreen_preview_by(1);
+                OverlayInputResult::Handled
+            }
+            KeyCode::Char('k') if key.modifiers.is_empty() => {
+                self.scroll_tool_approval_fullscreen_preview_by(-1);
+                OverlayInputResult::Handled
+            }
+            KeyCode::Char('j') if key.modifiers.is_empty() => {
                 self.scroll_tool_approval_fullscreen_preview_by(1);
                 OverlayInputResult::Handled
             }
@@ -127,8 +116,36 @@ impl Model {
         &mut self,
         key: KeyEvent,
     ) -> OverlayInputResult {
-        self.apply_tool_approval_choice_key(key, ToolApprovalEnterChoice::PreferredAllow)
-            .unwrap_or(OverlayInputResult::Handled)
+        let has_choice_picker = tool_approval_choice_picker_visible(&self.tool_approval_panel);
+        let enter_choice = if has_choice_picker {
+            ToolApprovalEnterChoice::Selected
+        } else {
+            ToolApprovalEnterChoice::PreferredAllow
+        };
+        if let Some(result) = self.apply_tool_approval_choice_key(key, enter_choice) {
+            return result;
+        }
+
+        if has_choice_picker {
+            self.move_tool_approval_selection_for_key(&key);
+        }
+        OverlayInputResult::Handled
+    }
+
+    fn move_tool_approval_selection_for_key(&mut self, key: &KeyEvent) -> bool {
+        if !key.modifiers.is_empty() {
+            return false;
+        }
+        let direction = match key.code {
+            KeyCode::Up => ToolApprovalSelectionMove::Up,
+            KeyCode::Down => ToolApprovalSelectionMove::Down,
+            KeyCode::Left => ToolApprovalSelectionMove::Left,
+            KeyCode::Right => ToolApprovalSelectionMove::Right,
+            _ => return false,
+        };
+        move_tool_approval_selection(&mut self.tool_approval_panel, direction);
+        self.tool_approval_panel_revision = self.tool_approval_panel_revision.saturating_add(1);
+        true
     }
 
     fn apply_tool_approval_choice_key(
@@ -148,6 +165,18 @@ impl Model {
             }
             KeyCode::Char('n') | KeyCode::Char('N') => {
                 let choice = preferred_tool_approval_deny_choice(&self.tool_approval_panel);
+                Some(self.apply_tool_approval_choice(choice))
+            }
+            KeyCode::Char(digit @ '1'..='9') if key.modifiers.is_empty() => {
+                let index = digit
+                    .to_digit(10)
+                    .and_then(|value| usize::try_from(value).ok())
+                    .and_then(|value| value.checked_sub(1));
+                let choice = index.and_then(|index| {
+                    tool_approval_choices(&self.tool_approval_panel)
+                        .get(index)
+                        .copied()
+                });
                 Some(self.apply_tool_approval_choice(choice))
             }
             KeyCode::Esc if key.modifiers.is_empty() => Some(OverlayInputResult::from_effect(

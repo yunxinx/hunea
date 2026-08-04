@@ -29,7 +29,7 @@ fn conversation_worker_persists_config_change_and_flushes_finished_turn() {
         receiver: Some(receiver),
         cancellation: Some(CancellationToken::new()),
         target: Some(RuntimeTarget::provider("local", "qwen3")),
-        permission_broker: None,
+        permission_broker: ConversationPermissionBroker::default(),
         pending_session_id: None,
         pending_user_entry_id: None,
         session_items: Vec::new(),

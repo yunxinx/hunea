@@ -5,7 +5,7 @@ use crate::{
     theme::{default_palette, terminal_default_palette},
 };
 use crossterm::event::{KeyCode, KeyEvent};
-use ratatui::{buffer::Buffer, layout::Rect};
+use ratatui::{buffer::Buffer, layout::Rect, style::Modifier};
 
 fn handled_effect(result: OverlayInputResult, context: &str) -> Option<AppEffect> {
     assert!(!result.is_ignored(), "{context}");
@@ -230,6 +230,655 @@ fn runtime_session_allow_option_only_renders_when_available() {
             "3. No",
             "4. No, reject similar requests during this session",
         ],
+    );
+}
+
+#[test]
+fn runtime_permission_panel_keeps_dynamic_option_names() {
+    use crate::runtime::RuntimeEventApply;
+    use runtime_domain::session::{
+        RuntimeEvent, RuntimePermissionOption, RuntimePermissionOptionKind,
+        RuntimePermissionRequest, RuntimeTarget,
+    };
+
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.apply_runtime_event(RuntimeEvent::PermissionRequested {
+        target: RuntimeTarget::provider("local", "qwen3"),
+        request: RuntimePermissionRequest::new(
+            "permission-dynamic-options",
+            Some("Write TEMP.md".to_string()),
+            vec![
+                RuntimePermissionOption::new(
+                    "reject-always-id",
+                    "Keep rejecting matching writes",
+                    RuntimePermissionOptionKind::RejectAlways,
+                ),
+                RuntimePermissionOption::new(
+                    "allow-always-id",
+                    "Remember this workspace write approval",
+                    RuntimePermissionOptionKind::AllowAlways,
+                ),
+                RuntimePermissionOption::new(
+                    "reject-once-id",
+                    "Reject this write",
+                    RuntimePermissionOptionKind::RejectOnce,
+                ),
+                RuntimePermissionOption::new(
+                    "allow-once-id",
+                    "Allow this write",
+                    RuntimePermissionOptionKind::AllowOnce,
+                ),
+            ],
+        ),
+    });
+
+    let text = build_panel_lines(&mut model, 120)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.into_owned())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        text.contains("Allow this write"),
+        "dynamic allow label missing: {text:?}"
+    );
+    assert!(
+        text.contains("Remember this workspace write approval"),
+        "dynamic session allow label missing: {text:?}"
+    );
+    assert!(
+        text.contains("Reject this write"),
+        "dynamic reject label missing: {text:?}"
+    );
+    assert!(
+        text.contains("Keep rejecting matching writes"),
+        "dynamic session reject label missing: {text:?}"
+    );
+}
+
+#[test]
+fn runtime_permission_panel_numeric_key_uses_option_kind_mapping() {
+    use crate::runtime::RuntimeEventApply;
+    use runtime_domain::session::{
+        RuntimeEvent, RuntimePermissionOption, RuntimePermissionOptionKind,
+        RuntimePermissionRequest, RuntimeTarget,
+    };
+
+    let target = RuntimeTarget::provider("local", "qwen3");
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.apply_runtime_event(RuntimeEvent::PermissionRequested {
+        target: target.clone(),
+        request: RuntimePermissionRequest::new(
+            "permission-numeric",
+            Some("Write TEMP.md".to_string()),
+            vec![
+                RuntimePermissionOption::new(
+                    "reject-once-id",
+                    "Reject once",
+                    RuntimePermissionOptionKind::RejectOnce,
+                ),
+                RuntimePermissionOption::new(
+                    "allow-always-id",
+                    "Allow in runtime",
+                    RuntimePermissionOptionKind::AllowAlways,
+                ),
+                RuntimePermissionOption::new(
+                    "allow-once-id",
+                    "Allow once",
+                    RuntimePermissionOptionKind::AllowOnce,
+                ),
+                RuntimePermissionOption::new(
+                    "reject-always-id",
+                    "Reject in runtime",
+                    RuntimePermissionOptionKind::RejectAlways,
+                ),
+            ],
+        ),
+    });
+
+    let effect = handled_effect(
+        model.handle_tool_approval_panel_key(KeyCode::Char('2').into()),
+        "numeric approval selection should be consumed by the modal panel",
+    );
+
+    assert_eq!(
+        effect,
+        Some(AppEffect::RespondRuntimePermission {
+            target,
+            request_id: "permission-numeric".to_string(),
+            option_id: Some("allow-always-id".to_string()),
+        })
+    );
+}
+
+#[test]
+fn file_preview_command_bar_keeps_dynamic_runtime_options_in_both_layouts() {
+    use runtime_domain::session::{RuntimePermissionOption, RuntimePermissionOptionKind};
+
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.set_palette(default_palette(), true);
+    model.set_window(200, 80);
+    model.open_tool_approval_panel_with_preview(
+        ToolApprovalSource::RuntimePermission {
+            target: runtime_domain::session::RuntimeTarget::provider("local", "qwen3"),
+            request_id: "permission-preview-options".to_string(),
+            allow_option_id: Some("allow-once-id".to_string()),
+            allow_always_option_id: Some("allow-always-id".to_string()),
+            reject_option_id: Some("reject-once-id".to_string()),
+            reject_always_option_id: Some("reject-always-id".to_string()),
+        },
+        "WriteFile: temp.md".to_string(),
+        Vec::new(),
+        Some(ToolApprovalPreview::create_file(
+            "temp.md".to_string(),
+            "body".to_string(),
+        )),
+    );
+    model.set_runtime_permission_options(vec![
+        RuntimePermissionOption::new(
+            "allow-once-id",
+            "Allow this file",
+            RuntimePermissionOptionKind::AllowOnce,
+        ),
+        RuntimePermissionOption::new(
+            "allow-always-id",
+            "Remember file approvals",
+            RuntimePermissionOptionKind::AllowAlways,
+        ),
+        RuntimePermissionOption::new(
+            "reject-once-id",
+            "Reject this file",
+            RuntimePermissionOptionKind::RejectOnce,
+        ),
+        RuntimePermissionOption::new(
+            "reject-always-id",
+            "Keep rejecting this file",
+            RuntimePermissionOptionKind::RejectAlways,
+        ),
+    ]);
+
+    let inline = build_panel_lines(&mut model, 200)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.into_owned())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    assert_strictly_ordered_plain_lines(
+        &inline,
+        &[
+            "1. Allow this file",
+            "2. Remember file approvals",
+            "3. Reject this file",
+            "4. Keep rejecting this file",
+        ],
+    );
+
+    model.set_window(200, 10);
+    let fullscreen = rendered_model_rows(&mut model, 200, 10);
+    assert_strictly_ordered_plain_lines(
+        &fullscreen,
+        &[
+            "1. Allow this file",
+            "2. Remember file approvals",
+            "3. Reject this file",
+            "4. Keep rejecting this file",
+        ],
+    );
+    assert!(model.tool_approval_fullscreen_preview_active());
+    let _ = model.handle_tool_approval_panel_key(KeyCode::Down.into());
+    assert_eq!(model.tool_approval_panel.selected, 1);
+    let moved_buffer = rendered_model_buffer(&mut model, 200, 10);
+    let moved_fullscreen = buffer_rows(&moved_buffer);
+    assert!(
+        moved_fullscreen
+            .iter()
+            .any(|line| line.contains("➜ 2. Remember file approvals")),
+        "fullscreen selection marker should follow Down: {moved_fullscreen:?}"
+    );
+
+    let selected_row = moved_fullscreen
+        .iter()
+        .position(|line| line.contains("2. Remember file approvals"))
+        .expect("selected fullscreen choice should render");
+    let unselected_row = moved_fullscreen
+        .iter()
+        .position(|line| line.contains("1. Allow this file"))
+        .expect("unselected fullscreen choice should render");
+    let hint_row = moved_fullscreen
+        .iter()
+        .position(|line| line.contains("Enter choose"))
+        .expect("fullscreen action hint should render");
+    assert!(
+        moved_fullscreen[hint_row.saturating_sub(1)]
+            .trim()
+            .is_empty(),
+        "fullscreen choices and action hint should keep a blank row: {moved_fullscreen:?}"
+    );
+
+    let selected_cell = (0..moved_buffer.area.width)
+        .map(|column| &moved_buffer[(column, selected_row as u16)])
+        .find(|cell| cell.symbol() == "2")
+        .expect("selected fullscreen choice should expose a styled value cell");
+    assert_eq!(selected_cell.fg, model.palette.main);
+    assert!(selected_cell.modifier.contains(Modifier::BOLD));
+
+    let unselected_cell = (0..moved_buffer.area.width)
+        .map(|column| &moved_buffer[(column, unselected_row as u16)])
+        .find(|cell| cell.symbol() == "1")
+        .expect("unselected fullscreen choice should expose a styled value cell");
+    assert_eq!(unselected_cell.fg, model.palette.secondary);
+    assert!(!unselected_cell.modifier.contains(Modifier::BOLD));
+
+    let effect = handled_effect(
+        model.handle_tool_approval_panel_key(KeyCode::Enter.into()),
+        "fullscreen Enter should apply the selected runtime option",
+    )
+    .expect("fullscreen runtime permission selection should emit an effect");
+    assert_eq!(
+        effect,
+        AppEffect::RespondRuntimePermission {
+            target: runtime_domain::session::RuntimeTarget::provider("local", "qwen3"),
+            request_id: "permission-preview-options".to_string(),
+            option_id: Some("allow-always-id".to_string()),
+        }
+    );
+}
+
+#[test]
+fn narrow_file_preview_wraps_each_dynamic_option_explicitly() {
+    use runtime_domain::session::{RuntimePermissionOption, RuntimePermissionOptionKind};
+
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.set_window(28, 80);
+    model.open_tool_approval_panel_with_preview(
+        ToolApprovalSource::RuntimePermission {
+            target: runtime_domain::session::RuntimeTarget::provider("local", "qwen3"),
+            request_id: "permission-preview-narrow-options".to_string(),
+            allow_option_id: Some("allow-once-id".to_string()),
+            allow_always_option_id: Some("allow-always-id".to_string()),
+            reject_option_id: Some("reject-once-id".to_string()),
+            reject_always_option_id: Some("reject-always-id".to_string()),
+        },
+        "WriteFile: temp.md".to_string(),
+        Vec::new(),
+        Some(ToolApprovalPreview::create_file(
+            "temp.md".to_string(),
+            "body".to_string(),
+        )),
+    );
+    model.set_runtime_permission_options(vec![
+        RuntimePermissionOption::new(
+            "allow-once-id",
+            "Allow this exceptionally long file change",
+            RuntimePermissionOptionKind::AllowOnce,
+        ),
+        RuntimePermissionOption::new(
+            "allow-always-id",
+            "Remember this file approval",
+            RuntimePermissionOptionKind::AllowAlways,
+        ),
+        RuntimePermissionOption::new(
+            "reject-once-id",
+            "Reject this file",
+            RuntimePermissionOptionKind::RejectOnce,
+        ),
+        RuntimePermissionOption::new(
+            "reject-always-id",
+            "Keep rejecting this file",
+            RuntimePermissionOptionKind::RejectAlways,
+        ),
+    ]);
+
+    let lines = build_panel_lines(&mut model, 28)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.into_owned())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    let first_choice = lines
+        .iter()
+        .position(|line| line.contains("1. Allow this"))
+        .expect("first dynamic choice should render");
+    let second_choice = lines
+        .iter()
+        .position(|line| line.contains("2. Remember"))
+        .expect("second dynamic choice should render");
+
+    assert!(
+        second_choice >= first_choice + 2,
+        "the first dynamic choice should occupy multiple narrow-screen rows: {lines:?}"
+    );
+    assert!(
+        lines[first_choice + 1].contains("exceptionally")
+            || lines[first_choice + 1].contains("long file change"),
+        "the wrapped continuation should remain readable: {lines:?}"
+    );
+}
+
+#[test]
+fn file_preview_choices_keep_shared_selection_visuals_and_footer_spacing() {
+    use runtime_domain::session::{RuntimePermissionOption, RuntimePermissionOptionKind};
+
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.set_palette(default_palette(), true);
+    model.set_window(120, 80);
+    model.open_tool_approval_panel_with_preview(
+        ToolApprovalSource::RuntimePermission {
+            target: runtime_domain::session::RuntimeTarget::provider("local", "qwen3"),
+            request_id: "permission-preview-selection-style".to_string(),
+            allow_option_id: Some("allow-once-id".to_string()),
+            allow_always_option_id: Some("allow-always-id".to_string()),
+            reject_option_id: Some("reject-once-id".to_string()),
+            reject_always_option_id: Some("reject-always-id".to_string()),
+        },
+        "WriteFile: temp.md".to_string(),
+        Vec::new(),
+        Some(ToolApprovalPreview::create_file(
+            "temp.md".to_string(),
+            "body".to_string(),
+        )),
+    );
+    model.set_runtime_permission_options(vec![
+        RuntimePermissionOption::new(
+            "allow-once-id",
+            "Allow this file",
+            RuntimePermissionOptionKind::AllowOnce,
+        ),
+        RuntimePermissionOption::new(
+            "allow-always-id",
+            "Remember file approvals",
+            RuntimePermissionOptionKind::AllowAlways,
+        ),
+        RuntimePermissionOption::new(
+            "reject-once-id",
+            "Reject this file",
+            RuntimePermissionOptionKind::RejectOnce,
+        ),
+        RuntimePermissionOption::new(
+            "reject-always-id",
+            "Keep rejecting this file",
+            RuntimePermissionOptionKind::RejectAlways,
+        ),
+    ]);
+
+    let lines = build_panel_lines(&mut model, 120);
+    let plain_lines = lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    let selected_index = plain_lines
+        .iter()
+        .position(|line| line.contains("1. Allow this file"))
+        .expect("selected file approval choice should render");
+    let unselected_index = plain_lines
+        .iter()
+        .position(|line| line.contains("2. Remember file approvals"))
+        .expect("unselected file approval choice should render");
+    let hint_index = plain_lines
+        .iter()
+        .position(|line| line.contains("Enter choose"))
+        .expect("file approval action hint should render");
+
+    assert_eq!(plain_lines[selected_index], "  ➜ 1. Allow this file");
+    assert_eq!(
+        plain_lines[unselected_index],
+        "    2. Remember file approvals"
+    );
+    assert_eq!(
+        plain_lines.get(hint_index.saturating_sub(1)),
+        Some(&String::new()),
+        "choices and the action hint should keep one blank row: {plain_lines:?}"
+    );
+
+    let selected_value = lines[selected_index]
+        .spans
+        .iter()
+        .find(|span| span.content.contains("1. Allow this file"))
+        .expect("selected choice value span should render");
+    assert_eq!(selected_value.style.fg, Some(model.palette.main));
+    assert!(selected_value.style.add_modifier.contains(Modifier::BOLD));
+
+    let unselected_value = lines[unselected_index]
+        .spans
+        .iter()
+        .find(|span| span.content.contains("2. Remember file approvals"))
+        .expect("unselected choice value span should render");
+    assert_eq!(unselected_value.style.fg, Some(model.palette.secondary));
+    assert!(!unselected_value.style.add_modifier.contains(Modifier::BOLD));
+
+    assert!(
+        !model
+            .handle_tool_approval_panel_key(KeyCode::Down.into())
+            .is_ignored()
+    );
+    let moved_lines = build_panel_lines(&mut model, 120)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.into_owned())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        moved_lines
+            .iter()
+            .any(|line| line == "    1. Allow this file")
+    );
+    assert!(
+        moved_lines
+            .iter()
+            .any(|line| line == "  ➜ 2. Remember file approvals")
+    );
+
+    let effect = handled_effect(
+        model.handle_tool_approval_panel_key(KeyCode::Enter.into()),
+        "Enter should apply the selected file approval choice",
+    )
+    .expect("runtime permission selection should emit an effect");
+    assert_eq!(
+        effect,
+        AppEffect::RespondRuntimePermission {
+            target: runtime_domain::session::RuntimeTarget::provider("local", "qwen3"),
+            request_id: "permission-preview-selection-style".to_string(),
+            option_id: Some("allow-always-id".to_string()),
+        }
+    );
+}
+
+#[test]
+fn file_preview_command_bar_only_renders_available_once_choices() {
+    use runtime_domain::session::{RuntimePermissionOption, RuntimePermissionOptionKind};
+
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.set_window(200, 80);
+    model.open_tool_approval_panel_with_preview(
+        ToolApprovalSource::RuntimePermission {
+            target: runtime_domain::session::RuntimeTarget::provider("local", "qwen3"),
+            request_id: "permission-preview-once-options".to_string(),
+            allow_option_id: Some("allow-once-id".to_string()),
+            allow_always_option_id: None,
+            reject_option_id: Some("reject-once-id".to_string()),
+            reject_always_option_id: None,
+        },
+        "WriteFile: temp.md".to_string(),
+        Vec::new(),
+        Some(ToolApprovalPreview::create_file(
+            "temp.md".to_string(),
+            "body".to_string(),
+        )),
+    );
+    model.set_runtime_permission_options(vec![
+        RuntimePermissionOption::new(
+            "allow-once-id",
+            "Allow this file",
+            RuntimePermissionOptionKind::AllowOnce,
+        ),
+        RuntimePermissionOption::new(
+            "reject-once-id",
+            "Reject this file",
+            RuntimePermissionOptionKind::RejectOnce,
+        ),
+    ]);
+
+    let lines = build_panel_lines(&mut model, 200)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.into_owned())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+
+    assert_strictly_ordered_plain_lines(&lines, &["1. Allow this file", "2. Reject this file"]);
+    assert!(
+        lines
+            .iter()
+            .all(|line| !line.contains("3.") && !line.contains("similar requests")),
+        "unavailable session choices must not be synthesized: {lines:?}"
+    );
+}
+
+#[test]
+fn constrained_fullscreen_file_preview_prioritizes_approval_choices() {
+    use runtime_domain::session::{RuntimePermissionOption, RuntimePermissionOptionKind};
+
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.set_window(200, 5);
+    model.set_palette(default_palette(), true);
+    model.open_tool_approval_panel_with_preview(
+        ToolApprovalSource::RuntimePermission {
+            target: runtime_domain::session::RuntimeTarget::provider("local", "qwen3"),
+            request_id: "permission-preview-constrained".to_string(),
+            allow_option_id: Some("allow-once-id".to_string()),
+            allow_always_option_id: Some("allow-always-id".to_string()),
+            reject_option_id: Some("reject-once-id".to_string()),
+            reject_always_option_id: Some("reject-always-id".to_string()),
+        },
+        "WriteFile: temp.md".to_string(),
+        Vec::new(),
+        Some(ToolApprovalPreview::create_file(
+            "temp.md".to_string(),
+            "body".to_string(),
+        )),
+    );
+    model.set_runtime_permission_options(vec![
+        RuntimePermissionOption::new(
+            "allow-once-id",
+            "Allow once",
+            RuntimePermissionOptionKind::AllowOnce,
+        ),
+        RuntimePermissionOption::new(
+            "allow-always-id",
+            "Allow in session",
+            RuntimePermissionOptionKind::AllowAlways,
+        ),
+        RuntimePermissionOption::new(
+            "reject-once-id",
+            "Reject once",
+            RuntimePermissionOptionKind::RejectOnce,
+        ),
+        RuntimePermissionOption::new(
+            "reject-always-id",
+            "Reject in session",
+            RuntimePermissionOptionKind::RejectAlways,
+        ),
+    ]);
+
+    let rows = rendered_model_rows(&mut model, 200, 5);
+
+    assert_strictly_ordered_plain_lines(
+        &rows,
+        &[
+            "1. Allow once",
+            "2. Allow in session",
+            "3. Reject once",
+            "4. Reject in session",
+        ],
+    );
+    assert!(
+        rows.iter().all(|line| !line.contains("PgUp/PgDn")),
+        "scroll hints should yield to approval choices in a constrained footer: {rows:?}"
+    );
+}
+
+#[test]
+fn constrained_fullscreen_file_preview_never_places_hint_directly_after_choices() {
+    use runtime_domain::session::{RuntimePermissionOption, RuntimePermissionOptionKind};
+
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.set_window(200, 6);
+    model.set_palette(default_palette(), true);
+    model.open_tool_approval_panel_with_preview(
+        ToolApprovalSource::RuntimePermission {
+            target: runtime_domain::session::RuntimeTarget::provider("local", "qwen3"),
+            request_id: "permission-preview-constrained-spacing".to_string(),
+            allow_option_id: Some("allow-once-id".to_string()),
+            allow_always_option_id: Some("allow-always-id".to_string()),
+            reject_option_id: Some("reject-once-id".to_string()),
+            reject_always_option_id: Some("reject-always-id".to_string()),
+        },
+        "WriteFile: temp.md".to_string(),
+        Vec::new(),
+        Some(ToolApprovalPreview::create_file(
+            "temp.md".to_string(),
+            "body".to_string(),
+        )),
+    );
+    model.set_runtime_permission_options(vec![
+        RuntimePermissionOption::new(
+            "allow-once-id",
+            "Allow once",
+            RuntimePermissionOptionKind::AllowOnce,
+        ),
+        RuntimePermissionOption::new(
+            "allow-always-id",
+            "Allow in session",
+            RuntimePermissionOptionKind::AllowAlways,
+        ),
+        RuntimePermissionOption::new(
+            "reject-once-id",
+            "Reject once",
+            RuntimePermissionOptionKind::RejectOnce,
+        ),
+        RuntimePermissionOption::new(
+            "reject-always-id",
+            "Reject in session",
+            RuntimePermissionOptionKind::RejectAlways,
+        ),
+    ]);
+
+    let rows = rendered_model_rows(&mut model, 200, 6);
+
+    assert_strictly_ordered_plain_lines(
+        &rows,
+        &[
+            "1. Allow once",
+            "2. Allow in session",
+            "3. Reject once",
+            "4. Reject in session",
+        ],
+    );
+    assert!(
+        rows.iter().all(|line| !line.contains("Enter choose")),
+        "the action hint should yield when there is no room for its required blank row: {rows:?}"
     );
 }
 
@@ -1058,7 +1707,7 @@ fn edit_preview_panel_marks_truncated_diff_as_partial() {
 }
 
 #[test]
-fn file_preview_panel_uses_single_command_bar_without_choice_picker() {
+fn file_preview_panel_separates_question_from_direct_key_hints_without_choice_picker() {
     let mut model = Model::new(StartupBannerOptions::default());
     model.palette = default_palette();
     model.open_tool_approval_panel_with_preview(
@@ -1089,9 +1738,12 @@ fn file_preview_panel_uses_single_command_bar_without_choice_picker() {
         .collect::<Vec<_>>();
     let text = lines.join("\n");
 
-    assert!(
-        text.contains("Do you want to create TEMP.md?  y/Enter approve · n reject · Esc cancel"),
-        "file preview should render one command bar footer: {lines:?}"
+    assert_strictly_ordered_plain_lines(
+        &lines,
+        &[
+            "Do you want to create TEMP.md?",
+            "y/Enter approve · n reject · Esc cancel",
+        ],
     );
     assert!(
         !text.contains("➜ 1. Yes") && !text.contains("2. Yes, allow all edits during this session"),
@@ -1308,10 +1960,35 @@ fn assert_ordered_plain_lines(lines: &[String], needles: &[&str]) {
     }
 }
 
+fn assert_strictly_ordered_plain_lines(lines: &[String], needles: &[&str]) {
+    let mut previous_index = None;
+    for needle in needles {
+        let index = lines
+            .iter()
+            .position(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("expected {needle:?} in {lines:?}"));
+        if let Some(previous_index) = previous_index {
+            assert!(
+                index > previous_index,
+                "expected {needle:?} on a later line in {lines:?}"
+            );
+        }
+        previous_index = Some(index);
+    }
+}
+
 fn rendered_model_rows(model: &mut Model, width: u16, height: u16) -> Vec<String> {
+    buffer_rows(&rendered_model_buffer(model, width, height))
+}
+
+fn rendered_model_buffer(model: &mut Model, width: u16, height: u16) -> Buffer {
     let area = Rect::new(0, 0, width, height);
     let mut buffer = Buffer::empty(area);
     let _ = model.render_to_buffer(area, &mut buffer);
+    buffer
+}
+
+fn buffer_rows(buffer: &Buffer) -> Vec<String> {
     (0..buffer.area.height)
         .map(|row| {
             let mut line = String::new();

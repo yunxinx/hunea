@@ -73,8 +73,6 @@ impl ConversationWorker {
         self.target = None;
         self.pending_session_id = None;
         self.pending_user_entry_id = None;
-        if let Some(permission_broker) = self.permission_broker.take() {
-            permission_broker.cancel_all();
-        }
+        self.permission_broker.cancel_all();
     }
 }

@@ -84,6 +84,48 @@ async fn tool_loop_passes_permission_preview_from_executor() {
     assert_eq!(preview.new_text, "new\n");
 }
 
+#[tokio::test]
+async fn ask_file_tool_without_preview_is_denied_before_approval_or_execution() {
+    let provider = FakeProvider {
+        calls: Mutex::new(0),
+    };
+    let executed = Arc::new(AtomicBool::new(false));
+    let permission_requested = Arc::new(AtomicBool::new(false));
+    let mut executor = ToolExecutorRegistry::new();
+    executor.insert(AskWriteWithoutPreviewTool {
+        executed: Arc::clone(&executed),
+    });
+    let request = PromptRequest::new(
+        "qwen3",
+        vec![ConversationItem::text(Role::User, "write a file")],
+    );
+
+    run_tool_loop(
+        &provider,
+        request,
+        executor,
+        &CancellationToken::new(),
+        ToolLoopOptions {
+            permission_handler: Some(Arc::new(PermissionRequestProbe {
+                called: Arc::clone(&permission_requested),
+            })),
+            ..ToolLoopOptions::default()
+        },
+        |_| {},
+    )
+    .await
+    .expect("runtime should return the denied tool result to the provider");
+
+    assert!(
+        !permission_requested.load(Ordering::SeqCst),
+        "a file call without a preview must not reach interactive approval"
+    );
+    assert!(
+        !executed.load(Ordering::SeqCst),
+        "a file call without a preview must not reach the executor"
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn permission_preview_uses_blocking_executor_on_current_thread_runtime() {
     let provider = FakeProvider {

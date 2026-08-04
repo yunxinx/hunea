@@ -85,6 +85,22 @@ fn reset_discards_a_turn_waiting_for_dynamic_environment() {
 }
 
 #[test]
+fn shutdown_cancels_the_previous_approval_context_turn() {
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions::default());
+    let previous_context_cancellation = tokio_util::sync::CancellationToken::new();
+    coordinator.conversation_worker.cancellation = Some(previous_context_cancellation.clone());
+
+    coordinator
+        .shutdown()
+        .expect("runtime coordinator should shut down cleanly");
+
+    assert!(
+        previous_context_cancellation.is_cancelled(),
+        "shutdown should cancel the previous approval context turn"
+    );
+}
+
+#[test]
 fn token_estimate_creates_render_barrier_before_permission_request() {
     let output_batch = vec![RuntimeEvent::OutputTokenEstimate {
         target: Some(RuntimeTarget::provider("local", "qwen3")),

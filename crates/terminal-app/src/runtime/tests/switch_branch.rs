@@ -135,6 +135,8 @@ fn switch_branch_moves_leaf_and_rebuilds_transcript_and_tree() {
         .into_iter()
         .map(|row| row.preview_content)
         .collect::<Vec<_>>();
+    let previous_context_cancellation = tokio_util::sync::CancellationToken::new();
+    coordinator.conversation_worker.cancellation = Some(previous_context_cancellation.clone());
 
     coordinator
         .handle_runtime_command(RuntimeCommand::SwitchBranch {
@@ -144,6 +146,10 @@ fn switch_branch_moves_leaf_and_rebuilds_transcript_and_tree() {
         .expect("switch branch should succeed");
 
     let events = wait_for_runtime_events(&mut coordinator, "branch switch events");
+    assert!(
+        previous_context_cancellation.is_cancelled(),
+        "successful branch switch should reset the previous approval context"
+    );
     assert_eq!(
         coordinator
             .provider_conversation

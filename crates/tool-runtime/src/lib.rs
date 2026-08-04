@@ -5,6 +5,7 @@ mod execution;
 mod executor;
 mod kind;
 mod permission;
+mod permission_rules;
 mod registry;
 mod schema;
 mod tool_error;
@@ -24,6 +25,7 @@ pub use permission::{
     ToolPermissionFuture, ToolPermissionHandler, ToolPermissionPolicy, ToolPermissionPreview,
     ToolPermissionRequest,
 };
+pub use permission_rules::{ToolPermissionRule, ToolPermissionRuleBehavior, ToolPermissionRuleSet};
 pub use registry::ToolRegistry;
 pub use schema::{ToolSchema, ToolSchemaError};
 pub use tool_error::{

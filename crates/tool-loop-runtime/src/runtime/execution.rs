@@ -270,6 +270,7 @@ async fn authorize_tool_call(
                     definition.name
                 ));
             };
+            let requires_file_preview = matches!(definition.kind, ToolKind::Write | ToolKind::Edit);
             let mut permission_request = ToolPermissionRequest::new(call.clone(), definition);
             let preview = match permission_preview_from_executor(
                 context.executor,
@@ -281,6 +282,12 @@ async fn authorize_tool_call(
                 Ok(preview) => preview,
                 Err(message) => return ToolAuthorization::deny(message),
             };
+            if requires_file_preview && preview.is_none() {
+                return ToolAuthorization::deny(format!(
+                    "{TOOL_PERMISSION_DENIED}: {} could not produce a file preview",
+                    permission_request.definition.name
+                ));
+            }
             let permission_snapshot = preview
                 .as_ref()
                 .and_then(|preview| preview.snapshot.clone());

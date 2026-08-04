@@ -77,7 +77,7 @@ pub struct ConversationWorker {
     receiver: Option<Receiver<ConversationWorkerEvent>>,
     pub cancellation: Option<CancellationToken>,
     pub target: Option<RuntimeTarget>,
-    permission_broker: Option<ConversationPermissionBroker>,
+    permission_broker: ConversationPermissionBroker,
     pending_session_id: Option<SessionId>,
     pending_user_entry_id: Option<String>,
     session_items: Vec<PersistedConversationItem>,
@@ -91,7 +91,7 @@ impl ConversationWorker {
             receiver: None,
             cancellation: None,
             target: None,
-            permission_broker: None,
+            permission_broker: ConversationPermissionBroker::default(),
             pending_session_id: None,
             pending_user_entry_id: None,
             session_items: Vec::new(),
@@ -111,7 +111,7 @@ impl ConversationWorker {
         let cancellation = CancellationToken::default();
         let thread_cancellation = cancellation.clone();
         let target = request.target();
-        let permission_broker = ConversationPermissionBroker::default();
+        let permission_broker = self.permission_broker.clone();
         let thread_permission_broker = permission_broker.clone();
         thread::spawn(move || {
             let _exit_notification = sender.notify_on_drop();
@@ -141,7 +141,6 @@ impl ConversationWorker {
         self.receiver = Some(receiver);
         self.cancellation = Some(cancellation);
         self.target = Some(target);
-        self.permission_broker = Some(permission_broker);
         self.pending_session_id = None;
         self.pending_user_entry_id = None;
         self.session_items.clear();
@@ -156,15 +155,19 @@ impl ConversationWorker {
         if let Some(cancellation) = self.cancellation.take() {
             cancellation.cancel();
         }
-        if let Some(permission_broker) = self.permission_broker.take() {
-            permission_broker.cancel_all();
-        }
+        self.permission_broker.cancel_all();
         self.receiver = None;
         self.target = None;
         self.pending_session_id = None;
         self.pending_user_entry_id = None;
         self.session_items.clear();
         self.upstream_context_tokens = None;
+    }
+
+    /// 取消当前 turn，并清除切换 conversation 后不得继续复用的权限规则。
+    pub fn reset_for_context_change(&mut self) {
+        self.reset_after_clear();
+        self.clear_permission_context();
     }
 
     pub fn interrupt(&mut self) -> bool {
@@ -174,10 +177,13 @@ impl ConversationWorker {
         if let Some(cancellation) = self.cancellation.take() {
             cancellation.cancel();
         }
-        if let Some(permission_broker) = self.permission_broker.take() {
-            permission_broker.cancel_all();
-        }
+        self.permission_broker.cancel_all();
         true
+    }
+
+    /// 清除当前 runtime 的权限上下文，用于切换到另一条 conversation 或关闭 runtime。
+    pub fn clear_permission_context(&mut self) {
+        self.permission_broker.clear_permission_context();
     }
 
     pub fn respond_permission(
@@ -185,10 +191,8 @@ impl ConversationWorker {
         request_id: &str,
         option_id: Option<String>,
     ) -> Result<(), String> {
-        let Some(permission_broker) = self.permission_broker.as_ref() else {
-            return Err("Conversation worker is not waiting for permission".to_string());
-        };
-        permission_broker.respond_permission(request_id, option_id)
+        self.permission_broker
+            .respond_permission(request_id, option_id)
     }
 
     pub fn current_target(&self) -> Option<&RuntimeTarget> {

@@ -324,7 +324,7 @@ impl AppRuntimeCoordinator {
     }
 
     pub(crate) fn shutdown(&mut self) -> Result<(), String> {
-        self.conversation_worker.reset_after_clear();
+        self.conversation_worker.reset_for_context_change();
         self.context_budget_worker.shutdown()?;
         self.dynamic_environment_worker.shutdown();
         if let Some(store) = self.options.session_store.as_ref() {
@@ -587,7 +587,7 @@ impl AppRuntimeCoordinator {
                     payload,
                 } => {
                     self.provider_conversation = conversation;
-                    self.conversation_worker.reset_after_clear();
+                    self.conversation_worker.reset_for_context_change();
                     events.push(RuntimeEvent::SessionResumed { payload });
                 }
                 SessionStoreWorkerEvent::RestoredWithTree {
@@ -597,7 +597,7 @@ impl AppRuntimeCoordinator {
                     tree_payload,
                 } => {
                     self.provider_conversation = conversation;
-                    self.conversation_worker.reset_after_clear();
+                    self.conversation_worker.reset_for_context_change();
                     events.push(RuntimeEvent::SessionResumed {
                         payload: resume_payload,
                     });

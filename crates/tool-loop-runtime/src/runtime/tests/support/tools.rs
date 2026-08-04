@@ -77,6 +77,28 @@ impl Tool for AskWriteLikeTool {
     }
 }
 
+struct AskWriteWithoutPreviewTool {
+    executed: Arc<AtomicBool>,
+}
+
+impl Tool for AskWriteWithoutPreviewTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new("echo")
+            .with_label("Write")
+            .with_kind(ToolKind::Write)
+            .with_permission_policy(ToolPermissionPolicy::Ask)
+    }
+
+    fn execute<'a>(
+        &'a self,
+        call: RuntimeToolCall,
+        _cancellation: &'a CancellationToken,
+    ) -> ToolExecutionFuture<'a> {
+        self.executed.store(true, Ordering::SeqCst);
+        Box::pin(async move { ToolResult::success(call.call_id, "written") })
+    }
+}
+
 struct ConditionalTerminatingTool;
 
 impl Tool for ConditionalTerminatingTool {
@@ -224,6 +246,21 @@ impl ToolPermissionHandler for SleepyAllowPermissionHandler {
 
 struct CapturingAllowPermissionHandler {
     preview: Arc<Mutex<Option<ToolPermissionPreview>>>,
+}
+
+struct PermissionRequestProbe {
+    called: Arc<AtomicBool>,
+}
+
+impl ToolPermissionHandler for PermissionRequestProbe {
+    fn request_permission<'a>(
+        &'a self,
+        _request: ToolPermissionRequest,
+        _cancellation: &'a CancellationToken,
+    ) -> ToolPermissionFuture<'a> {
+        self.called.store(true, Ordering::SeqCst);
+        Box::pin(async { ToolPermissionDecision::Allow })
+    }
 }
 
 impl ToolPermissionHandler for CapturingAllowPermissionHandler {

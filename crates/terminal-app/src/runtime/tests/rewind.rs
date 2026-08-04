@@ -92,6 +92,8 @@ fn select_entry_rewind_rebuilds_provider_history_to_selected_entry() {
         Some(assistant_replay_entry_id.as_str()),
         "visible assistant row should rewind through hidden transcript replay"
     );
+    let previous_context_cancellation = tokio_util::sync::CancellationToken::new();
+    coordinator.conversation_worker.cancellation = Some(previous_context_cancellation.clone());
 
     coordinator
         .handle_runtime_command(RuntimeCommand::SelectEntryRewind {
@@ -100,6 +102,10 @@ fn select_entry_rewind_rebuilds_provider_history_to_selected_entry() {
         .expect("select entry rewind should succeed");
 
     let events = wait_for_runtime_events(&mut coordinator, "entry rewind events");
+    assert!(
+        previous_context_cancellation.is_cancelled(),
+        "successful rewind should reset the previous approval context"
+    );
     assert_eq!(
         coordinator
             .provider_conversation

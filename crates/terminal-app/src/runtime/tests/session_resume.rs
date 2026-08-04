@@ -73,6 +73,8 @@ fn resume_session_emits_transcript_and_restored_model() {
         session_header_template: Some(header),
         ..AppRuntimeOptions::default()
     });
+    let previous_context_cancellation = tokio_util::sync::CancellationToken::new();
+    coordinator.conversation_worker.cancellation = Some(previous_context_cancellation.clone());
 
     coordinator
         .handle_runtime_command(RuntimeCommand::ResumeSession {
@@ -81,6 +83,10 @@ fn resume_session_emits_transcript_and_restored_model() {
         .expect("resume session should succeed");
 
     let payload = wait_for_session_resumed(&mut coordinator);
+    assert!(
+        previous_context_cancellation.is_cancelled(),
+        "successful resume should reset the previous approval context"
+    );
     assert_eq!(payload.session_id, session_id.to_string());
     assert_eq!(
         payload.restored_model,
@@ -105,6 +111,48 @@ fn resume_session_emits_transcript_and_restored_model() {
     assert_eq!(
         coordinator.provider_conversation.system_prompt(),
         Some("historical prompt")
+    );
+    cleanup(&work_dir);
+}
+
+#[test]
+fn failed_resume_preserves_the_current_approval_context() {
+    let work_dir = temp_test_dir("resume-session-failure-work");
+    let store = Arc::new(InMemorySessionStore::new());
+    let header = SessionHeader {
+        session_id: SessionId::new(),
+        work_dir: work_dir.clone(),
+        session_name: None,
+        initial_model: "qwen3".to_string(),
+        git_head: None,
+        cli_version: None,
+    };
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        session_store: Some(store),
+        session_header_template: Some(header),
+        ..AppRuntimeOptions::default()
+    });
+    let current_context_cancellation = tokio_util::sync::CancellationToken::new();
+    coordinator.conversation_worker.cancellation = Some(current_context_cancellation.clone());
+
+    coordinator
+        .handle_runtime_command(RuntimeCommand::ResumeSession {
+            session_id: SessionId::new().to_string(),
+        })
+        .expect("missing session restore should be accepted for async execution");
+
+    let message = wait_for_runtime_event(
+        &mut coordinator,
+        |event| match event {
+            RuntimeEvent::Failed { message, .. } => Some(message),
+            _ => None,
+        },
+        "missing session restore failure",
+    );
+    assert!(!message.is_empty());
+    assert!(
+        !current_context_cancellation.is_cancelled(),
+        "failed resume must preserve the current approval context"
     );
     cleanup(&work_dir);
 }

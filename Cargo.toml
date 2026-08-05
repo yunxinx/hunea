@@ -52,6 +52,8 @@ directories = "6"
 flate2 = "1"
 futures-util = "0.3.31"
 globset = "0.4"
+grep-regex = "0.1.14"
+grep-searcher = "0.1.17"
 ignore = "0.4.26"
 libc = "0.2"
 tool-loop-runtime = { path = "crates/tool-loop-runtime" }
@@ -67,7 +69,6 @@ terminal-ui = { path = "crates/terminal-ui" }
 percent-encoding = "2"
 pulldown-cmark = "0.13.4"
 ratatui = { version = "0.30.2", features = ["crossterm_0_29"] }
-regex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls", "stream"] }
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }

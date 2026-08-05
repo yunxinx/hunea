@@ -41,7 +41,7 @@ pub(crate) enum SearchToolError {
         source: globset::Error,
     },
     #[error("invalid grep pattern: {source}")]
-    InvalidRegex { source: regex::Error },
+    InvalidRegex { source: grep_regex::Error },
     #[error("walk workspace failed: {source}")]
     WalkWorkspace { source: ignore::Error },
     #[error("read file type failed for '{path}'")]

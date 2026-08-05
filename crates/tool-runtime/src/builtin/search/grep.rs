@@ -1,10 +1,14 @@
 use std::{
-    fs,
+    collections::VecDeque,
+    io,
     path::{Path, PathBuf},
     process::Stdio,
 };
 
-use regex::RegexBuilder;
+use grep_regex::RegexMatcherBuilder;
+use grep_searcher::{
+    BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkFinish, SinkMatch,
+};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::{
@@ -556,6 +560,230 @@ fn external_match_path(root: &Path, path: &str) -> PathBuf {
     }
 }
 
+/// Searcher 报告的一行（匹配行或 context 行），文本已经过 lossy 转换和截断。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RustGrepLine {
+    line_number: u64,
+    text: String,
+    was_truncated: bool,
+}
+
+/// 一个等待补齐 after-context 的匹配块；`after_left` 归零或文件结束时完成为 block 字符串。
+#[derive(Debug, Clone)]
+struct PendingRustGrepBlock {
+    /// 每行记录分隔符：匹配行用 `:`，context 行用 `-`。
+    lines: Vec<(char, RustGrepLine)>,
+    match_line: u64,
+    after_left: usize,
+}
+
+/// 文件级 Sink：把 Searcher 的 byte-oriented 事件重建成现有 fallback 的
+/// `path:line:text` / `path-line:text` block 格式。
+///
+/// 行文本进入时立即做 lossy UTF-8 转换并去掉末尾 `\n`/`\r`，坏字节只会变成
+/// `U+FFFD`，不会让整个文件静默消失；context 窗口通过 `recent_lines` 和
+/// `pending` 两个有界缓冲重建，不重新读取整文件。
+struct RustGrepFileSink<'a> {
+    relative_path: String,
+    context: usize,
+    /// 本文件还可展示的匹配数（全局 limit 减去之前文件已观察到的匹配）。
+    remaining_matches: usize,
+    cancellation: &'a CancellationToken,
+    recent_lines: VecDeque<RustGrepLine>,
+    pending: VecDeque<PendingRustGrepBlock>,
+    completed_blocks: Vec<String>,
+    shown_matches: usize,
+    observed_matches: usize,
+    lines_truncated: bool,
+    limit_hit: bool,
+    binary_detected: bool,
+}
+
+impl<'a> RustGrepFileSink<'a> {
+    fn new(
+        relative_path: String,
+        context: usize,
+        remaining_matches: usize,
+        cancellation: &'a CancellationToken,
+    ) -> Self {
+        Self {
+            relative_path,
+            context,
+            remaining_matches,
+            cancellation,
+            recent_lines: VecDeque::new(),
+            pending: VecDeque::new(),
+            completed_blocks: Vec::new(),
+            shown_matches: 0,
+            observed_matches: 0,
+            lines_truncated: false,
+            limit_hit: false,
+            binary_detected: false,
+        }
+    }
+
+    fn check_cancelled(&self) -> Result<bool, io::Error> {
+        if self.cancellation.is_cancelled() {
+            Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"))
+        } else {
+            Ok(true)
+        }
+    }
+
+    fn line_from_bytes(&mut self, bytes: &[u8], line_number: Option<u64>) -> RustGrepLine {
+        let mut text = String::from_utf8_lossy(bytes).into_owned();
+        if text.ends_with('\n') {
+            text.pop();
+            if text.ends_with('\r') {
+                text.pop();
+            }
+        }
+        let (text, was_truncated) = truncate_line(&text, GREP_MAX_LINE_CHARS);
+        RustGrepLine {
+            line_number: line_number.unwrap_or(0),
+            text,
+            was_truncated,
+        }
+    }
+
+    fn push_recent(&mut self, line: RustGrepLine) {
+        if self.context == 0 {
+            return;
+        }
+        self.recent_lines.push_back(line);
+        while self.recent_lines.len() > self.context {
+            self.recent_lines.pop_front();
+        }
+    }
+
+    /// 把一行按 after-context 喂给仍需要它的 pending block；行号单调递增，
+    /// 因此只有行号大于 block 匹配行的行才可能属于它的 after 窗口。
+    fn feed_after_context(&mut self, line: &RustGrepLine) {
+        for block in self.pending.iter_mut() {
+            if block.after_left > 0 && line.line_number > block.match_line {
+                block.lines.push(('-', line.clone()));
+                block.after_left -= 1;
+            }
+        }
+        self.complete_ready_blocks();
+    }
+
+    fn complete_ready_blocks(&mut self) {
+        while self
+            .pending
+            .front()
+            .is_some_and(|block| block.after_left == 0)
+        {
+            let block = self.pending.pop_front().expect("front block checked");
+            self.commit_block(block);
+        }
+    }
+
+    /// 文件结束或 group 边界时强制完成剩余 pending，EOF 截断的 after-context
+    /// 以现有 block 的 `min(match + context + 1, lines)` 语义截断。
+    fn flush_pending(&mut self) {
+        while let Some(block) = self.pending.pop_front() {
+            self.commit_block(block);
+        }
+    }
+
+    fn commit_block(&mut self, block: PendingRustGrepBlock) {
+        self.lines_truncated |= block.lines.iter().any(|(_, line)| line.was_truncated);
+        self.completed_blocks.push(self.format_block(block));
+    }
+
+    fn format_block(&self, block: PendingRustGrepBlock) -> String {
+        block
+            .lines
+            .iter()
+            .map(|(separator, line)| {
+                format!(
+                    "{}{separator}{}:{}",
+                    self.relative_path, line.line_number, line.text
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+impl Sink for RustGrepFileSink<'_> {
+    type Error = io::Error;
+
+    fn begin(&mut self, _searcher: &Searcher) -> Result<bool, Self::Error> {
+        self.check_cancelled()
+    }
+
+    fn matched(&mut self, _searcher: &Searcher, mat: &SinkMatch<'_>) -> Result<bool, Self::Error> {
+        self.check_cancelled()?;
+        let line = self.line_from_bytes(mat.bytes(), mat.line_number());
+        self.feed_after_context(&line);
+        if self.remaining_matches == 0 {
+            // 第一个超额匹配：记录它并继续消费当前已展示 block 的
+            // after-context；排空 pending 后再停止，避免 limit 截断 context。
+            if !self.limit_hit {
+                self.observed_matches += 1;
+            }
+            self.limit_hit = true;
+            return Ok(!self.pending.is_empty());
+        }
+        self.remaining_matches -= 1;
+        self.observed_matches += 1;
+        self.shown_matches += 1;
+        let mut block_lines = Vec::with_capacity(self.context.saturating_add(1));
+        block_lines.extend(self.recent_lines.iter().map(|recent| ('-', recent.clone())));
+        block_lines.push((':', line.clone()));
+        self.pending.push_back(PendingRustGrepBlock {
+            lines: block_lines,
+            match_line: line.line_number,
+            after_left: self.context,
+        });
+        self.push_recent(line);
+        self.complete_ready_blocks();
+        Ok(true)
+    }
+
+    fn context(
+        &mut self,
+        _searcher: &Searcher,
+        ctx: &SinkContext<'_>,
+    ) -> Result<bool, Self::Error> {
+        self.check_cancelled()?;
+        let line = self.line_from_bytes(ctx.bytes(), ctx.line_number());
+        self.feed_after_context(&line);
+        self.push_recent(line);
+        Ok(!(self.limit_hit && self.pending.is_empty()))
+    }
+
+    fn context_break(&mut self, _searcher: &Searcher) -> Result<bool, Self::Error> {
+        self.check_cancelled()?;
+        // group 边界意味着此前的 pending 已收齐 after-context；清空 recent，
+        // 避免 before-context 泄漏到下一组。
+        self.flush_pending();
+        self.recent_lines.clear();
+        Ok(!self.limit_hit)
+    }
+
+    fn binary_data(&mut self, _searcher: &Searcher, _offset: u64) -> Result<bool, Self::Error> {
+        // 含 NUL 的文件整体丢弃，不产生任何普通 `path:line:text` 输出。
+        self.binary_detected = true;
+        self.pending.clear();
+        self.completed_blocks.clear();
+        self.recent_lines.clear();
+        self.shown_matches = 0;
+        self.observed_matches = 0;
+        self.lines_truncated = false;
+        Ok(false)
+    }
+
+    fn finish(&mut self, _searcher: &Searcher, _: &SinkFinish) -> Result<(), Self::Error> {
+        if !self.binary_detected {
+            self.flush_pending();
+        }
+        Ok(())
+    }
+}
+
 fn rust_grep(
     root: &Path,
     search_path: &Path,
@@ -565,15 +793,27 @@ fn rust_grep(
     if cancellation.is_cancelled() {
         return Err(SearchToolError::Interrupted);
     }
-    let pattern = if arguments.literal {
-        regex::escape(&arguments.pattern)
-    } else {
-        arguments.pattern.clone()
-    };
-    let regex = RegexBuilder::new(&pattern)
+    let mut matcher_builder = RegexMatcherBuilder::new();
+    matcher_builder
+        .multi_line(true)
         .case_insensitive(arguments.ignore_case)
-        .build()
+        .fixed_strings(arguments.literal)
+        // CRLF 也是行边界；保持 Searcher 使用 LF 分隔符即可流式按行处理，
+        // 不需要额外引入 matcher 的 direct dependency。
+        .crlf(true)
+        .line_terminator(Some(b'\n'))
+        .dot_matches_new_line(false)
+        .ban_byte(Some(b'\x00'));
+    let matcher = matcher_builder
+        .build(&arguments.pattern)
         .map_err(|source| SearchToolError::InvalidRegex { source })?;
+    let mut searcher = SearcherBuilder::new()
+        .line_number(true)
+        .before_context(arguments.context)
+        .after_context(arguments.context)
+        .binary_detection(BinaryDetection::quit(b'\x00'))
+        .bom_sniffing(true)
+        .build();
     let glob = arguments.glob.as_deref().map(compile_glob).transpose()?;
     let mut matches = Vec::new();
     let mut observed_matches = 0usize;
@@ -602,23 +842,28 @@ fn rust_grep(
         {
             continue;
         }
-        let Ok(content) = fs::read_to_string(path) else {
+
+        let mut sink = RustGrepFileSink::new(
+            workspace_relative_path(root, path),
+            arguments.context,
+            arguments.limit.saturating_sub(observed_matches),
+            cancellation,
+        );
+        match searcher.search_path(&matcher, path, &mut sink) {
+            Ok(()) => {}
+            Err(_) if cancellation.is_cancelled() => return Err(SearchToolError::Interrupted),
+            // 不可读文件按旧 fallback 语义跳过，不升级为整次 grep 失败。
+            Err(_) => continue,
+        }
+        if sink.binary_detected {
             continue;
-        };
-        let lines = content.lines().collect::<Vec<_>>();
-        for (index, line) in lines.iter().enumerate() {
-            if regex.is_match(line) {
-                if observed_matches >= arguments.limit {
-                    observed_matches += 1;
-                    match_truncated = true;
-                    break 'walk;
-                }
-                observed_matches += 1;
-                let (match_block, was_truncated) =
-                    format_match_block(root, path, &lines, index, arguments.context);
-                lines_truncated |= was_truncated;
-                matches.push(match_block);
-            }
+        }
+        observed_matches += sink.observed_matches;
+        match_truncated |= sink.limit_hit;
+        lines_truncated |= sink.lines_truncated;
+        matches.extend(sink.completed_blocks);
+        if sink.limit_hit {
+            break 'walk;
         }
     }
 
@@ -962,6 +1207,390 @@ fi
         cleanup(&root);
     }
 
+    #[test]
+    fn rust_grep_matches_utf16le_bom_file_with_line_numbers_and_context() {
+        let root = temp_root("rust-grep-utf16le");
+        write_bytes(
+            &root,
+            "utf16.txt",
+            &utf16le_with_bom("alpha\nbeta\nneedle here\nomega\ngamma\n"),
+        );
+        let arguments = NormalizedGrepArguments {
+            pattern: "needle".to_string(),
+            requested_path: ".".to_string(),
+            glob: None,
+            ignore_case: false,
+            literal: false,
+            context: 1,
+            limit: 10,
+        };
+
+        let outcome = rust_grep(&root, &root, &arguments, &CancellationToken::new())
+            .expect("utf-16 search should succeed");
+
+        assert_eq!(outcome.total_matches, 1);
+        assert!(!outcome.truncated);
+        assert!(
+            outcome.content.contains("utf16.txt:3:needle here"),
+            "unexpected content: {}",
+            outcome.content
+        );
+        assert!(outcome.content.contains("utf16.txt-2:beta"));
+        assert!(outcome.content.contains("utf16.txt-4:omega"));
+        cleanup(&root);
+    }
+
+    #[test]
+    fn rust_grep_lossy_decodes_invalid_utf8_with_literal_pattern() {
+        let root = temp_root("rust-grep-bad-utf8-literal");
+        write_bytes(&root, "bad.txt", b"first \xFF line\nsecond\n");
+        let arguments = NormalizedGrepArguments {
+            pattern: "line".to_string(),
+            requested_path: ".".to_string(),
+            glob: None,
+            ignore_case: false,
+            literal: true,
+            context: 0,
+            limit: 10,
+        };
+
+        let outcome = rust_grep(&root, &root, &arguments, &CancellationToken::new())
+            .expect("invalid utf-8 search should not fail");
+
+        assert_eq!(outcome.total_matches, 1);
+        assert!(!outcome.content.contains("No matches found."));
+        assert!(
+            outcome.content.contains("bad.txt:1:first \u{FFFD} line"),
+            "unexpected content: {}",
+            outcome.content
+        );
+        cleanup(&root);
+    }
+
+    #[test]
+    fn rust_grep_lossy_decodes_invalid_utf8_with_ignore_case() {
+        let root = temp_root("rust-grep-bad-utf8-case");
+        write_bytes(&root, "bad.txt", b"NEEDLE \xFF haystack\nplain\n");
+        let arguments = NormalizedGrepArguments {
+            pattern: "needle".to_string(),
+            requested_path: ".".to_string(),
+            glob: None,
+            ignore_case: true,
+            literal: false,
+            context: 0,
+            limit: 10,
+        };
+
+        let outcome = rust_grep(&root, &root, &arguments, &CancellationToken::new())
+            .expect("invalid utf-8 search should not fail");
+
+        assert_eq!(outcome.total_matches, 1);
+        assert!(
+            outcome
+                .content
+                .contains("bad.txt:1:NEEDLE \u{FFFD} haystack"),
+            "unexpected content: {}",
+            outcome.content
+        );
+        cleanup(&root);
+    }
+
+    #[test]
+    fn rust_grep_literal_pattern_matches_meta_characters_literally() {
+        let root = temp_root("rust-grep-literal-meta");
+        write_bytes(&root, "lit.txt", b"a.c\nabc\n");
+        let arguments = NormalizedGrepArguments {
+            pattern: "a.c".to_string(),
+            requested_path: ".".to_string(),
+            glob: None,
+            ignore_case: false,
+            literal: true,
+            context: 0,
+            limit: 10,
+        };
+
+        let outcome = rust_grep(&root, &root, &arguments, &CancellationToken::new())
+            .expect("literal search should succeed");
+
+        assert_eq!(outcome.total_matches, 1);
+        assert!(outcome.content.contains("lit.txt:1:a.c"));
+        assert!(!outcome.content.contains("lit.txt:2:abc"));
+        cleanup(&root);
+    }
+
+    #[test]
+    fn rust_grep_skips_nul_binary_files_but_keeps_searching_later_text_files() {
+        let root = temp_root("rust-grep-binary-skip");
+        write_bytes(&root, "bin.dat", b"needle\x00binary payload\n");
+        write_bytes(&root, "text.txt", b"line one\nneedle in text\n");
+        let arguments = NormalizedGrepArguments {
+            pattern: "needle".to_string(),
+            requested_path: ".".to_string(),
+            glob: None,
+            ignore_case: false,
+            literal: false,
+            context: 0,
+            limit: 10,
+        };
+
+        let outcome = rust_grep(&root, &root, &arguments, &CancellationToken::new())
+            .expect("binary skip search should succeed");
+
+        assert_eq!(outcome.total_matches, 1);
+        assert!(outcome.content.contains("text.txt:2:needle in text"));
+        assert!(!outcome.content.contains("bin.dat"));
+        cleanup(&root);
+    }
+
+    #[test]
+    fn rust_grep_finds_match_at_end_of_large_multi_buffer_file() {
+        let root = temp_root("rust-grep-large-file");
+        let mut content = String::from("first needle\n");
+        for _ in 0..2_000 {
+            content.push_str("filler line of padding for the large file test\n");
+        }
+        content.push_str("final needle\n");
+        write_bytes(&root, "large.txt", content.as_bytes());
+        let arguments = NormalizedGrepArguments {
+            pattern: "needle".to_string(),
+            requested_path: ".".to_string(),
+            glob: None,
+            ignore_case: false,
+            literal: false,
+            context: 0,
+            limit: 10,
+        };
+
+        let outcome = rust_grep(&root, &root, &arguments, &CancellationToken::new())
+            .expect("large file search should succeed");
+
+        assert_eq!(outcome.total_matches, 2);
+        assert!(outcome.content.contains("large.txt:1:first needle"));
+        assert!(outcome.content.contains("large.txt:2002:final needle"));
+        cleanup(&root);
+    }
+
+    #[test]
+    fn rust_grep_context_blocks_preserve_separators_and_line_numbers() {
+        let root = temp_root("rust-grep-context");
+        write_bytes(
+            &root,
+            "ctx.txt",
+            b"one\ntwo needle\nthree\nfour\nfive\nsix needle\nseven\neight\n",
+        );
+        let arguments = NormalizedGrepArguments {
+            pattern: "needle".to_string(),
+            requested_path: ".".to_string(),
+            glob: None,
+            ignore_case: false,
+            literal: false,
+            context: 1,
+            limit: 10,
+        };
+
+        let outcome = rust_grep(&root, &root, &arguments, &CancellationToken::new())
+            .expect("context search should succeed");
+
+        assert_eq!(outcome.total_matches, 2);
+        assert!(outcome.content.contains("ctx.txt-1:one"));
+        assert!(outcome.content.contains("ctx.txt:2:two needle"));
+        assert!(outcome.content.contains("ctx.txt-3:three"));
+        assert!(outcome.content.contains("ctx.txt-5:five"));
+        assert!(outcome.content.contains("ctx.txt:6:six needle"));
+        assert!(outcome.content.contains("ctx.txt-7:seven"));
+        cleanup(&root);
+    }
+
+    #[test]
+    fn rust_grep_overlapping_context_blocks_share_context_lines() {
+        let root = temp_root("rust-grep-overlap");
+        write_bytes(
+            &root,
+            "ov.txt",
+            b"one\ntwo\nthree needle\nfour needle\nfive\nsix\n",
+        );
+        let arguments = NormalizedGrepArguments {
+            pattern: "needle".to_string(),
+            requested_path: ".".to_string(),
+            glob: None,
+            ignore_case: false,
+            literal: false,
+            context: 1,
+            limit: 10,
+        };
+
+        let outcome = rust_grep(&root, &root, &arguments, &CancellationToken::new())
+            .expect("overlap context search should succeed");
+
+        assert_eq!(outcome.total_matches, 2);
+        assert!(outcome.content.contains("ov.txt-2:two"));
+        assert!(outcome.content.contains("ov.txt:3:three needle"));
+        assert!(outcome.content.contains("ov.txt-4:four needle"));
+        assert!(outcome.content.contains("ov.txt-3:three needle"));
+        assert!(outcome.content.contains("ov.txt:4:four needle"));
+        assert!(outcome.content.contains("ov.txt-5:five"));
+        cleanup(&root);
+    }
+
+    #[test]
+    fn rust_grep_eof_context_is_truncated_by_end_of_file() {
+        let root = temp_root("rust-grep-eof-context");
+        write_bytes(&root, "eof.txt", b"one\ntwo\nthree needle\n");
+        let arguments = NormalizedGrepArguments {
+            pattern: "needle".to_string(),
+            requested_path: ".".to_string(),
+            glob: None,
+            ignore_case: false,
+            literal: false,
+            context: 2,
+            limit: 10,
+        };
+
+        let outcome = rust_grep(&root, &root, &arguments, &CancellationToken::new())
+            .expect("eof context search should succeed");
+
+        assert_eq!(outcome.total_matches, 1);
+        assert!(outcome.content.contains("eof.txt-1:one"));
+        assert!(outcome.content.contains("eof.txt-2:two"));
+        assert!(outcome.content.contains("eof.txt:3:three needle"));
+        assert!(!outcome.content.contains("eof.txt-4:"));
+        cleanup(&root);
+    }
+
+    #[test]
+    fn rust_grep_limit_truncation_reports_limit_plus_one_total() {
+        let root = temp_root("rust-grep-limit");
+        let content = (1..=10)
+            .map(|index| format!("line {index} needle"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        write_bytes(&root, "many.txt", content.as_bytes());
+        let arguments = NormalizedGrepArguments {
+            pattern: "needle".to_string(),
+            requested_path: ".".to_string(),
+            glob: None,
+            ignore_case: false,
+            literal: false,
+            context: 0,
+            limit: 3,
+        };
+
+        let outcome = rust_grep(&root, &root, &arguments, &CancellationToken::new())
+            .expect("limit search should succeed");
+
+        assert_eq!(outcome.shown_matches, 3);
+        assert_eq!(outcome.total_matches, 4);
+        assert!(outcome.match_truncated);
+        assert!(outcome.truncated);
+        assert!(outcome.content.contains("many.txt:1:line 1 needle"));
+        assert!(outcome.content.contains("many.txt:3:line 3 needle"));
+        assert!(!outcome.content.contains("many.txt:4:line 4 needle"));
+        cleanup(&root);
+    }
+
+    #[test]
+    fn rust_grep_limit_preserves_after_context_for_last_shown_match() {
+        let root = temp_root("rust-grep-limit-context");
+        write_bytes(
+            &root,
+            "limit-context.txt",
+            b"first needle\nextra needle\nanother extra needle\ntail context\nfinal line\n",
+        );
+        let arguments = NormalizedGrepArguments {
+            pattern: "needle".to_string(),
+            requested_path: ".".to_string(),
+            glob: None,
+            ignore_case: false,
+            literal: false,
+            context: 3,
+            limit: 1,
+        };
+
+        let outcome = rust_grep(&root, &root, &arguments, &CancellationToken::new())
+            .expect("limit context search should succeed");
+
+        assert_eq!(outcome.shown_matches, 1);
+        assert_eq!(outcome.total_matches, 2);
+        assert!(outcome.match_truncated);
+        assert!(outcome.content.contains("limit-context.txt:1:first needle"));
+        assert!(outcome.content.contains("limit-context.txt-2:extra needle"));
+        assert!(
+            outcome
+                .content
+                .contains("limit-context.txt-3:another extra needle")
+        );
+        assert!(outcome.content.contains("limit-context.txt-4:tail context"));
+        assert!(!outcome.content.contains("limit-context.txt-5:final line"));
+        cleanup(&root);
+    }
+
+    #[test]
+    fn rust_grep_truncates_long_lines_and_reports_lines_truncated() {
+        let root = temp_root("rust-grep-line-truncation");
+        let long_prefix = "x".repeat(GREP_MAX_LINE_CHARS + 20);
+        write_bytes(
+            &root,
+            "long.txt",
+            format!("{long_prefix} needle\n").as_bytes(),
+        );
+        let arguments = NormalizedGrepArguments {
+            pattern: "needle".to_string(),
+            requested_path: ".".to_string(),
+            glob: None,
+            ignore_case: false,
+            literal: false,
+            context: 0,
+            limit: 10,
+        };
+
+        let outcome = rust_grep(&root, &root, &arguments, &CancellationToken::new())
+            .expect("long line search should succeed");
+
+        assert!(outcome.lines_truncated);
+        assert!(outcome.truncated);
+        assert!(
+            outcome.content.contains(&format!(
+                "long.txt:1:{}...",
+                "x".repeat(GREP_MAX_LINE_CHARS)
+            )),
+            "unexpected content: {}",
+            outcome.content
+        );
+        cleanup(&root);
+    }
+
+    #[test]
+    fn rust_grep_anchors_match_whole_lines_not_whole_file() {
+        let root = temp_root("rust-grep-anchors");
+        write_bytes(&root, "anchors.txt", b"needle\nx needle\ny\nneedle z\n");
+        write_bytes(
+            &root,
+            "anchors-crlf.txt",
+            b"needle\r\nx needle\r\ny\r\nneedle z\r\n",
+        );
+        let arguments = NormalizedGrepArguments {
+            pattern: "^needle$".to_string(),
+            requested_path: ".".to_string(),
+            glob: None,
+            ignore_case: false,
+            literal: false,
+            context: 0,
+            limit: 10,
+        };
+
+        let outcome = rust_grep(&root, &root, &arguments, &CancellationToken::new())
+            .expect("anchored search should succeed");
+
+        assert_eq!(outcome.total_matches, 2);
+        assert!(outcome.content.contains("anchors.txt:1:needle"));
+        assert!(!outcome.content.contains("anchors.txt:2"));
+        assert!(!outcome.content.contains("anchors.txt:4"));
+        assert!(outcome.content.contains("anchors-crlf.txt:1:needle"));
+        assert!(!outcome.content.contains("anchors-crlf.txt:2"));
+        assert!(!outcome.content.contains("anchors-crlf.txt:4"));
+        cleanup(&root);
+    }
+
     #[cfg(unix)]
     fn write_executable(root: &Path, name: &str, content: &str) -> PathBuf {
         let path = root.join(name);
@@ -987,6 +1616,25 @@ fi
             std::env::temp_dir().join(format!("hunea-{prefix}-{}-{stamp}", std::process::id()));
         fs::create_dir_all(&root).expect("create temp root");
         root
+    }
+
+    fn write_bytes(root: &Path, name: &str, bytes: &[u8]) -> PathBuf {
+        let path = root.join(name);
+        {
+            use std::io::Write;
+
+            let mut file = fs::File::create(&path).expect("create test file");
+            file.write_all(bytes).expect("write test file");
+        }
+        path
+    }
+
+    fn utf16le_with_bom(text: &str) -> Vec<u8> {
+        let mut bytes = vec![0xFF, 0xFE];
+        for unit in text.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        bytes
     }
 
     fn cleanup(path: &Path) {

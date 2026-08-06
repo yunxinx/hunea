@@ -1406,6 +1406,71 @@ fn runtime_readfile_title_fallback_renders_compact_summary_even_without_read_kin
 }
 
 #[test]
+fn view_image_absolute_path_uses_shared_compact_display_policy() {
+    let absolute_path = std::env::current_dir()
+        .expect("test should run inside the workspace")
+        .join("assets/pixel.png");
+    let raw_path = absolute_path.display().to_string();
+    let item = ToolResultItem::from_runtime_tool_activity(
+        RuntimeToolActivity {
+            activity_id: "call-view-image".to_string(),
+            title: format!("View Image {raw_path}"),
+            kind: RuntimeToolKind::Read,
+            status: RuntimeToolActivityStatus::Completed,
+            content: Vec::new(),
+            locations: vec![RuntimeToolActivityLocation {
+                path: raw_path.clone(),
+                line: None,
+            }],
+            raw_input: Some(serde_json::json!({ "path": raw_path }).into()),
+            raw_output: None,
+        },
+        ToolActivityRenderMode::Compact,
+    );
+    let rendered_plain = item
+        .render_lines(80, default_palette())
+        .iter()
+        .map(line_to_plain_text)
+        .collect::<Vec<_>>();
+
+    assert_eq!(rendered_plain, vec!["● Read assets/pixel.png".to_string()]);
+}
+
+#[test]
+fn search_absolute_path_uses_shared_compact_display_policy() {
+    let absolute_path = std::env::current_dir()
+        .expect("test should run inside the workspace")
+        .join("crates/tool-runtime");
+    let call = completed_grep_call("needle", Some(&absolute_path.display().to_string()));
+    let item = ToolResultItem::from_runtime_tool_activity(call, ToolActivityRenderMode::Compact);
+    let rendered_plain = item
+        .render_lines(120, default_palette())
+        .iter()
+        .map(line_to_plain_text)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        rendered_plain,
+        vec!["● Grep needle in crates/tool-runtime".to_string()]
+    );
+}
+
+#[test]
+fn compact_location_suffix_uses_shared_display_policy() {
+    let absolute_path = std::env::current_dir()
+        .expect("test should run inside the workspace")
+        .join("src/lib.rs");
+
+    let suffix =
+        super::activity::runtime_tool_activity_location_suffix(&[RuntimeToolActivityLocation {
+            path: absolute_path.display().to_string(),
+            line: Some(7),
+        }]);
+
+    assert_eq!(suffix.as_deref(), Some("src/lib.rs:7"));
+}
+
+#[test]
 fn list_dir_root_renders_compact_summary_without_content_details() {
     let item = ToolResultItem::from_runtime_tool_activity(
         RuntimeToolActivity {

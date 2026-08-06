@@ -6,9 +6,9 @@ mod workspace_file;
 
 pub use command::bash_tool;
 pub use search::{
-    ManagedSearchToolConfig, ManagedToolInstallError, ManagedToolKind, ManagedToolProgress,
-    ManagedToolStatus, detect_managed_tool_status, find_tool, grep_tool,
-    install_managed_tool_with_progress,
+    MANAGED_RIPGREP_NAME, MANAGED_RIPGREP_VERSION, ManagedRipgrepConfig,
+    ManagedRipgrepInstallError, ManagedRipgrepProgress, ManagedRipgrepStatus,
+    detect_managed_ripgrep_status, find_tool, grep_tool, install_managed_ripgrep_with_progress,
 };
 pub use workspace_file::{
     WorkspaceToolRegistryOptions, edit_tool, list_dir_tool, read_tool, view_image_tool,

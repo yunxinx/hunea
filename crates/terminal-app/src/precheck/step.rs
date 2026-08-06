@@ -34,7 +34,7 @@ pub(crate) enum PrecheckStep {
     ConfigAccessibility(steps::ConfigAccessibilityWidget),
     PortableModeConfirm(steps::PortableModeConfirmWidget),
     PortableModeRecovery(steps::PortableModeRecoveryWidget),
-    SearchToolPrecheck(steps::SearchToolPrecheckWidget),
+    RipgrepPrecheck(steps::RipgrepPrecheckWidget),
 }
 
 impl StepStateProvider for PrecheckStep {
@@ -43,7 +43,7 @@ impl StepStateProvider for PrecheckStep {
             Self::ConfigAccessibility(w) => w.step_state(),
             Self::PortableModeConfirm(w) => w.step_state(),
             Self::PortableModeRecovery(w) => w.step_state(),
-            Self::SearchToolPrecheck(w) => w.step_state(),
+            Self::RipgrepPrecheck(w) => w.step_state(),
         }
     }
 }
@@ -54,7 +54,7 @@ impl KeyboardHandler for PrecheckStep {
             Self::ConfigAccessibility(w) => w.handle_key_event(key),
             Self::PortableModeConfirm(w) => w.handle_key_event(key),
             Self::PortableModeRecovery(w) => w.handle_key_event(key),
-            Self::SearchToolPrecheck(w) => w.handle_key_event(key),
+            Self::RipgrepPrecheck(w) => w.handle_key_event(key),
         }
     }
 }
@@ -65,7 +65,7 @@ impl StepRenderer for PrecheckStep {
             Self::ConfigAccessibility(w) => w.render(area, buf),
             Self::PortableModeConfirm(w) => w.render(area, buf),
             Self::PortableModeRecovery(w) => w.render(area, buf),
-            Self::SearchToolPrecheck(w) => w.render(area, buf),
+            Self::RipgrepPrecheck(w) => w.render(area, buf),
         }
     }
 }

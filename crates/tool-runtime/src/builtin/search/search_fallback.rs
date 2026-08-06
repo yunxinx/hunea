@@ -59,29 +59,31 @@ pub(crate) struct HeadTruncation {
     pub output_bytes: usize,
 }
 
-pub(crate) fn workspace_relative_path(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .components()
-        .map(|component| component.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/")
+pub(crate) fn search_relative_path<'a>(search_root: &Path, path: &'a Path) -> &'a Path {
+    path.strip_prefix(search_root).unwrap_or(path)
 }
 
-pub(crate) fn workspace_relative_cli_path(root: &Path, path: &Path) -> String {
-    let relative_path = workspace_relative_path(root, path);
-    if relative_path.is_empty() {
-        ".".to_string()
+pub(crate) fn model_search_path(workspace_root: &Path, path: &Path) -> String {
+    if let Ok(relative) = path.strip_prefix(workspace_root)
+        && !relative.as_os_str().is_empty()
+    {
+        normalized_path_text(relative)
     } else {
-        relative_path
+        normalized_path_text(path)
     }
 }
 
-pub(crate) fn build_workspace_walker(
-    root: &Path,
-    start_path: &Path,
-    include_hidden: bool,
-) -> ignore::Walk {
+fn normalized_path_text(path: &Path) -> String {
+    let normalized = path.components().collect::<PathBuf>();
+    let text = normalized.to_string_lossy();
+    if std::path::MAIN_SEPARATOR == '/' {
+        text.into_owned()
+    } else {
+        text.replace(std::path::MAIN_SEPARATOR, "/")
+    }
+}
+
+pub(crate) fn build_search_walker(start_path: &Path, include_hidden: bool) -> ignore::Walk {
     let mut builder = WalkBuilder::new(start_path);
     builder
         .standard_filters(true)
@@ -93,9 +95,6 @@ pub(crate) fn build_workspace_walker(
         .hidden(!include_hidden)
         .sort_by_file_name(|left, right| left.cmp(right))
         .filter_entry(|entry| !is_vcs_directory_name(entry.file_name()));
-    if start_path != root {
-        builder.add_custom_ignore_filename(".gitignore");
-    }
     builder.build()
 }
 
@@ -125,9 +124,18 @@ pub(crate) fn compile_glob(pattern: &str) -> Result<GlobMatcher, SearchToolError
         })
 }
 
-pub(crate) fn path_matches_glob(root: &Path, path: &Path, matcher: &GlobMatcher) -> bool {
-    let relative = PathBuf::from(workspace_relative_path(root, path));
-    matcher.is_match(relative)
+pub(crate) fn path_matches_glob(
+    search_root: &Path,
+    search_root_is_file: bool,
+    path: &Path,
+    matcher: &GlobMatcher,
+) -> bool {
+    let target = if search_root_is_file {
+        path.file_name().map(Path::new).unwrap_or(path)
+    } else {
+        search_relative_path(search_root, path)
+    };
+    matcher.is_match(target)
 }
 
 pub(crate) fn truncate_line(text: &str, max_chars: usize) -> (String, bool) {
@@ -215,11 +223,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn workspace_root_becomes_dot_for_external_cli_arguments() {
+    fn model_search_paths_preserve_workspace_and_external_identity() {
         let root = Path::new("/workspace");
 
-        assert_eq!(workspace_relative_cli_path(root, root), ".");
-        assert_eq!(workspace_relative_cli_path(root, &root.join("src")), "src");
+        assert_eq!(
+            model_search_path(root, &root.join("src/lib.rs")),
+            "src/lib.rs"
+        );
+        assert_eq!(
+            model_search_path(root, Path::new("/external/lib.rs")),
+            "/external/lib.rs"
+        );
+        assert_eq!(
+            model_search_path(root, Path::new("/external/./lib.rs")),
+            "/external/lib.rs"
+        );
+        assert_eq!(
+            search_relative_path(&root.join("src"), &root.join("src/lib.rs")),
+            Path::new("lib.rs")
+        );
     }
 
     #[tokio::test]

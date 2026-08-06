@@ -23,6 +23,7 @@ fn resolve_non_interactive_present_marker_yields_portable() {
         result.data_dir_resolution.data_dir(),
         working_dir.join(".hunea")
     );
+    assert!(result.managed_ripgrep_outcome.is_none());
 }
 
 #[test]

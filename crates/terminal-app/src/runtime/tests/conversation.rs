@@ -595,22 +595,32 @@ fn manual_skill_mentions_emit_synthetic_skill_usage_events_before_worker_failure
         .expect("conversation should start");
 
     let events = RuntimeCoordinator::drain_runtime_events(&mut coordinator);
-    assert!(matches!(
-        events.as_slice(),
-        [RuntimeEvent::ToolActivityStarted { activity, .. }]
-            if activity.title.ends_with(".agents/skills/code-review/SKILL.md")
-                && activity.raw_input.as_ref().and_then(|raw| raw.string_field(&["hunea_skill_name"]))
-                    == Some("code-review".to_string())
-    ));
-
-    let failure = wait_for_runtime_event(
-        &mut coordinator,
-        |event| match event {
+    assert!(
+        matches!(
+            events.first(),
+            Some(RuntimeEvent::ToolActivityStarted { activity, .. })
+                if activity.title.ends_with(".agents/skills/code-review/SKILL.md")
+                    && activity.raw_input.as_ref().and_then(|raw| raw.string_field(&["hunea_skill_name"]))
+                        == Some("code-review".to_string())
+        ),
+        "synthetic manual-skill activity should precede worker failure: {events:#?}"
+    );
+    let failure = events
+        .into_iter()
+        .find_map(|event| match event {
             RuntimeEvent::Failed { message, .. } => Some(message),
             _ => None,
-        },
-        "worker failure after synthetic skill usage event",
-    );
+        })
+        .unwrap_or_else(|| {
+            wait_for_runtime_event(
+                &mut coordinator,
+                |event| match event {
+                    RuntimeEvent::Failed { message, .. } => Some(message),
+                    _ => None,
+                },
+                "worker failure after synthetic skill usage event",
+            )
+        });
     assert!(
         failure.contains("requires API key"),
         "worker should still fail through the normal runtime path: {failure}"

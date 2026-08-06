@@ -398,13 +398,6 @@ pub struct ProviderRequestMetrics {
     pub duration: Duration,
 }
 
-/// `ManagedSearchTool` 标识可由 app 层持久化授权的受管搜索工具。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ManagedSearchTool {
-    Ripgrep,
-    Fd,
-}
-
 /// `ConversationEvent` 是对话 worker 暴露给消费层的事件。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConversationEvent {

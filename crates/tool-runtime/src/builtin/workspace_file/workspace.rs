@@ -7,7 +7,7 @@ use crate::ToolExecutorRegistry;
 
 use super::super::{
     command::bash,
-    search::{ManagedSearchToolConfig, find, grep},
+    search::{ManagedRipgrepConfig, find, grep},
 };
 use super::{
     error::WorkspaceFileError,
@@ -18,20 +18,20 @@ use super::{
 
 /// `WorkspaceToolRegistryOptions` 保存 workspace builtin 工具注册时的窄配置。
 ///
-/// `managed_root` 是受管工具（rg/fd）的下载安装根，源自 `DataDirResolution::config_dir()`
+/// `managed_root` 是 managed ripgrep 的下载安装根，源自 `DataDirResolution::config_dir()`
 /// （全局 `~/.config/hunea/` 或便携 `<working_dir>/.hunea/`），由调用方注入。
 /// 故意不兼容旧版 `~/.hunea` 硬编码根：无迁移、无双路径查找。
 /// Default 用 `.hunea` 占位，仅测试路径使用；生产路径必显式设置。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceToolRegistryOptions {
-    pub managed_search_tools: ManagedSearchToolConfig,
+    pub managed_ripgrep: ManagedRipgrepConfig,
     pub managed_root: PathBuf,
 }
 
 impl Default for WorkspaceToolRegistryOptions {
     fn default() -> Self {
         Self {
-            managed_search_tools: ManagedSearchToolConfig::default(),
+            managed_ripgrep: ManagedRipgrepConfig::default(),
             managed_root: PathBuf::from(".hunea"),
         }
     }
@@ -66,14 +66,10 @@ pub fn workspace_readonly_tool_registry_with_options(
     ));
     registry.insert(grep::grep_tool_with_config(
         &root,
-        options.managed_search_tools.clone(),
+        options.managed_ripgrep.clone(),
         options.managed_root.clone(),
     ));
-    registry.insert(find::find_tool_with_config(
-        &root,
-        options.managed_search_tools,
-        options.managed_root,
-    ));
+    registry.insert(find::find_tool(&root));
     registry
 }
 
@@ -107,14 +103,10 @@ pub fn workspace_tool_registry_with_options(
     ));
     registry.insert(grep::grep_tool_with_config(
         &root,
-        options.managed_search_tools.clone(),
+        options.managed_ripgrep.clone(),
         options.managed_root.clone(),
     ));
-    registry.insert(find::find_tool_with_config(
-        &root,
-        options.managed_search_tools,
-        options.managed_root,
-    ));
+    registry.insert(find::find_tool(&root));
     registry.insert(super::write::write_tool_with_access(
         &root,
         access.clone(),
@@ -131,7 +123,7 @@ pub fn workspace_tool_registry_with_options(
     registry
 }
 
-pub(crate) fn resolve_workspace_path(
+pub(crate) fn resolve_read_path(
     access: &dyn WorkspaceAccess,
     root: &Path,
     requested: &str,
@@ -153,19 +145,12 @@ pub(crate) fn resolve_workspace_path(
     } else {
         root.join(requested_path)
     };
-    let candidate =
-        access
-            .canonicalize(&candidate)
-            .map_err(|source| WorkspaceFileError::PathNotFound {
-                requested: requested.to_string(),
-                source,
-            })?;
-    if !candidate.starts_with(&root) {
-        return Err(WorkspaceFileError::PathOutsideWorkspace {
+    access
+        .canonicalize(&candidate)
+        .map_err(|source| WorkspaceFileError::PathNotFound {
             requested: requested.to_string(),
-        });
-    }
-    Ok(candidate)
+            source,
+        })
 }
 
 pub(crate) fn resolve_workspace_write_path(
@@ -290,22 +275,32 @@ mod tests {
     use super::super::workspace_access::{
         WorkspaceAccess, WorkspaceDirectoryEntry, WorkspaceMetadata,
     };
-    use super::{super::error::WorkspaceFileError, resolve_workspace_path};
+    use super::{super::error::WorkspaceFileError, resolve_read_path};
 
     struct FakeWorkspaceAccess {
         canonical_paths: HashMap<PathBuf, PathBuf>,
+        canonical_errors: HashMap<PathBuf, io::ErrorKind>,
     }
 
     impl FakeWorkspaceAccess {
         fn new(canonical_paths: impl IntoIterator<Item = (PathBuf, PathBuf)>) -> Self {
             Self {
                 canonical_paths: canonical_paths.into_iter().collect(),
+                canonical_errors: HashMap::new(),
             }
+        }
+
+        fn with_canonical_error(mut self, path: PathBuf, kind: io::ErrorKind) -> Self {
+            self.canonical_errors.insert(path, kind);
+            self
         }
     }
 
     impl WorkspaceAccess for FakeWorkspaceAccess {
         fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+            if let Some(kind) = self.canonical_errors.get(path) {
+                return Err(io::Error::new(*kind, "canonical path is inaccessible"));
+            }
             self.canonical_paths
                 .get(path)
                 .cloned()
@@ -335,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_workspace_path_uses_workspace_access_canonicalization() {
+    fn resolve_read_path_uses_workspace_access_canonicalization() {
         let access = FakeWorkspaceAccess::new([
             (
                 PathBuf::from("/workspace-link"),
@@ -348,13 +343,13 @@ mod tests {
         ]);
 
         let resolved =
-            resolve_workspace_path(&access, Path::new("/workspace-link"), "src/lib.rs").unwrap();
+            resolve_read_path(&access, Path::new("/workspace-link"), "src/lib.rs").unwrap();
 
         assert_eq!(resolved, PathBuf::from("/srv/workspace/src/lib.rs"));
     }
 
     #[test]
-    fn resolve_workspace_path_rejects_paths_outside_workspace_after_backend_resolution() {
+    fn resolve_read_path_accepts_paths_outside_workspace_after_backend_resolution() {
         let access = FakeWorkspaceAccess::new([
             (
                 PathBuf::from("/workspace-link"),
@@ -363,23 +358,20 @@ mod tests {
             (PathBuf::from("/etc/passwd"), PathBuf::from("/etc/passwd")),
         ]);
 
-        let error = resolve_workspace_path(&access, Path::new("/workspace-link"), "/etc/passwd")
-            .expect_err("outside path should be rejected");
+        let resolved = resolve_read_path(&access, Path::new("/workspace-link"), "/etc/passwd")
+            .expect("read paths outside the workspace should be accepted");
 
-        assert!(matches!(
-            error,
-            WorkspaceFileError::PathOutsideWorkspace { requested } if requested == "/etc/passwd"
-        ));
+        assert_eq!(resolved, PathBuf::from("/etc/passwd"));
     }
 
     #[test]
-    fn resolve_workspace_path_preserves_not_found_source() {
+    fn resolve_read_path_preserves_not_found_source() {
         let access = FakeWorkspaceAccess::new([(
             PathBuf::from("/workspace-link"),
             PathBuf::from("/srv/workspace"),
         )]);
 
-        let error = resolve_workspace_path(&access, Path::new("/workspace-link"), "missing.txt")
+        let error = resolve_read_path(&access, Path::new("/workspace-link"), "missing.txt")
             .expect_err("missing path should be rejected");
 
         let WorkspaceFileError::PathNotFound { requested, source } = error else {
@@ -387,5 +379,26 @@ mod tests {
         };
         assert_eq!(requested, "missing.txt");
         assert_eq!(source.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn resolve_read_path_preserves_inaccessible_source() {
+        let access = FakeWorkspaceAccess::new([(
+            PathBuf::from("/workspace-link"),
+            PathBuf::from("/srv/workspace"),
+        )])
+        .with_canonical_error(
+            PathBuf::from("/srv/workspace/denied.txt"),
+            io::ErrorKind::PermissionDenied,
+        );
+
+        let error = resolve_read_path(&access, Path::new("/workspace-link"), "denied.txt")
+            .expect_err("inaccessible path should be rejected");
+
+        let WorkspaceFileError::PathNotFound { requested, source } = error else {
+            panic!("inaccessible path should retain the filesystem source error");
+        };
+        assert_eq!(requested, "denied.txt");
+        assert_eq!(source.kind(), io::ErrorKind::PermissionDenied);
     }
 }

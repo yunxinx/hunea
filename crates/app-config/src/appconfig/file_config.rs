@@ -47,7 +47,6 @@ pub(super) struct FileRuntimeConfig {
     pub(super) request_timeout_seconds: Option<u64>,
     pub(super) tool_max_turns: Option<usize>,
     pub(super) allow_managed_rg: Option<bool>,
-    pub(super) allow_managed_fd: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

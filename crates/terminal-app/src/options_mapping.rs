@@ -11,7 +11,7 @@ use terminal_ui::{
     MotionMode as TuiMotionMode, ReasoningDisplayMode, RuntimeRequestPolicy,
     ScrollAnimationMode as TuiScrollAnimationMode, StatusLineItem, StyleMode,
 };
-use tool_runtime::builtin::ManagedSearchToolConfig;
+use tool_runtime::builtin::ManagedRipgrepConfig;
 
 use crate::runtime::AppRuntimeOptions;
 
@@ -105,7 +105,7 @@ pub(crate) fn runtime_options_from_app_config_and_models(
     AppRuntimeOptions {
         loaded_models: loaded_models.clone(),
         runtime_request_policy: runtime_request_policy_from_config(&config.runtime),
-        managed_search_tools: managed_search_tools_from_config(&config.runtime),
+        managed_ripgrep: managed_ripgrep_from_config(&config.runtime),
         // AGENTS.md 等用户级文件的数据目录由预检注入。
         hunea_config_dir: data_dir_resolution.config_dir().to_path_buf(),
         session_store: None,
@@ -127,10 +127,9 @@ fn runtime_request_policy_from_config(config: &RuntimeConfig) -> RuntimeRequestP
     .with_tool_max_turns(config.tool_max_turns)
 }
 
-fn managed_search_tools_from_config(config: &RuntimeConfig) -> ManagedSearchToolConfig {
-    ManagedSearchToolConfig {
+fn managed_ripgrep_from_config(config: &RuntimeConfig) -> ManagedRipgrepConfig {
+    ManagedRipgrepConfig {
         allow_managed_rg: config.allow_managed_rg,
-        allow_managed_fd: config.allow_managed_fd,
     }
 }
 

@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     env,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     rc::Rc,
     time::Instant,
 };
@@ -16,7 +16,6 @@ use crate::{
     theme::{TerminalPalette, secondary_text_style},
     transcript::{TRANSCRIPT_DETAIL_HINT, markdown_highlight::HighlightChunk},
 };
-use runtime_domain::envinfo::shorten_home_prefix;
 use runtime_domain::session::{
     RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityContent,
     RuntimeToolActivityLocation, RuntimeToolActivityStatus, RuntimeToolKind,
@@ -763,8 +762,8 @@ pub(super) fn runtime_tool_activity_location_suffix(
         locations
             .iter()
             .map(|location| match location.line {
-                Some(line) => format!("{}:{line}", location.path),
-                None => location.path.clone(),
+                Some(line) => format!("{}:{line}", runtime_display_path(&location.path)),
+                None => runtime_display_path(&location.path),
             })
             .collect::<Vec<_>>()
             .join(", "),
@@ -906,7 +905,7 @@ pub(super) fn specific_search_tool_activity_parts(
     Some(SpecificSearchToolActivityParts {
         action,
         pattern,
-        path: list_dir_display_path(&path),
+        path: runtime_display_path(&path),
     })
 }
 
@@ -1154,65 +1153,7 @@ fn list_dir_tool_call_target(call: &RuntimeToolActivity) -> String {
         })
         .unwrap_or_else(|| ".".to_string());
 
-    list_dir_display_path(&target)
-}
-
-fn list_dir_display_path(path: &str) -> String {
-    let path = path.trim();
-    if path.is_empty() || path == "." {
-        return ".".to_string();
-    }
-
-    let path_ref = Path::new(path);
-    if !path_ref.is_absolute() {
-        return relative_display_path(path_ref);
-    }
-
-    if let Ok(cwd) = env::current_dir() {
-        if path_ref == cwd {
-            return ".".to_string();
-        }
-        if let Ok(stripped) = path_ref.strip_prefix(cwd)
-            && !stripped.as_os_str().is_empty()
-        {
-            return relative_display_path(stripped);
-        }
-    }
-
-    detect_home_dir()
-        .map(|home_dir| shorten_home_prefix(path_ref, &home_dir))
-        .unwrap_or_else(|| path_ref.display().to_string())
-}
-
-fn relative_display_path(path: &Path) -> String {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::Normal(part) => normalized.push(part),
-            Component::ParentDir => normalized.push(".."),
-            Component::RootDir | Component::Prefix(_) => normalized.push(component.as_os_str()),
-        }
-    }
-
-    if normalized.as_os_str().is_empty() {
-        ".".to_string()
-    } else {
-        normalized.display().to_string()
-    }
-}
-
-fn detect_home_dir() -> Option<PathBuf> {
-    env::var_os("HOME")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("USERPROFILE").map(PathBuf::from))
-        .or_else(|| {
-            let home_drive = env::var_os("HOMEDRIVE")?;
-            let home_path = env::var_os("HOMEPATH")?;
-            let mut path = PathBuf::from(home_drive);
-            path.push(home_path);
-            Some(path)
-        })
+    runtime_display_path(&target)
 }
 
 fn runtime_tool_kind_label(kind: RuntimeToolKind) -> &'static str {

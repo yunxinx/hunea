@@ -16,99 +16,46 @@ use super::error::SearchToolError;
 const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 /// spawn `--version` 超时，防止挂起候选阻塞启动。
 const SPAWN_VERIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const SPAWN_VERIFY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
 /// 下载进度节流：避免每个 chunk 都塞 channel。
 const PROGRESS_EMIT_BYTES: u64 = 64 * 1024;
 const PROGRESS_EMIT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
-/// `ManagedSearchToolConfig` 保存 `rg` / `fd` 受管安装的授权配置面。
+/// `ManagedRipgrepConfig` 保存 managed ripgrep 的授权配置面。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ManagedSearchToolConfig {
+pub struct ManagedRipgrepConfig {
     pub allow_managed_rg: Option<bool>,
-    pub allow_managed_fd: Option<bool>,
 }
 
-impl ManagedSearchToolConfig {
-    pub fn allows(&self, tool: ManagedToolKind) -> bool {
-        match tool {
-            ManagedToolKind::Ripgrep => self.allow_managed_rg == Some(true),
-            ManagedToolKind::Fd => self.allow_managed_fd == Some(true),
-        }
+impl ManagedRipgrepConfig {
+    pub fn allows(&self) -> bool {
+        self.allow_managed_rg == Some(true)
     }
 
     /// 区分「未配置」与「明确拒绝」：仅 `Some(false)` 返回 true。
-    pub fn rejects(&self, tool: ManagedToolKind) -> bool {
-        match tool {
-            ManagedToolKind::Ripgrep => self.allow_managed_rg == Some(false),
-            ManagedToolKind::Fd => self.allow_managed_fd == Some(false),
-        }
+    pub fn rejects(&self) -> bool {
+        self.allow_managed_rg == Some(false)
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ManagedToolKind {
-    Ripgrep,
-    Fd,
-}
+const RIPGREP_BINARY_NAME: &str = "rg";
+/// Managed ripgrep 在 precheck 与安装器中共享的展示名。
+pub const MANAGED_RIPGREP_NAME: &str = "ripgrep";
+/// Managed ripgrep 固定安装版本。
+pub const MANAGED_RIPGREP_VERSION: &str = "15.1.0";
+const RIPGREP_REPOSITORY: &str = "BurntSushi/ripgrep";
 
-impl ManagedToolKind {
-    pub const fn binary_name(self) -> &'static str {
-        match self {
-            Self::Ripgrep => "rg",
-            Self::Fd => "fd",
-        }
-    }
-
-    pub const fn system_binary_names(self) -> &'static [&'static str] {
-        match self {
-            Self::Ripgrep => &["rg"],
-            Self::Fd => &["fd", "fdfind"],
-        }
-    }
-
-    /// 编译期固定 pin 版本，供下载与目录命名使用。
-    pub const fn version(self) -> &'static str {
-        match self {
-            Self::Ripgrep => "15.1.0",
-            Self::Fd => "10.3.0",
-        }
-    }
-
-    pub const fn display_name(self) -> &'static str {
-        match self {
-            Self::Ripgrep => "rg",
-            Self::Fd => "fd",
-        }
-    }
-
-    pub const fn repository(self) -> &'static str {
-        match self {
-            Self::Ripgrep => "BurntSushi/ripgrep",
-            Self::Fd => "sharkdp/fd",
-        }
-    }
-
-    pub const fn executable_file_name(self) -> &'static str {
-        #[cfg(windows)]
-        {
-            match self {
-                Self::Ripgrep => "rg.exe",
-                Self::Fd => "fd.exe",
-            }
-        }
-        #[cfg(not(windows))]
-        {
-            self.binary_name()
-        }
-    }
-
-    fn manifest(self) -> Option<ManagedToolManifest> {
-        manifest_for_current_platform(self)
+fn ripgrep_executable_file_name() -> &'static str {
+    if cfg!(windows) {
+        "rg.exe"
+    } else {
+        RIPGREP_BINARY_NAME
     }
 }
 
-/// 受管工具可用性（纯检测，无网络）。
+/// Managed ripgrep 可用性（纯检测，无网络）。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ManagedToolStatus {
+pub enum ManagedRipgrepStatus {
     SystemPath(PathBuf),
     Bundled(PathBuf),
     ManagedReady(PathBuf),
@@ -116,7 +63,7 @@ pub enum ManagedToolStatus {
     NeedsRebuild,
     /// 未授权且不可用，需用户决策。
     NeedsDownload,
-    /// `allow_managed_* = Some(false)`。
+    /// `allow_managed_rg = Some(false)`。
     NotAuthorized,
     /// Termux/Android：managed 二进制不兼容。
     AndroidIncompatible,
@@ -124,7 +71,7 @@ pub enum ManagedToolStatus {
 
 /// 安装进度事件（precheck 通过 channel 接收）。
 #[derive(Debug, Clone)]
-pub enum ManagedToolProgress {
+pub enum ManagedRipgrepProgress {
     /// `bytes_total` 为 None 表示无 content-length。
     Downloading {
         bytes_received: u64,
@@ -141,16 +88,16 @@ pub enum ManagedToolProgress {
     },
 }
 
-/// 安装对外错误：不暴露内部 `SearchToolError`；详情走 `ManagedToolProgress::Failed`。
+/// 安装对外错误：不暴露内部 `SearchToolError`；详情走 `ManagedRipgrepProgress::Failed`。
 #[derive(Debug, thiserror::Error)]
-pub enum ManagedToolInstallError {
-    #[error("managed tool install interrupted")]
+pub enum ManagedRipgrepInstallError {
+    #[error("managed ripgrep install interrupted")]
     Interrupted,
     #[error("{message}")]
     Other { message: String },
 }
 
-impl From<SearchToolError> for ManagedToolInstallError {
+impl From<SearchToolError> for ManagedRipgrepInstallError {
     fn from(error: SearchToolError) -> Self {
         match error {
             SearchToolError::Interrupted => Self::Interrupted,
@@ -162,13 +109,13 @@ impl From<SearchToolError> for ManagedToolInstallError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ExternalToolBackend {
+pub(crate) enum RipgrepBackend {
     SystemPath,
     Bundled,
     Managed,
 }
 
-impl ExternalToolBackend {
+impl RipgrepBackend {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::SystemPath => "system_path",
@@ -179,34 +126,29 @@ impl ExternalToolBackend {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ExternalCommand {
+pub(crate) struct RipgrepCommand {
     pub(crate) path: PathBuf,
-    pub(crate) backend: ExternalToolBackend,
+    pub(crate) backend: RipgrepBackend,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ExternalCommandPlan {
-    Ready(ExternalCommand),
+pub(crate) enum RipgrepCommandPlan {
+    Ready(RipgrepCommand),
     Unavailable,
 }
 
 #[derive(Debug, Clone, Copy)]
-struct ManagedToolManifest {
+struct ManagedRipgrepManifest {
     asset_name: &'static str,
     sha256: &'static str,
     archive_kind: ArchiveKind,
 }
 
-impl ManagedToolManifest {
-    fn url(self, tool: ManagedToolKind) -> String {
-        let tag = match tool {
-            ManagedToolKind::Ripgrep => tool.version().to_string(),
-            ManagedToolKind::Fd => format!("v{}", tool.version()),
-        };
+impl ManagedRipgrepManifest {
+    fn url(self) -> String {
         format!(
-            "https://github.com/{}/releases/download/{tag}/{}",
-            tool.repository(),
-            self.asset_name
+            "https://github.com/{}/releases/download/{}/{}",
+            RIPGREP_REPOSITORY, MANAGED_RIPGREP_VERSION, self.asset_name
         )
     }
 }
@@ -218,7 +160,7 @@ enum ArchiveKind {
 }
 
 #[derive(Debug, Clone)]
-struct ManagedInstallPaths {
+struct RipgrepInstallPaths {
     archive_path: PathBuf,
     extract_dir: PathBuf,
     version_temp_dir: PathBuf,
@@ -227,57 +169,55 @@ struct ManagedInstallPaths {
     stable_entry: PathBuf,
 }
 
-pub(crate) fn resolve_external_command_plan(
-    tool: ManagedToolKind,
-    config: &ManagedSearchToolConfig,
+pub(crate) fn resolve_ripgrep_command_plan(
+    config: &ManagedRipgrepConfig,
     managed_root: &Path,
-) -> ExternalCommandPlan {
-    // 运行时只做文件检查，不 spawn。严格验证留给 precheck 的 detect_managed_tool_status；
-    // 合并两套会让热路径 fork 或让 precheck 变松。坏 system/bundled 由 managed_fallback_for 兜底。
+) -> RipgrepCommandPlan {
+    // 运行时只做文件检查，不 spawn。严格验证留给 precheck 的 detect_managed_ripgrep_status；
+    // 合并两套会让热路径 fork 或让 precheck 变松。坏 system/bundled 由 managed_ripgrep_fallback_for 兜底。
     //
-    // 授权契约：allow_managed_* 只管「下载/重建/静默装」；已装好的 managed 二进制能否用
+    // 授权契约：allow_managed_rg 只管「下载/重建/静默装」；已装好的 managed 二进制能否用
     // 只看 rejects（Some(false) 硬拒绝）。None/true 且文件在 → 可用。
-    if let Some(path) = find_system_binary_path(tool) {
-        return ExternalCommandPlan::Ready(ExternalCommand {
+    if let Some(path) = find_system_ripgrep_path() {
+        return RipgrepCommandPlan::Ready(RipgrepCommand {
             path,
-            backend: ExternalToolBackend::SystemPath,
+            backend: RipgrepBackend::SystemPath,
         });
     }
-    if let Some(path) = find_bundled_binary_path(tool) {
-        return ExternalCommandPlan::Ready(ExternalCommand {
+    if let Some(path) = find_bundled_ripgrep_path() {
+        return RipgrepCommandPlan::Ready(RipgrepCommand {
             path,
-            backend: ExternalToolBackend::Bundled,
+            backend: RipgrepBackend::Bundled,
         });
     }
-    if !config.rejects(tool)
-        && let Some(path) = managed_entry_file_exists(tool, managed_root)
+    if !config.rejects()
+        && let Some(path) = managed_ripgrep_entry_file_exists(managed_root)
     {
-        return ExternalCommandPlan::Ready(ExternalCommand {
+        return RipgrepCommandPlan::Ready(RipgrepCommand {
             path,
-            backend: ExternalToolBackend::Managed,
+            backend: RipgrepBackend::Managed,
         });
     }
-    ExternalCommandPlan::Unavailable
+    RipgrepCommandPlan::Unavailable
 }
 
 /// primary 非 managed 时，返回 managed 候选供执行失败后重试。
-/// 与 `resolve_external_command_plan` 同一授权契约：仅 `rejects` 挡住已装二进制。
-pub(crate) fn managed_fallback_for(
-    plan: &ExternalCommandPlan,
-    tool: ManagedToolKind,
-    config: &ManagedSearchToolConfig,
+/// 与 `resolve_ripgrep_command_plan` 同一授权契约：仅 `rejects` 挡住已装二进制。
+pub(crate) fn managed_ripgrep_fallback_for(
+    plan: &RipgrepCommandPlan,
+    config: &ManagedRipgrepConfig,
     managed_root: &Path,
-) -> Option<ExternalCommand> {
+) -> Option<RipgrepCommand> {
     match plan {
-        ExternalCommandPlan::Ready(cmd) if cmd.backend == ExternalToolBackend::Managed => None,
-        ExternalCommandPlan::Unavailable => None,
+        RipgrepCommandPlan::Ready(cmd) if cmd.backend == RipgrepBackend::Managed => None,
+        RipgrepCommandPlan::Unavailable => None,
         _ => {
-            if config.rejects(tool) {
+            if config.rejects() {
                 return None;
             }
-            managed_entry_file_exists(tool, managed_root).map(|path| ExternalCommand {
+            managed_ripgrep_entry_file_exists(managed_root).map(|path| RipgrepCommand {
                 path,
-                backend: ExternalToolBackend::Managed,
+                backend: RipgrepBackend::Managed,
             })
         }
     }
@@ -285,43 +225,42 @@ pub(crate) fn managed_fallback_for(
 
 /// 纯检测（spawn `--version`），无网络。顺序：system → bundled → managed → Android/授权。
 ///
-/// 已装好且 spawn 通过 → `ManagedReady`，不看 allow（与运行时「能跑就用」一致）。
-/// allow 只在 managed 不可用时决定 NeedsRebuild / NeedsDownload / NotAuthorized。
-pub fn detect_managed_tool_status(
-    tool: ManagedToolKind,
-    config: &ManagedSearchToolConfig,
+/// system/bundled ripgrep 不受 managed 授权影响；`Some(false)` 明确固定使用 Rust fallback，
+/// 因此不会探测、使用或提示重建 managed binary。
+pub fn detect_managed_ripgrep_status(
+    config: &ManagedRipgrepConfig,
     managed_root: &Path,
-) -> ManagedToolStatus {
-    if let Some(path) = find_system_binary_verified(tool) {
-        return ManagedToolStatus::SystemPath(path);
+) -> ManagedRipgrepStatus {
+    if let Some(path) = find_system_ripgrep_verified() {
+        return ManagedRipgrepStatus::SystemPath(path);
     }
-    if let Some(path) = find_bundled_binary_verified(tool) {
-        return ManagedToolStatus::Bundled(path);
+    if let Some(path) = find_bundled_ripgrep_verified() {
+        return ManagedRipgrepStatus::Bundled(path);
     }
-    if let Some(path) = usable_managed_entry_verified(tool, managed_root) {
-        return ManagedToolStatus::ManagedReady(path);
+    if config.rejects() {
+        return ManagedRipgrepStatus::NotAuthorized;
+    }
+    if let Some(path) = usable_managed_ripgrep_entry_verified(managed_root) {
+        return ManagedRipgrepStatus::ManagedReady(path);
     }
     // manifest 无 android 目标，下载也不可用。
     if env::consts::OS == "android" {
-        return ManagedToolStatus::AndroidIncompatible;
+        return ManagedRipgrepStatus::AndroidIncompatible;
     }
     // 已授权：文件在但 spawn 失败 → Rebuild；文件不在 → Download。
-    if config.allows(tool) {
-        if managed_entry_file_exists(tool, managed_root).is_some() {
-            return ManagedToolStatus::NeedsRebuild;
+    if config.allows() {
+        if managed_ripgrep_entry_file_exists(managed_root).is_some() {
+            return ManagedRipgrepStatus::NeedsRebuild;
         }
-        return ManagedToolStatus::NeedsDownload;
+        return ManagedRipgrepStatus::NeedsDownload;
     }
-    if config.rejects(tool) {
-        return ManagedToolStatus::NotAuthorized;
-    }
-    ManagedToolStatus::NeedsDownload
+    ManagedRipgrepStatus::NeedsDownload
 }
 
 // --- 轻量检查（运行时热路径用，只检查文件存在性与可执行权限）---
 
-fn find_system_binary_path(tool: ManagedToolKind) -> Option<PathBuf> {
-    tool.system_binary_names()
+fn find_system_ripgrep_path() -> Option<PathBuf> {
+    [RIPGREP_BINARY_NAME]
         .iter()
         .find_map(|name| find_executable_on_path(name))
 }
@@ -333,87 +272,87 @@ fn find_executable_on_path(binary_name: &str) -> Option<PathBuf> {
         .find(|candidate| is_executable_file(candidate))
 }
 
-fn find_bundled_binary_path(tool: ManagedToolKind) -> Option<PathBuf> {
+fn find_bundled_ripgrep_path() -> Option<PathBuf> {
     let executable_dir = env::current_exe().ok()?.parent()?.to_path_buf();
     [
         executable_dir
             .join("tools")
-            .join(tool.binary_name())
-            .join(tool.version())
-            .join(tool.executable_file_name()),
+            .join(RIPGREP_BINARY_NAME)
+            .join(MANAGED_RIPGREP_VERSION)
+            .join(ripgrep_executable_file_name()),
         executable_dir
             .join("tools")
-            .join(tool.executable_file_name()),
-        executable_dir.join(tool.executable_file_name()),
+            .join(ripgrep_executable_file_name()),
+        executable_dir.join(ripgrep_executable_file_name()),
     ]
     .into_iter()
     .find(|candidate| is_executable_file(candidate))
 }
 
-fn managed_entry_file_exists(tool: ManagedToolKind, managed_root: &Path) -> Option<PathBuf> {
-    let entry = managed_entry_path(tool, managed_root);
+fn managed_ripgrep_entry_file_exists(managed_root: &Path) -> Option<PathBuf> {
+    let entry = managed_ripgrep_entry_path(managed_root);
     is_executable_file(&entry).then_some(entry)
 }
 
 // --- spawn 验证（precheck 用，一次性，带超时）---
 
-fn find_system_binary_verified(tool: ManagedToolKind) -> Option<PathBuf> {
+fn find_system_ripgrep_verified() -> Option<PathBuf> {
     // 对 PATH 上全部候选 spawn 验证，避免坏的第一个短路后续可用项。
     let paths = env::var_os("PATH")?;
-    tool.system_binary_names()
+    [RIPGREP_BINARY_NAME]
         .iter()
         .flat_map(|name| env::split_paths(&paths).map(move |directory| directory.join(name)))
         .filter(|candidate| is_executable_file(candidate))
         .find(|path| verify_binary_via_spawn(path))
 }
 
-fn find_bundled_binary_verified(tool: ManagedToolKind) -> Option<PathBuf> {
-    find_bundled_binary_path(tool).filter(|path| verify_binary_via_spawn(path))
+fn find_bundled_ripgrep_verified() -> Option<PathBuf> {
+    find_bundled_ripgrep_path().filter(|path| verify_binary_via_spawn(path))
 }
 
-fn usable_managed_entry_verified(tool: ManagedToolKind, managed_root: &Path) -> Option<PathBuf> {
-    managed_entry_file_exists(tool, managed_root).filter(|path| verify_binary_via_spawn(path))
+fn usable_managed_ripgrep_entry_verified(managed_root: &Path) -> Option<PathBuf> {
+    managed_ripgrep_entry_file_exists(managed_root).filter(|path| verify_binary_via_spawn(path))
 }
 
-/// 带进度的受管工具安装。cancel 后清临时文件，不续传。`progress_tx` send 失败表示调用方已退出。
-pub async fn install_managed_tool_with_progress(
-    tool: ManagedToolKind,
+/// 带进度的 managed ripgrep 安装。cancel 后清临时文件，不续传。`progress_tx` send 失败表示调用方已退出。
+pub async fn install_managed_ripgrep_with_progress(
     managed_root: &Path,
     cancellation: CancellationToken,
-    progress_tx: &tokio::sync::mpsc::UnboundedSender<ManagedToolProgress>,
-) -> Result<PathBuf, ManagedToolInstallError> {
+    progress_tx: &tokio::sync::mpsc::UnboundedSender<ManagedRipgrepProgress>,
+) -> Result<PathBuf, ManagedRipgrepInstallError> {
     let outcome =
-        install_managed_tool_with_progress_inner(tool, managed_root, &cancellation, progress_tx)
-            .await;
+        install_managed_ripgrep_with_progress_inner(managed_root, &cancellation, progress_tx).await;
     match &outcome {
         Ok(path) => {
-            let _ = progress_tx.send(ManagedToolProgress::Ready { path: path.clone() });
+            let _ = progress_tx.send(ManagedRipgrepProgress::Ready { path: path.clone() });
         }
         Err(error) => {
-            let _ = progress_tx.send(ManagedToolProgress::Failed {
+            let _ = progress_tx.send(ManagedRipgrepProgress::Failed {
                 error: error.to_string(),
             });
         }
     }
-    outcome.map_err(ManagedToolInstallError::from)
+    outcome.map_err(ManagedRipgrepInstallError::from)
 }
 
-async fn install_managed_tool_with_progress_inner(
-    tool: ManagedToolKind,
+async fn install_managed_ripgrep_with_progress_inner(
     managed_root: &Path,
     cancellation: &CancellationToken,
-    progress_tx: &tokio::sync::mpsc::UnboundedSender<ManagedToolProgress>,
+    progress_tx: &tokio::sync::mpsc::UnboundedSender<ManagedRipgrepProgress>,
 ) -> Result<PathBuf, SearchToolError> {
     ensure_not_cancelled(cancellation)?;
-    let manifest = tool.manifest().ok_or(SearchToolError::NoManagedAsset {
-        tool: tool.display_name(),
-    })?;
-    let stable_entry = managed_entry_path(tool, managed_root);
-    let version_binary = managed_version_binary_path(tool, managed_root);
-    if is_executable_file(&stable_entry) && verify_binary_via_spawn(&stable_entry) {
+    let manifest =
+        ripgrep_manifest_for_current_platform().ok_or(SearchToolError::NoManagedRipgrepAsset)?;
+    let stable_entry = managed_ripgrep_entry_path(managed_root);
+    let version_binary = managed_ripgrep_version_binary_path(managed_root);
+    if is_executable_file(&stable_entry)
+        && verify_binary_on_blocking_pool(&stable_entry, cancellation).await?
+    {
         return Ok(stable_entry);
     }
-    if is_executable_file(&version_binary) && verify_binary_via_spawn(&version_binary) {
+    if is_executable_file(&version_binary)
+        && verify_binary_on_blocking_pool(&version_binary, cancellation).await?
+    {
         let cancellation = cancellation.clone();
         let version_binary = version_binary.clone();
         let stable_entry_for_update = stable_entry.clone();
@@ -432,27 +371,27 @@ async fn install_managed_tool_with_progress_inner(
     tokio::fs::create_dir_all(&temp_root)
         .await
         .map_err(|source| SearchToolError::PathIo {
-            operation: "create managed tools temp directory",
+            operation: "create managed ripgrep temp directory",
             path: temp_root.clone(),
             source,
         })?;
     let unique = format!(
         "{}-{}-{}",
-        tool.binary_name(),
+        RIPGREP_BINARY_NAME,
         std::process::id(),
         unix_millis()
     );
-    let paths = ManagedInstallPaths {
+    let paths = RipgrepInstallPaths {
         archive_path: temp_root.join(format!("{unique}.archive")),
         extract_dir: temp_root.join(format!("{unique}.extract")),
         version_temp_dir: temp_root.join(format!("{unique}.version")),
-        final_version_dir: managed_version_dir(tool, managed_root),
+        final_version_dir: managed_ripgrep_version_dir(managed_root),
         version_binary,
         stable_entry,
     };
 
     let install_result = async {
-        let url = manifest.url(tool);
+        let url = manifest.url();
         download_archive(&url, &paths.archive_path, cancellation, Some(progress_tx)).await?;
         let blocking_paths = paths.clone();
         let blocking_cancellation = cancellation.clone();
@@ -462,7 +401,7 @@ async fn install_managed_tool_with_progress_inner(
                 blocking_paths,
                 manifest.sha256,
                 manifest.archive_kind,
-                tool.executable_file_name(),
+                ripgrep_executable_file_name(),
                 blocking_cancellation,
                 Some(&progress_tx_for_blocking),
             )
@@ -484,13 +423,13 @@ async fn download_archive(
     url: &str,
     destination: &Path,
     cancellation: &CancellationToken,
-    progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<ManagedToolProgress>>,
+    progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<ManagedRipgrepProgress>>,
 ) -> Result<(), SearchToolError> {
     ensure_not_cancelled(cancellation)?;
     let parsed =
-        Url::parse(url).map_err(|source| SearchToolError::InvalidManagedToolUrl { source })?;
+        Url::parse(url).map_err(|source| SearchToolError::InvalidManagedRipgrepUrl { source })?;
     if parsed.host_str() != Some("github.com") {
-        return Err(SearchToolError::UnofficialManagedToolUrl {
+        return Err(SearchToolError::UnofficialManagedRipgrepUrl {
             url: url.to_string(),
         });
     }
@@ -547,7 +486,7 @@ async fn download_archive(
                 last_emitted_bytes,
                 now.duration_since(last_emitted_at),
             ) {
-                let _ = tx.send(ManagedToolProgress::Downloading {
+                let _ = tx.send(ManagedRipgrepProgress::Downloading {
                     bytes_received,
                     bytes_total,
                 });
@@ -561,7 +500,7 @@ async fn download_archive(
         && bytes_received > 0
         && bytes_received != last_emitted_bytes
     {
-        let _ = tx.send(ManagedToolProgress::Downloading {
+        let _ = tx.send(ManagedRipgrepProgress::Downloading {
             bytes_received,
             bytes_total,
         });
@@ -577,21 +516,21 @@ async fn download_archive(
 }
 
 fn install_archive_blocking(
-    paths: ManagedInstallPaths,
+    paths: RipgrepInstallPaths,
     expected_sha256: &str,
     archive_kind: ArchiveKind,
     executable_file_name: &str,
     cancellation: CancellationToken,
-    progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<ManagedToolProgress>>,
+    progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<ManagedRipgrepProgress>>,
 ) -> Result<PathBuf, SearchToolError> {
     ensure_not_cancelled(&cancellation)?;
     if let Some(tx) = progress_tx {
-        let _ = tx.send(ManagedToolProgress::Verifying);
+        let _ = tx.send(ManagedRipgrepProgress::Verifying);
     }
     verify_sha256(&paths.archive_path, expected_sha256, &cancellation)?;
     ensure_not_cancelled(&cancellation)?;
     if let Some(tx) = progress_tx {
-        let _ = tx.send(ManagedToolProgress::Extracting);
+        let _ = tx.send(ManagedRipgrepProgress::Extracting);
     }
     fs::create_dir_all(&paths.extract_dir).map_err(|source| SearchToolError::PathIo {
         operation: "create extraction directory",
@@ -617,7 +556,7 @@ fn install_archive_blocking(
     make_executable(&temp_binary)?;
     ensure_not_cancelled(&cancellation)?;
     if let Some(tx) = progress_tx {
-        let _ = tx.send(ManagedToolProgress::Installing);
+        let _ = tx.send(ManagedRipgrepProgress::Installing);
     }
     if paths.final_version_dir.exists() {
         let _ = fs::remove_dir_all(&paths.final_version_dir);
@@ -892,7 +831,7 @@ fn copy_reader_with_cancellation(
     }
 }
 
-async fn cleanup_install_paths(paths: &ManagedInstallPaths) {
+async fn cleanup_install_paths(paths: &RipgrepInstallPaths) {
     let _ = tokio::fs::remove_file(&paths.archive_path).await;
     let _ = tokio::fs::remove_dir_all(&paths.extract_dir).await;
     let _ = tokio::fs::remove_dir_all(&paths.version_temp_dir).await;
@@ -906,24 +845,26 @@ fn ensure_not_cancelled(cancellation: &CancellationToken) -> Result<(), SearchTo
     }
 }
 
-/// 路径布局：`{managed_root}/bin/<exe>`、`{managed_root}/tools/<name>/<version>/`。
+/// 路径布局：`{managed_root}/bin/<exe>`、`{managed_root}/tools/rg/<version>/`。
 ///
 /// `managed_root` 由调用方注入（= data/config dir），**不**再硬编码 `~/.hunea`。
 /// 旧路径无兼容、无迁移——干净实现优先。
-fn managed_entry_path(tool: ManagedToolKind, managed_root: &Path) -> PathBuf {
-    managed_root.join("bin").join(tool.executable_file_name())
+fn managed_ripgrep_entry_path(managed_root: &Path) -> PathBuf {
+    managed_root
+        .join("bin")
+        .join(ripgrep_executable_file_name())
 }
 
-fn managed_version_binary_path(tool: ManagedToolKind, managed_root: &Path) -> PathBuf {
-    managed_version_dir(tool, managed_root).join(tool.executable_file_name())
+fn managed_ripgrep_version_binary_path(managed_root: &Path) -> PathBuf {
+    managed_ripgrep_version_dir(managed_root).join(ripgrep_executable_file_name())
 }
 
-fn managed_version_dir(tool: ManagedToolKind, managed_root: &Path) -> PathBuf {
-    managed_tool_root(tool, managed_root).join(tool.version())
+fn managed_ripgrep_version_dir(managed_root: &Path) -> PathBuf {
+    managed_ripgrep_root(managed_root).join(MANAGED_RIPGREP_VERSION)
 }
 
-fn managed_tool_root(tool: ManagedToolKind, managed_root: &Path) -> PathBuf {
-    managed_root.join("tools").join(tool.binary_name())
+fn managed_ripgrep_root(managed_root: &Path) -> PathBuf {
+    managed_root.join("tools").join(RIPGREP_BINARY_NAME)
 }
 
 fn is_executable_file(path: &Path) -> bool {
@@ -954,30 +895,65 @@ fn should_emit_download_progress(
         || elapsed_since_last >= PROGRESS_EMIT_INTERVAL
 }
 
+async fn verify_binary_on_blocking_pool(
+    path: &Path,
+    cancellation: &CancellationToken,
+) -> Result<bool, SearchToolError> {
+    let path = path.to_path_buf();
+    let cancellation = cancellation.clone();
+    task::spawn_blocking(move || verify_binary_via_spawn_cancellable(&path, &cancellation))
+        .await
+        .map_err(|source| SearchToolError::JoinTask {
+            operation: "managed binary verification",
+            source,
+        })?
+}
+
 /// spawn `--version`：比文件权限检查更严，能发现坏架构/缺库。
 ///
 /// std 无 `Child::wait_timeout`，用 try_wait + 短 sleep 做 deadline；超时 kill。
 /// 不引入 wait_timeout/nix 依赖——启动期各工具约 5–20ms，足够。
 fn verify_binary_via_spawn(path: &Path) -> bool {
+    let cancellation = CancellationToken::new();
+    verify_binary_via_spawn_cancellable(path, &cancellation).unwrap_or(false)
+}
+
+fn verify_binary_via_spawn_cancellable(
+    path: &Path,
+    cancellation: &CancellationToken,
+) -> Result<bool, SearchToolError> {
+    ensure_not_cancelled(cancellation)?;
     let Ok(mut child) = std::process::Command::new(path)
         .arg("--version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
     else {
-        return false;
+        return Ok(false);
     };
     let started = std::time::Instant::now();
     while started.elapsed() < SPAWN_VERIFY_TIMEOUT {
+        if cancellation.is_cancelled() {
+            terminate_child(&mut child);
+            return Err(SearchToolError::Interrupted);
+        }
         match child.try_wait() {
-            Ok(Some(status)) => return status.success(),
-            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Ok(Some(status)) => {
+                ensure_not_cancelled(cancellation)?;
+                return Ok(status.success());
+            }
+            Ok(None) => std::thread::sleep(SPAWN_VERIFY_POLL_INTERVAL),
             Err(_) => break,
         }
     }
+    terminate_child(&mut child);
+    ensure_not_cancelled(cancellation)?;
+    Ok(false)
+}
+
+fn terminate_child(child: &mut std::process::Child) {
     let _ = child.kill();
     let _ = child.wait();
-    false
 }
 
 fn make_executable(path: &Path) -> Result<(), SearchToolError> {
@@ -1012,99 +988,46 @@ fn unix_millis() -> u128 {
         .as_millis()
 }
 
-fn manifest_for_current_platform(tool: ManagedToolKind) -> Option<ManagedToolManifest> {
-    match tool {
-        ManagedToolKind::Ripgrep => ripgrep_manifest_for_current_platform(),
-        ManagedToolKind::Fd => fd_manifest_for_current_platform(),
-    }
-}
-
-fn ripgrep_manifest_for_current_platform() -> Option<ManagedToolManifest> {
+fn ripgrep_manifest_for_current_platform() -> Option<ManagedRipgrepManifest> {
     Some(match (env::consts::OS, env::consts::ARCH) {
-        ("macos", "aarch64") => ManagedToolManifest {
+        ("macos", "aarch64") => ManagedRipgrepManifest {
             asset_name: "ripgrep-15.1.0-aarch64-apple-darwin.tar.gz",
             sha256: "378e973289176ca0c6054054ee7f631a065874a352bf43f0fa60ef079b6ba715",
             archive_kind: ArchiveKind::TarGz,
         },
-        ("macos", "x86_64") => ManagedToolManifest {
+        ("macos", "x86_64") => ManagedRipgrepManifest {
             asset_name: "ripgrep-15.1.0-x86_64-apple-darwin.tar.gz",
             sha256: "64811cb24e77cac3057d6c40b63ac9becf9082eedd54ca411b475b755d334882",
             archive_kind: ArchiveKind::TarGz,
         },
-        ("linux", "x86_64") => ManagedToolManifest {
+        ("linux", "x86_64") => ManagedRipgrepManifest {
             asset_name: "ripgrep-15.1.0-x86_64-unknown-linux-musl.tar.gz",
             sha256: "1c9297be4a084eea7ecaedf93eb03d058d6faae29bbc57ecdaf5063921491599",
             archive_kind: ArchiveKind::TarGz,
         },
-        ("linux", "aarch64") => ManagedToolManifest {
+        ("linux", "aarch64") => ManagedRipgrepManifest {
             asset_name: "ripgrep-15.1.0-aarch64-unknown-linux-gnu.tar.gz",
             sha256: "2b661c6ef508e902f388e9098d9c4c5aca72c87b55922d94abdba830b4dc885e",
             archive_kind: ArchiveKind::TarGz,
         },
-        ("linux", "x86") => ManagedToolManifest {
+        ("linux", "x86") => ManagedRipgrepManifest {
             asset_name: "ripgrep-15.1.0-i686-unknown-linux-gnu.tar.gz",
             sha256: "0300c58864b1de49da08f714d56ce10328dcbf6de37a404486fe2696e95692f1",
             archive_kind: ArchiveKind::TarGz,
         },
-        ("windows", "aarch64") => ManagedToolManifest {
+        ("windows", "aarch64") => ManagedRipgrepManifest {
             asset_name: "ripgrep-15.1.0-aarch64-pc-windows-msvc.zip",
             sha256: "00d931fb5237c9696ca49308818edb76d8eb6fc132761cb2a1bd616b2df02f8e",
             archive_kind: ArchiveKind::Zip,
         },
-        ("windows", "x86_64") => ManagedToolManifest {
+        ("windows", "x86_64") => ManagedRipgrepManifest {
             asset_name: "ripgrep-15.1.0-x86_64-pc-windows-msvc.zip",
             sha256: "124510b94b6baa3380d051fdf4650eaa80a302c876d611e9dba0b2e18d87493a",
             archive_kind: ArchiveKind::Zip,
         },
-        ("windows", "x86") => ManagedToolManifest {
+        ("windows", "x86") => ManagedRipgrepManifest {
             asset_name: "ripgrep-15.1.0-i686-pc-windows-msvc.zip",
             sha256: "725be85a1e8f92878a548f40ee4f6df64bc93b809586462b3c6d884e1de1e83a",
-            archive_kind: ArchiveKind::Zip,
-        },
-        _ => return None,
-    })
-}
-
-fn fd_manifest_for_current_platform() -> Option<ManagedToolManifest> {
-    Some(match (env::consts::OS, env::consts::ARCH) {
-        ("macos", "aarch64") => ManagedToolManifest {
-            asset_name: "fd-v10.3.0-aarch64-apple-darwin.tar.gz",
-            sha256: "0570263812089120bc2a5d84f9e65cd0c25e4a4d724c80075c357239c74ae904",
-            archive_kind: ArchiveKind::TarGz,
-        },
-        ("macos", "x86_64") => ManagedToolManifest {
-            asset_name: "fd-v10.3.0-x86_64-apple-darwin.tar.gz",
-            sha256: "50d30f13fe3d5914b14c4fff5abcbd4d0cdab4b855970a6956f4f006c17117a3",
-            archive_kind: ArchiveKind::TarGz,
-        },
-        ("linux", "aarch64") => ManagedToolManifest {
-            asset_name: "fd-v10.3.0-aarch64-unknown-linux-musl.tar.gz",
-            sha256: "996b9b1366433b211cb3bbedba91c9dbce2431842144d925428ead0adf32020b",
-            archive_kind: ArchiveKind::TarGz,
-        },
-        ("linux", "x86_64") => ManagedToolManifest {
-            asset_name: "fd-v10.3.0-x86_64-unknown-linux-musl.tar.gz",
-            sha256: "2b6bfaae8c48f12050813c2ffe1884c61ea26e750d803df9c9114550a314cd14",
-            archive_kind: ArchiveKind::TarGz,
-        },
-        ("linux", "x86") => ManagedToolManifest {
-            asset_name: "fd-v10.3.0-i686-unknown-linux-musl.tar.gz",
-            sha256: "e761dfc5baff0fb91cd1428f1475fae0e9d70dfbf55c10e9db803566abf70fad",
-            archive_kind: ArchiveKind::TarGz,
-        },
-        ("windows", "aarch64") => ManagedToolManifest {
-            asset_name: "fd-v10.3.0-aarch64-pc-windows-msvc.zip",
-            sha256: "bf9b1e31bcac71c1e95d49c56f0d872f525b95d03854e94b1d4dd6786f825cc5",
-            archive_kind: ArchiveKind::Zip,
-        },
-        ("windows", "x86_64") => ManagedToolManifest {
-            asset_name: "fd-v10.3.0-x86_64-pc-windows-msvc.zip",
-            sha256: "318aa2a6fa664325933e81fda60d523fff29444129e91ebf0726b5b3bcd8b059",
-            archive_kind: ArchiveKind::Zip,
-        },
-        ("windows", "x86") => ManagedToolManifest {
-            asset_name: "fd-v10.3.0-i686-pc-windows-msvc.zip",
-            sha256: "1e1c1c677d01c1df9e54095d727f61649401ac54a5946cecb3fbe3d002615fd8",
             archive_kind: ArchiveKind::Zip,
         },
         _ => return None,
@@ -1143,6 +1066,47 @@ mod tests {
         cleanup(&root);
     }
 
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn managed_install_verification_does_not_block_runtime_and_observes_cancellation() {
+        let root = temp_root("managed-verification-cancelled");
+        let stable_entry = managed_ripgrep_entry_path(&root);
+        fs::create_dir_all(
+            stable_entry
+                .parent()
+                .expect("stable entry should have parent"),
+        )
+        .expect("create managed bin directory");
+        write_executable(
+            &root.join("bin"),
+            ripgrep_executable_file_name(),
+            "#!/bin/sh\nexec sleep 30\n",
+        );
+        let cancellation = CancellationToken::new();
+        let cancellation_after_delay = cancellation.clone();
+        let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let started = std::time::Instant::now();
+
+        let (install_result, ()) = tokio::join!(
+            install_managed_ripgrep_with_progress(&root, cancellation, &progress_tx),
+            async move {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                cancellation_after_delay.cancel();
+            }
+        );
+
+        assert!(matches!(
+            install_result,
+            Err(ManagedRipgrepInstallError::Interrupted)
+        ));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "verification cancellation took {:?}",
+            started.elapsed()
+        );
+        cleanup(&root);
+    }
+
     fn temp_root(prefix: &str) -> PathBuf {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1158,63 +1122,66 @@ mod tests {
         let _ = fs::remove_dir_all(path);
     }
 
-    // --- ManagedSearchToolConfig ---
+    // --- ManagedRipgrepConfig ---
 
     #[test]
     fn config_allows_only_explicit_true() {
-        let config = ManagedSearchToolConfig {
+        let config = ManagedRipgrepConfig {
             allow_managed_rg: Some(true),
-            allow_managed_fd: Some(false),
         };
-        assert!(config.allows(ManagedToolKind::Ripgrep));
-        assert!(!config.allows(ManagedToolKind::Fd));
+        assert!(config.allows());
     }
 
     #[test]
     fn config_rejects_only_explicit_false() {
-        let config = ManagedSearchToolConfig {
+        let config = ManagedRipgrepConfig {
             allow_managed_rg: Some(false),
-            allow_managed_fd: None,
         };
-        assert!(config.rejects(ManagedToolKind::Ripgrep));
-        assert!(!config.rejects(ManagedToolKind::Fd));
+        assert!(config.rejects());
     }
 
     #[test]
     fn config_default_neither_allows_nor_rejects() {
-        let config = ManagedSearchToolConfig::default();
-        for tool in [ManagedToolKind::Ripgrep, ManagedToolKind::Fd] {
-            assert!(!config.allows(tool));
-            assert!(!config.rejects(tool));
-        }
+        let config = ManagedRipgrepConfig::default();
+        assert!(!config.allows());
+        assert!(!config.rejects());
     }
 
-    // --- managed_fallback_for ---
+    #[test]
+    fn manifest_url_uses_the_ripgrep_release_tag() {
+        let manifest = ManagedRipgrepManifest {
+            asset_name: "ripgrep-15.1.0-test.tar.gz",
+            sha256: "unused",
+            archive_kind: ArchiveKind::TarGz,
+        };
+
+        assert_eq!(
+            manifest.url(),
+            "https://github.com/BurntSushi/ripgrep/releases/download/15.1.0/\
+ripgrep-15.1.0-test.tar.gz"
+        );
+    }
+
+    // --- managed_ripgrep_fallback_for ---
 
     #[test]
-    fn managed_fallback_for_returns_none_when_primary_is_managed() {
-        let config = ManagedSearchToolConfig::default();
-        let plan = ExternalCommandPlan::Ready(ExternalCommand {
+    fn managed_ripgrep_fallback_for_returns_none_when_primary_is_managed() {
+        let config = ManagedRipgrepConfig::default();
+        let plan = RipgrepCommandPlan::Ready(RipgrepCommand {
             path: PathBuf::from("/fake/rg"),
-            backend: ExternalToolBackend::Managed,
+            backend: RipgrepBackend::Managed,
         });
         assert!(
-            managed_fallback_for(
-                &plan,
-                ManagedToolKind::Ripgrep,
-                &config,
-                Path::new("/tmp/fake-managed-root")
-            )
-            .is_none()
+            managed_ripgrep_fallback_for(&plan, &config, Path::new("/tmp/fake-managed-root"))
+                .is_none()
         );
     }
 
     #[test]
-    fn managed_fallback_for_returns_none_when_unavailable() {
-        let config = ManagedSearchToolConfig::default();
-        let result = managed_fallback_for(
-            &ExternalCommandPlan::Unavailable,
-            ManagedToolKind::Ripgrep,
+    fn managed_ripgrep_fallback_for_returns_none_when_unavailable() {
+        let config = ManagedRipgrepConfig::default();
+        let result = managed_ripgrep_fallback_for(
+            &RipgrepCommandPlan::Unavailable,
             &config,
             Path::new("/tmp/fake-managed-root"),
         );
@@ -1222,23 +1189,17 @@ mod tests {
     }
 
     #[test]
-    fn managed_fallback_for_returns_none_when_rejected() {
-        let config = ManagedSearchToolConfig {
+    fn managed_ripgrep_fallback_for_returns_none_when_rejected() {
+        let config = ManagedRipgrepConfig {
             allow_managed_rg: Some(false),
-            allow_managed_fd: None,
         };
-        let plan = ExternalCommandPlan::Ready(ExternalCommand {
+        let plan = RipgrepCommandPlan::Ready(RipgrepCommand {
             path: PathBuf::from("/fake/rg"),
-            backend: ExternalToolBackend::SystemPath,
+            backend: RipgrepBackend::SystemPath,
         });
         assert!(
-            managed_fallback_for(
-                &plan,
-                ManagedToolKind::Ripgrep,
-                &config,
-                Path::new("/tmp/fake-managed-root")
-            )
-            .is_none()
+            managed_ripgrep_fallback_for(&plan, &config, Path::new("/tmp/fake-managed-root"))
+                .is_none()
         );
     }
 

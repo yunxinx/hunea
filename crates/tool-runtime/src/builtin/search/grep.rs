@@ -25,20 +25,20 @@ use crate::{
 };
 
 use super::super::workspace_file::{
-    workspace::resolve_workspace_path, workspace_access::local_workspace_access,
+    workspace::resolve_read_path, workspace_access::local_workspace_access,
 };
 use super::{
     error::SearchToolError,
-    external_tool::{
-        ExternalCommand, ExternalCommandPlan, ManagedSearchToolConfig, ManagedToolKind,
-        managed_fallback_for, resolve_external_command_plan,
+    ripgrep::{
+        ManagedRipgrepConfig, RipgrepCommand, RipgrepCommandPlan, managed_ripgrep_fallback_for,
+        resolve_ripgrep_command_plan,
     },
     search_fallback::{
         GREP_MAX_LINE_CHARS, SEARCH_MAX_OUTPUT_BYTES, TOOL_CALL_INTERRUPTED,
-        VCS_DIRECTORIES_TO_EXCLUDE, build_workspace_walker, collect_capped_stderr, compile_glob,
-        format_bytes, path_has_vcs_component, path_matches_glob, path_text_has_vcs_component,
-        stderr_task_output, truncate_head_by_bytes, truncate_line, workspace_relative_cli_path,
-        workspace_relative_path,
+        VCS_DIRECTORIES_TO_EXCLUDE, build_search_walker, collect_capped_stderr, compile_glob,
+        format_bytes, model_search_path, path_has_vcs_component, path_matches_glob,
+        path_text_has_vcs_component, search_relative_path, stderr_task_output,
+        truncate_head_by_bytes, truncate_line,
     },
 };
 
@@ -47,23 +47,23 @@ const DEFAULT_MATCH_LIMIT: usize = 100;
 const MAX_MATCH_LIMIT: usize = 1_000;
 const MAX_CONTEXT_LINES: usize = 20;
 
-/// `grep_tool` 创建 workspace 内容搜索工具。
+/// `grep_tool` 创建递归内容搜索工具。
 pub fn grep_tool(root: impl AsRef<Path>) -> impl Tool + 'static {
     grep_tool_with_config(
         root,
-        ManagedSearchToolConfig::default(),
+        ManagedRipgrepConfig::default(),
         PathBuf::from(".hunea"),
     )
 }
 
 pub(crate) fn grep_tool_with_config(
     root: impl AsRef<Path>,
-    managed_tools: ManagedSearchToolConfig,
+    managed_ripgrep: ManagedRipgrepConfig,
     managed_root: PathBuf,
 ) -> impl Tool + 'static {
     GrepTool {
         root: root.as_ref().to_path_buf(),
-        managed_tools,
+        managed_ripgrep,
         managed_root,
     }
 }
@@ -71,7 +71,7 @@ pub(crate) fn grep_tool_with_config(
 #[derive(Clone)]
 struct GrepTool {
     root: PathBuf,
-    managed_tools: ManagedSearchToolConfig,
+    managed_ripgrep: ManagedRipgrepConfig,
     managed_root: PathBuf,
 }
 
@@ -90,7 +90,7 @@ impl Tool for GrepTool {
             .with_label("Grep")
             .with_kind(ToolKind::Search)
             .with_description(
-                "Search file contents recursively inside the current workspace. Returns file paths, 1-based line numbers, matching text, and truncation notes when match, line, or byte limits are reached. Respects .gitignore and searches hidden files.",
+                "Search file contents recursively under an existing relative or absolute path. Relative paths resolve from the current working directory. Returns file paths, 1-based line numbers, matching text, and truncation notes when match, line, or byte limits are reached. Respects ignore files and searches hidden files.",
             )
             .with_input_schema(json!({
                 "type": "object",
@@ -101,11 +101,11 @@ impl Tool for GrepTool {
                     },
                     "path": {
                         "type": "string",
-                        "description": "Workspace-relative or workspace-contained absolute file or directory path; defaults to the workspace root"
+                        "description": "Existing relative or absolute file or directory path; relative paths resolve from the current working directory and default to it"
                     },
                     "glob": {
                         "type": "string",
-                        "description": "Optional glob filter for workspace-relative paths, for example \"*.rs\" or \"crates/**/Cargo.toml\""
+                        "description": "Optional glob filter relative to the search path, for example \"*.rs\" or \"crates/**/Cargo.toml\""
                     },
                     "ignore_case": {
                         "type": "boolean",
@@ -151,10 +151,10 @@ impl Tool for GrepTool {
         context: ToolExecutionContext<'a>,
     ) -> ToolExecutionFuture<'a> {
         let root = self.root.clone();
-        let managed_tools = self.managed_tools.clone();
+        let managed_ripgrep = self.managed_ripgrep.clone();
         let managed_root = self.managed_root.clone();
         Box::pin(
-            async move { execute_grep(root, managed_tools, managed_root, call, context).await },
+            async move { execute_grep(root, managed_ripgrep, managed_root, call, context).await },
         )
     }
 }
@@ -197,16 +197,17 @@ struct GrepOutcome {
 struct GrepExecutionPlan {
     root: PathBuf,
     search_path: PathBuf,
+    search_path_is_file: bool,
     arguments: NormalizedGrepArguments,
-    external_command: ExternalCommandPlan,
+    external_command: RipgrepCommandPlan,
     /// primary 非managed 时可能存在的 managed 二进制候选，用于 primary 执行失败后重试，
     /// 避免 PATH 上坏的 rg 短路已安装的 managed rg。
-    managed_fallback: Option<ExternalCommand>,
+    managed_fallback: Option<RipgrepCommand>,
 }
 
 async fn execute_grep(
     root: PathBuf,
-    managed_tools: ManagedSearchToolConfig,
+    managed_ripgrep: ManagedRipgrepConfig,
     managed_root: PathBuf,
     call: ToolCall,
     context: ToolExecutionContext<'_>,
@@ -219,7 +220,7 @@ async fn execute_grep(
     let plan = match task::spawn_blocking(move || {
         build_grep_execution_plan(
             root,
-            managed_tools,
+            managed_ripgrep,
             managed_root,
             call.arguments,
             &cancellation,
@@ -235,14 +236,22 @@ async fn execute_grep(
     let GrepExecutionPlan {
         root,
         search_path,
+        search_path_is_file,
         arguments,
         external_command,
         managed_fallback,
     } = plan;
 
-    if let ExternalCommandPlan::Ready(command) = external_command
-        && let Ok(outcome) =
-            run_external_grep(&command, &root, &search_path, &arguments, &context).await
+    if let RipgrepCommandPlan::Ready(command) = external_command
+        && let Ok(outcome) = run_external_grep(
+            &command,
+            &root,
+            &search_path,
+            search_path_is_file,
+            &arguments,
+            &context,
+        )
+        .await
     {
         return grep_result(call_id, outcome);
     }
@@ -250,8 +259,15 @@ async fn execute_grep(
     // primary（system/bundled）执行失败时，尝试 managed 二进制重试，
     // 避免 PATH 上坏的 rg 短路已安装的 managed rg。
     if let Some(command) = managed_fallback
-        && let Ok(outcome) =
-            run_external_grep(&command, &root, &search_path, &arguments, &context).await
+        && let Ok(outcome) = run_external_grep(
+            &command,
+            &root,
+            &search_path,
+            search_path_is_file,
+            &arguments,
+            &context,
+        )
+        .await
     {
         return grep_result(call_id, outcome);
     }
@@ -269,7 +285,7 @@ async fn execute_grep(
 
 fn build_grep_execution_plan(
     root: PathBuf,
-    managed_tools: ManagedSearchToolConfig,
+    managed_ripgrep: ManagedRipgrepConfig,
     managed_root: PathBuf,
     arguments: serde_json::Value,
     cancellation: &CancellationToken,
@@ -283,23 +299,19 @@ fn build_grep_execution_plan(
         Ok(root) => root,
         Err(source) => return Err(SearchToolError::WorkspaceRoot { path: root, source }),
     };
-    let search_path =
-        match resolve_workspace_path(access.as_ref(), &root, &arguments.requested_path) {
-            Ok(path) => path,
-            Err(source) => return Err(SearchToolError::WorkspacePath { source }),
-        };
+    let search_path = match resolve_read_path(access.as_ref(), &root, &arguments.requested_path) {
+        Ok(path) => path,
+        Err(source) => return Err(SearchToolError::WorkspacePath { source }),
+    };
+    let search_path_is_file = search_path.is_file();
 
-    let external_command =
-        resolve_external_command_plan(ManagedToolKind::Ripgrep, &managed_tools, &managed_root);
-    let managed_fallback = managed_fallback_for(
-        &external_command,
-        ManagedToolKind::Ripgrep,
-        &managed_tools,
-        &managed_root,
-    );
+    let external_command = resolve_ripgrep_command_plan(&managed_ripgrep, &managed_root);
+    let managed_fallback =
+        managed_ripgrep_fallback_for(&external_command, &managed_ripgrep, &managed_root);
     Ok(GrepExecutionPlan {
         root,
         search_path,
+        search_path_is_file,
         arguments,
         external_command,
         managed_fallback,
@@ -335,12 +347,33 @@ fn parse_arguments(value: serde_json::Value) -> Result<NormalizedGrepArguments, 
 }
 
 async fn run_external_grep(
-    command: &ExternalCommand,
+    command: &RipgrepCommand,
     root: &Path,
     search_path: &Path,
+    search_path_is_file: bool,
     arguments: &NormalizedGrepArguments,
     context: &ToolExecutionContext<'_>,
 ) -> Result<GrepOutcome, SearchToolError> {
+    let (command_cwd, command_target) = if search_path_is_file {
+        let parent = search_path
+            .parent()
+            .ok_or_else(|| SearchToolError::PathIo {
+                operation: "resolve grep file search parent",
+                path: search_path.to_path_buf(),
+                source: io::Error::new(io::ErrorKind::InvalidInput, "file has no parent directory"),
+            })?;
+        let target = search_path
+            .file_name()
+            .ok_or_else(|| SearchToolError::PathIo {
+                operation: "resolve grep file search name",
+                path: search_path.to_path_buf(),
+                source: io::Error::new(io::ErrorKind::InvalidInput, "file has no name"),
+            })?;
+        (parent.to_path_buf(), target.to_string_lossy().into_owned())
+    } else {
+        (search_path.to_path_buf(), ".".to_string())
+    };
+
     let mut args = vec![
         "--json".to_string(),
         "--line-number".to_string(),
@@ -369,11 +402,11 @@ async fn run_external_grep(
     }
     args.push("--".to_string());
     args.push(arguments.pattern.clone());
-    args.push(workspace_relative_cli_path(root, search_path));
+    args.push(command_target);
 
     let mut process = Command::new(&command.path);
     process.args(&args);
-    process.current_dir(root);
+    process.current_dir(&command_cwd);
     process.stdin(Stdio::null());
     process.stdout(Stdio::piped());
     process.stderr(Stdio::piped());
@@ -381,11 +414,11 @@ async fn run_external_grep(
 
     let mut child = process
         .spawn()
-        .map_err(|source| SearchToolError::ExternalSpawn { source })?;
+        .map_err(|source| SearchToolError::RipgrepSpawn { source })?;
     let stdout = child
         .stdout
         .take()
-        .ok_or(SearchToolError::ExternalStdoutUnavailable { tool: "grep" })?;
+        .ok_or(SearchToolError::RipgrepStdoutUnavailable)?;
     let stderr_task = child
         .stderr
         .take()
@@ -403,21 +436,25 @@ async fn run_external_grep(
                 return Err(SearchToolError::Interrupted);
             }
             line = lines.next_line() => {
-                line.map_err(|source| SearchToolError::ExternalOutputRead {
-                    tool: "grep",
-                    source,
-                })?
+                line.map_err(|source| SearchToolError::RipgrepOutputRead { source })?
             }
         };
         let Some(line) = line else {
             break;
         };
-        let Some(match_event) = parse_rg_match_event(&line) else {
+        let Some(raw_match) = parse_rg_match_event(&line) else {
             continue;
         };
-        if path_text_has_vcs_component(&match_event.path) {
+        if path_text_has_vcs_component(&raw_match.path) {
             continue;
         }
+        let candidate_path = external_match_path(&command_cwd, &raw_match.path);
+        let match_event = ExternalGrepMatch {
+            model_path: model_search_path(root, &candidate_path),
+            candidate_path,
+            line_number: raw_match.line_number,
+            line_text: raw_match.line_text,
+        };
         if observed_matches >= arguments.limit {
             match_truncated = true;
             killed_due_to_limit = true;
@@ -432,19 +469,15 @@ async fn run_external_grep(
     let status = child
         .wait()
         .await
-        .map_err(|source| SearchToolError::ExternalWait {
-            tool: "grep",
-            source,
-        })?;
+        .map_err(|source| SearchToolError::RipgrepWait { source })?;
     let stderr = stderr_task_output(stderr_task).await;
     if !killed_due_to_limit && !matches!(status.code(), Some(0) | Some(1)) {
-        return Err(SearchToolError::ExternalFailed {
-            tool: "grep",
+        return Err(SearchToolError::RipgrepFailed {
             stderr: stderr.trim().to_string(),
         });
     }
 
-    let (lines, lines_truncated) = format_external_grep_matches(root, arguments, &matches).await;
+    let (lines, lines_truncated) = format_external_grep_matches(arguments, &matches).await;
     let formatted = format_grep_content(lines, matches.len(), match_truncated, lines_truncated);
     Ok(GrepOutcome {
         content: formatted.content,
@@ -460,6 +493,14 @@ async fn run_external_grep(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ExternalGrepMatch {
+    candidate_path: PathBuf,
+    model_path: String,
+    line_number: usize,
+    line_text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RawExternalGrepMatch {
     path: String,
     line_number: usize,
     line_text: String,
@@ -484,13 +525,13 @@ struct RipgrepText {
     text: String,
 }
 
-fn parse_rg_match_event(line: &str) -> Option<ExternalGrepMatch> {
+fn parse_rg_match_event(line: &str) -> Option<RawExternalGrepMatch> {
     let event = serde_json::from_str::<RipgrepJsonEvent>(line).ok()?;
     if event.event_type != "match" {
         return None;
     }
     let data = event.data?;
-    Some(ExternalGrepMatch {
+    Some(RawExternalGrepMatch {
         path: data.path.text,
         line_number: data.line_number,
         line_text: sanitize_rg_line_text(&data.lines.text),
@@ -505,7 +546,6 @@ fn sanitize_rg_line_text(text: &str) -> String {
 }
 
 async fn format_external_grep_matches(
-    root: &Path,
     arguments: &NormalizedGrepArguments,
     matches: &[ExternalGrepMatch],
 ) -> (Vec<String>, bool) {
@@ -517,18 +557,17 @@ async fn format_external_grep_matches(
             lines_truncated |= was_truncated;
             output.push(format!(
                 "{}:{}:{}",
-                match_event.path, match_event.line_number, line
+                match_event.model_path, match_event.line_number, line
             ));
             continue;
         }
 
-        let path = external_match_path(root, &match_event.path);
-        let Ok(content) = tokio::fs::read_to_string(&path).await else {
+        let Ok(content) = tokio::fs::read_to_string(&match_event.candidate_path).await else {
             let (line, was_truncated) = truncate_line(&match_event.line_text, GREP_MAX_LINE_CHARS);
             lines_truncated |= was_truncated;
             output.push(format!(
                 "{}:{}:{}",
-                match_event.path, match_event.line_number, line
+                match_event.model_path, match_event.line_number, line
             ));
             continue;
         };
@@ -539,24 +578,28 @@ async fn format_external_grep_matches(
             lines_truncated |= was_truncated;
             output.push(format!(
                 "{}:{}:{}",
-                match_event.path, match_event.line_number, line
+                match_event.model_path, match_event.line_number, line
             ));
             continue;
         }
-        let (block, was_truncated) =
-            format_match_block(root, &path, &lines, match_index, arguments.context);
+        let (block, was_truncated) = format_match_block(
+            &match_event.model_path,
+            &lines,
+            match_index,
+            arguments.context,
+        );
         lines_truncated |= was_truncated;
         output.push(block);
     }
     (output, lines_truncated)
 }
 
-fn external_match_path(root: &Path, path: &str) -> PathBuf {
+fn external_match_path(command_cwd: &Path, path: &str) -> PathBuf {
     let path = Path::new(path);
     if path.is_absolute() {
         path.to_path_buf()
     } else {
-        root.join(path)
+        command_cwd.join(path)
     }
 }
 
@@ -584,7 +627,7 @@ struct PendingRustGrepBlock {
 /// `U+FFFD`，不会让整个文件静默消失；context 窗口通过 `recent_lines` 和
 /// `pending` 两个有界缓冲重建，不重新读取整文件。
 struct RustGrepFileSink<'a> {
-    relative_path: String,
+    model_path: String,
     context: usize,
     /// 本文件还可展示的匹配数（全局 limit 减去之前文件已观察到的匹配）。
     remaining_matches: usize,
@@ -601,13 +644,13 @@ struct RustGrepFileSink<'a> {
 
 impl<'a> RustGrepFileSink<'a> {
     fn new(
-        relative_path: String,
+        model_path: String,
         context: usize,
         remaining_matches: usize,
         cancellation: &'a CancellationToken,
     ) -> Self {
         Self {
-            relative_path,
+            model_path,
             context,
             remaining_matches,
             cancellation,
@@ -699,7 +742,7 @@ impl<'a> RustGrepFileSink<'a> {
             .map(|(separator, line)| {
                 format!(
                     "{}{separator}{}:{}",
-                    self.relative_path, line.line_number, line.text
+                    self.model_path, line.line_number, line.text
                 )
             })
             .collect::<Vec<_>>()
@@ -819,14 +862,16 @@ fn rust_grep(
     let mut observed_matches = 0usize;
     let mut match_truncated = false;
     let mut lines_truncated = false;
+    let search_root_is_file = search_path.is_file();
 
-    'walk: for entry in build_workspace_walker(root, search_path, true) {
+    'walk: for entry in build_search_walker(search_path, true) {
         if cancellation.is_cancelled() {
             return Err(SearchToolError::Interrupted);
         }
-        let entry = entry.map_err(|source| SearchToolError::WalkWorkspace { source })?;
+        let entry = entry.map_err(|source| SearchToolError::WalkSearchPath { source })?;
         let path = entry.path();
-        if path_has_vcs_component(path) {
+        let search_relative = search_relative_path(search_path, path);
+        if path_has_vcs_component(search_relative) {
             continue;
         }
         let file_type = entry
@@ -838,13 +883,13 @@ fn rust_grep(
             continue;
         }
         if let Some(glob) = glob.as_ref()
-            && !path_matches_glob(root, path, glob)
+            && !path_matches_glob(search_path, search_root_is_file, path, glob)
         {
             continue;
         }
 
         let mut sink = RustGrepFileSink::new(
-            workspace_relative_path(root, path),
+            model_search_path(root, path),
             arguments.context,
             arguments.limit.saturating_sub(observed_matches),
             cancellation,
@@ -882,17 +927,15 @@ fn rust_grep(
 }
 
 fn format_match_block(
-    root: &Path,
-    path: &Path,
+    model_path: &str,
     lines: &[&str],
     match_index: usize,
     context: usize,
 ) -> (String, bool) {
-    let relative = workspace_relative_path(root, path);
     if context == 0 {
         let (line, was_truncated) = truncate_line(lines[match_index], GREP_MAX_LINE_CHARS);
         return (
-            format!("{}:{}:{}", relative, match_index + 1, line),
+            format!("{}:{}:{}", model_path, match_index + 1, line),
             was_truncated,
         );
     }
@@ -904,7 +947,7 @@ fn format_match_block(
             let separator = if index == match_index { ":" } else { "-" };
             let (line, was_truncated) = truncate_line(lines[index], GREP_MAX_LINE_CHARS);
             was_any_line_truncated |= was_truncated;
-            format!("{}{separator}{}:{}", relative, index + 1, line)
+            format!("{}{separator}{}:{}", model_path, index + 1, line)
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -998,7 +1041,7 @@ mod tests {
 
     use tokio_util::sync::CancellationToken;
 
-    use super::super::external_tool::ExternalToolBackend;
+    use super::super::ripgrep::RipgrepBackend;
     use super::*;
 
     #[test]
@@ -1041,7 +1084,7 @@ mod tests {
 
         let plan = build_grep_execution_plan(
             root.clone(),
-            ManagedSearchToolConfig::default(),
+            ManagedRipgrepConfig::default(),
             root.clone(),
             json!({
                 "pattern": "needle",
@@ -1049,7 +1092,7 @@ mod tests {
             }),
             &cancellation,
         )
-        .expect("grep execution plan should resolve workspace paths");
+        .expect("grep execution plan should resolve search paths");
 
         assert_eq!(
             plan.root,
@@ -1082,9 +1125,9 @@ fi
 printf '{"type":"match","data":{"path":{"text":"src/lib.rs"},"line_number":1,"lines":{"text":"needle\\n"}}}\n'
 "#,
         );
-        let command = ExternalCommand {
+        let command = RipgrepCommand {
             path: script,
-            backend: ExternalToolBackend::SystemPath,
+            backend: RipgrepBackend::SystemPath,
         };
         let arguments = NormalizedGrepArguments {
             pattern: "needle".to_string(),
@@ -1100,6 +1143,7 @@ printf '{"type":"match","data":{"path":{"text":"src/lib.rs"},"line_number":1,"li
             &command,
             &root,
             &root,
+            false,
             &arguments,
             &ToolExecutionContext::new(&CancellationToken::new()),
         )
@@ -1108,6 +1152,118 @@ printf '{"type":"match","data":{"path":{"text":"src/lib.rs"},"line_number":1,"li
 
         assert_eq!(outcome.content, "src/lib.rs:1:needle");
         cleanup(&root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn external_grep_restores_external_directory_matches_to_absolute_model_paths() {
+        let workspace = temp_root("external-grep-workspace");
+        let external = temp_root("external-grep-directory");
+        fs::create_dir_all(external.join("src")).expect("external source directory should exist");
+        fs::write(external.join("src/lib.rs"), "needle\n")
+            .expect("external source file should exist");
+        let script = write_executable(
+            &workspace,
+            "fake-rg-external-directory",
+            r#"#!/bin/sh
+last=""
+for arg in "$@"; do
+  last="$arg"
+done
+if [ "$last" != "." ] || [ ! -f "src/lib.rs" ]; then
+  printf 'expected external directory cwd with target "."\n' >&2
+  exit 2
+fi
+printf '{"type":"match","data":{"path":{"text":"src/lib.rs"},"line_number":1,"lines":{"text":"needle\\n"}}}\n'
+"#,
+        );
+        let command = RipgrepCommand {
+            path: script,
+            backend: RipgrepBackend::SystemPath,
+        };
+        let arguments = NormalizedGrepArguments {
+            pattern: "needle".to_string(),
+            requested_path: external.display().to_string(),
+            glob: Some("src/*.rs".to_string()),
+            ignore_case: false,
+            literal: true,
+            context: 0,
+            limit: 10,
+        };
+
+        let outcome = run_external_grep(
+            &command,
+            &workspace,
+            &external,
+            false,
+            &arguments,
+            &ToolExecutionContext::new(&CancellationToken::new()),
+        )
+        .await
+        .expect("external directory search should restore the rg path");
+
+        assert_eq!(
+            outcome.content,
+            format!("{}:1:needle", external.join("src/lib.rs").display())
+        );
+        cleanup(&external);
+        cleanup(&workspace);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn external_grep_uses_file_parent_for_context_reads_and_absolute_model_paths() {
+        let workspace = temp_root("external-grep-file-workspace");
+        let external = temp_root("external-grep-file-directory");
+        let search_file = external.join("needle.txt");
+        fs::write(&search_file, "before\nneedle\nafter\n")
+            .expect("external search file should exist");
+        let script = write_executable(
+            &workspace,
+            "fake-rg-external-file",
+            r#"#!/bin/sh
+last=""
+for arg in "$@"; do
+  last="$arg"
+done
+if [ "$last" != "needle.txt" ] || [ ! -f "$last" ]; then
+  printf 'expected file parent cwd with target "needle.txt"\n' >&2
+  exit 2
+fi
+printf '{"type":"match","data":{"path":{"text":"needle.txt"},"line_number":2,"lines":{"text":"needle\\n"}}}\n'
+"#,
+        );
+        let command = RipgrepCommand {
+            path: script,
+            backend: RipgrepBackend::SystemPath,
+        };
+        let arguments = NormalizedGrepArguments {
+            pattern: "needle".to_string(),
+            requested_path: search_file.display().to_string(),
+            glob: Some("needle*.txt".to_string()),
+            ignore_case: false,
+            literal: true,
+            context: 1,
+            limit: 10,
+        };
+
+        let outcome = run_external_grep(
+            &command,
+            &workspace,
+            &search_file,
+            true,
+            &arguments,
+            &ToolExecutionContext::new(&CancellationToken::new()),
+        )
+        .await
+        .expect("external file search should restore its candidate path");
+
+        let prefix = search_file.display();
+        assert!(outcome.content.contains(&format!("{prefix}-1:before")));
+        assert!(outcome.content.contains(&format!("{prefix}:2:needle")));
+        assert!(outcome.content.contains(&format!("{prefix}-3:after")));
+        cleanup(&external);
+        cleanup(&workspace);
     }
 
     #[cfg(unix)]
@@ -1125,9 +1281,9 @@ while [ "$i" -le 500 ]; do
 done
 "#,
         );
-        let command = ExternalCommand {
+        let command = RipgrepCommand {
             path: script,
-            backend: ExternalToolBackend::SystemPath,
+            backend: RipgrepBackend::SystemPath,
         };
         let arguments = NormalizedGrepArguments {
             pattern: "needle".to_string(),
@@ -1143,6 +1299,7 @@ done
             &command,
             &root,
             &root,
+            false,
             &arguments,
             &ToolExecutionContext::new(&CancellationToken::new()),
         )
@@ -1178,9 +1335,9 @@ if [ "$exclude_vcs" -eq 0 ]; then
 fi
 "#,
         );
-        let command = ExternalCommand {
+        let command = RipgrepCommand {
             path: script,
-            backend: ExternalToolBackend::SystemPath,
+            backend: RipgrepBackend::SystemPath,
         };
         let arguments = NormalizedGrepArguments {
             pattern: "needle".to_string(),
@@ -1196,6 +1353,7 @@ fi
             &command,
             &root,
             &root,
+            false,
             &arguments,
             &ToolExecutionContext::new(&CancellationToken::new()),
         )

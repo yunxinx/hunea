@@ -7,10 +7,9 @@ use std::{
 use app_config::appconfig::{
     AppConfigError, CommandMenuMode, EscRewindMode, KeyboardEnhancementMode,
     ReasoningContentDisplay, UserInputStyle, load_from_paths,
-    persist_managed_search_tool_authorization_to_path,
-    persist_managed_search_tool_rejection_to_path, read_managed_search_authorization,
+    persist_managed_ripgrep_authorization_to_path, persist_managed_ripgrep_rejection_to_path,
+    read_managed_ripgrep_authorization,
 };
-use runtime_domain::session::ManagedSearchTool;
 
 #[test]
 fn load_defaults_to_cx_when_no_config_exists() {
@@ -928,7 +927,6 @@ fn load_defaults_runtime_request_policy() {
     assert_eq!(config.runtime.request_timeout_seconds, 120);
     assert_eq!(config.runtime.tool_max_turns, None);
     assert_eq!(config.runtime.allow_managed_rg, None);
-    assert_eq!(config.runtime.allow_managed_fd, None);
 }
 
 #[test]
@@ -949,152 +947,151 @@ fn load_accepts_configured_runtime_request_policy() {
 }
 
 #[test]
-fn load_accepts_managed_search_tool_authorization_flags() {
+fn load_accepts_managed_ripgrep_authorization_flag() {
     let working_dir = temp_test_dir("load-runtime-managed-search-tools-working");
     write_config(
         &working_dir.join(".hunea").join("config.toml"),
-        "[runtime]\nallow_managed_rg = true\nallow_managed_fd = false\n",
+        "[runtime]\nallow_managed_rg = true\n",
     );
 
     let config = load_from_paths(Some(working_dir.as_path()), None)
-        .expect("runtime managed search tool flags should load");
+        .expect("managed ripgrep authorization should load");
 
     assert_eq!(config.runtime.allow_managed_rg, Some(true));
-    assert_eq!(config.runtime.allow_managed_fd, Some(false));
 }
 
 #[test]
-fn persists_managed_search_tool_authorization_to_user_config() {
+fn load_rejects_removed_managed_fd_authorization_flag() {
+    let working_dir = temp_test_dir("load-runtime-removed-managed-fd-working");
+    write_config(
+        &working_dir.join(".hunea").join("config.toml"),
+        "[runtime]\nallow_managed_fd = false\n",
+    );
+
+    let error = load_from_paths(Some(working_dir.as_path()), None)
+        .expect_err("removed fd authorization should be rejected as an unknown field");
+    assert!(error.to_string().contains("allow_managed_fd"));
+}
+
+#[test]
+fn persists_managed_ripgrep_authorization_to_user_config() {
     let working_dir = temp_test_dir("persist-managed-search-authorization");
     let config_path = working_dir.join("config.toml");
     write_config(&config_path, "[runtime]\nrequest_timeout_seconds = 240\n");
 
-    persist_managed_search_tool_authorization_to_path(&config_path, ManagedSearchTool::Ripgrep)
+    persist_managed_ripgrep_authorization_to_path(&config_path)
         .expect("authorization should be written");
 
     let content = fs::read_to_string(&config_path).expect("config should be readable");
     assert!(content.contains("request_timeout_seconds = 240"));
     assert!(content.contains("allow_managed_rg = true"));
-    assert!(!content.contains("allow_managed_fd = true"));
 }
 
 #[test]
-fn persists_managed_search_tool_rejection_to_user_config() {
+fn persists_managed_ripgrep_rejection_to_user_config() {
     let working_dir = temp_test_dir("persist-managed-search-rejection");
     let config_path = working_dir.join("config.toml");
     write_config(&config_path, "[runtime]\nrequest_timeout_seconds = 240\n");
 
-    persist_managed_search_tool_rejection_to_path(&config_path, ManagedSearchTool::Fd)
-        .expect("rejection should be written");
+    persist_managed_ripgrep_rejection_to_path(&config_path).expect("rejection should be written");
 
     let content = fs::read_to_string(&config_path).expect("config should be readable");
     assert!(content.contains("request_timeout_seconds = 240"));
-    assert!(content.contains("allow_managed_fd = false"));
-    assert!(!content.contains("allow_managed_rg = "));
+    assert!(content.contains("allow_managed_rg = false"));
 }
 
 #[test]
-fn persists_managed_search_tool_rejection_creates_config_when_missing() {
+fn persists_managed_ripgrep_rejection_creates_config_when_missing() {
     let working_dir = temp_test_dir("persist-managed-search-rejection-missing");
     let config_path = working_dir.join("config.toml");
 
-    persist_managed_search_tool_rejection_to_path(&config_path, ManagedSearchTool::Ripgrep)
+    persist_managed_ripgrep_rejection_to_path(&config_path)
         .expect("rejection should be written even when config file is missing");
 
     let content = fs::read_to_string(&config_path).expect("config should be readable");
     assert!(content.contains("allow_managed_rg = false"));
 }
 
-/// write-through 场景：先写 rg、再写 fd，两字段共存（toml_edit 保留兄弟 key）。
-/// 回归：多工具串行 precheck 中途 Quit 时，已完成工具的授权不能被后续写入冲掉。
+/// write-through 场景保留已有 runtime 配置字段。
 #[test]
-fn persists_managed_search_authorization_preserves_sibling_fields() {
+fn persists_managed_ripgrep_authorization_preserves_sibling_fields() {
     let working_dir = temp_test_dir("persist-managed-search-siblings");
     let config_path = working_dir.join("config.toml");
 
-    persist_managed_search_tool_authorization_to_path(&config_path, ManagedSearchTool::Ripgrep)
+    persist_managed_ripgrep_authorization_to_path(&config_path)
         .expect("rg authorization should be written");
-    persist_managed_search_tool_authorization_to_path(&config_path, ManagedSearchTool::Fd)
-        .expect("fd authorization should be written");
 
     let content = fs::read_to_string(&config_path).expect("config should be readable");
     assert!(content.contains("allow_managed_rg = true"));
-    assert!(content.contains("allow_managed_fd = true"));
 
-    let auth = read_managed_search_authorization(&config_path);
+    let auth = read_managed_ripgrep_authorization(&config_path);
     assert_eq!(auth.allow_managed_rg, Some(true));
-    assert_eq!(auth.allow_managed_fd, Some(true));
 }
 
 #[test]
-fn read_managed_search_authorization_returns_default_when_file_missing() {
+fn read_managed_ripgrep_authorization_returns_default_when_file_missing() {
     let working_dir = temp_test_dir("read-managed-search-missing");
     let config_path = working_dir.join("nonexistent.toml");
 
-    let auth = read_managed_search_authorization(&config_path);
+    let auth = read_managed_ripgrep_authorization(&config_path);
 
     assert_eq!(
         auth,
-        app_config::appconfig::ManagedSearchAuthorization::default()
+        app_config::appconfig::ManagedRipgrepAuthorization::default()
     );
 }
 
 #[test]
-fn read_managed_search_authorization_returns_default_when_no_runtime_table() {
+fn read_managed_ripgrep_authorization_returns_default_when_no_runtime_table() {
     let working_dir = temp_test_dir("read-managed-search-no-runtime");
     let config_path = working_dir.join("config.toml");
     write_config(&config_path, "[tui]\nuser_input_style = \"cx\"\n");
 
-    let auth = read_managed_search_authorization(&config_path);
+    let auth = read_managed_ripgrep_authorization(&config_path);
 
     assert_eq!(
         auth,
-        app_config::appconfig::ManagedSearchAuthorization::default()
+        app_config::appconfig::ManagedRipgrepAuthorization::default()
     );
 }
 
 #[test]
-fn read_managed_search_authorization_returns_default_when_malformed_toml() {
+fn read_managed_ripgrep_authorization_returns_default_when_malformed_toml() {
     let working_dir = temp_test_dir("read-managed-search-malformed");
     let config_path = working_dir.join("config.toml");
     write_config(&config_path, "this is not valid toml = = =\n");
 
-    let auth = read_managed_search_authorization(&config_path);
+    let auth = read_managed_ripgrep_authorization(&config_path);
 
     assert_eq!(
         auth,
-        app_config::appconfig::ManagedSearchAuthorization::default()
+        app_config::appconfig::ManagedRipgrepAuthorization::default()
     );
 }
 
 #[test]
-fn read_managed_search_authorization_reads_present_fields() {
+fn read_managed_ripgrep_authorization_reads_present_fields() {
     let working_dir = temp_test_dir("read-managed-search-present");
     let config_path = working_dir.join("config.toml");
     write_config(
         &config_path,
-        "[runtime]\nallow_managed_rg = true\nallow_managed_fd = false\nrequest_timeout_seconds = 240\n",
+        "[runtime]\nallow_managed_rg = true\nrequest_timeout_seconds = 240\n",
     );
 
-    let auth = read_managed_search_authorization(&config_path);
+    let auth = read_managed_ripgrep_authorization(&config_path);
 
     assert_eq!(auth.allow_managed_rg, Some(true));
-    assert_eq!(auth.allow_managed_fd, Some(false));
 }
 
 #[test]
-fn read_managed_search_authorization_treats_non_bool_as_none() {
+fn read_managed_ripgrep_authorization_treats_non_bool_as_none() {
     let working_dir = temp_test_dir("read-managed-search-non-bool");
     let config_path = working_dir.join("config.toml");
-    write_config(
-        &config_path,
-        "[runtime]\nallow_managed_rg = \"yes\"\nallow_managed_fd = 1\n",
-    );
+    write_config(&config_path, "[runtime]\nallow_managed_rg = \"yes\"\n");
 
-    let auth = read_managed_search_authorization(&config_path);
+    let auth = read_managed_ripgrep_authorization(&config_path);
 
     assert_eq!(auth.allow_managed_rg, None);
-    assert_eq!(auth.allow_managed_fd, None);
 }
 
 #[test]

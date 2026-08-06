@@ -5,7 +5,7 @@ use crate::precheck::step::{PrecheckStep, StepState};
 use runtime_domain::paths::DataDirResolution;
 use std::path::PathBuf;
 use terminal_ui::theme::default_palette;
-use tool_runtime::builtin::ManagedSearchToolConfig;
+use tool_runtime::builtin::ManagedRipgrepConfig;
 
 fn make_ctx(
     portable_marker: PortableMarkerProbe,
@@ -15,13 +15,13 @@ fn make_ctx(
         working_dir: PathBuf::from("/tmp/hunea-test-workspace"),
         portable_marker,
         global_accessibility,
-        managed_search_config: ManagedSearchToolConfig::default(),
+        managed_ripgrep: ManagedRipgrepConfig::default(),
         managed_root: PathBuf::from("/tmp/hunea-test-managed-root"),
     }
 }
 
 /// 只统计便携模式 step（ConfigAccessibility / PortableModeConfirm / PortableModeRecovery）。
-/// SearchToolPrecheck step 不计入，因为它依赖运行环境的工具检测。
+/// RipgrepPrecheck step 不计入，因为它依赖运行环境的 ripgrep 检测。
 fn count_portable_steps(steps: &[PrecheckStep]) -> (usize, usize, usize) {
     let mut config = 0;
     let mut confirm = 0;
@@ -31,7 +31,7 @@ fn count_portable_steps(steps: &[PrecheckStep]) -> (usize, usize, usize) {
             PrecheckStep::ConfigAccessibility(_) => config += 1,
             PrecheckStep::PortableModeConfirm(_) => confirm += 1,
             PrecheckStep::PortableModeRecovery(_) => recovery += 1,
-            PrecheckStep::SearchToolPrecheck(_) => {}
+            PrecheckStep::RipgrepPrecheck(_) => {}
         }
     }
     (config, confirm, recovery)
@@ -115,10 +115,10 @@ fn plan_steps_order_config_before_confirm() {
     // 便携模式 step 排在搜索工具 step 之前。
     let first_portable = steps
         .iter()
-        .find(|s| !matches!(s, PrecheckStep::SearchToolPrecheck(_)));
+        .find(|s| !matches!(s, PrecheckStep::RipgrepPrecheck(_)));
     let second_portable = steps
         .iter()
-        .filter(|s| !matches!(s, PrecheckStep::SearchToolPrecheck(_)))
+        .filter(|s| !matches!(s, PrecheckStep::RipgrepPrecheck(_)))
         .nth(1);
     assert!(matches!(
         first_portable,
@@ -141,7 +141,7 @@ fn portable_mode_steps_start_in_progress() {
     );
     let steps = plan_steps(&ctx, default_palette());
     for step in &steps {
-        if !matches!(step, PrecheckStep::SearchToolPrecheck(_)) {
+        if !matches!(step, PrecheckStep::RipgrepPrecheck(_)) {
             assert_eq!(
                 step.step_state(),
                 StepState::InProgress,
@@ -154,15 +154,14 @@ fn portable_mode_steps_start_in_progress() {
 #[test]
 fn available_global_screen_needs_no_interaction() {
     // 全局可用 + 明确拒绝 managed 工具时，不应有任何 step（正常启动不弹 TUI）。
-    // 用拒绝避免环境依赖：未拒绝时 detect_managed_tool_status 在无 rg/fd 环境返回
-    // NeedsDownload 导致 search tool step 加入，使 needs_interaction() 误判为 true。
+    // 用拒绝避免环境依赖：未拒绝时 detect_managed_ripgrep_status 在无 rg 环境返回
+    // NeedsDownload 导致 ripgrep step 加入，使 needs_interaction() 误判为 true。
     let ctx = PrecheckContext {
         working_dir: PathBuf::from("/tmp/hunea-test-workspace"),
         portable_marker: PortableMarkerProbe::Absent,
         global_accessibility: Accessibility::Available,
-        managed_search_config: ManagedSearchToolConfig {
+        managed_ripgrep: ManagedRipgrepConfig {
             allow_managed_rg: Some(false),
-            allow_managed_fd: Some(false),
         },
         managed_root: PathBuf::from("/tmp/hunea-test-managed-root"),
     };
@@ -172,6 +171,6 @@ fn available_global_screen_needs_no_interaction() {
     );
     assert!(
         !screen.needs_interaction(),
-        "normal startup must not open precheck TUI when managed tools are rejected"
+        "normal startup must not open precheck TUI when managed ripgrep is rejected"
     );
 }

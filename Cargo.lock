@@ -61,7 +61,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "app-config"
-version = "0.12.1-alpha.2"
+version = "0.12.1-alpha.3"
 dependencies = [
  "libc",
  "runtime-domain",
@@ -464,7 +464,7 @@ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
 name = "conversation-runtime"
-version = "0.12.1-alpha.2"
+version = "0.12.1-alpha.3"
 dependencies = [
  "libc",
  "openai-compat-provider",
@@ -2053,7 +2053,7 @@ checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
 name = "openai-compat-provider"
-version = "0.12.1-alpha.2"
+version = "0.12.1-alpha.3"
 dependencies = [
  "futures-util",
  "provider-protocol",
@@ -2351,7 +2351,7 @@ dependencies = [
 
 [[package]]
 name = "provider-protocol"
-version = "0.12.1-alpha.2"
+version = "0.12.1-alpha.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -2747,7 +2747,7 @@ dependencies = [
 
 [[package]]
 name = "runtime-domain"
-version = "0.12.1-alpha.2"
+version = "0.12.1-alpha.3"
 dependencies = [
  "base16ct",
  "directories",
@@ -3013,7 +3013,7 @@ dependencies = [
 
 [[package]]
 name = "session-store"
-version = "0.12.1-alpha.2"
+version = "0.12.1-alpha.3"
 dependencies = [
  "provider-protocol",
  "runtime-domain",
@@ -3336,7 +3336,7 @@ dependencies = [
 
 [[package]]
 name = "terminal-app"
-version = "0.12.1-alpha.2"
+version = "0.12.1-alpha.3"
 dependencies = [
  "app-config",
  "color-eyre",
@@ -3360,7 +3360,7 @@ dependencies = [
 
 [[package]]
 name = "terminal-cli"
-version = "0.12.1-alpha.2"
+version = "0.12.1-alpha.3"
 dependencies = [
  "app-config",
  "color-eyre",
@@ -3381,7 +3381,7 @@ dependencies = [
 
 [[package]]
 name = "terminal-ui"
-version = "0.12.1-alpha.2"
+version = "0.12.1-alpha.3"
 dependencies = [
  "arboard",
  "base64 0.23.0",
@@ -3707,7 +3707,7 @@ checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
 name = "tool-loop-runtime"
-version = "0.12.1-alpha.2"
+version = "0.12.1-alpha.3"
 dependencies = [
  "provider-protocol",
  "runtime-domain",
@@ -3720,7 +3720,7 @@ dependencies = [
 
 [[package]]
 name = "tool-runtime"
-version = "0.12.1-alpha.2"
+version = "0.12.1-alpha.3"
 dependencies = [
  "base16ct",
  "base64 0.23.0",
@@ -4526,7 +4526,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.12.1-alpha.2"
+version = "0.12.1-alpha.3"
 dependencies = [
  "anyhow",
  "semver",

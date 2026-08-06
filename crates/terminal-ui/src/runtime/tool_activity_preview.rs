@@ -1,7 +1,11 @@
 //! Runtime tool activity preview helpers shared by approval and transcript rendering.
 
-use std::path::Path;
+use std::{
+    env,
+    path::{Component, Path, PathBuf},
+};
 
+use runtime_domain::envinfo::shorten_home_prefix;
 use runtime_domain::session::{
     RuntimeToolActivity, RuntimeToolActivityContent, RuntimeToolActivityRawValue,
     RuntimeToolActivityStatus, RuntimeToolActivityUpdate, RuntimeToolKind,
@@ -64,16 +68,84 @@ impl ToolApprovalPreview {
 }
 
 pub(crate) fn runtime_display_path(path: &str) -> String {
-    let path_ref = Path::new(path);
-    if path_ref.is_absolute()
-        && let Ok(cwd) = std::env::current_dir()
-        && let Ok(stripped) = path_ref.strip_prefix(cwd)
-        && !stripped.as_os_str().is_empty()
-    {
-        return stripped.display().to_string();
+    let cwd = env::current_dir().ok();
+    let home = detect_home_dir();
+    runtime_display_path_with_roots(path, cwd.as_deref(), home.as_deref())
+}
+
+/// `runtime_display_path_with_roots` 只改变 TUI 展示文本，不改写 runtime 保存的原始路径。
+/// cwd 内显示相对路径，cwd 外但 home 内显示 `~/...`，其余显示绝对路径。
+pub(crate) fn runtime_display_path_with_roots(
+    path: &str,
+    cwd: Option<&Path>,
+    home: Option<&Path>,
+) -> String {
+    let path = path.trim();
+    if path.is_empty() {
+        return ".".to_string();
+    }
+
+    let normalized_path = lexical_path(Path::new(path));
+    let path_ref = normalized_path.as_path();
+    if !path_ref.is_absolute() {
+        return relative_display_path(path_ref);
+    }
+
+    if let Some(cwd) = cwd {
+        let normalized_cwd = lexical_path(cwd);
+        let cwd = normalized_cwd.as_path();
+        if path_ref == cwd {
+            return ".".to_string();
+        }
+        if let Ok(stripped) = path_ref.strip_prefix(cwd)
+            && !stripped.as_os_str().is_empty()
+        {
+            return relative_display_path(stripped);
+        }
+    }
+
+    if let Some(home) = home {
+        return shorten_home_prefix(path_ref, &lexical_path(home));
     }
 
     path_ref.display().to_string()
+}
+
+fn relative_display_path(path: &Path) -> String {
+    let normalized = lexical_path(path);
+
+    if normalized.as_os_str().is_empty() {
+        ".".to_string()
+    } else {
+        normalized.display().to_string()
+    }
+}
+
+fn lexical_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => normalized.push(part),
+            Component::ParentDir => normalized.push(".."),
+            Component::RootDir | Component::Prefix(_) => normalized.push(component.as_os_str()),
+        }
+    }
+
+    normalized
+}
+
+fn detect_home_dir() -> Option<PathBuf> {
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("USERPROFILE").map(PathBuf::from))
+        .or_else(|| {
+            let home_drive = env::var_os("HOMEDRIVE")?;
+            let home_path = env::var_os("HOMEPATH")?;
+            let mut path = PathBuf::from(home_drive);
+            path.push(home_path);
+            Some(path)
+        })
 }
 
 pub(crate) fn is_runtime_write_tool_activity(call: &RuntimeToolActivity) -> bool {
@@ -147,4 +219,52 @@ fn raw_input_string_field(
     keys: &[&str],
 ) -> Option<String> {
     raw_input.string_field(keys)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::runtime_display_path_with_roots;
+    use std::path::Path;
+
+    #[test]
+    fn display_path_normalizes_relative_paths() {
+        assert_eq!(runtime_display_path_with_roots("", None, None), ".");
+        assert_eq!(
+            runtime_display_path_with_roots("./src/main.rs", None, None),
+            "src/main.rs"
+        );
+        assert_eq!(runtime_display_path_with_roots(".", None, None), ".");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn display_path_uses_cwd_relative_home_relative_then_absolute_precedence() {
+        let cwd = Path::new("/home/ziply/project");
+        let home = Path::new("/home/ziply");
+
+        assert_eq!(
+            runtime_display_path_with_roots("/home/ziply/project", Some(cwd), Some(home)),
+            "."
+        );
+        assert_eq!(
+            runtime_display_path_with_roots(
+                "/home/ziply/project/src/main.rs",
+                Some(cwd),
+                Some(home)
+            ),
+            "src/main.rs"
+        );
+        assert_eq!(
+            runtime_display_path_with_roots(
+                "/home/ziply/reference/README.md",
+                Some(cwd),
+                Some(home)
+            ),
+            "~/reference/README.md"
+        );
+        assert_eq!(
+            runtime_display_path_with_roots("/opt/./reference/README.md", Some(cwd), Some(home)),
+            "/opt/reference/README.md"
+        );
+    }
 }

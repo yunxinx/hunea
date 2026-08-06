@@ -1,19 +1,19 @@
-//! 搜索工具下载进度的文本格式化（进度条 / 字节 / 速度 / ETA）。
+//! Managed ripgrep 下载进度的文本格式化（进度条 / 字节 / 速度 / ETA）。
 //!
 //! 不用 ratatui Gauge：precheck 全是 Paragraph lines，字符 bar 与现有布局一致。
 
 use std::time::Instant;
 
-use tool_runtime::builtin::ManagedToolProgress;
+use tool_runtime::builtin::ManagedRipgrepProgress;
 
-pub(super) fn stage_label(progress: &ManagedToolProgress) -> &'static str {
+pub(super) fn stage_label(progress: &ManagedRipgrepProgress) -> &'static str {
     match progress {
-        ManagedToolProgress::Downloading { .. } => "Downloading",
-        ManagedToolProgress::Verifying => "Verifying checksum",
-        ManagedToolProgress::Extracting => "Extracting archive",
-        ManagedToolProgress::Installing => "Installing",
-        ManagedToolProgress::Ready { .. } => "Ready",
-        ManagedToolProgress::Failed { .. } => "Failed",
+        ManagedRipgrepProgress::Downloading { .. } => "Downloading",
+        ManagedRipgrepProgress::Verifying => "Verifying checksum",
+        ManagedRipgrepProgress::Extracting => "Extracting archive",
+        ManagedRipgrepProgress::Installing => "Installing",
+        ManagedRipgrepProgress::Ready { .. } => "Ready",
+        ManagedRipgrepProgress::Failed { .. } => "Failed",
     }
 }
 

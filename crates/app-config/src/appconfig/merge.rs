@@ -257,7 +257,6 @@ fn merge_runtime_config(
         && file_config.request_timeout_seconds.is_none()
         && file_config.tool_max_turns.is_none()
         && file_config.allow_managed_rg.is_none()
-        && file_config.allow_managed_fd.is_none()
     {
         return Ok(());
     }
@@ -294,9 +293,6 @@ fn merge_runtime_config(
     config.tool_max_turns = tool_max_turns;
     if let Some(allow_managed_rg) = file_config.allow_managed_rg {
         config.allow_managed_rg = Some(allow_managed_rg);
-    }
-    if let Some(allow_managed_fd) = file_config.allow_managed_fd {
-        config.allow_managed_fd = Some(allow_managed_fd);
     }
     Ok(())
 }

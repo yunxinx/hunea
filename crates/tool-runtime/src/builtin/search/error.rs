@@ -19,22 +19,16 @@ pub(crate) enum SearchToolError {
         #[source]
         source: WorkspaceFileError,
     },
-    #[error("spawn external search tool failed: {source}")]
-    ExternalSpawn { source: io::Error },
-    #[error("external {tool} stdout is unavailable")]
-    ExternalStdoutUnavailable { tool: &'static str },
-    #[error("read external {tool} output failed: {source}")]
-    ExternalOutputRead {
-        tool: &'static str,
-        source: io::Error,
-    },
-    #[error("wait for external {tool} failed: {source}")]
-    ExternalWait {
-        tool: &'static str,
-        source: io::Error,
-    },
-    #[error("external {tool} failed: {stderr}")]
-    ExternalFailed { tool: &'static str, stderr: String },
+    #[error("spawn ripgrep failed: {source}")]
+    RipgrepSpawn { source: io::Error },
+    #[error("ripgrep stdout is unavailable")]
+    RipgrepStdoutUnavailable,
+    #[error("read ripgrep output failed: {source}")]
+    RipgrepOutputRead { source: io::Error },
+    #[error("wait for ripgrep failed: {source}")]
+    RipgrepWait { source: io::Error },
+    #[error("ripgrep failed: {stderr}")]
+    RipgrepFailed { stderr: String },
     #[error("invalid glob pattern {pattern:?}: {source}")]
     InvalidGlob {
         pattern: String,
@@ -42,23 +36,25 @@ pub(crate) enum SearchToolError {
     },
     #[error("invalid grep pattern: {source}")]
     InvalidRegex { source: grep_regex::Error },
-    #[error("walk workspace failed: {source}")]
-    WalkWorkspace { source: ignore::Error },
+    #[error("walk search path failed: {source}")]
+    WalkSearchPath { source: ignore::Error },
     #[error("read file type failed for '{path}'")]
     FileTypeUnavailable { path: PathBuf },
+    #[error("find search path '{path}' is not a directory")]
+    SearchPathNotDirectory { path: PathBuf },
     #[error("{TOOL_CALL_INTERRUPTED}")]
     Interrupted,
-    #[error("no managed {tool} asset for this platform")]
-    NoManagedAsset { tool: &'static str },
+    #[error("no managed ripgrep asset for this platform")]
+    NoManagedRipgrepAsset,
     #[error("{operation} task failed: {source}")]
     JoinTask {
         operation: &'static str,
         source: tokio::task::JoinError,
     },
-    #[error("invalid managed tool URL: {source}")]
-    InvalidManagedToolUrl { source: url::ParseError },
-    #[error("managed tool URL is not an official GitHub URL: {url}")]
-    UnofficialManagedToolUrl { url: String },
+    #[error("invalid managed ripgrep URL: {source}")]
+    InvalidManagedRipgrepUrl { source: url::ParseError },
+    #[error("managed ripgrep URL is not an official GitHub URL: {url}")]
+    UnofficialManagedRipgrepUrl { url: String },
     #[error("download failed: {source}")]
     Download { source: reqwest::Error },
     #[error("read download body failed: {source}")]
@@ -74,7 +70,7 @@ pub(crate) enum SearchToolError {
         path: PathBuf,
         source: io::Error,
     },
-    #[error("checksum mismatch for managed tool archive: expected {expected}, got {actual}")]
+    #[error("checksum mismatch for managed ripgrep archive: expected {expected}, got {actual}")]
     ChecksumMismatch { expected: String, actual: String },
     #[error("tar archive contains a path outside the extraction directory")]
     TarPathOutsideExtraction,

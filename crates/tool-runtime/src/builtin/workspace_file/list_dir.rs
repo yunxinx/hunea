@@ -18,7 +18,7 @@ use crate::{
 
 use super::{
     error::WorkspaceFileError,
-    workspace::resolve_workspace_path,
+    workspace::resolve_read_path,
     workspace_access::{SharedWorkspaceAccess, local_workspace_access},
 };
 
@@ -26,7 +26,7 @@ const LIST_DIR_TOOL_NAME: &str = "list_dir";
 const LIST_DIR_DEFAULT_ENTRY_LIMIT: usize = 500;
 const LIST_DIR_MAX_ENTRY_LIMIT: usize = 2_000;
 
-/// `list_dir_tool` 创建只读 workspace 目录列举工具。
+/// `list_dir_tool` 创建只读目录列举工具。
 pub fn list_dir_tool(root: impl AsRef<Path>) -> impl Tool + 'static {
     list_dir_tool_with_access(root, local_workspace_access())
 }
@@ -61,14 +61,14 @@ impl Tool for ListDirTool {
             .with_label("List Directory")
             .with_kind(ToolKind::Search)
             .with_description(
-                "List immediate entries of a directory inside the current workspace. Entries are sorted alphabetically, include dotfiles unless gitignored, and directories end with '/'.",
+                "List immediate entries of an existing directory from a relative or absolute path. Relative paths resolve from the current working directory. Entries are sorted alphabetically, include dotfiles unless gitignored, and directories end with '/'.",
             )
             .with_input_schema(json!({
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Workspace-relative or workspace-contained absolute directory path; defaults to the workspace root"
+                        "description": "Existing relative or absolute directory path; relative paths resolve from the current working directory and default to it"
                     },
                     "limit": {
                         "type": "integer",
@@ -134,7 +134,7 @@ fn execute_list_dir(
     };
     let requested_path = arguments.path.as_deref().unwrap_or(".");
 
-    let path = match resolve_workspace_path(access.as_ref(), &root, requested_path) {
+    let path = match resolve_read_path(access.as_ref(), &root, requested_path) {
         Ok(path) => path,
         Err(error) => return ToolResult::error(call.call_id, error.to_string()),
     };
@@ -189,7 +189,12 @@ fn list_directory_entries(
             path: root.to_path_buf(),
             source,
         })?;
-    let gitignore = gitignore_matcher(access, &root, path, cancellation)?;
+    let ignore_root = if path.starts_with(&root) {
+        root.as_path()
+    } else {
+        path
+    };
+    let gitignore = gitignore_matcher(access, ignore_root, path, cancellation)?;
     let mut entries = access
         .read_dir(path)
         .map_err(|source| WorkspaceFileError::ReadDirectory {
@@ -530,6 +535,72 @@ mod tests {
             &CancellationToken::new(),
         )
         .expect("nested directory listing should honor its own gitignore");
+
+        assert_eq!(content, "keep.rs");
+    }
+
+    #[test]
+    fn external_listing_uses_only_the_target_gitignore_scope() {
+        let access = FakeWorkspaceAccess {
+            canonical_paths: HashMap::from([(
+                PathBuf::from("/workspace-link"),
+                PathBuf::from("/srv/workspace"),
+            )]),
+            metadata_by_path: HashMap::from([
+                (
+                    PathBuf::from("/srv/workspace/.gitignore"),
+                    WorkspaceMetadata {
+                        is_dir: false,
+                        is_file: true,
+                        len: 8,
+                        modified_at: None,
+                    },
+                ),
+                (
+                    PathBuf::from("/srv/external/.gitignore"),
+                    WorkspaceMetadata {
+                        is_dir: false,
+                        is_file: true,
+                        len: 11,
+                        modified_at: None,
+                    },
+                ),
+            ]),
+            file_contents: HashMap::from([
+                (
+                    PathBuf::from("/srv/workspace/.gitignore"),
+                    b"keep.rs\n".to_vec(),
+                ),
+                (
+                    PathBuf::from("/srv/external/.gitignore"),
+                    b"ignored.rs\n".to_vec(),
+                ),
+            ]),
+            directories: HashMap::from([(
+                PathBuf::from("/srv/external"),
+                vec![
+                    WorkspaceDirectoryEntry {
+                        path: PathBuf::from("/srv/external/keep.rs"),
+                        name: "keep.rs".to_string(),
+                        is_dir: false,
+                    },
+                    WorkspaceDirectoryEntry {
+                        path: PathBuf::from("/srv/external/ignored.rs"),
+                        name: "ignored.rs".to_string(),
+                        is_dir: false,
+                    },
+                ],
+            )]),
+        };
+
+        let content = list_directory_entries(
+            Path::new("/workspace-link"),
+            &access,
+            Path::new("/srv/external"),
+            10,
+            &CancellationToken::new(),
+        )
+        .expect("external listing should use its own ignore scope");
 
         assert_eq!(content, "keep.rs");
     }

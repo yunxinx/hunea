@@ -4,10 +4,10 @@ pub(crate) mod config_accessibility;
 mod layout;
 pub(crate) mod portable_mode_confirm;
 pub(crate) mod portable_mode_recovery;
-pub(crate) mod search_tool_precheck;
-mod search_tool_progress;
+pub(crate) mod ripgrep_precheck;
+mod ripgrep_progress;
 
 pub(crate) use config_accessibility::ConfigAccessibilityWidget;
 pub(crate) use portable_mode_confirm::{ConfirmSelection, PortableModeConfirmWidget};
 pub(crate) use portable_mode_recovery::{PortableModeRecoveryWidget, RecoverySelection};
-pub(crate) use search_tool_precheck::SearchToolPrecheckWidget;
+pub(crate) use ripgrep_precheck::RipgrepPrecheckWidget;

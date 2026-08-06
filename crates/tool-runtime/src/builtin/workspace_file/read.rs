@@ -17,7 +17,7 @@ use super::{
     file_state::{
         TextFingerprint, TextFingerprintBuilder, WorkspaceFileSnapshot, WorkspaceReadState,
     },
-    workspace::resolve_workspace_path,
+    workspace::resolve_read_path,
     workspace_access::{SharedWorkspaceAccess, WorkspaceAccess, local_workspace_access},
 };
 
@@ -27,7 +27,7 @@ const READ_MAX_LINE_COUNT: usize = 5_000;
 const READ_MAX_LINE_CHARS: usize = 2_000;
 const READ_MAX_OUTPUT_BYTES: usize = 64 * 1024;
 
-/// `read_tool` 创建只读 workspace 内容读取工具。
+/// `read_tool` 创建只读文本文件读取工具。
 pub fn read_tool(root: impl AsRef<Path>) -> impl Tool + 'static {
     read_tool_with_access(
         root,
@@ -70,14 +70,14 @@ impl Tool for ReadTool {
             .with_label("Read")
             .with_kind(ToolKind::Read)
             .with_description(
-                "Read a UTF-8 text file inside the current workspace. Use view_image for image files. Use offset and limit to read large text files in chunks; text output includes 1-based line numbers.",
+                "Read an existing UTF-8 text file from a relative or absolute path. Relative paths resolve from the current working directory. Use view_image for image files. Use offset and limit to read large text files in chunks; text output includes 1-based line numbers.",
             )
             .with_input_schema(json!({
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Workspace-relative or workspace-contained absolute file path"
+                        "description": "Existing relative or absolute file path; relative paths resolve from the current working directory"
                     },
                     "offset": {
                         "type": "integer",
@@ -166,7 +166,7 @@ fn execute_read(
         }
     };
 
-    let path = match resolve_workspace_path(access.as_ref(), &root, &arguments.path) {
+    let path = match resolve_read_path(access.as_ref(), &root, &arguments.path) {
         Ok(path) => path,
         Err(error) => return ToolResult::error(call.call_id, error.to_string()),
     };

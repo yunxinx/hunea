@@ -25,7 +25,7 @@ pub use command::{RuntimeCommand, RuntimeCommandReceipt};
 pub use context_budget::{ContextBudgetLoadErrorPayload, ContextBudgetProjectionErrorKind};
 pub use conversation::{
     ConversationEvent, ConversationRequest, ConversationResponse, ConversationTurnRequest,
-    ManagedSearchTool, ProviderRequest, ProviderRequestMetrics,
+    ProviderRequest, ProviderRequestMetrics,
 };
 pub use event::{PromptAssemblyCommandFailureKind, PromptAssemblyUpdateNotice, RuntimeEvent};
 pub use identity::{RuntimeAgentCapabilities, RuntimeIdentity, RuntimePromptCapabilities};

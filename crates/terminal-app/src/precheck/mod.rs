@@ -4,7 +4,7 @@
 
 mod accessibility;
 mod config_probe;
-mod managed_search;
+mod managed_ripgrep;
 mod screen;
 mod step;
 mod steps;
@@ -16,9 +16,9 @@ use color_eyre::eyre::{Result, WrapErr, eyre};
 
 use accessibility::{Accessibility, probe_global_config_dir_accessibility};
 use config_probe::{PortableMarkerProbe, probe_portable_marker};
-pub(crate) use managed_search::sync_managed_search_outcomes_to_config;
-use managed_search::{
-    ManagedSearchOutcome, install_managed_tool_silently, read_managed_search_config,
+pub(crate) use managed_ripgrep::sync_managed_ripgrep_outcome_to_config;
+use managed_ripgrep::{
+    ManagedRipgrepOutcome, install_managed_ripgrep_silently, read_managed_ripgrep_config,
 };
 use runtime_domain::paths::{
     CONFIG_FILE_NAME, DataDirResolution, hunea_config_dir, resolve_data_dir,
@@ -26,7 +26,7 @@ use runtime_domain::paths::{
 use screen::PrecheckScreen;
 use terminal_ui::MinimalTerminalSession;
 use tool_runtime::builtin::{
-    ManagedSearchToolConfig, ManagedToolKind, ManagedToolStatus, detect_managed_tool_status,
+    MANAGED_RIPGREP_NAME, ManagedRipgrepConfig, ManagedRipgrepStatus, detect_managed_ripgrep_status,
 };
 
 /// `PrecheckResult` 是预检阶段的输出，供主启动流程使用。
@@ -45,7 +45,7 @@ pub struct PrecheckResult {
     /// 用户是否选择退出（如便携模式确认时选 Quit）
     pub should_exit: bool,
     /// step 决策结果：磁盘已 write-through；此字段只供进主 TUI 填内存 Config。
-    pub(crate) managed_search_outcomes: Vec<ManagedSearchOutcome>,
+    pub(crate) managed_ripgrep_outcome: Option<ManagedRipgrepOutcome>,
 }
 
 /// `PrecheckContext` 汇总预检探测结果，供 step 编排决策。
@@ -53,9 +53,9 @@ pub(crate) struct PrecheckContext {
     pub working_dir: PathBuf,
     pub portable_marker: PortableMarkerProbe,
     pub global_accessibility: Accessibility,
-    /// 轻量读的 `allow_managed_*`（完整 config 尚未加载）。
-    pub managed_search_config: ManagedSearchToolConfig,
-    /// 受管工具安装根（= `DataDirResolution::config_dir()`）。
+    /// 轻量读的 `allow_managed_rg`（完整 config 尚未加载）。
+    pub managed_ripgrep: ManagedRipgrepConfig,
+    /// Managed ripgrep 安装根（= `DataDirResolution::config_dir()`）。
     ///
     /// 故意不兼容旧版硬编码的 `~/.hunea`：统一落到 config/data 目录
     /// （全局 `~/.config/hunea/` 或便携 `<working_dir>/.hunea/`），无迁移。
@@ -95,13 +95,13 @@ fn run_with_working_dir(working_dir: PathBuf) -> Result<PrecheckResult> {
         .ok_or_else(|| eyre!("cannot resolve hunea data directory (is HOME set?)"))?;
 
     let config_path = initial_resolution.config_dir().join(CONFIG_FILE_NAME);
-    let managed_search_config = read_managed_search_config(&config_path);
+    let managed_ripgrep_config = read_managed_ripgrep_config(&config_path);
 
     let ctx = PrecheckContext {
         working_dir: working_dir.clone(),
         portable_marker,
         global_accessibility,
-        managed_search_config,
+        managed_ripgrep: managed_ripgrep_config,
         managed_root: initial_resolution.config_dir().to_path_buf(),
     };
 
@@ -128,7 +128,7 @@ fn run_without_working_dir() -> Result<PrecheckResult> {
                 data_dir_resolution: DataDirResolution::Global(global_dir),
                 working_dir: None,
                 should_exit: false,
-                managed_search_outcomes: Vec::new(),
+                managed_ripgrep_outcome: None,
             })
         }
         Accessibility::Unavailable { .. } => Err(eyre!(
@@ -138,7 +138,7 @@ fn run_without_working_dir() -> Result<PrecheckResult> {
     }
 }
 
-/// 非 TTY：便携模式按探测结果直接解析；已授权且缺失的搜索工具静默安装，失败走 fallback。
+/// 非 TTY：便携模式按探测结果直接解析；已授权且缺失的 ripgrep 静默安装，失败走 fallback。
 fn run_non_interactive() -> Result<PrecheckResult> {
     let mut result = match std::env::current_dir() {
         Ok(working_dir) => {
@@ -159,24 +159,21 @@ fn apply_silent_managed_install(result: &mut PrecheckResult) {
         .data_dir_resolution
         .config_dir()
         .join(CONFIG_FILE_NAME);
-    let managed_search_config = read_managed_search_config(&config_path);
+    let managed_ripgrep = read_managed_ripgrep_config(&config_path);
     let managed_root = result.data_dir_resolution.config_dir();
-    for tool in [ManagedToolKind::Ripgrep, ManagedToolKind::Fd] {
-        if !managed_search_config.allows(tool) {
-            continue;
-        }
-        let status = detect_managed_tool_status(tool, &managed_search_config, managed_root);
-        match status {
-            ManagedToolStatus::NeedsDownload | ManagedToolStatus::NeedsRebuild => {
-                if let Err(error) = install_managed_tool_silently(tool, managed_root) {
-                    eprintln!(
-                        "warning: failed to install {} silently: {error}; using Rust fallback",
-                        tool.display_name()
-                    );
-                }
+    if !managed_ripgrep.allows() {
+        return;
+    }
+    let status = detect_managed_ripgrep_status(&managed_ripgrep, managed_root);
+    match status {
+        ManagedRipgrepStatus::NeedsDownload | ManagedRipgrepStatus::NeedsRebuild => {
+            if let Err(error) = install_managed_ripgrep_silently(managed_root) {
+                eprintln!(
+                    "warning: failed to install {MANAGED_RIPGREP_NAME} silently: {error}; using Rust fallback"
+                );
             }
-            _ => {}
         }
+        _ => {}
     }
 }
 
@@ -199,7 +196,7 @@ fn resolve_non_interactive(
                 data_dir_resolution: DataDirResolution::Global(global_dir),
                 working_dir: None,
                 should_exit: false,
-                managed_search_outcomes: Vec::new(),
+                managed_ripgrep_outcome: None,
             })
         }
         (None, _, Accessibility::Unavailable { .. }) => Err(eyre!(
@@ -216,7 +213,7 @@ fn resolve_non_interactive(
                 data_dir_resolution: resolution,
                 working_dir: Some(working_dir.to_path_buf()),
                 should_exit: false,
-                managed_search_outcomes: Vec::new(),
+                managed_ripgrep_outcome: None,
             })
         }
         (Some(working_dir), PortableMarkerProbe::Absent, Accessibility::Available) => {
@@ -226,7 +223,7 @@ fn resolve_non_interactive(
                 data_dir_resolution: resolution,
                 working_dir: Some(working_dir.to_path_buf()),
                 should_exit: false,
-                managed_search_outcomes: Vec::new(),
+                managed_ripgrep_outcome: None,
             })
         }
         (Some(_), PortableMarkerProbe::Absent, Accessibility::Unavailable { .. }) => Err(eyre!(

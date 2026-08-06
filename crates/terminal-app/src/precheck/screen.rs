@@ -7,14 +7,14 @@ use crossterm::event::{self, Event, KeyEventKind};
 use ratatui::widgets::Clear;
 use runtime_domain::paths::DataDirResolution;
 use terminal_ui::theme::default_palette;
-use tool_runtime::builtin::{ManagedToolKind, ManagedToolStatus, detect_managed_tool_status};
+use tool_runtime::builtin::{ManagedRipgrepStatus, detect_managed_ripgrep_status};
 
 use super::config_probe::write_portable_marker;
-use super::managed_search::{ManagedSearchOutcome, persist_managed_search_outcome};
+use super::managed_ripgrep::{ManagedRipgrepOutcome, persist_managed_ripgrep_outcome};
 use super::step::{KeyboardHandler, PrecheckStep, StepRenderer, StepState, StepStateProvider};
 use super::steps::{
     ConfigAccessibilityWidget, ConfirmSelection, PortableModeConfirmWidget,
-    PortableModeRecoveryWidget, RecoverySelection, SearchToolPrecheckWidget,
+    PortableModeRecoveryWidget, RecoverySelection, RipgrepPrecheckWidget,
 };
 use super::{Accessibility, PortableMarkerProbe, PrecheckContext, PrecheckResult};
 use runtime_domain::paths::{CONFIG_FILE_NAME, WORKSPACE_HUNEA_DIRNAME};
@@ -25,7 +25,7 @@ pub(crate) struct PrecheckScreen {
     working_dir: std::path::PathBuf,
     data_dir_resolution: DataDirResolution,
     should_exit: bool,
-    managed_search_outcomes: Vec<ManagedSearchOutcome>,
+    managed_ripgrep_outcome: Option<ManagedRipgrepOutcome>,
 }
 
 impl PrecheckScreen {
@@ -38,7 +38,7 @@ impl PrecheckScreen {
             working_dir: ctx.working_dir.clone(),
             data_dir_resolution: initial_resolution,
             should_exit: false,
-            managed_search_outcomes: Vec::new(),
+            managed_ripgrep_outcome: None,
         }
     }
 
@@ -78,7 +78,7 @@ impl PrecheckScreen {
 
     fn has_active_download(&self) -> bool {
         self.steps.iter().any(|step| {
-            if let PrecheckStep::SearchToolPrecheck(w) = step {
+            if let PrecheckStep::RipgrepPrecheck(w) = step {
                 w.is_downloading()
             } else {
                 false
@@ -103,7 +103,7 @@ impl PrecheckScreen {
     }
 
     fn poll_download_progress(&mut self) {
-        if let Some(PrecheckStep::SearchToolPrecheck(w)) = self.current_step_mut() {
+        if let Some(PrecheckStep::RipgrepPrecheck(w)) = self.current_step_mut() {
             w.poll_progress();
         }
     }
@@ -112,7 +112,7 @@ impl PrecheckScreen {
     fn apply_step_outcomes(&mut self) -> Result<()> {
         let mut should_exit = false;
         let mut new_resolution: Option<DataDirResolution> = None;
-        let mut new_outcomes: Vec<ManagedSearchOutcome> = Vec::new();
+        let mut new_outcome: Option<ManagedRipgrepOutcome> = None;
 
         for step in &mut self.steps {
             match step {
@@ -136,10 +136,10 @@ impl PrecheckScreen {
                     }
                 }
                 PrecheckStep::ConfigAccessibility(_) => {}
-                PrecheckStep::SearchToolPrecheck(w) => {
+                PrecheckStep::RipgrepPrecheck(w) => {
                     if w.step_state() == StepState::Complete {
                         if let Some(outcome) = w.take_outcome() {
-                            new_outcomes.push(outcome);
+                            new_outcome = Some(outcome);
                         }
                         if w.wants_exit() {
                             should_exit = true;
@@ -157,18 +157,16 @@ impl PrecheckScreen {
             self.data_dir_resolution = resolution;
             // 便携切换后更新 widget root；进行中的下载仍用旧 root。
             for step in &mut self.steps {
-                if let PrecheckStep::SearchToolPrecheck(w) = step {
+                if let PrecheckStep::RipgrepPrecheck(w) = step {
                     w.set_managed_root(new_managed_root.clone());
                 }
             }
         }
         // write-through：避免后续 step Quit 丢掉已完成工具的授权。
-        if !new_outcomes.is_empty() {
+        if let Some(outcome) = new_outcome {
             let config_path = self.data_dir_resolution.config_dir().join(CONFIG_FILE_NAME);
-            for outcome in &new_outcomes {
-                persist_managed_search_outcome(outcome, &config_path);
-            }
-            self.managed_search_outcomes.extend(new_outcomes);
+            persist_managed_ripgrep_outcome(&outcome, &config_path);
+            self.managed_ripgrep_outcome = Some(outcome);
         }
         Ok(())
     }
@@ -203,7 +201,7 @@ impl PrecheckScreen {
             data_dir_resolution: self.data_dir_resolution.clone(),
             working_dir: Some(std::mem::take(&mut self.working_dir)),
             should_exit: self.should_exit,
-            managed_search_outcomes: std::mem::take(&mut self.managed_search_outcomes),
+            managed_ripgrep_outcome: self.managed_ripgrep_outcome.take(),
         }
     }
 }
@@ -211,7 +209,7 @@ impl PrecheckScreen {
 impl Drop for PrecheckScreen {
     fn drop(&mut self) {
         for step in &mut self.steps {
-            if let PrecheckStep::SearchToolPrecheck(w) = step {
+            if let PrecheckStep::RipgrepPrecheck(w) = step {
                 w.abort_download();
             }
         }
@@ -243,48 +241,35 @@ fn plan_steps(
         (PortableMarkerProbe::Present, Accessibility::Unavailable { .. }) => {}
     }
 
-    // rg 先、fd 后；就绪/已拒绝不加 step。
-    for tool in [ManagedToolKind::Ripgrep, ManagedToolKind::Fd] {
-        let status =
-            detect_managed_tool_status(tool, &ctx.managed_search_config, &ctx.managed_root);
-        match status {
-            ManagedToolStatus::SystemPath(_)
-            | ManagedToolStatus::Bundled(_)
-            | ManagedToolStatus::ManagedReady(_)
-            | ManagedToolStatus::NotAuthorized => {}
-            ManagedToolStatus::NeedsDownload => {
-                steps.push(PrecheckStep::SearchToolPrecheck(
-                    SearchToolPrecheckWidget::new(
-                        tool,
-                        false,
-                        palette,
-                        ctx.managed_root.clone(),
-                        false,
-                    ),
-                ));
-            }
-            ManagedToolStatus::NeedsRebuild => {
-                steps.push(PrecheckStep::SearchToolPrecheck(
-                    SearchToolPrecheckWidget::new(
-                        tool,
-                        false,
-                        palette,
-                        ctx.managed_root.clone(),
-                        true,
-                    ),
-                ));
-            }
-            ManagedToolStatus::AndroidIncompatible => {
-                steps.push(PrecheckStep::SearchToolPrecheck(
-                    SearchToolPrecheckWidget::new(
-                        tool,
-                        true,
-                        palette,
-                        ctx.managed_root.clone(),
-                        false,
-                    ),
-                ));
-            }
+    let status = detect_managed_ripgrep_status(&ctx.managed_ripgrep, &ctx.managed_root);
+    match status {
+        ManagedRipgrepStatus::SystemPath(_)
+        | ManagedRipgrepStatus::Bundled(_)
+        | ManagedRipgrepStatus::ManagedReady(_)
+        | ManagedRipgrepStatus::NotAuthorized => {}
+        ManagedRipgrepStatus::NeedsDownload => {
+            steps.push(PrecheckStep::RipgrepPrecheck(RipgrepPrecheckWidget::new(
+                false,
+                palette,
+                ctx.managed_root.clone(),
+                false,
+            )));
+        }
+        ManagedRipgrepStatus::NeedsRebuild => {
+            steps.push(PrecheckStep::RipgrepPrecheck(RipgrepPrecheckWidget::new(
+                false,
+                palette,
+                ctx.managed_root.clone(),
+                true,
+            )));
+        }
+        ManagedRipgrepStatus::AndroidIncompatible => {
+            steps.push(PrecheckStep::RipgrepPrecheck(RipgrepPrecheckWidget::new(
+                true,
+                palette,
+                ctx.managed_root.clone(),
+                false,
+            )));
         }
     }
 

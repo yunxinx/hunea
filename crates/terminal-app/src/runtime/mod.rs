@@ -3,11 +3,11 @@ mod context_budget_worker;
 mod conversation_commands;
 mod dynamic_environment_worker;
 mod event_mapping;
-mod managed_search_authorization;
 mod prompt_assembly_commands;
 mod session_commands;
 mod session_tree_load;
 mod session_worker;
+mod workspace_tools;
 
 use std::{
     path::{Path, PathBuf},
@@ -36,7 +36,7 @@ use session_store::{
     SessionStore, SessionTreeSnapshot, SessionTreeSnapshotRow,
 };
 use terminal_ui::RuntimeCoordinator;
-use tool_runtime::{ToolDefinition, ToolExecutorRegistry, builtin::ManagedSearchToolConfig};
+use tool_runtime::{ToolDefinition, ToolExecutorRegistry, builtin::ManagedRipgrepConfig};
 
 use self::{
     context_budget_worker::ContextBudgetWorker,
@@ -44,21 +44,18 @@ use self::{
     event_mapping::{
         runtime_event_from_conversation_event, should_defer_runtime_event_for_render_barrier,
     },
-    managed_search_authorization::conversation_workspace_tools,
     session_worker::{SessionStoreWorker, SessionStoreWorkerEvent},
+    workspace_tools::conversation_workspace_tools,
 };
 use crate::prompt_assembly::PromptAssemblyEditSession;
 
-/// `tool_definitions_for_managed_search` 在 coordinator 创建前收集内置工具定义，
+/// `tool_definitions_for_managed_ripgrep` 在 coordinator 创建前收集内置工具定义，
 /// 供初始 prompt assembly 加载使用。
-pub(crate) fn tool_definitions_for_managed_search(
-    managed_search_tools: &ManagedSearchToolConfig,
+pub(crate) fn tool_definitions_for_managed_ripgrep(
+    managed_ripgrep: &ManagedRipgrepConfig,
     managed_root: &Path,
 ) -> Vec<ToolDefinition> {
-    tool_definitions_from_registry(&conversation_workspace_tools(
-        managed_search_tools,
-        managed_root,
-    ))
+    tool_definitions_from_registry(&conversation_workspace_tools(managed_ripgrep, managed_root))
 }
 
 fn tool_definitions_from_registry(workspace_tools: &ToolExecutorRegistry) -> Vec<ToolDefinition> {
@@ -105,7 +102,7 @@ fn session_tools_for_manager(
 pub(crate) struct AppRuntimeOptions {
     pub(crate) loaded_models: provider_models::LoadedModelCatalog,
     pub(crate) runtime_request_policy: RuntimeRequestPolicy,
-    pub(crate) managed_search_tools: ManagedSearchToolConfig,
+    pub(crate) managed_ripgrep: ManagedRipgrepConfig,
     /// 数据目录（全局或便携 `.hunea/`），用于 AGENTS.md 等用户级文件。
     ///
     /// 由预检 `DataDirResolution` 注入；测试 Default 用 `.hunea` 占位，生产路径必须显式设置。
@@ -153,7 +150,7 @@ impl Default for AppRuntimeOptions {
         Self {
             loaded_models: provider_models::LoadedModelCatalog::default(),
             runtime_request_policy: RuntimeRequestPolicy::default(),
-            managed_search_tools: ManagedSearchToolConfig::default(),
+            managed_ripgrep: ManagedRipgrepConfig::default(),
             hunea_config_dir: PathBuf::from(".hunea"),
             session_store: None,
             session_header_template: None,
@@ -169,7 +166,7 @@ impl Default for AppRuntimeOptions {
 impl AppRuntimeCoordinator {
     pub(crate) fn new(options: AppRuntimeOptions) -> Result<Self, String> {
         let workspace_tools =
-            conversation_workspace_tools(&options.managed_search_tools, &options.hunea_config_dir);
+            conversation_workspace_tools(&options.managed_ripgrep, &options.hunea_config_dir);
         let prompt_assembly_tool_definitions = tool_definitions_from_registry(&workspace_tools);
         let session_workspace_tools =
             session_tools_for_manager(&workspace_tools, options.prompt_assembly_manager.as_ref());
@@ -268,7 +265,7 @@ impl AppRuntimeCoordinator {
                 self.model_refresh.reset_after_clear();
                 self.context_budget_worker.cancel_pending();
                 self.workspace_tools = conversation_workspace_tools(
-                    &self.options.managed_search_tools,
+                    &self.options.managed_ripgrep,
                     &self.options.hunea_config_dir,
                 );
                 self.refresh_prompt_assembly_tool_definitions();

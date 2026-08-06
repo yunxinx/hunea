@@ -2,16 +2,16 @@ mod defaults;
 mod error;
 mod file_config;
 mod load;
-mod managed_search_authorization;
+mod managed_ripgrep_authorization;
 mod merge;
 mod types;
 mod validate;
 
 pub use error::AppConfigError;
 pub use load::{load_from_paths, load_with_resolution};
-pub use managed_search_authorization::{
-    ManagedSearchAuthorization, persist_managed_search_tool_authorization_to_path,
-    persist_managed_search_tool_rejection_to_path, read_managed_search_authorization,
+pub use managed_ripgrep_authorization::{
+    ManagedRipgrepAuthorization, persist_managed_ripgrep_authorization_to_path,
+    persist_managed_ripgrep_rejection_to_path, read_managed_ripgrep_authorization,
 };
 pub use types::{
     BRANCH_PICKER_LIST_ROWS_DEFAULT, BRANCH_PICKER_LIST_ROWS_MAX, BRANCH_PICKER_LIST_ROWS_MIN,

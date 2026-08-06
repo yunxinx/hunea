@@ -38,7 +38,6 @@ impl Config {
                 request_timeout_seconds: 120,
                 tool_max_turns: None,
                 allow_managed_rg: None,
-                allow_managed_fd: None,
             },
             debug: DebugConfig { enabled: false },
         }

@@ -877,6 +877,13 @@ async fn builtin_find_tool_can_be_registered_independently() {
 
     assert!(!result.is_error(), "find should succeed: {result:?}");
     assert_eq!(result.text_content(), "src/bin/main.rs\nsrc/lib.rs");
+    assert_eq!(
+        result
+            .details()
+            .and_then(|details| details.get("backend"))
+            .and_then(serde_json::Value::as_str),
+        Some("rust")
+    );
     cleanup(&root);
 }
 
@@ -1454,7 +1461,190 @@ async fn builtin_list_dir_limits_output_entries() {
 }
 
 #[tokio::test]
-async fn builtin_read_rejects_paths_outside_workspace_root() {
+async fn builtin_readonly_tools_accept_external_absolute_paths() {
+    let root = temp_root("builtin-readonly-external-root");
+    let external = temp_root("builtin-readonly-external-target");
+    fs::write(root.join(".gitignore"), "needle.txt\n").expect("write workspace ignore fixture");
+    fs::write(external.join("needle.txt"), "needle\n").expect("write external fixture");
+    let registry = workspace_readonly_tool_registry(&root);
+
+    let list_result = registry
+        .execute_tool(
+            ToolCall::new(
+                "list-1",
+                "list_dir",
+                serde_json::json!({ "path": external }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(
+        !list_result.is_error(),
+        "external list should succeed: {list_result:?}"
+    );
+    assert_eq!(list_result.text_content(), "needle.txt");
+
+    let find_result = registry
+        .execute_tool(
+            ToolCall::new(
+                "find-1",
+                "find",
+                serde_json::json!({ "pattern": "*.txt", "path": external }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(
+        !find_result.is_error(),
+        "external find should succeed: {find_result:?}"
+    );
+    assert_eq!(
+        find_result.text_content(),
+        external.join("needle.txt").display().to_string()
+    );
+    let read_from_find = registry
+        .execute_tool(
+            ToolCall::new(
+                "read-1",
+                "read",
+                serde_json::json!({ "path": find_result.text_content() }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(
+        !read_from_find.is_error(),
+        "find output should be reusable as a read path: {read_from_find:?}"
+    );
+    assert!(read_from_find.text_content().contains("needle"));
+
+    let grep_result = registry
+        .execute_tool(
+            ToolCall::new(
+                "grep-1",
+                "grep",
+                serde_json::json!({
+                    "pattern": "needle",
+                    "path": external,
+                    "literal": true
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(
+        !grep_result.is_error(),
+        "external grep should succeed: {grep_result:?}"
+    );
+    assert!(
+        grep_result.text_content().contains(&format!(
+            "{}:1:needle",
+            external.join("needle.txt").display()
+        )),
+        "external grep should return an absolute reusable path: {grep_result:?}"
+    );
+
+    fs::create_dir_all(external.join("src")).expect("create external source directory");
+    fs::create_dir_all(external.join("nested/src"))
+        .expect("create nested external source directory");
+    fs::write(external.join("src/lib.rs"), "anchored needle\n")
+        .expect("write anchored grep fixture");
+    fs::write(external.join("nested/src/deep.rs"), "nested needle\n")
+        .expect("write nested grep fixture");
+    let anchored_grep = registry
+        .execute_tool(
+            ToolCall::new(
+                "grep-2",
+                "grep",
+                serde_json::json!({
+                    "pattern": "needle",
+                    "path": external,
+                    "glob": "src/*.rs",
+                    "literal": true
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(
+        !anchored_grep.is_error(),
+        "anchored grep should succeed: {anchored_grep:?}"
+    );
+    assert!(
+        anchored_grep
+            .text_content()
+            .contains(&external.join("src/lib.rs").display().to_string())
+    );
+    assert!(!anchored_grep.text_content().contains("nested/src/deep.rs"));
+
+    let single_file_grep = registry
+        .execute_tool(
+            ToolCall::new(
+                "grep-3",
+                "grep",
+                serde_json::json!({
+                    "pattern": "needle",
+                    "path": external.join("needle.txt"),
+                    "glob": "needle*.txt",
+                    "literal": true
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(
+        !single_file_grep.is_error(),
+        "external single-file grep should succeed: {single_file_grep:?}"
+    );
+    assert!(single_file_grep.text_content().starts_with(&format!(
+        "{}:1:needle",
+        external.join("needle.txt").display()
+    )));
+
+    let context_path = external.join("context.txt");
+    fs::write(&context_path, "before\nneedle\nafter\n").expect("write context fixture");
+    let context_grep = registry
+        .execute_tool(
+            ToolCall::new(
+                "grep-4",
+                "grep",
+                serde_json::json!({
+                    "pattern": "needle",
+                    "path": context_path,
+                    "literal": true,
+                    "context": 1
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(
+        !context_grep.is_error(),
+        "external context grep should succeed: {context_grep:?}"
+    );
+    let context_prefix = external.join("context.txt").display().to_string();
+    assert!(
+        context_grep
+            .text_content()
+            .contains(&format!("{context_prefix}-1:before"))
+    );
+    assert!(
+        context_grep
+            .text_content()
+            .contains(&format!("{context_prefix}:2:needle"))
+    );
+    assert!(
+        context_grep
+            .text_content()
+            .contains(&format!("{context_prefix}-3:after"))
+    );
+
+    cleanup(&external);
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_read_accepts_absolute_and_parent_relative_paths_outside_workspace_root() {
     let root = temp_root("builtin-outside-root");
     let outside = temp_root("builtin-outside-target");
     fs::write(outside.join("secret.txt"), "secret\n").expect("write outside fixture");
@@ -1471,9 +1661,62 @@ async fn builtin_read_rejects_paths_outside_workspace_root() {
         )
         .await;
 
-    assert!(result.is_error());
-    assert!(result.content().contains("outside workspace"));
+    assert!(
+        !result.is_error(),
+        "external read should succeed: {result:?}"
+    );
+    assert!(result.text_content().contains("secret"));
+
+    let parent_relative = PathBuf::from("..")
+        .join(outside.file_name().expect("temp root should have a name"))
+        .join("secret.txt");
+    let relative_result = registry
+        .execute_tool(
+            ToolCall::new(
+                "call-2",
+                "read",
+                serde_json::json!({ "path": parent_relative }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(
+        !relative_result.is_error(),
+        "parent-relative external read should succeed: {relative_result:?}"
+    );
+    assert!(relative_result.text_content().contains("secret"));
     cleanup(&outside);
+    cleanup(&root);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn builtin_read_accepts_workspace_symlink_to_external_target() {
+    use std::os::unix::fs::symlink;
+
+    let root = temp_root("builtin-read-external-symlink-root");
+    let external = temp_root("builtin-read-external-symlink-target");
+    fs::write(external.join("target.txt"), "external target\n").expect("write external fixture");
+    symlink(external.join("target.txt"), root.join("linked.txt")).expect("create external symlink");
+    let registry = workspace_readonly_tool_registry(&root);
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "call-1",
+                "read",
+                serde_json::json!({ "path": "linked.txt" }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(
+        !result.is_error(),
+        "external symlink read should succeed: {result:?}"
+    );
+    assert!(result.text_content().contains("external target"));
+    cleanup(&external);
     cleanup(&root);
 }
 
@@ -1534,7 +1777,7 @@ async fn builtin_view_image_rejects_directory_paths() {
 }
 
 #[tokio::test]
-async fn builtin_view_image_rejects_paths_outside_workspace_root() {
+async fn builtin_view_image_accepts_paths_outside_workspace_root() {
     let root = temp_root("builtin-view-image-outside-root");
     let outside = temp_root("builtin-view-image-outside-target");
     fs::write(outside.join("pixel.png"), png_fixture()).expect("write outside image fixture");
@@ -1551,8 +1794,15 @@ async fn builtin_view_image_rejects_paths_outside_workspace_root() {
         )
         .await;
 
-    assert!(result.is_error());
-    assert!(result.text_content().contains("outside workspace"));
+    assert!(
+        !result.is_error(),
+        "external image read should succeed: {result:?}"
+    );
+    assert!(matches!(
+        result.content().as_slice(),
+        [ToolResultContent::Image { uri: Some(uri), .. }]
+            if uri == &outside.join("pixel.png").display().to_string()
+    ));
     cleanup(&outside);
     cleanup(&root);
 }

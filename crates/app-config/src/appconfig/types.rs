@@ -182,7 +182,6 @@ pub struct RuntimeConfig {
     pub request_timeout_seconds: u64,
     pub tool_max_turns: Option<usize>,
     pub allow_managed_rg: Option<bool>,
-    pub allow_managed_fd: Option<bool>,
 }
 
 impl ReasoningContentDisplay {

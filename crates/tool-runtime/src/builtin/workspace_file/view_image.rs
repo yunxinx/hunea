@@ -16,14 +16,14 @@ use crate::{
 
 use super::{
     error::WorkspaceFileError,
-    workspace::resolve_workspace_path,
+    workspace::resolve_read_path,
     workspace_access::{SharedWorkspaceAccess, local_workspace_access},
 };
 
 const VIEW_IMAGE_TOOL_NAME: &str = "view_image";
 const VIEW_IMAGE_MAX_BYTES: u64 = 20 * 1024 * 1024;
 
-/// `view_image_tool` 创建本地 workspace 图片查看工具。
+/// `view_image_tool` 创建本地图片查看工具。
 pub fn view_image_tool(root: impl AsRef<Path>) -> impl Tool + 'static {
     view_image_tool_with_access(root, local_workspace_access())
 }
@@ -59,14 +59,14 @@ impl Tool for ViewImageTool {
             .with_label("View Image")
             .with_kind(ToolKind::Read)
             .with_description(
-                "Attach a local image file from the current workspace so the model can inspect it visually.",
+                "Attach an existing local image file from a relative or absolute path so the model can inspect it visually. Relative paths resolve from the current working directory.",
             )
             .with_input_schema(json!({
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Workspace-relative or workspace-contained absolute image path"
+                        "description": "Existing relative or absolute image path; relative paths resolve from the current working directory"
                     },
                     "detail": {
                         "type": "string",
@@ -139,7 +139,7 @@ fn execute_view_image(
         return ToolResult::error(call.call_id, WorkspaceFileError::Interrupted.to_string());
     }
 
-    let path = match resolve_workspace_path(access.as_ref(), &root, &arguments.path) {
+    let path = match resolve_read_path(access.as_ref(), &root, &arguments.path) {
         Ok(path) => path,
         Err(error) => return ToolResult::error(call.call_id, error.to_string()),
     };

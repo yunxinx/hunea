@@ -86,7 +86,7 @@ fn tool_definitions_with_unguided_tool() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition::new("authorize_search_download")
             .with_label("Authorize search download")
-            .with_description("Install a managed search helper"),
+            .with_description("Install a managed helper"),
         ToolDefinition::new("bash")
             .with_label("Bash")
             .with_description("Run shell commands")

@@ -30,7 +30,7 @@ pub use replay::{
     write_terminal_replay, write_terminal_replay_preserving_ansi,
     write_terminal_replay_with_context,
 };
-use runtime::{AppRuntimeCoordinator, AppRuntimeOptions, tool_definitions_for_managed_search};
+use runtime::{AppRuntimeCoordinator, AppRuntimeOptions, tool_definitions_for_managed_ripgrep};
 
 #[cfg(test)]
 use app_config::appconfig::{
@@ -70,8 +70,8 @@ pub fn run() -> Result<()> {
         eprintln!("warning: {warning}");
     }
     // 磁盘已由 step write-through；此处只同步内存 Config。
-    precheck::sync_managed_search_outcomes_to_config(
-        &precheck_result.managed_search_outcomes,
+    precheck::sync_managed_ripgrep_outcome_to_config(
+        precheck_result.managed_ripgrep_outcome.as_ref(),
         &mut config,
     );
     run_loaded_config(
@@ -98,8 +98,8 @@ pub fn run_for_cli() -> std::result::Result<(), AppRunError> {
         eprintln!("warning: {warning}");
     }
     // 磁盘已由 step write-through；此处只同步内存 Config。
-    precheck::sync_managed_search_outcomes_to_config(
-        &precheck_result.managed_search_outcomes,
+    precheck::sync_managed_ripgrep_outcome_to_config(
+        precheck_result.managed_ripgrep_outcome.as_ref(),
         &mut config,
     );
     run_loaded_config(
@@ -201,7 +201,7 @@ pub fn run_with_writer<W: Write>(
 
 /// `run_with_config_writer` 使用完整配置启动 TUI。
 ///
-/// `data_dir_resolution` 决定 session store、models.toml、phrases.toml 以及受管搜索
+/// `data_dir_resolution` 决定 session store、models.toml、phrases.toml 以及 managed ripgrep
 /// 授权写入位置（全局 or 工作区便携）。
 pub fn run_with_config_writer<W: Write>(
     writer: &mut W,
@@ -272,10 +272,8 @@ fn attach_default_session_persistence(
     };
     options.session_store = Some(Arc::clone(&store));
     options.session_header_template = Some(session_header);
-    let tool_definitions = tool_definitions_for_managed_search(
-        &options.managed_search_tools,
-        &options.hunea_config_dir,
-    );
+    let tool_definitions =
+        tool_definitions_for_managed_ripgrep(&options.managed_ripgrep, &options.hunea_config_dir);
     // work_dir = 项目目录（找项目 AGENTS.md）；config_dir = 数据目录（找全局 AGENTS.md）。
     // 便携模式下二者都落在工作区 `.hunea/` 一侧，但语义仍要分开传，避免全局模式找错位置。
     let config_dir = data_dir_resolution.config_dir();
@@ -656,7 +654,6 @@ mod tests {
                 request_timeout_seconds: 240,
                 tool_max_turns: Some(11),
                 allow_managed_rg: Some(true),
-                allow_managed_fd: Some(false),
             },
             debug: DebugConfig { enabled: false },
         };
@@ -673,8 +670,7 @@ mod tests {
             std::time::Duration::from_secs(240)
         );
         assert_eq!(options.runtime_request_policy.tool_max_turns(), Some(11));
-        assert_eq!(options.managed_search_tools.allow_managed_rg, Some(true));
-        assert_eq!(options.managed_search_tools.allow_managed_fd, Some(false));
+        assert_eq!(options.managed_ripgrep.allow_managed_rg, Some(true));
     }
 
     #[test]
@@ -852,7 +848,6 @@ mod tests {
             request_timeout_seconds: 120,
             tool_max_turns: None,
             allow_managed_rg: None,
-            allow_managed_fd: None,
         }
     }
 

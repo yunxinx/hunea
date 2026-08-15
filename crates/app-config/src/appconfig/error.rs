@@ -38,6 +38,10 @@ pub enum AppConfigError {
         path: Option<PathBuf>,
         value: String,
     },
+    InvalidDiffDisplay {
+        path: Option<PathBuf>,
+        value: String,
+    },
     InvalidStatusLineItem {
         path: Option<PathBuf>,
         value: String,
@@ -146,6 +150,19 @@ impl fmt::Display for AppConfigError {
             Self::InvalidScrollAnimation { path: None, value } => write!(
                 f,
                 "tui.scroll_animation must be \"off\", \"snappy\", \"fast\", \"smooth\", \"gentle\", or \"glide\", got {value:?}"
+            ),
+            Self::InvalidDiffDisplay {
+                path: Some(path),
+                value,
+            } => write!(
+                f,
+                "validate config file {}: tui.diff_display must be \"full_line\", \"content\", \"text\", or \"summary\", got {:?}",
+                path.display(),
+                value
+            ),
+            Self::InvalidDiffDisplay { path: None, value } => write!(
+                f,
+                "tui.diff_display must be \"full_line\", \"content\", \"text\", or \"summary\", got {value:?}"
             ),
             Self::InvalidStatusLineItem {
                 path: Some(path),
@@ -352,6 +369,7 @@ impl std::error::Error for AppConfigError {
             Self::InvalidStyleMode { .. }
             | Self::InvalidMotionMode { .. }
             | Self::InvalidScrollAnimation { .. }
+            | Self::InvalidDiffDisplay { .. }
             | Self::InvalidStatusLineItem { .. }
             | Self::InvalidExternalEditorCommand { .. }
             | Self::ExternalEditorMustWait { .. }

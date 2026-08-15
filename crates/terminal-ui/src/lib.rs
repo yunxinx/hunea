@@ -112,6 +112,7 @@ pub use status_line::StatusLineItem;
 pub use style_mode::StyleMode;
 pub use terminal_panic::install_terminal_panic_hook;
 pub use terminal_session::MinimalTerminalSession;
+pub use tool_result::DiffDisplay;
 pub use transcript::ReasoningDisplayMode;
 pub use update::{AppEffect, AppEvent, STARTUP_PROBE_TIMEOUT};
 

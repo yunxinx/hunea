@@ -370,3 +370,36 @@ fn compact_diff_truncation_keeps_notice_inside_the_head_edge() {
         "tail edge must keep the final content lines: {diff_lines:?}"
     );
 }
+
+#[test]
+fn tool_result_render_cache_key_includes_diff_display() {
+    let activity = RuntimeToolActivity {
+        activity_id: "call-1".to_string(),
+        title: "Edit src/lib.rs".to_string(),
+        kind: RuntimeToolKind::Edit,
+        status: RuntimeToolActivityStatus::Completed,
+        content: vec![RuntimeToolActivityContent::Diff {
+            path: "src/lib.rs".to_string(),
+            old_text: Some("one\nold\ntail\n".to_string()),
+            new_text: "one\nnew\ntail\n".to_string(),
+            is_truncated: false,
+        }],
+        locations: Vec::new(),
+        raw_input: None,
+        raw_output: None,
+    };
+    let full_line = ToolResultItem::from_runtime_tool_activity(
+        activity.clone(),
+        ToolActivityRenderMode::Compact,
+    )
+    .with_diff_display(crate::DiffDisplay::FullLine);
+    let summary =
+        ToolResultItem::from_runtime_tool_activity(activity, ToolActivityRenderMode::Compact)
+            .with_diff_display(crate::DiffDisplay::Summary);
+
+    assert_ne!(
+        full_line.render_cache_key(),
+        summary.render_cache_key(),
+        "summary changes compact line count, so DiffDisplay must participate in the cache key"
+    );
+}

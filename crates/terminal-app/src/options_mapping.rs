@@ -6,7 +6,8 @@ use app_config::appconfig::{
 use conversation_runtime::models::LoadedModelCatalog;
 use runtime_domain::{envinfo, paths::DataDirResolution, phrases::LoadedStatusPhrases};
 use terminal_ui::{
-    CommandMenuMode as TuiCommandMenuMode, EscRewindMode as TuiEscRewindMode,
+    CommandMenuMode as TuiCommandMenuMode, DiffDisplay as TuiDiffDisplay,
+    EscRewindMode as TuiEscRewindMode,
     KeyboardEnhancementPreference as TuiKeyboardEnhancementPreference, ModelOptions,
     MotionMode as TuiMotionMode, ReasoningDisplayMode, RuntimeRequestPolicy,
     ScrollAnimationMode as TuiScrollAnimationMode, StatusLineItem, StyleMode,
@@ -40,6 +41,15 @@ fn scroll_animation_mode_from_config(
         app_config::appconfig::ScrollAnimationMode::Smooth => TuiScrollAnimationMode::Smooth,
         app_config::appconfig::ScrollAnimationMode::Gentle => TuiScrollAnimationMode::Gentle,
         app_config::appconfig::ScrollAnimationMode::Glide => TuiScrollAnimationMode::Glide,
+    }
+}
+
+fn diff_display_from_config(mode: app_config::appconfig::DiffDisplay) -> TuiDiffDisplay {
+    match mode {
+        app_config::appconfig::DiffDisplay::FullLine => TuiDiffDisplay::FullLine,
+        app_config::appconfig::DiffDisplay::Content => TuiDiffDisplay::Content,
+        app_config::appconfig::DiffDisplay::Text => TuiDiffDisplay::Text,
+        app_config::appconfig::DiffDisplay::Summary => TuiDiffDisplay::Summary,
     }
 }
 
@@ -166,6 +176,7 @@ fn model_options_from_configs(
             tui_config.reasoning_content_display,
         ),
         scroll_animation: scroll_animation_mode_from_config(tui_config.scroll_animation),
+        diff_display: diff_display_from_config(tui_config.diff_display),
         debug_commands_enabled: debug_config.is_some_and(|config| config.enabled),
         model_catalog: loaded_models.catalog.clone(),
         selected_model: loaded_models.selected_model.clone(),

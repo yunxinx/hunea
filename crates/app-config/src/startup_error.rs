@@ -117,6 +117,13 @@ fn config_error_rows(error: &appconfig::AppConfigError) -> Vec<(&'static str, St
             "Unknown scroll animation mode",
             "off, snappy, fast, smooth, gentle, glide",
         ),
+        AppConfigError::InvalidDiffDisplay { path, value } => validation_rows(
+            path,
+            "tui.diff_display",
+            value,
+            "Unknown diff display mode",
+            "full_line, content, text, summary",
+        ),
         AppConfigError::InvalidStatusLineItem { path, value } => validation_rows(
             path,
             "tui.status_line",

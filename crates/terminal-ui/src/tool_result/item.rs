@@ -25,10 +25,10 @@ use super::approval::{ParsedToolResultLine, looks_like_shell_command, style_core
 #[cfg(test)]
 use super::diff::DiffBudget;
 use super::diff::{
-    DiffPresentations, RuntimeDiffDetailLine, has_same_diff_presentation_inputs,
-    runtime_diff_line_prefix, runtime_tool_activity_diff_emphasis_style,
-    runtime_tool_activity_diff_line_style, runtime_tool_activity_diff_row_style,
-    runtime_tool_activity_has_diff_content,
+    DiffDisplay, DiffPresentations, RuntimeDiffDetailLine, effective_diff_display,
+    has_same_diff_presentation_inputs, runtime_diff_line_prefix,
+    runtime_tool_activity_diff_gutter_style, runtime_tool_activity_diff_line_fill_style,
+    runtime_tool_activity_diff_segment_style, runtime_tool_activity_has_diff_content,
 };
 use super::exploration::{
     coalesce_adjacent_target_display_lines, exploration_display_lines, exploration_group_family,
@@ -173,6 +173,7 @@ pub(crate) struct ToolResultItem {
     body: ToolResultBody,
     diff_presentation_cache: DiffPresentationCache,
     render_mode: ToolActivityRenderMode,
+    diff_display: DiffDisplay,
     render_cache_key: u64,
     active_marker_started_at: Option<Instant>,
     exploration_open: bool,
@@ -185,6 +186,7 @@ impl PartialEq for ToolResultItem {
     fn eq(&self, other: &Self) -> bool {
         self.body == other.body
             && self.render_mode == other.render_mode
+            && self.diff_display == other.diff_display
             && self.render_cache_key == other.render_cache_key
             && self.active_marker_started_at == other.active_marker_started_at
             && self.exploration_open == other.exploration_open
@@ -233,6 +235,7 @@ impl ToolResultItem {
         let permission_waiting = false;
         let terminal_snapshots = BTreeMap::new();
         let exploration_open = matches!(body, ToolResultBody::Exploration(_));
+        let diff_display = DiffDisplay::default();
         let render_cache_key = tool_result_render_cache_key(
             &body,
             render_mode,
@@ -240,6 +243,7 @@ impl ToolResultItem {
             approval_suspended,
             permission_waiting,
             &terminal_snapshots,
+            diff_display,
         );
         let active_marker_started_at =
             active_marker_started_at_for_body(&body, &terminal_snapshots).then_some(Instant::now());
@@ -247,6 +251,7 @@ impl ToolResultItem {
             body,
             diff_presentation_cache: DiffPresentationCache::default(),
             render_mode,
+            diff_display,
             render_cache_key,
             active_marker_started_at,
             exploration_open,
@@ -475,6 +480,15 @@ impl ToolResultItem {
         true
     }
 
+    pub(crate) fn with_diff_display(mut self, diff_display: DiffDisplay) -> Self {
+        if self.diff_display == diff_display {
+            return self;
+        }
+        self.diff_display = diff_display;
+        self.refresh_render_cache_key();
+        self
+    }
+
     pub(crate) fn mark_exploration_complete(&mut self) -> bool {
         if !matches!(self.body, ToolResultBody::Exploration(_)) || !self.exploration_open {
             return false;
@@ -597,6 +611,7 @@ impl ToolResultItem {
             body: ToolResultBody::Exploration(calls),
             diff_presentation_cache: _,
             render_mode,
+            diff_display,
             render_cache_key: _,
             active_marker_started_at,
             exploration_open,
@@ -641,7 +656,7 @@ impl ToolResultItem {
                 let keeps_exploration_open = body_index == last_body_index
                     && exploration_open
                     && matches!(&body, ToolResultBody::Exploration(_));
-                let mut item = Self::from_body(body, render_mode);
+                let mut item = Self::from_body(body, render_mode).with_diff_display(diff_display);
                 item.exploration_open = keeps_exploration_open;
 
                 if is_updated_runtime {
@@ -1147,7 +1162,13 @@ impl ToolResultItem {
                 self.wrap_runtime_execute_footer(footer, width, palette)
             }
             RuntimeToolActivityDetailBlock::Diff(logical_lines) => {
-                self.wrap_runtime_diff_detail_block(logical_lines, width, palette)
+                if effective_diff_display(self.diff_display, self.render_mode)
+                    == DiffDisplay::Summary
+                {
+                    Vec::new()
+                } else {
+                    self.wrap_runtime_diff_detail_block(logical_lines, width, palette)
+                }
             }
         }
     }
@@ -1341,6 +1362,7 @@ impl ToolResultItem {
         width: usize,
         palette: TerminalPalette,
     ) -> Vec<Line<'static>> {
+        let display = effective_diff_display(self.diff_display, self.render_mode);
         logical_lines
             .iter()
             .flat_map(|content| {
@@ -1348,19 +1370,19 @@ impl ToolResultItem {
                 let continuation_prefix = " ".repeat(display_width(prefix.as_str()));
                 let prefix_width = display_width(prefix.as_str());
                 let content_width = width.saturating_sub(prefix_width).max(1);
-                let line_style = runtime_tool_activity_diff_line_style(content.kind, palette);
-                let emphasis_style =
-                    runtime_tool_activity_diff_emphasis_style(content.kind, palette);
+                let gutter_style =
+                    runtime_tool_activity_diff_gutter_style(content.kind, palette, display);
                 let chunks = content
                     .segments
                     .iter()
                     .map(|segment| HighlightChunk {
                         text: segment.text.clone(),
-                        style: if segment.is_emphasized {
-                            line_style.patch(emphasis_style)
-                        } else {
-                            line_style
-                        },
+                        style: runtime_tool_activity_diff_segment_style(
+                            content.kind,
+                            palette,
+                            display,
+                            segment.is_emphasized,
+                        ),
                     })
                     .collect::<Vec<_>>();
                 // `wrap_highlight_chunks` 对每个逻辑行至少产出一行（空正文即空 span 列表），
@@ -1375,12 +1397,17 @@ impl ToolResultItem {
                             continuation_prefix.clone()
                         };
                         let mut spans = Vec::with_capacity(content_spans.len() + 1);
-                        spans.push(Span::styled(line_prefix, line_style));
+                        spans.push(Span::styled(line_prefix, gutter_style));
                         spans.extend(content_spans);
                         let mut rendered = Line::from(spans);
-                        rendered.style = rendered
-                            .style
-                            .patch(runtime_tool_activity_diff_row_style(content.kind, palette));
+                        rendered.style =
+                            rendered
+                                .style
+                                .patch(runtime_tool_activity_diff_line_fill_style(
+                                    content.kind,
+                                    palette,
+                                    display,
+                                ));
                         rendered
                     })
                     .collect::<Vec<_>>()
@@ -1430,6 +1457,7 @@ impl ToolResultItem {
             self.approval_suspended,
             self.permission_waiting,
             &self.terminal_snapshots,
+            self.diff_display,
         );
     }
 

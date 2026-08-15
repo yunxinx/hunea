@@ -9,7 +9,8 @@ use runtime_domain::session::{
 };
 
 use super::{
-    ToolActivityRenderMode, ToolResultBody, activity::runtime_tool_activity_content_byte_len,
+    DiffDisplay, ToolActivityRenderMode, ToolResultBody,
+    activity::runtime_tool_activity_content_byte_len,
 };
 
 pub(super) fn runtime_tool_activity_source_byte_len(call: &RuntimeToolActivity) -> usize {
@@ -121,6 +122,7 @@ pub(super) fn tool_result_render_cache_key(
     approval_suspended: bool,
     permission_waiting: bool,
     terminal_snapshots: &BTreeMap<String, RuntimeTerminalSnapshot>,
+    diff_display: DiffDisplay,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     "tool_result".hash(&mut hasher);
@@ -129,6 +131,7 @@ pub(super) fn tool_result_render_cache_key(
     approval_suspended.hash(&mut hasher);
     permission_waiting.hash(&mut hasher);
     terminal_snapshots.hash(&mut hasher);
+    diff_display.hash(&mut hasher);
     body.hash(&mut hasher);
     hasher.finish()
 }

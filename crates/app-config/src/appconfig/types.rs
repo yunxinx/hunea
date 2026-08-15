@@ -66,6 +66,8 @@ pub struct TuiConfig {
     /// 滚轮平滑滚动的手感档位；`Off` 恢复固定步长瞬时跳变（无加速度），
     /// 是平滑滚动的完整逃生通道；`motion = "reduced"` 时无论取值均为瞬时。
     pub scroll_animation: ScrollAnimationMode,
+    /// 工具活动 diff 的着色与摘要展示档位；缺省 `FullLine` 保持整行背景铺满。
+    pub diff_display: DiffDisplay,
 }
 
 /// `DebugConfig` 表示仅用于本地调试与界面预览的配置。
@@ -127,6 +129,35 @@ impl ScrollAnimationMode {
             "gentle" => Ok(Self::Gentle),
             "glide" => Ok(Self::Glide),
             other => Err(super::AppConfigError::InvalidScrollAnimation {
+                path: None,
+                value: other.to_string(),
+            }),
+        }
+    }
+}
+
+/// `DiffDisplay` 控制工具活动 diff 的着色范围与主界面是否渲染 hunk。
+///
+/// 与 `terminal-ui::DiffDisplay` 变体一一对应，由 `terminal-app` 映射；
+/// 新增变体时两边与映射必须同步更新。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DiffDisplay {
+    /// 行前景 + 整行背景铺满；缺省档，与当前视觉一致。
+    #[default]
+    FullLine,
+    Content,
+    Text,
+    Summary,
+}
+
+impl DiffDisplay {
+    pub(super) fn parse(value: &str) -> Result<Self, super::AppConfigError> {
+        match value {
+            "full_line" => Ok(Self::FullLine),
+            "content" => Ok(Self::Content),
+            "text" => Ok(Self::Text),
+            "summary" => Ok(Self::Summary),
+            other => Err(super::AppConfigError::InvalidDiffDisplay {
                 path: None,
                 value: other.to_string(),
             }),

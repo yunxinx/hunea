@@ -25,6 +25,13 @@ motion = "full"
 # 注意：`motion = "reduced"` 时无论此项取值，滚动均为瞬时。
 scroll_animation = "smooth"
 
+# `diff_display` 控制工具活动 diff 的着色范围，以及主界面是否渲染 hunk 行。
+# - "full_line"：行前景 + 整行背景铺满 widget 行宽 + 行内强调，是默认值。
+# - "content"：只给 gutter 与有字格子上背景，行尾空白不染色；行内强调保留。
+# - "text"：不用任何背景或反色，Insert/Delete 仍用行级前景色，强调段仅 Bold。
+# - "summary"：主界面只保留 header 的 +N/−M 计数，不渲染 hunk；`ctrl+t` overlay 仍按 full_line 看完整 diff。
+diff_display = "full_line"
+
 # `command_menu_mode` 控制命令菜单（斜杠命令）的触发方式。
 # - "slash"：仅在输入框以 `/` 开头时内联触发斜杠命令菜单，是默认值。
 # - "floating"：`/` 不再触发菜单（视为普通文本），改由 `Ctrl+O` 打开悬浮命令菜单。

@@ -331,6 +331,7 @@ mod tests {
             command_menu_rows: COMMAND_MENU_ROWS_DEFAULT,
             keyboard_enhancement: KeyboardEnhancementMode::Auto,
             scroll_animation: app_config::appconfig::ScrollAnimationMode::Smooth,
+            diff_display: app_config::appconfig::DiffDisplay::FullLine,
         });
 
         assert!(options.copy_on_mouse_selection_release);
@@ -444,6 +445,7 @@ mod tests {
             command_menu_rows: COMMAND_MENU_ROWS_DEFAULT,
             keyboard_enhancement: KeyboardEnhancementMode::Auto,
             scroll_animation: app_config::appconfig::ScrollAnimationMode::Smooth,
+            diff_display: app_config::appconfig::DiffDisplay::FullLine,
         });
 
         assert!(options.swap_enter_and_send);
@@ -475,6 +477,7 @@ mod tests {
             command_menu_rows: COMMAND_MENU_ROWS_DEFAULT,
             keyboard_enhancement: KeyboardEnhancementMode::Auto,
             scroll_animation: app_config::appconfig::ScrollAnimationMode::Smooth,
+            diff_display: app_config::appconfig::DiffDisplay::FullLine,
         });
 
         assert!(!options.ctrl_c_clears_input);
@@ -506,6 +509,7 @@ mod tests {
             command_menu_rows: COMMAND_MENU_ROWS_DEFAULT,
             keyboard_enhancement: KeyboardEnhancementMode::Auto,
             scroll_animation: app_config::appconfig::ScrollAnimationMode::Smooth,
+            diff_display: app_config::appconfig::DiffDisplay::FullLine,
         });
 
         assert_eq!(options.esc_interrupt_presses, 3);
@@ -537,6 +541,7 @@ mod tests {
             command_menu_rows: COMMAND_MENU_ROWS_DEFAULT,
             keyboard_enhancement: KeyboardEnhancementMode::Auto,
             scroll_animation: app_config::appconfig::ScrollAnimationMode::Smooth,
+            diff_display: app_config::appconfig::DiffDisplay::FullLine,
         });
 
         assert!(!options.show_esc_interrupt_hint);
@@ -568,6 +573,7 @@ mod tests {
             command_menu_rows: COMMAND_MENU_ROWS_DEFAULT,
             keyboard_enhancement: KeyboardEnhancementMode::Auto,
             scroll_animation: app_config::appconfig::ScrollAnimationMode::Smooth,
+            diff_display: app_config::appconfig::DiffDisplay::FullLine,
         });
 
         assert!(options.show_reasoning_content);
@@ -599,6 +605,7 @@ mod tests {
             command_menu_rows: COMMAND_MENU_ROWS_DEFAULT,
             keyboard_enhancement: KeyboardEnhancementMode::Auto,
             scroll_animation: app_config::appconfig::ScrollAnimationMode::Smooth,
+            diff_display: app_config::appconfig::DiffDisplay::FullLine,
         });
 
         assert_eq!(
@@ -700,6 +707,7 @@ mod tests {
             command_menu_rows: COMMAND_MENU_ROWS_DEFAULT,
             keyboard_enhancement: KeyboardEnhancementMode::Auto,
             scroll_animation: app_config::appconfig::ScrollAnimationMode::Smooth,
+            diff_display: app_config::appconfig::DiffDisplay::FullLine,
         };
 
         write_terminal_replay_on_exit(&mut FailingWriter, &model, false, &config)
@@ -733,6 +741,7 @@ mod tests {
             command_menu_rows: COMMAND_MENU_ROWS_DEFAULT,
             keyboard_enhancement: KeyboardEnhancementMode::Auto,
             scroll_animation: app_config::appconfig::ScrollAnimationMode::Smooth,
+            diff_display: app_config::appconfig::DiffDisplay::FullLine,
         };
         let mut output = Vec::new();
 
@@ -767,6 +776,7 @@ mod tests {
             command_menu_rows: COMMAND_MENU_ROWS_DEFAULT,
             keyboard_enhancement: KeyboardEnhancementMode::Auto,
             scroll_animation: app_config::appconfig::ScrollAnimationMode::Smooth,
+            diff_display: app_config::appconfig::DiffDisplay::FullLine,
         }
     }
 
@@ -839,6 +849,48 @@ mod tests {
             off_options.scroll_animation,
             terminal_ui::ScrollAnimationMode::Off
         );
+    }
+
+    #[test]
+    fn model_options_map_diff_display_tiers_without_stringly_typed_state() {
+        assert_eq!(
+            app_config::appconfig::DiffDisplay::default(),
+            app_config::appconfig::DiffDisplay::FullLine
+        );
+        assert_eq!(
+            terminal_ui::DiffDisplay::default(),
+            terminal_ui::DiffDisplay::FullLine
+        );
+        let default_options = model_options_from_config(&default_tui_config());
+        assert_eq!(
+            default_options.diff_display,
+            terminal_ui::DiffDisplay::FullLine
+        );
+
+        for (config_mode, expected) in [
+            (
+                app_config::appconfig::DiffDisplay::FullLine,
+                terminal_ui::DiffDisplay::FullLine,
+            ),
+            (
+                app_config::appconfig::DiffDisplay::Content,
+                terminal_ui::DiffDisplay::Content,
+            ),
+            (
+                app_config::appconfig::DiffDisplay::Text,
+                terminal_ui::DiffDisplay::Text,
+            ),
+            (
+                app_config::appconfig::DiffDisplay::Summary,
+                terminal_ui::DiffDisplay::Summary,
+            ),
+        ] {
+            let options = model_options_from_config(&TuiConfig {
+                diff_display: config_mode,
+                ..default_tui_config()
+            });
+            assert_eq!(options.diff_display, expected);
+        }
     }
 
     fn default_runtime_config() -> RuntimeConfig {

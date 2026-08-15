@@ -17,6 +17,39 @@ use runtime_domain::session::{RuntimeToolActivity, RuntimeToolActivityContent};
 
 use super::{TOOL_ACTIVITY_COMPACT_EDGE_LINES, ToolActivityRenderMode};
 
+/// `DiffDisplay` 控制工具活动 diff 的着色范围，以及主界面是否渲染 hunk。
+///
+/// 与 `app-config::DiffDisplay` 变体一一对应，由 `terminal-app` 映射；
+/// 新增变体时两边与映射必须同步更新。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum DiffDisplay {
+    /// 行前景 + `Line.style` 铺满 widget 行宽背景 + 行内强调。
+    #[default]
+    FullLine,
+    /// gutter 与有字格子带行 tint，行尾空白不染色；行内强调保留。
+    Content,
+    /// 无任何背景或 `REVERSED`；Insert/Delete 仍用行级前景色，强调段仅 Bold。
+    Text,
+    /// 主界面只保留 header 计数；overlay / debug detailed 按 `FullLine` 渲染。
+    Summary,
+}
+
+/// `effective_diff_display` 把 `Summary` 在 overlay / debug detailed 下提升为 `FullLine`。
+///
+/// overlay 特例只允许出现在这一处，禁止在渲染路径复制。
+pub(crate) fn effective_diff_display(
+    config: DiffDisplay,
+    render_mode: ToolActivityRenderMode,
+) -> DiffDisplay {
+    match (config, render_mode) {
+        (
+            DiffDisplay::Summary,
+            ToolActivityRenderMode::Detailed | ToolActivityRenderMode::DebugDetailed,
+        ) => DiffDisplay::FullLine,
+        (other, _) => other,
+    }
+}
+
 /// diff gutter 为行号预留的固定宽度；更长行号自然向左扩展。
 pub(super) const TOOL_ACTIVITY_DIFF_LINE_NUMBER_WIDTH: usize = 7;
 
@@ -659,13 +692,31 @@ pub(super) fn runtime_tool_activity_diff_line_style(
     }
 }
 
-pub(super) fn runtime_tool_activity_diff_row_style(
+/// `FullLine` 把行 tint 放进 `Line.style`（ratatui 会铺满 widget 行宽）；
+/// 其它档位不上行宽背景。
+pub(super) fn runtime_tool_activity_diff_line_fill_style(
     kind: RuntimeDiffDetailLineKind,
     palette: TerminalPalette,
+    display: DiffDisplay,
 ) -> Style {
-    runtime_tool_activity_diff_background(kind, palette)
-        .map(|background| Style::new().bg(background))
-        .unwrap_or_default()
+    match display {
+        DiffDisplay::FullLine => runtime_tool_activity_diff_background(kind, palette)
+            .map(|background| Style::new().bg(background))
+            .unwrap_or_default(),
+        DiffDisplay::Content | DiffDisplay::Text | DiffDisplay::Summary => Style::new(),
+    }
+}
+
+/// `Content` 把行 tint 放到 gutter 与非强调正文 span 上，避免铺满行宽。
+pub(super) fn runtime_tool_activity_diff_span_row_tint(
+    kind: RuntimeDiffDetailLineKind,
+    palette: TerminalPalette,
+    display: DiffDisplay,
+) -> Option<Color> {
+    match display {
+        DiffDisplay::Content => runtime_tool_activity_diff_background(kind, palette),
+        DiffDisplay::FullLine | DiffDisplay::Text | DiffDisplay::Summary => None,
+    }
 }
 
 fn runtime_tool_activity_diff_background(
@@ -681,10 +732,13 @@ fn runtime_tool_activity_diff_background(
 }
 
 /// `runtime_tool_activity_diff_emphasis_style` 返回行内强调段叠加在整行样式之上的样式。
-/// emphasis tint 可用时用更饱和背景 + BOLD；终端默认配色下降级为 REVERSED 保证可辨识。
+///
+/// `FullLine`/`Content`：emphasis tint 可用时用更饱和背景 + BOLD；终端默认配色下降级为 REVERSED。
+/// `Text`：仅 Bold，不用背景也不用 REVERSED。
 pub(super) fn runtime_tool_activity_diff_emphasis_style(
     kind: RuntimeDiffDetailLineKind,
     palette: TerminalPalette,
+    display: DiffDisplay,
 ) -> Style {
     let is_insert = match kind {
         RuntimeDiffDetailLineKind::Insert => true,
@@ -694,8 +748,39 @@ pub(super) fn runtime_tool_activity_diff_emphasis_style(
         | RuntimeDiffDetailLineKind::Omitted => return Style::new(),
     };
 
-    match diff_emphasis_tint(&palette, is_insert) {
-        Some(tint) => Style::new().bg(tint).add_modifier(Modifier::BOLD),
-        None => Style::new().add_modifier(Modifier::REVERSED),
+    match display {
+        DiffDisplay::Text | DiffDisplay::Summary => Style::new().add_modifier(Modifier::BOLD),
+        DiffDisplay::FullLine | DiffDisplay::Content => {
+            match diff_emphasis_tint(&palette, is_insert) {
+                Some(tint) => Style::new().bg(tint).add_modifier(Modifier::BOLD),
+                None => Style::new().add_modifier(Modifier::REVERSED),
+            }
+        }
     }
+}
+
+pub(super) fn runtime_tool_activity_diff_segment_style(
+    kind: RuntimeDiffDetailLineKind,
+    palette: TerminalPalette,
+    display: DiffDisplay,
+    is_emphasized: bool,
+) -> Style {
+    let line_style = runtime_tool_activity_diff_line_style(kind, palette);
+    if is_emphasized {
+        return line_style.patch(runtime_tool_activity_diff_emphasis_style(
+            kind, palette, display,
+        ));
+    }
+    match runtime_tool_activity_diff_span_row_tint(kind, palette, display) {
+        Some(background) => line_style.bg(background),
+        None => line_style,
+    }
+}
+
+pub(super) fn runtime_tool_activity_diff_gutter_style(
+    kind: RuntimeDiffDetailLineKind,
+    palette: TerminalPalette,
+    display: DiffDisplay,
+) -> Style {
+    runtime_tool_activity_diff_segment_style(kind, palette, display, false)
 }

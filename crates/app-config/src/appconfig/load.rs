@@ -90,7 +90,9 @@ fn load_from_config_paths(
 #[cfg(test)]
 mod tests {
     use super::{load_from_paths, load_with_resolution};
-    use crate::appconfig::{AppConfigError, MotionMode, ScrollAnimationMode, UserInputStyle};
+    use crate::appconfig::{
+        AppConfigError, DiffDisplay, MotionMode, ScrollAnimationMode, UserInputStyle,
+    };
     use runtime_domain::paths::DataDirResolution;
     use std::{
         fs,
@@ -231,6 +233,70 @@ mod tests {
 
         let error = load_from_paths(Some(working_dir.as_path()), None)
             .expect_err("bool scroll_animation should fail to decode");
+        assert!(matches!(error, AppConfigError::Decode { .. }));
+    }
+
+    #[test]
+    fn load_defaults_diff_display_to_full_line_and_parses_all_tiers() {
+        let default_working_dir = temp_test_dir("load-default-diff-display-working");
+        let default_config = load_from_paths(Some(default_working_dir.as_path()), None)
+            .expect("missing diff_display config should default to full_line");
+        assert_eq!(default_config.tui.diff_display, DiffDisplay::FullLine);
+
+        for (value, expected) in [
+            ("full_line", DiffDisplay::FullLine),
+            ("content", DiffDisplay::Content),
+            ("text", DiffDisplay::Text),
+            ("summary", DiffDisplay::Summary),
+        ] {
+            let working_dir = temp_test_dir(&format!("load-diff-display-{value}-working"));
+            write_config(
+                &working_dir.join(".hunea").join("config.toml"),
+                &format!("[tui]\ndiff_display = \"{value}\"\n"),
+            );
+            let config = load_from_paths(Some(working_dir.as_path()), None)
+                .unwrap_or_else(|error| panic!("tier {value:?} should be accepted: {error}"));
+            assert_eq!(config.tui.diff_display, expected);
+        }
+    }
+
+    #[test]
+    fn load_rejects_unknown_diff_display() {
+        let working_dir = temp_test_dir("load-rejects-diff-display-working");
+        write_config(
+            &working_dir.join(".hunea").join("config.toml"),
+            "[tui]\ndiff_display = \"sometimes\"\n",
+        );
+
+        let error = load_from_paths(Some(working_dir.as_path()), None)
+            .expect_err("unknown diff display should be rejected");
+
+        assert!(matches!(
+            error,
+            AppConfigError::InvalidDiffDisplay {
+                path: Some(_),
+                ref value,
+            } if value == "sometimes"
+        ));
+        let message = error.to_string();
+        assert!(message.contains("tui.diff_display"), "got: {message}");
+        assert!(message.contains("full_line"), "got: {message}");
+        assert!(message.contains("content"), "got: {message}");
+        assert!(message.contains("text"), "got: {message}");
+        assert!(message.contains("summary"), "got: {message}");
+        assert!(message.contains("sometimes"), "got: {message}");
+    }
+
+    #[test]
+    fn load_rejects_bool_diff_display_as_decode_error() {
+        let working_dir = temp_test_dir("load-rejects-bool-diff-display-working");
+        write_config(
+            &working_dir.join(".hunea").join("config.toml"),
+            "[tui]\ndiff_display = true\n",
+        );
+
+        let error = load_from_paths(Some(working_dir.as_path()), None)
+            .expect_err("bool diff_display should fail to decode");
         assert!(matches!(error, AppConfigError::Decode { .. }));
     }
 

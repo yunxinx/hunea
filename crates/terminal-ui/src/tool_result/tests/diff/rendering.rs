@@ -628,3 +628,300 @@ fn blank_diff_line_renders_as_a_gutter_only_row() {
         "an inserted blank line must still occupy a gutter-only row: {lines:?}"
     );
 }
+
+fn replace_diff_activity() -> RuntimeToolActivity {
+    RuntimeToolActivity {
+        activity_id: "call-1".to_string(),
+        title: "Edit src/lib.rs".to_string(),
+        kind: RuntimeToolKind::Edit,
+        status: RuntimeToolActivityStatus::Completed,
+        content: vec![RuntimeToolActivityContent::Diff {
+            path: "src/lib.rs".to_string(),
+            old_text: Some("one\nold\ntail\n".to_string()),
+            new_text: "one\nnew\ntail\n".to_string(),
+            is_truncated: false,
+        }],
+        locations: Vec::new(),
+        raw_input: None,
+        raw_output: None,
+    }
+}
+
+fn replace_diff_item(
+    render_mode: ToolActivityRenderMode,
+    display: crate::DiffDisplay,
+) -> ToolResultItem {
+    let item = ToolResultItem::from_runtime_tool_activity(replace_diff_activity(), render_mode)
+        .with_diff_display(display);
+    item.prebuild_diff_presentation_with_budget(presentation_budget());
+    item
+}
+
+fn inline_change_diff_activity() -> RuntimeToolActivity {
+    RuntimeToolActivity {
+        activity_id: "call-1".to_string(),
+        title: "Edit src/lib.rs".to_string(),
+        kind: RuntimeToolKind::Edit,
+        status: RuntimeToolActivityStatus::Completed,
+        content: vec![RuntimeToolActivityContent::Diff {
+            path: "src/lib.rs".to_string(),
+            old_text: Some("let value = compute(alpha, beta);\n".to_string()),
+            new_text: "let value = compute(alpha, gamma);\n".to_string(),
+            is_truncated: false,
+        }],
+        locations: Vec::new(),
+        raw_input: None,
+        raw_output: None,
+    }
+}
+
+fn inline_change_diff_item(
+    render_mode: ToolActivityRenderMode,
+    display: crate::DiffDisplay,
+) -> ToolResultItem {
+    let item =
+        ToolResultItem::from_runtime_tool_activity(inline_change_diff_activity(), render_mode)
+            .with_diff_display(display);
+    item.prebuild_diff_presentation_with_budget(presentation_budget());
+    item
+}
+
+fn find_insert_delete_lines(lines: &[ratatui::text::Line<'_>]) -> (usize, usize) {
+    let insert = lines
+        .iter()
+        .position(|line| line_to_plain_text(line).contains("+  new"))
+        .expect("insert line should be rendered");
+    let delete = lines
+        .iter()
+        .position(|line| line_to_plain_text(line).contains("-  old"))
+        .expect("delete line should be rendered");
+    (insert, delete)
+}
+
+#[test]
+fn runtime_tool_activity_diff_content_display_tints_gutter_and_text_not_line_style() {
+    let palette = default_palette();
+    let item = replace_diff_item(
+        ToolActivityRenderMode::Detailed,
+        crate::DiffDisplay::Content,
+    );
+    let lines = item.render_lines(80, palette);
+    let (insert_index, delete_index) = find_insert_delete_lines(&lines);
+    let insert_line = &lines[insert_index];
+    let delete_line = &lines[delete_index];
+    let insert_tint = diff_row_tint(&palette, true).expect("explicit palette should tint inserts");
+    let delete_tint = diff_row_tint(&palette, false).expect("explicit palette should tint deletes");
+    let insert_emphasis = diff_emphasis_tint(&palette, true);
+
+    assert_eq!(insert_line.style.bg, None);
+    assert_eq!(delete_line.style.bg, None);
+    assert_eq!(insert_line.spans[0].style.bg, Some(insert_tint));
+    assert_eq!(delete_line.spans[0].style.bg, Some(delete_tint));
+    assert!(
+        insert_line
+            .spans
+            .iter()
+            .skip(1)
+            .any(|span| span.style.bg == Some(insert_tint) || span.style.bg == insert_emphasis),
+        "content display should tint text spans: {insert_line:?}"
+    );
+}
+
+#[test]
+fn runtime_tool_activity_diff_content_display_keeps_inline_emphasis() {
+    let palette = default_palette();
+    let item = inline_change_diff_item(
+        ToolActivityRenderMode::Detailed,
+        crate::DiffDisplay::Content,
+    );
+    let lines = item.render_lines(120, palette);
+    let insert_line = lines
+        .iter()
+        .find(|line| line_to_plain_text(line).contains("+  "))
+        .expect("insert line should be rendered");
+    let insert_emphasis = diff_emphasis_tint(&palette, true)
+        .expect("explicit palette should provide an insert emphasis tint");
+    let emphasized = insert_line
+        .spans
+        .iter()
+        .find(|span| span.content.contains("gamma"))
+        .expect("content display should keep the insert emphasis span");
+
+    assert_eq!(insert_line.style.bg, None);
+    assert_eq!(emphasized.style.bg, Some(insert_emphasis));
+    assert!(
+        emphasized.style.add_modifier.contains(Modifier::BOLD),
+        "content display emphasis should keep Bold: {emphasized:?}"
+    );
+}
+
+#[test]
+fn wrapped_diff_continuation_prefix_uses_content_gutter_tint() {
+    let palette = default_palette();
+    let changed_new = format!("gamma_{}", "o".repeat(40));
+    let old_text = format!(
+        "keep one two three beta_{} keep four five six\n",
+        "o".repeat(40)
+    );
+    let new_text = format!("keep one two three {changed_new} keep four five six\n");
+    let item = ToolResultItem::from_runtime_tool_activity(
+        RuntimeToolActivity {
+            activity_id: "call-1".to_string(),
+            title: "Edit src/lib.rs".to_string(),
+            kind: RuntimeToolKind::Edit,
+            status: RuntimeToolActivityStatus::Completed,
+            content: vec![RuntimeToolActivityContent::Diff {
+                path: "src/lib.rs".to_string(),
+                old_text: Some(old_text),
+                new_text,
+                is_truncated: false,
+            }],
+            locations: Vec::new(),
+            raw_input: None,
+            raw_output: None,
+        },
+        ToolActivityRenderMode::Detailed,
+    )
+    .with_diff_display(crate::DiffDisplay::Content);
+    item.prebuild_diff_presentation_with_budget(presentation_budget());
+    let lines = item.render_lines(40, palette);
+    let insert_tint = diff_row_tint(&palette, true).expect("explicit palette should tint inserts");
+    let insert_gutter = format!(
+        "{:>width$} +  ",
+        1,
+        width = diff::TOOL_ACTIVITY_DIFF_LINE_NUMBER_WIDTH
+    );
+    let insert_start = lines
+        .iter()
+        .position(|line| line_to_plain_text(line).starts_with(&insert_gutter))
+        .expect("the inserted line must be rendered");
+    let continuation = lines
+        .get(insert_start + 1)
+        .expect("content-mode wrap must produce a continuation row");
+    assert_eq!(continuation.style.bg, None);
+    assert_eq!(
+        continuation.spans[0].style.bg,
+        Some(insert_tint),
+        "wrapped continuation prefix is gutter and must carry the row tint: {continuation:?}"
+    );
+}
+
+#[test]
+fn runtime_tool_activity_diff_text_display_keeps_foreground_without_background_or_reversed() {
+    let palette = default_palette();
+    let item = inline_change_diff_item(ToolActivityRenderMode::Detailed, crate::DiffDisplay::Text);
+    let lines = item.render_lines(120, palette);
+    let insert_line = lines
+        .iter()
+        .find(|line| line_to_plain_text(line).contains("+  "))
+        .expect("insert line should be rendered");
+    let delete_line = lines
+        .iter()
+        .find(|line| line_to_plain_text(line).contains("-  "))
+        .expect("delete line should be rendered");
+
+    assert_eq!(insert_line.style.bg, None);
+    assert_eq!(delete_line.style.bg, None);
+    for line in [insert_line, delete_line] {
+        assert!(
+            line.spans.iter().all(|span| {
+                span.style.bg.is_none() && !span.style.add_modifier.contains(Modifier::REVERSED)
+            }),
+            "text display must not use background or REVERSED: {line:?}"
+        );
+    }
+    assert_eq!(insert_line.spans[0].style.fg, Some(palette.quote));
+    assert_eq!(delete_line.spans[0].style.fg, Some(palette.system_error));
+
+    let emphasized = insert_line
+        .spans
+        .iter()
+        .find(|span| span.content.contains("gamma"))
+        .expect("insert emphasis span should exist");
+    assert!(
+        emphasized.style.add_modifier.contains(Modifier::BOLD),
+        "text display emphasis should keep Bold: {emphasized:?}"
+    );
+    assert_eq!(emphasized.style.bg, None);
+}
+
+#[test]
+fn runtime_tool_activity_diff_summary_compact_keeps_header_without_hunks() {
+    let item = replace_diff_item(ToolActivityRenderMode::Compact, crate::DiffDisplay::Summary);
+    let rendered_plain = item
+        .render_lines(120, default_palette())
+        .iter()
+        .map(line_to_plain_text)
+        .collect::<Vec<_>>();
+
+    assert!(
+        rendered_plain
+            .iter()
+            .any(|line| line.contains("(+1 -1)") || line.contains("(+1 −1)")),
+        "summary compact should keep the header counts: {rendered_plain:?}"
+    );
+    assert!(
+        rendered_plain.iter().all(|line| !line.contains("+  new")
+            && !line.contains("-  old")
+            && !line.contains("ctrl + t to view transcript")),
+        "summary compact must not render hunk rows or compact omit hints: {rendered_plain:?}"
+    );
+}
+
+#[test]
+fn runtime_tool_activity_diff_summary_detailed_renders_full_line_hunks() {
+    let palette = default_palette();
+    let item = replace_diff_item(
+        ToolActivityRenderMode::Detailed,
+        crate::DiffDisplay::Summary,
+    );
+    let lines = item.render_lines(80, palette);
+    let (insert_index, delete_index) = find_insert_delete_lines(&lines);
+    let insert_line = &lines[insert_index];
+    let delete_line = &lines[delete_index];
+    let insert_tint = diff_row_tint(&palette, true).expect("explicit palette should tint inserts");
+    let delete_tint = diff_row_tint(&palette, false).expect("explicit palette should tint deletes");
+
+    assert_eq!(insert_line.style.bg, Some(insert_tint));
+    assert_eq!(delete_line.style.bg, Some(delete_tint));
+}
+
+#[test]
+fn runtime_tool_activity_diff_terminal_default_palette_drops_row_tint_and_text_skips_reversed() {
+    let palette = terminal_default_palette();
+    let full_line = replace_diff_item(
+        ToolActivityRenderMode::Detailed,
+        crate::DiffDisplay::FullLine,
+    )
+    .render_lines(80, palette);
+    let content = replace_diff_item(
+        ToolActivityRenderMode::Detailed,
+        crate::DiffDisplay::Content,
+    )
+    .render_lines(80, palette);
+    let text = replace_diff_item(ToolActivityRenderMode::Detailed, crate::DiffDisplay::Text)
+        .render_lines(80, palette);
+
+    for lines in [&full_line, &content] {
+        let (insert_index, delete_index) = find_insert_delete_lines(lines);
+        assert_eq!(lines[insert_index].style.bg, None);
+        assert_eq!(lines[delete_index].style.bg, None);
+        assert!(
+            lines[insert_index]
+                .spans
+                .iter()
+                .all(|span| span.style.bg.is_none()),
+            "terminal-default full_line/content must not paint row tint: {:?}",
+            lines[insert_index]
+        );
+    }
+
+    let (insert_index, _) = find_insert_delete_lines(&text);
+    assert!(
+        text[insert_index].spans.iter().all(|span| {
+            span.style.bg.is_none() && !span.style.add_modifier.contains(Modifier::REVERSED)
+        }),
+        "text display must not use REVERSED under terminal-default palette: {:?}",
+        text[insert_index]
+    );
+}

@@ -14,6 +14,7 @@ pub(super) use runtime_domain::session::{
     RuntimeToolActivityStatus, RuntimeToolActivityUpdate,
 };
 
+pub use diff::DiffDisplay;
 pub(crate) use item::{
     TOOL_ACTIVITY_ACTIVE_MARKER_BLINK_INTERVAL, ToolActivityRenderMode, ToolResultItem,
     ToolResultKind,

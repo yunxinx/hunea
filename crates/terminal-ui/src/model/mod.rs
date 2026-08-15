@@ -74,6 +74,7 @@ pub struct Model {
     /// 档位调参在使用处经 `ScrollAnimationMode::tuning()` 取表传参，
     /// 不注入 `DocumentRuntimeState`——避免会话重置路径静默丢档。
     pub(super) scroll_animation: crate::ScrollAnimationMode,
+    pub(super) diff_display: crate::DiffDisplay,
     pub(super) status_line_items: Vec<StatusLineItem>,
     pub(super) status_line_2_items: Vec<StatusLineItem>,
     pub(super) external_editor: Vec<String>,
@@ -205,6 +206,7 @@ impl Model {
         }
         let mut transcript = Transcript::new(palette, working_dir.clone());
         transcript.set_motion_mode(motion_mode);
+        transcript.set_diff_display(options.diff_display);
         transcript.set_gap(1);
         transcript.append_startup_banner(startup_banner_options.clone());
         let transcript_render = Rc::new(index_only_render_result(
@@ -247,6 +249,7 @@ impl Model {
             style_mode,
             motion_mode,
             scroll_animation: options.scroll_animation,
+            diff_display: options.diff_display,
             status_line_items: status_line_items.clone(),
             status_line_2_items,
             external_editor: options.external_editor,
@@ -538,6 +541,7 @@ impl Model {
         self.startup_banner_entrance.complete();
         let mut transcript = Transcript::new(self.palette, self.working_dir.clone());
         transcript.set_motion_mode(self.motion_mode);
+        transcript.set_diff_display(self.diff_display);
         transcript.set_gap(1);
         if self.has_window {
             transcript.set_width(self.width);

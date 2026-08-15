@@ -352,7 +352,11 @@ fn diff_emphasis_style_degrades_to_reversed_without_surface() {
         diff::RuntimeDiffDetailLineKind::Insert,
         diff::RuntimeDiffDetailLineKind::Delete,
     ] {
-        let style = diff::runtime_tool_activity_diff_emphasis_style(kind, terminal_default);
+        let style = diff::runtime_tool_activity_diff_emphasis_style(
+            kind,
+            terminal_default,
+            crate::DiffDisplay::FullLine,
+        );
         assert!(
             style.add_modifier.contains(Modifier::REVERSED),
             "terminal-default palette must keep emphasis visible through REVERSED: {style:?}"
@@ -364,10 +368,12 @@ fn diff_emphasis_style_degrades_to_reversed_without_surface() {
     let insert_style = diff::runtime_tool_activity_diff_emphasis_style(
         diff::RuntimeDiffDetailLineKind::Insert,
         explicit,
+        crate::DiffDisplay::FullLine,
     );
     let delete_style = diff::runtime_tool_activity_diff_emphasis_style(
         diff::RuntimeDiffDetailLineKind::Delete,
         explicit,
+        crate::DiffDisplay::FullLine,
     );
     assert_eq!(insert_style.bg, diff_emphasis_tint(&explicit, true));
     assert_eq!(delete_style.bg, diff_emphasis_tint(&explicit, false));
@@ -375,6 +381,54 @@ fn diff_emphasis_style_degrades_to_reversed_without_surface() {
     assert!(delete_style.bg.is_some());
     assert!(insert_style.add_modifier.contains(Modifier::BOLD));
     assert!(!insert_style.add_modifier.contains(Modifier::REVERSED));
+}
+
+#[test]
+fn diff_emphasis_style_text_display_uses_bold_without_background_or_reversed() {
+    let terminal_default = terminal_default_palette();
+    let explicit = default_palette();
+    for palette in [terminal_default, explicit] {
+        let style = diff::runtime_tool_activity_diff_emphasis_style(
+            diff::RuntimeDiffDetailLineKind::Insert,
+            palette,
+            crate::DiffDisplay::Text,
+        );
+        assert!(style.add_modifier.contains(Modifier::BOLD), "{style:?}");
+        assert!(
+            !style.add_modifier.contains(Modifier::REVERSED),
+            "text display must not fall back to REVERSED: {style:?}"
+        );
+        assert_eq!(style.bg, None);
+    }
+}
+
+#[test]
+fn effective_diff_display_promotes_summary_only_for_detailed_modes() {
+    assert_eq!(
+        diff::effective_diff_display(crate::DiffDisplay::Summary, ToolActivityRenderMode::Compact),
+        crate::DiffDisplay::Summary
+    );
+    assert_eq!(
+        diff::effective_diff_display(
+            crate::DiffDisplay::Summary,
+            ToolActivityRenderMode::Detailed
+        ),
+        crate::DiffDisplay::FullLine
+    );
+    assert_eq!(
+        diff::effective_diff_display(
+            crate::DiffDisplay::Summary,
+            ToolActivityRenderMode::DebugDetailed
+        ),
+        crate::DiffDisplay::FullLine
+    );
+    assert_eq!(
+        diff::effective_diff_display(
+            crate::DiffDisplay::Content,
+            ToolActivityRenderMode::Detailed
+        ),
+        crate::DiffDisplay::Content
+    );
 }
 
 #[test]

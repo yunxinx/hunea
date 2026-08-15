@@ -454,6 +454,7 @@ impl Model {
         let mut transcript =
             crate::transcript::Transcript::new(self.palette, self.working_dir.clone());
         transcript.set_gap(1);
+        transcript.set_diff_display(self.diff_display);
         if self.has_window {
             transcript.set_width(self.width);
         }

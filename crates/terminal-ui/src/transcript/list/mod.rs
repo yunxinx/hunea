@@ -67,6 +67,7 @@ pub(crate) struct Transcript {
     palette: TerminalPalette,
     motion_mode: crate::MotionMode,
     tool_activity_render_mode: ToolActivityRenderMode,
+    diff_display: crate::DiffDisplay,
     reasoning_render_mode: ReasoningRenderMode,
     items_version: usize,
     metrics_cache: TranscriptItemMetricsCache,
@@ -82,6 +83,7 @@ impl PartialEq for Transcript {
             && self.palette == other.palette
             && self.motion_mode == other.motion_mode
             && self.tool_activity_render_mode == other.tool_activity_render_mode
+            && self.diff_display == other.diff_display
             && self.reasoning_render_mode == other.reasoning_render_mode
     }
 }
@@ -99,6 +101,7 @@ impl Transcript {
             palette,
             motion_mode: crate::MotionMode::Full,
             tool_activity_render_mode: ToolActivityRenderMode::Compact,
+            diff_display: crate::DiffDisplay::default(),
             reasoning_render_mode: ReasoningRenderMode::Compact,
             items_version: 1,
             metrics_cache: TranscriptItemMetricsCache::default(),
@@ -112,6 +115,30 @@ impl Transcript {
         }
         self.motion_mode = motion_mode;
         self.screen_cache.invalidate_all();
+    }
+
+    pub(crate) fn set_diff_display(&mut self, diff_display: crate::DiffDisplay) {
+        if self.diff_display == diff_display {
+            return;
+        }
+
+        self.diff_display = diff_display;
+        let mut first_dirty: Option<usize> = None;
+        let mut items = self.items.as_ref().clone();
+        for (index, item) in items.iter_mut().enumerate() {
+            let TranscriptItem::ToolResult(tool_result) = item.as_ref() else {
+                continue;
+            };
+            let tool_result = tool_result.clone().with_diff_display(diff_display);
+            *item = Rc::new(TranscriptItem::ToolResult(tool_result));
+            first_dirty = Some(first_dirty.map_or(index, |dirty| dirty.min(index)));
+        }
+        if let Some(first_dirty) = first_dirty {
+            self.items = Rc::new(items);
+            self.items_version = self.items_version.saturating_add(1);
+            self.metrics_cache.mark_metrics_dirty_from(first_dirty);
+            self.screen_cache.mark_dirty_from(first_dirty);
+        }
     }
 
     /// `set_gap` 设置项与项之间的空行数。
@@ -297,7 +324,9 @@ impl Transcript {
     pub(crate) fn append_tool_result(&mut self, content: impl Into<String>, kind: ToolResultKind) {
         let mut item = ToolResultItem::new(content, kind);
         item.set_render_mode(self.tool_activity_render_mode);
-        self.push_item(TranscriptItem::ToolResult(item));
+        self.push_item(TranscriptItem::ToolResult(
+            item.with_diff_display(self.diff_display),
+        ));
     }
 
     /// `append_runtime_tool_activity` 追加一条可更新的 runtime tool activity 展示项。
@@ -310,6 +339,7 @@ impl Transcript {
             call.clone(),
             self.tool_activity_render_mode,
         ) {
+            let exploration = exploration.with_diff_display(self.diff_display);
             if exploration.is_exploration_group()
                 && let Some((last_index, last_item)) = self.items.iter().enumerate().next_back()
                 && let TranscriptItem::ToolResult(tool_result) = last_item.as_ref()
@@ -328,7 +358,8 @@ impl Transcript {
 
         let index = self.items.len();
         self.push_item(TranscriptItem::ToolResult(
-            ToolResultItem::from_runtime_tool_activity(call, self.tool_activity_render_mode),
+            ToolResultItem::from_runtime_tool_activity(call, self.tool_activity_render_mode)
+                .with_diff_display(self.diff_display),
         ));
         index
     }

@@ -4,7 +4,7 @@ use super::{
     error::AppConfigError,
     file_config::{FileConfig, FileRuntimeConfig},
     types::{
-        CommandMenuMode, Config, EscRewindMode, KeyboardEnhancementMode, MotionMode,
+        CommandMenuMode, Config, DiffDisplay, EscRewindMode, KeyboardEnhancementMode, MotionMode,
         ReasoningContentDisplay, RuntimeConfig, ScrollAnimationMode, UserInputStyle,
     },
     validate::{
@@ -230,6 +230,19 @@ pub(super) fn merge_config_file(
             ScrollAnimationMode::parse(&scroll_animation).map_err(|error| match error {
                 AppConfigError::InvalidScrollAnimation { value, .. } => {
                     AppConfigError::InvalidScrollAnimation {
+                        path: Some(path.to_path_buf()),
+                        value,
+                    }
+                }
+                other => other,
+            })?;
+    }
+
+    if let Some(diff_display) = file_config.tui.diff_display {
+        config.tui.diff_display =
+            DiffDisplay::parse(&diff_display).map_err(|error| match error {
+                AppConfigError::InvalidDiffDisplay { value, .. } => {
+                    AppConfigError::InvalidDiffDisplay {
                         path: Some(path.to_path_buf()),
                         value,
                     }

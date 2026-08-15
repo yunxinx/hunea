@@ -77,6 +77,8 @@ pub struct ModelOptions {
     /// 滚轮平滑滚动档位；`Off` 为瞬时滚动，`MotionMode::Reduced` 时无论
     /// 档位取值均为瞬时滚动。
     pub scroll_animation: ScrollAnimationMode,
+    /// 工具活动 diff 的着色与摘要展示档位；缺省 `FullLine` 保持当前整行铺满。
+    pub diff_display: crate::DiffDisplay,
     pub debug_commands_enabled: bool,
     pub model_catalog: ModelCatalog,
     pub selected_model: Option<ModelSelection>,
@@ -113,6 +115,7 @@ impl Default for ModelOptions {
             show_reasoning_content: false,
             reasoning_display_mode: ReasoningDisplayMode::Collapsed,
             scroll_animation: ScrollAnimationMode::default(),
+            diff_display: crate::DiffDisplay::default(),
             debug_commands_enabled: false,
             model_catalog: ModelCatalog::default(),
             selected_model: None,

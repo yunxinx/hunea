@@ -2,7 +2,7 @@ use super::super::diff;
 use super::*;
 use crate::{
     display_width::display_width,
-    theme::diff_emphasis_tint,
+    theme::{diff_emphasis_tint, diff_row_tint},
     transcript::{TranscriptItem, materialize_transcript_item_render_block},
 };
 

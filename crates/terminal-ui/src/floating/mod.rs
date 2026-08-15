@@ -26,6 +26,8 @@ impl FloatingLayer {
         size: FloatingSize,
         lines: Vec<Line<'static>>,
         scrollbar: Option<PickerScrollbar>,
+        scrollbar_track_height: Option<u16>,
+        scrollbar_track_y_offset: u16,
     ) {
         if lines.is_empty() {
             return;
@@ -35,6 +37,8 @@ impl FloatingLayer {
             placement: FloatingPlacement::Anchored { anchor, size },
             lines,
             scrollbar,
+            scrollbar_track_height,
+            scrollbar_track_y_offset,
         });
     }
 }
@@ -87,6 +91,8 @@ struct FloatingSurface {
     placement: FloatingPlacement,
     lines: Vec<Line<'static>>,
     scrollbar: Option<PickerScrollbar>,
+    scrollbar_track_height: Option<u16>,
+    scrollbar_track_y_offset: u16,
 }
 
 impl FloatingSurface {
@@ -109,7 +115,18 @@ impl FloatingSurface {
         }
 
         if let Some(scrollbar) = self.scrollbar {
-            scrollbar.render(surface_area, buf);
+            let scrollbar_area = match self.scrollbar_track_height {
+                Some(height) => {
+                    let y_offset = self.scrollbar_track_y_offset.min(surface_area.height);
+                    Rect {
+                        y: surface_area.y.saturating_add(y_offset),
+                        height: height.min(surface_area.height.saturating_sub(y_offset)),
+                        ..surface_area
+                    }
+                }
+                None => surface_area,
+            };
+            scrollbar.render(scrollbar_area, buf);
         }
     }
 }
@@ -170,58 +187,49 @@ impl FloatingPlacement {
 
 impl Model {
     pub(crate) fn has_current_floating_layer(&self) -> bool {
-        self.file_picker.is_some()
-            || self.skill_picker.is_some()
-            || self.custom_prompt_picker.is_some()
+        self.mention_picker.is_some() || self.custom_prompt_picker.is_some()
     }
 
     pub(crate) fn current_floating_layer(
         &self,
         document: &DocumentLayout,
         viewport: &DocumentViewport,
+        bounds: Rect,
     ) -> FloatingLayer {
         let mut layer = FloatingLayer::default();
-        let file_picker = self.current_file_picker_render_result();
-        if file_picker.has_content
-            && let Some(anchor) = self.current_file_picker_floating_anchor(document, viewport)
-        {
-            let scrollbar = self.file_picker.as_ref().and_then(|state| {
-                let visible_rows = self.file_picker_list_visible_rows();
-                (state.items.len() > visible_rows).then_some(PickerScrollbar::new(
-                    state.items.len(),
-                    visible_rows,
-                    state.scroll,
-                    secondary_text_style(self.palette),
-                    tertiary_text_style(self.palette),
-                ))
-            });
-            layer.push_anchored_with_scrollbar(
-                FloatingAnchor::new(0, anchor.y),
-                FloatingSize::full_width(self.file_picker_popup_height),
-                file_picker.lines,
-                scrollbar,
+        if let Some(anchor) = self.current_mention_picker_floating_anchor(document, viewport) {
+            let popup_height = self.file_picker_popup_height;
+            let chrome_before_list = vertical_anchor_opens_above(
+                bounds,
+                bounds.y.saturating_add(anchor.y),
+                popup_height,
             );
-        }
-        let skill_picker = self.current_skill_picker_render_result();
-        if skill_picker.has_content
-            && let Some(anchor) = self.current_skill_picker_floating_anchor(document, viewport)
-        {
-            let scrollbar = self.skill_picker.as_ref().and_then(|state| {
-                let visible_rows = self.file_picker_list_visible_rows();
-                (state.items.len() > visible_rows).then_some(PickerScrollbar::new(
-                    state.items.len(),
-                    visible_rows,
-                    state.scroll,
-                    secondary_text_style(self.palette),
-                    tertiary_text_style(self.palette),
-                ))
-            });
-            layer.push_anchored_with_scrollbar(
-                FloatingAnchor::new(0, anchor.y),
-                FloatingSize::full_width(self.file_picker_popup_height),
-                skill_picker.lines,
-                scrollbar,
-            );
+            let mention_picker = self.mention_picker_render_result(chrome_before_list);
+            if mention_picker.has_content {
+                let list_rows = self.mention_picker_list_visible_rows();
+                let scrollbar = self.mention_picker.as_ref().and_then(|state| {
+                    (state.items.len() > list_rows).then_some(PickerScrollbar::new(
+                        state.items.len(),
+                        list_rows,
+                        state.scroll,
+                        secondary_text_style(self.palette),
+                        tertiary_text_style(self.palette),
+                    ))
+                });
+                let scrollbar_track_y_offset = if chrome_before_list {
+                    u16::try_from(usize::from(popup_height).saturating_sub(list_rows)).unwrap_or(0)
+                } else {
+                    0
+                };
+                layer.push_anchored_with_scrollbar(
+                    FloatingAnchor::new(0, anchor.y),
+                    FloatingSize::full_width(popup_height),
+                    mention_picker.lines,
+                    scrollbar,
+                    Some(u16::try_from(list_rows).unwrap_or(u16::MAX)),
+                    scrollbar_track_y_offset,
+                );
+            }
         }
         let custom_prompt_picker = self.current_custom_prompt_picker_render_result();
         if custom_prompt_picker.has_content
@@ -243,26 +251,19 @@ impl Model {
                 FloatingSize::full_width(self.file_picker_popup_height),
                 custom_prompt_picker.lines,
                 scrollbar,
+                None,
+                0,
             );
         }
         layer
     }
 
-    fn current_file_picker_floating_anchor(
+    fn current_mention_picker_floating_anchor(
         &self,
         document: &DocumentLayout,
         viewport: &DocumentViewport,
     ) -> Option<FloatingAnchor> {
         let token_start = self.composer.current_at_token_start_char()?;
-        self.current_prefixed_picker_floating_anchor(document, viewport, token_start)
-    }
-
-    fn current_skill_picker_floating_anchor(
-        &self,
-        document: &DocumentLayout,
-        viewport: &DocumentViewport,
-    ) -> Option<FloatingAnchor> {
-        let token_start = self.composer.current_skill_token_start_char()?;
         self.current_prefixed_picker_floating_anchor(document, viewport, token_start)
     }
 
@@ -342,17 +343,35 @@ fn resolve_vertical_axis(bounds: Rect, anchor_y: u16, height: u16) -> (u16, u16)
     let below_start = anchor_y.saturating_add(1);
     let below_space = bounds.bottom().saturating_sub(below_start);
     let above_space = anchor_y.saturating_sub(bounds.y);
+    if vertical_anchor_opens_above(bounds, anchor_y, height) {
+        if above_space >= target_height {
+            (anchor_y.saturating_sub(target_height), target_height)
+        } else {
+            (bounds.y, above_space.min(target_height))
+        }
+    } else if below_space >= target_height {
+        (below_start, target_height)
+    } else {
+        (below_start, below_space.min(target_height))
+    }
+}
+
+fn vertical_anchor_opens_above(bounds: Rect, anchor_y: u16, height: u16) -> bool {
+    let target_height = height.min(bounds.height);
+    if target_height == 0 {
+        return false;
+    }
+
+    let below_start = anchor_y.saturating_add(1);
+    let below_space = bounds.bottom().saturating_sub(below_start);
+    let above_space = anchor_y.saturating_sub(bounds.y);
     if below_space >= target_height {
-        return (below_start, target_height);
+        return false;
     }
     if above_space >= target_height {
-        return (anchor_y.saturating_sub(target_height), target_height);
+        return true;
     }
-    if below_space >= above_space {
-        (below_start, below_space.min(target_height))
-    } else {
-        (bounds.y, above_space.min(target_height))
-    }
+    below_space < above_space
 }
 
 #[cfg(test)]

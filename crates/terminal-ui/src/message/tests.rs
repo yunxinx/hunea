@@ -190,10 +190,10 @@ fn user_render_colors_entire_bound_skill_token_with_command_accent() {
     let palette = default_palette();
     let item = MessageItem::new_with_style_mode_and_source(
         Sender::User,
-        "$code-review needs changes",
+        "@code-review needs changes",
         StyleMode::Cx,
         Some(ComposerSourceMessage::user_text_with_bindings(
-            "$code-review needs changes",
+            "@code-review needs changes",
             vec![TranscriptSkillBinding {
                 skill_name: "code-review".to_string(),
                 origin: PromptSourceOrigin::Project,
@@ -214,13 +214,13 @@ fn user_render_colors_entire_bound_skill_token_with_command_accent() {
         user_line
             .spans
             .iter()
-            .any(|span| { span.content.as_ref() == "$code-review" && span.style == accent_style })
+            .any(|span| { span.content.as_ref() == "@code-review" && span.style == accent_style })
     );
     assert_eq!(
         user_line
             .spans
             .iter()
-            .find(|span| span.content.as_ref() == "$code-review")
+            .find(|span| span.content.as_ref() == "@code-review")
             .map(|span| span.style.fg),
         Some(command_accent_text_style(palette).fg)
     );

@@ -510,6 +510,15 @@ impl Model {
             return result.into_effect();
         }
 
+        let result = self.handle_mention_picker_key(key);
+        if !result.is_ignored() {
+            return result.into_effect();
+        }
+        let result = self.handle_custom_prompt_picker_key(key);
+        if !result.is_ignored() {
+            return result.into_effect();
+        }
+
         if is_plain_esc && let Some(effect) = self.handle_chat_interrupt_key() {
             return Some(effect);
         } else if key.code != KeyCode::Esc {
@@ -538,19 +547,6 @@ impl Model {
         {
             self.toggle_floating_command_menu();
             return None;
-        }
-
-        let result = self.handle_file_picker_key(key);
-        if !result.is_ignored() {
-            return result.into_effect();
-        }
-        let result = self.handle_skill_picker_key(key);
-        if !result.is_ignored() {
-            return result.into_effect();
-        }
-        let result = self.handle_custom_prompt_picker_key(key);
-        if !result.is_ignored() {
-            return result.into_effect();
         }
 
         if key.code == KeyCode::Char('r') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -612,9 +608,8 @@ impl Model {
         let old_value = self.composer_text().to_string();
         let old_line = self.composer.line();
         let old_column = self.composer.column();
-        let composer_picker_was_active = self.file_picker_active()
-            || self.skill_picker_active()
-            || self.custom_prompt_picker_active();
+        let composer_picker_was_active =
+            self.mention_picker_active() || self.custom_prompt_picker_active();
         let file_picker_manual_viewport_state = (composer_picker_was_active
             && self.document_runtime.manual_scroll)
             .then(|| self.current_document_viewport_state());
@@ -622,8 +617,7 @@ impl Model {
         self.sync_command_panel_navigation();
         self.sync_composer_attached_picker_state();
         let file_picker_closed = composer_picker_was_active
-            && !self.file_picker_active()
-            && !self.skill_picker_active()
+            && !self.mention_picker_active()
             && !self.custom_prompt_picker_active();
         self.sync_external_editor_helper_after_draft_change(&old_value);
         self.sync_composer_height();

@@ -426,7 +426,7 @@ impl Composer {
         true
     }
 
-    /// `current_at_token` 返回当前光标所在的 `@` 文件 token，不含前导 `@`。
+    /// `current_at_token` 返回当前光标所在的 `@` mention token，不含前导 `@`。
     pub(crate) fn current_at_token(&self) -> Option<String> {
         self.current_prefixed_token_value('@')
     }
@@ -461,16 +461,6 @@ impl Composer {
         true
     }
 
-    /// `current_skill_token` 返回当前光标所在的 `$skill` token，不含前导 `$`。
-    pub(crate) fn current_skill_token(&self) -> Option<String> {
-        self.current_prefixed_token_value('$')
-    }
-
-    /// `current_skill_token_start_char` 返回当前 `$skill` token 起点的字符偏移。
-    pub(crate) fn current_skill_token_start_char(&self) -> Option<usize> {
-        self.current_prefixed_token_start_char('$')
-    }
-
     /// `current_custom_prompt_token` 返回当前光标所在的 `#prompt` token，不含前导 `#`。
     pub(crate) fn current_custom_prompt_token(&self) -> Option<String> {
         self.current_prefixed_token_value('#')
@@ -481,19 +471,19 @@ impl Composer {
         self.current_prefixed_token_start_char('#')
     }
 
-    /// `replace_current_skill_token` 替换当前 `$` token，建立绑定，并把光标移动到替换文本末尾。
+    /// `replace_current_skill_token` 替换当前 `@` token，建立绑定，并把光标移动到替换文本末尾。
     pub(crate) fn replace_current_skill_token(
         &mut self,
         skill_name: &str,
         skill_path: &std::path::Path,
         origin: runtime_domain::prompt_assembly::PromptSourceOrigin,
     ) -> bool {
-        let Some(token) = self.current_prefixed_token('$') else {
+        let Some(token) = self.current_prefixed_token('@') else {
             return false;
         };
-        let visible_token = format!("${skill_name}");
+        let visible_token = format!("@{skill_name}");
         let replacement = format!("{visible_token} ");
-        if !self.replace_current_prefixed_token('$', &replacement) {
+        if !self.replace_current_prefixed_token('@', &replacement) {
             return false;
         }
 
@@ -545,7 +535,7 @@ impl Composer {
     }
 
     pub(crate) fn current_skill_binding(&self) -> Option<TranscriptSkillBinding> {
-        let token = self.current_prefixed_token('$')?;
+        let token = self.current_prefixed_token('@')?;
         self.skill_bindings
             .iter()
             .find(|binding| {
@@ -1327,7 +1317,7 @@ impl Composer {
     }
 
     pub(crate) fn reconcile_skill_bindings(&mut self) {
-        let tokens = prefixed_tokens_in_text(&self.value, '$');
+        let tokens = prefixed_tokens_in_text(&self.value, '@');
         self.skill_bindings = reconcile_bound_prefixed_tokens(
             &self.skill_bindings,
             &tokens,

@@ -30,13 +30,14 @@ use super::{
     custom_prompt_picker::CustomPromptPickerState,
     entry_tree::{BRANCH_PICKER_LIST_ROWS_MAX, BRANCH_PICKER_LIST_ROWS_MIN},
     external_editor::ExternalEditorLaunch,
-    file_picker::{FILE_PICKER_POPUP_MAX_HEIGHT, FILE_PICKER_POPUP_MIN_HEIGHT, FilePickerState},
     file_search::FileSearchCache,
+    mention_picker::{
+        FILE_PICKER_POPUP_MAX_HEIGHT, FILE_PICKER_POPUP_MIN_HEIGHT, MentionPickerState,
+    },
     message_history_recall::BlindRecallState,
     message_revisit::MessageRevisitState,
     model_panel::ModelPanelState,
     render_frame::RenderFrame,
-    skill_picker::SkillPickerState,
     startup_banner::StartupBannerEntranceState,
     status_line::StatusLineItem,
     status_phrases::StatusPhraseSelector,
@@ -111,12 +112,10 @@ pub struct Model {
     pub(super) command_panel_scroll: usize,
     pub(super) dismissed_command_panel_query: Option<String>,
     pub(super) floating_command_menu: Option<FloatingCommandMenuState>,
-    pub(super) file_picker: Option<FilePickerState>,
-    pub(super) skill_picker: Option<SkillPickerState>,
+    pub(super) mention_picker: Option<MentionPickerState>,
     pub(super) custom_prompt_picker: Option<CustomPromptPickerState>,
     pub(super) file_search_cache: FileSearchCache,
-    pub(super) dismissed_file_picker_token: Option<String>,
-    pub(super) dismissed_skill_picker_token: Option<String>,
+    pub(super) dismissed_mention_token: Option<String>,
     pub(super) dismissed_custom_prompt_picker_token: Option<String>,
     pub(super) copy_on_mouse_selection_release: bool,
     pub(super) swap_enter_and_send: bool,
@@ -291,12 +290,10 @@ impl Model {
             command_panel_scroll: 0,
             dismissed_command_panel_query: None,
             floating_command_menu: None,
-            file_picker: None,
-            skill_picker: None,
+            mention_picker: None,
             custom_prompt_picker: None,
             file_search_cache: FileSearchCache::default(),
-            dismissed_file_picker_token: None,
-            dismissed_skill_picker_token: None,
+            dismissed_mention_token: None,
             dismissed_custom_prompt_picker_token: None,
             copy_on_mouse_selection_release: options.copy_on_mouse_selection_release,
             swap_enter_and_send: options.swap_enter_and_send,
@@ -564,11 +561,9 @@ impl Model {
         self.command_panel_scroll = 0;
         self.dismissed_command_panel_query = None;
         self.floating_command_menu = None;
-        self.file_picker = None;
-        self.skill_picker = None;
+        self.mention_picker = None;
         self.custom_prompt_picker = None;
-        self.dismissed_file_picker_token = None;
-        self.dismissed_skill_picker_token = None;
+        self.dismissed_mention_token = None;
         self.dismissed_custom_prompt_picker_token = None;
         self.selection_runtime = SelectionRuntimeState::default();
         self.pending_composer_cursor_click = PendingComposerCursorClick::default();

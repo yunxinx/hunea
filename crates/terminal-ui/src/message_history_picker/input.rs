@@ -279,8 +279,7 @@ impl Model {
             && !self.context_budget_active()
             && !self.tool_approval_panel_active()
             && !self.command_panel_active()
-            && !self.file_picker_active()
-            && !self.skill_picker_active()
+            && !self.mention_picker_active()
             && !self.custom_prompt_picker_active()
     }
 }

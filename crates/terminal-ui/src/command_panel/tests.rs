@@ -748,7 +748,7 @@ fn ctrl_o_closes_file_picker_before_opening_floating_menu() {
     model.current_dir = root.display().to_string();
     model.set_window(80, 24);
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('@'))));
-    assert!(model.file_picker_active());
+    assert!(model.mention_picker_active());
 
     model.update(AppEvent::Key(KeyEvent::new(
         KeyCode::Char('o'),
@@ -756,7 +756,7 @@ fn ctrl_o_closes_file_picker_before_opening_floating_menu() {
     )));
 
     // 菜单独占键盘输入，composer 附属浮层留在下层只会冻结，打开时应一并关闭。
-    assert!(!model.file_picker_active());
+    assert!(!model.mention_picker_active());
     assert!(model.floating_command_menu_active());
 }
 

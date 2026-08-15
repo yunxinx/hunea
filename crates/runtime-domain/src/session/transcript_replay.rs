@@ -99,7 +99,7 @@ impl TranscriptReplayItem {
     }
 }
 
-/// `TranscriptSkillBinding` 表示一次 user transcript 中仍可恢复的 `$skill` 结构化绑定。
+/// `TranscriptSkillBinding` 表示一次 user transcript 中仍可恢复的 `@{name}` 结构化绑定。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TranscriptSkillBinding {
     pub skill_name: String,
@@ -110,10 +110,10 @@ pub struct TranscriptSkillBinding {
 }
 
 impl TranscriptSkillBinding {
-    /// `visible_token_text` 返回 transcript 中应当出现的 `$skill` 可见 token。
+    /// `visible_token_text` 返回 transcript 中应当出现的 `@{name}` 可见 token。
     #[must_use]
     pub fn visible_token_text(&self) -> String {
-        format!("${}", self.skill_name)
+        format!("@{}", self.skill_name)
     }
 }
 

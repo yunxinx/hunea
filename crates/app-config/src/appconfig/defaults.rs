@@ -23,7 +23,7 @@ impl Config {
                 command_menu_rows: COMMAND_MENU_ROWS_DEFAULT,
                 keyboard_enhancement: super::KeyboardEnhancementMode::Auto,
                 show_esc_interrupt_hint: true,
-                file_picker_popup_height: 7,
+                file_picker_popup_height: 9,
                 branch_picker_list_rows: BRANCH_PICKER_LIST_ROWS_DEFAULT,
                 composer_undo_limit: COMPOSER_UNDO_DEFAULT_LIMIT,
                 message_history_limit: MESSAGE_HISTORY_LIMIT_DEFAULT,

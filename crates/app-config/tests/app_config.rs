@@ -22,7 +22,7 @@ fn load_defaults_to_cx_when_no_config_exists() {
     assert_eq!(config.tui.user_input_style, UserInputStyle::Cx);
     assert!(config.tui.status_line.is_empty());
     assert!(config.tui.status_line_2.is_empty());
-    assert_eq!(config.tui.file_picker_popup_height, 7);
+    assert_eq!(config.tui.file_picker_popup_height, 9);
     assert_eq!(config.tui.branch_picker_list_rows, 7);
     assert_eq!(config.tui.command_menu_rows, 7);
     assert_eq!(config.tui.composer_undo_limit, 50);

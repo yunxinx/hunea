@@ -23,7 +23,7 @@ pub enum PromptSourceKind {
     InstructionsFile,
     ExtraPrompt,
     SkillDiscovery,
-    /// 长期注入型 skill，和当前消息里的 `$skill` 临时注入不同。
+    /// 长期注入型 skill，和当前消息里的 `@{name}` 临时注入不同。
     LongLivedSkill,
     /// 工具使用指南，body 从工具注册表动态生成。
     ToolGuidelines,

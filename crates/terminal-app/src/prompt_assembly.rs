@@ -118,7 +118,7 @@ struct SkillFrontmatter {
     disable_model_invocation: bool,
 }
 
-/// `ManualSkillPromptUse` 表示一次 `$skill` 当前轮注入解析后的 skill 使用项。
+/// `ManualSkillPromptUse` 表示一次 `@{name}` 当前轮注入解析后的 skill 使用项。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ManualSkillPromptUse {
     pub(crate) skill_name: String,
@@ -136,7 +136,7 @@ pub(crate) struct CustomPromptUse {
     pub(crate) body: String,
 }
 
-/// `AttachedPromptMessageAssembly` 表示当前轮 `$skill` / `#prompt` 注入后的 provider-visible 用户消息。
+/// `AttachedPromptMessageAssembly` 表示当前轮 `@{name}` / `#prompt` 注入后的 provider-visible 用户消息。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AttachedPromptMessageAssembly {
     pub(crate) provider_visible_user_text: String,

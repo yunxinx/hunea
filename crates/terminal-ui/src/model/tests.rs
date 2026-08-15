@@ -724,10 +724,10 @@ fn at_file_picker_opens_and_tab_completes_common_prefix() {
     let mut model = file_picker_model(root.path());
     type_text(&mut model, "@s");
 
-    assert!(model.file_picker_active());
+    assert!(model.mention_picker_active());
     assert_eq!(
         model
-            .current_file_picker_render_result()
+            .current_mention_picker_render_result()
             .plain_lines
             .iter()
             .filter(|line| line.contains("src/"))
@@ -741,15 +741,15 @@ fn at_file_picker_opens_and_tab_completes_common_prefix() {
 }
 
 #[test]
-fn dollar_skill_picker_opens_and_enter_inserts_bound_skill_token() {
+fn at_mention_picker_opens_and_enter_inserts_bound_skill_token() {
     let mut model = skill_picker_model();
 
-    type_text(&mut model, "$co");
+    type_text(&mut model, "@co");
 
-    assert!(model.skill_picker_active());
+    assert!(model.mention_picker_active());
     assert!(
         model
-            .current_skill_picker_render_result()
+            .current_mention_picker_render_result()
             .plain_lines
             .iter()
             .any(|line| line.contains("Code Review"))
@@ -758,11 +758,243 @@ fn dollar_skill_picker_opens_and_enter_inserts_bound_skill_token() {
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
 
     assert_eq!(effect, None);
-    assert_eq!(model.composer_text(), "$code-review ");
-    assert!(!model.skill_picker_active());
+    assert_eq!(model.composer_text(), "@code-review ");
+    assert!(!model.mention_picker_active());
     let source_message = model.composer.source_message();
     assert_eq!(source_message.skill_bindings().len(), 1);
     assert_eq!(source_message.skill_bindings()[0].skill_name, "code-review");
+    assert_eq!(
+        source_message.skill_bindings()[0].visible_token_text(),
+        "@code-review"
+    );
+}
+
+#[test]
+fn dollar_sigil_does_not_open_mention_picker() {
+    let mut model = skill_picker_model();
+
+    type_text(&mut model, "$co");
+
+    assert!(!model.mention_picker_active());
+    assert_eq!(model.composer_text(), "$co");
+}
+
+#[test]
+fn mention_picker_left_right_cycle_search_modes_without_moving_cursor() {
+    let mut model = skill_picker_model();
+    type_text(&mut model, "@");
+    let cursor = model.composer.cursor_position();
+
+    let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Right)));
+    assert_eq!(model.composer.cursor_position(), cursor);
+    assert!(
+        model
+            .current_mention_picker_render_result()
+            .plain_lines
+            .last()
+            .is_some_and(|line| line.contains("[Files]")),
+        "Right should move from All Results to Files"
+    );
+    assert!(
+        model
+            .current_mention_picker_render_result()
+            .plain_lines
+            .iter()
+            .any(|line| line.contains("No files")),
+        "Files mode should keep an empty-file placeholder instead of mixing in skills"
+    );
+
+    let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Right)));
+    assert_eq!(model.composer.cursor_position(), cursor);
+    assert!(
+        model
+            .current_mention_picker_render_result()
+            .plain_lines
+            .last()
+            .is_some_and(|line| line.contains("[Skills]"))
+    );
+
+    let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Right)));
+    assert!(
+        model
+            .current_mention_picker_render_result()
+            .plain_lines
+            .last()
+            .is_some_and(|line| line.contains("[All Results]"))
+    );
+
+    let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Left)));
+    assert_eq!(model.composer.cursor_position(), cursor);
+    assert!(
+        model
+            .current_mention_picker_render_result()
+            .plain_lines
+            .last()
+            .is_some_and(|line| line.contains("[Skills]"))
+    );
+
+    let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+    assert!(!model.mention_picker_active());
+    let cursor_after_close = model.composer.cursor_position();
+    let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Left)));
+    assert_ne!(
+        model.composer.cursor_position(),
+        cursor_after_close,
+        "Left/Right should move the composer cursor after the mention picker closes"
+    );
+}
+
+#[test]
+fn dismissing_mention_picker_does_not_prime_chat_interrupt() {
+    let mut model = skill_picker_model();
+    model.show_stream_activity("qwen3");
+    type_text(&mut model, "@");
+    assert!(model.mention_picker_active());
+
+    let dismiss_effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+    let first_interrupt_effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+
+    assert_eq!(dismiss_effect, None);
+    assert!(!model.mention_picker_active());
+    assert_eq!(model.composer_text(), "@");
+    assert_eq!(first_interrupt_effect, None);
+    assert!(model.current_status_notice_text().contains("Esc again"));
+}
+
+#[test]
+fn mention_picker_all_results_lists_files_before_skills() {
+    let root = TempFileTree::new("mention-all-results-order");
+    root.write_file("src/lib.rs");
+    let mut prompt_assembly = PromptAssemblyManagerSnapshot::default();
+    prompt_assembly.candidates.manual_skills = vec![PromptAssemblyDiscoveredSkill {
+        skill_name: "code-review".to_string(),
+        title: "Code Review".to_string(),
+        description: "Review code".to_string(),
+        origin: PromptSourceOrigin::Project,
+        selection_scope: PromptAssemblyScope::Project,
+        skill_path: "/tmp/code-review/SKILL.md".into(),
+        body: "# Code Review".to_string(),
+        selection: PromptAssemblySelectionState::from_parts(true, false, None),
+    }];
+    let mut model = Model::new_with_options(
+        StartupBannerOptions::default(),
+        ModelOptions {
+            style_mode: StyleMode::Ms,
+            file_picker_popup_height: 7,
+            prompt_assembly: Some(prompt_assembly),
+            ..ModelOptions::default()
+        },
+    );
+    model.transcript_mut().clear();
+    model.current_dir = root.path().display().to_string();
+    model.set_window(40, 8);
+    model.set_palette(default_palette(), true);
+    type_text(&mut model, "@");
+
+    let lines = model.current_mention_picker_render_result().plain_lines;
+    let file_index = lines
+        .iter()
+        .position(|line| line.contains("src/lib.rs"))
+        .expect("All Results should include matching files");
+    let skill_index = lines
+        .iter()
+        .position(|line| line.contains("Code Review"))
+        .expect("All Results should include matching skills");
+    assert!(
+        file_index < skill_index,
+        "files should appear before skills: {lines:?}"
+    );
+
+    let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Right)));
+    let files_only = model.current_mention_picker_render_result().plain_lines;
+    assert!(files_only.iter().any(|line| line.contains("src/lib.rs")));
+    assert!(!files_only.iter().any(|line| line.contains("Code Review")));
+
+    let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Right)));
+    let skills_only = model.current_mention_picker_render_result().plain_lines;
+    assert!(skills_only.iter().any(|line| line.contains("Code Review")));
+    assert!(!skills_only.iter().any(|line| line.contains("src/lib.rs")));
+}
+
+#[test]
+fn mention_picker_tab_completes_only_the_selected_item_kind() {
+    let root = TempFileTree::new("mention-tab-same-kind");
+    root.write_file("src/lib.rs");
+    root.write_file("src/main.rs");
+    let mut prompt_assembly = PromptAssemblyManagerSnapshot::default();
+    prompt_assembly.candidates.manual_skills = vec![PromptAssemblyDiscoveredSkill {
+        skill_name: "code-review".to_string(),
+        title: "Code Review".to_string(),
+        description: "Review code".to_string(),
+        origin: PromptSourceOrigin::Project,
+        selection_scope: PromptAssemblyScope::Project,
+        skill_path: "/tmp/code-review/SKILL.md".into(),
+        body: "# Code Review".to_string(),
+        selection: PromptAssemblySelectionState::from_parts(true, false, None),
+    }];
+    let mut model = Model::new_with_options(
+        StartupBannerOptions::default(),
+        ModelOptions {
+            style_mode: StyleMode::Ms,
+            file_picker_popup_height: 7,
+            prompt_assembly: Some(prompt_assembly),
+            ..ModelOptions::default()
+        },
+    );
+    model.transcript_mut().clear();
+    model.current_dir = root.path().display().to_string();
+    model.set_window(40, 8);
+    model.set_palette(default_palette(), true);
+    type_text(&mut model, "@");
+
+    let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Tab)));
+
+    assert_eq!(
+        model.composer_text(),
+        "@src/",
+        "All Results Tab should complete the selected file group, not mix skill names into the prefix"
+    );
+}
+
+#[test]
+fn mention_picker_default_height_is_nine_and_explicit_seven_is_kept() {
+    let default_model = Model::new_with_style_mode(StartupBannerOptions::default(), StyleMode::Ms);
+    assert_eq!(default_model.file_picker_popup_height, 9);
+    assert_eq!(default_model.mention_picker_list_visible_rows(), 7);
+    assert_eq!(default_model.file_picker_list_visible_rows(), 9);
+
+    let configured = Model::new_with_options(
+        StartupBannerOptions::default(),
+        ModelOptions {
+            file_picker_popup_height: 7,
+            ..ModelOptions::default()
+        },
+    );
+    assert_eq!(configured.file_picker_popup_height, 7);
+    assert_eq!(configured.mention_picker_list_visible_rows(), 5);
+
+    let minimum = Model::new_with_options(
+        StartupBannerOptions::default(),
+        ModelOptions {
+            file_picker_popup_height: 3,
+            ..ModelOptions::default()
+        },
+    );
+    assert_eq!(minimum.mention_picker_list_visible_rows(), 1);
+    assert_eq!(
+        minimum.file_picker_list_visible_rows(),
+        3,
+        "custom prompt picker should keep the full configured height, without mention footer rows"
+    );
+}
+
+#[test]
+fn hash_still_opens_custom_prompt_picker_not_mention_search() {
+    let mut model = custom_prompt_picker_model();
+    type_text(&mut model, "#rev");
+
+    assert!(!model.mention_picker_active());
+    assert!(model.custom_prompt_picker_active());
 }
 
 #[test]
@@ -778,6 +1010,12 @@ fn hash_custom_prompt_picker_opens_and_enter_inserts_bound_prompt_token() {
             .iter()
             .any(|row| row.contains("Review Rules") || row.contains("review-rules")),
         "custom prompt picker should render matching prompt rows: {floating_rows:?}"
+    );
+    assert!(
+        floating_rows
+            .iter()
+            .all(|row| { !row.contains("[All Results]") && !row.contains("switch search modes") }),
+        "custom prompt picker should keep its own rows and omit mention footer chrome: {floating_rows:?}"
     );
 
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
@@ -896,22 +1134,22 @@ fn custom_prompt_picker_keeps_scope_suffix_visible_at_row_end_when_content_is_lo
 }
 
 #[test]
-fn moving_cursor_back_onto_bound_skill_token_reopens_skill_picker() {
+fn moving_cursor_back_onto_bound_skill_token_reopens_mention_picker() {
     let mut model = skill_picker_model();
 
-    type_text(&mut model, "$co");
+    type_text(&mut model, "@co");
     let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
     type_text(&mut model, "later");
-    assert!(!model.skill_picker_active());
+    assert!(!model.mention_picker_active());
 
     for _ in 0.."later ".chars().count() {
         let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Left)));
     }
 
-    assert!(model.skill_picker_active());
+    assert!(model.mention_picker_active());
     assert!(
         model
-            .current_skill_picker_render_result()
+            .current_mention_picker_render_result()
             .plain_lines
             .iter()
             .any(|line| line.contains("Code Review"))
@@ -922,9 +1160,9 @@ fn moving_cursor_back_onto_bound_skill_token_reopens_skill_picker() {
 fn skill_picker_renders_title_and_description_in_separate_columns() {
     let mut model = skill_picker_model();
 
-    type_text(&mut model, "$");
+    type_text(&mut model, "@");
 
-    let lines = model.current_skill_picker_render_result().plain_lines;
+    let lines = model.current_mention_picker_render_result().plain_lines;
     let skill_line = lines
         .iter()
         .find(|line| line.contains("Code Review"))
@@ -932,16 +1170,16 @@ fn skill_picker_renders_title_and_description_in_separate_columns() {
 
     assert!(skill_line.contains("Review code"));
     assert!(!skill_line.contains("[Skill]"));
-    assert!(!skill_line.contains("$code-review - Review code"));
+    assert!(!skill_line.contains("@code-review - Review code"));
 }
 
 #[test]
 fn skill_picker_keeps_description_column_aligned_across_rows() {
     let mut model = skill_picker_model();
 
-    type_text(&mut model, "$");
+    type_text(&mut model, "@");
 
-    let lines = model.current_skill_picker_render_result().plain_lines;
+    let lines = model.current_mention_picker_render_result().plain_lines;
     let code_review_line = lines
         .iter()
         .find(|line| line.contains("Code Review"))
@@ -970,9 +1208,9 @@ fn skill_picker_highlights_matched_description_text() {
     model.set_window(80, 8);
     model.set_palette(default_palette(), true);
 
-    type_text(&mut model, "$inspect");
+    type_text(&mut model, "@inspect");
 
-    let rendered = model.current_skill_picker_render_result();
+    let rendered = model.current_mention_picker_render_result();
     let skill_line = rendered
         .lines
         .iter()
@@ -1004,7 +1242,7 @@ fn skill_picker_highlights_matched_description_text() {
 fn skill_picker_popup_scrollbar_thumb_reaches_bottom_on_last_page() {
     let mut model = overflowing_skill_picker_model();
 
-    type_text(&mut model, "$");
+    type_text(&mut model, "@");
     for _ in 0..9 {
         let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Down)));
     }
@@ -1029,11 +1267,11 @@ fn fullscreen_modal_closes_composer_file_picker_state() {
 
     let mut model = file_picker_model(root.path());
     type_text(&mut model, "@s");
-    assert!(model.file_picker_active());
+    assert!(model.mention_picker_active());
 
     model.open_session_picker_loading();
 
-    assert!(!model.file_picker_active());
+    assert!(!model.mention_picker_active());
 }
 
 #[test]
@@ -1065,7 +1303,7 @@ fn file_picker_render_shifts_to_the_completed_directory_prefix() {
 
     assert_eq!(model.composer_text(), "@src/dir1/dir2/dir");
 
-    let lines = model.current_file_picker_render_result().plain_lines;
+    let lines = model.current_mention_picker_render_result().plain_lines;
     assert!(
         lines.iter().any(|line| line.contains("dir3/docs.md")),
         "completed directory prefix should be stripped from picker rows: {lines:?}"
@@ -1086,7 +1324,7 @@ fn file_picker_highlights_matched_path_fragment() {
     model.set_palette(default_palette(), true);
     type_text(&mut model, "@src/li");
 
-    let rendered = model.current_file_picker_render_result();
+    let rendered = model.current_mention_picker_render_result();
     let file_line_index = rendered
         .plain_lines
         .iter()
@@ -1124,7 +1362,7 @@ fn file_picker_popup_uses_configured_height_and_full_width() {
         StartupBannerOptions::default(),
         ModelOptions {
             style_mode: StyleMode::Ms,
-            file_picker_popup_height: 3,
+            file_picker_popup_height: 5,
             ..ModelOptions::default()
         },
     );
@@ -1140,6 +1378,56 @@ fn file_picker_popup_uses_configured_height_and_full_width() {
         rows.iter().filter(|line| line.contains("src/")).count(),
         3,
         "configured popup height should limit visible picker rows: {rows:?}"
+    );
+    let popup_plain = model.current_mention_picker_render_result().plain_lines;
+    assert!(
+        popup_plain
+            .last()
+            .is_some_and(|line| line.contains("[All Results]")),
+        "mention picker footer should mark the active search mode: {popup_plain:?}"
+    );
+    assert!(
+        popup_plain
+            .get(popup_plain.len().saturating_sub(2))
+            .is_some_and(|line| line.trim().is_empty()),
+        "mention picker should keep a blank row above the footer: {popup_plain:?}"
+    );
+    let upward = model.mention_picker_render_result(true).plain_lines;
+    assert!(
+        upward
+            .first()
+            .is_some_and(|line| line.contains("[All Results]")),
+        "upward chrome should put the footer first: {upward:?}"
+    );
+    assert!(
+        upward.get(1).is_some_and(|line| line.trim().is_empty()),
+        "upward chrome should keep a blank row under the footer: {upward:?}"
+    );
+    assert!(
+        upward
+            .get(2)
+            .is_some_and(|line| line.contains("src/lib.rs")),
+        "upward chrome should keep search results after the blank row: {upward:?}"
+    );
+    let footer = model
+        .current_mention_picker_render_result()
+        .lines
+        .last()
+        .cloned()
+        .expect("mention picker footer should render");
+    assert!(
+        footer.spans.iter().any(|span| {
+            span.content.as_ref() == "[All Results]"
+                && span.style.fg == Some(model.palette.command_accent)
+                && span.style.add_modifier.contains(Modifier::BOLD)
+        }),
+        "active mention mode should use palette.command_accent: {footer:?}"
+    );
+    assert!(
+        footer.spans.iter().any(|span| {
+            span.content.as_ref() == "Files" && span.style.fg == Some(model.palette.muted)
+        }),
+        "inactive mention modes should use palette.muted: {footer:?}"
     );
     assert!(
         rendered_segment(&rows[1], 0, 40)
@@ -1160,7 +1448,7 @@ fn file_picker_popup_renders_vertical_scrollbar_for_overflowing_results() {
         StartupBannerOptions::default(),
         ModelOptions {
             style_mode: StyleMode::Ms,
-            file_picker_popup_height: 3,
+            file_picker_popup_height: 5,
             ..ModelOptions::default()
         },
     );
@@ -1233,12 +1521,12 @@ fn at_file_picker_enter_inserts_selected_path_with_prefix_and_space() {
     let mut model = file_picker_model(root.path());
     type_text(&mut model, "@src/l");
 
-    assert!(model.file_picker_active());
+    assert!(model.mention_picker_active());
 
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
 
     assert_eq!(model.composer_text(), "@src/lib.rs ");
-    assert!(!model.file_picker_active());
+    assert!(!model.mention_picker_active());
 }
 
 #[test]
@@ -1251,14 +1539,14 @@ fn at_file_picker_enter_inserts_image_placeholder_and_attachment() {
     model.current_dir = root.path().display().to_string();
     type_text(&mut model, "@assets/s");
 
-    assert!(model.file_picker_active());
+    assert!(model.mention_picker_active());
 
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
 
     let source_message = model.composer.source_message();
     assert_eq!(model.composer_text(), "[Image #1] ");
     assert_eq!(source_message.attachments().len(), 1);
-    assert!(!model.file_picker_active());
+    assert!(!model.mention_picker_active());
 
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
     let Some(AppEffect::SendConversationTurn {
@@ -1285,7 +1573,7 @@ fn at_file_picker_enter_on_exact_image_path_inserts_attachment_instead_of_submit
     let mut model = file_picker_model(root.path());
     type_text(&mut model, "@assets/sample.png");
 
-    assert!(model.file_picker_active());
+    assert!(model.mention_picker_active());
 
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
 
@@ -1293,7 +1581,7 @@ fn at_file_picker_enter_on_exact_image_path_inserts_attachment_instead_of_submit
     assert!(effect.is_none());
     assert_eq!(model.composer_text(), "[Image #1] ");
     assert_eq!(source_message.attachments().len(), 1);
-    assert!(!model.file_picker_active());
+    assert!(!model.mention_picker_active());
 }
 
 #[test]
@@ -1309,7 +1597,7 @@ fn at_file_picker_down_then_enter_inserts_the_selected_path() {
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
 
     assert_eq!(model.composer_text(), "@src/main.rs ");
-    assert!(!model.file_picker_active());
+    assert!(!model.mention_picker_active());
 }
 
 #[test]
@@ -1321,10 +1609,10 @@ fn at_file_picker_enter_on_exact_visible_path_submits_prompt() {
     model.current_dir = root.path().display().to_string();
     type_text(&mut model, "@src/lib.rs");
 
-    assert!(model.file_picker_active());
+    assert!(model.mention_picker_active());
     assert!(
         model
-            .current_file_picker_render_result()
+            .current_mention_picker_render_result()
             .plain_lines
             .iter()
             .any(|line| line.contains("lib.rs"))
@@ -1359,13 +1647,13 @@ fn at_file_picker_enter_on_empty_results_does_not_send_composer() {
     model.set_palette(default_palette(), true);
     type_text(&mut model, "@does-not-exist");
 
-    assert!(model.file_picker_active());
+    assert!(model.mention_picker_active());
     assert!(
         model
-            .current_file_picker_render_result()
+            .current_mention_picker_render_result()
             .plain_lines
             .iter()
-            .any(|line| line.contains("No files"))
+            .any(|line| line.contains("No matches"))
     );
 
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
@@ -1392,13 +1680,13 @@ fn at_file_picker_enter_on_explicit_gitignored_file_submits_prompt() {
     model.current_dir = root.path().display().to_string();
     type_text(&mut model, "@target/debug.log");
 
-    assert!(model.file_picker_active());
+    assert!(model.mention_picker_active());
     assert!(
         model
-            .current_file_picker_render_result()
+            .current_mention_picker_render_result()
             .plain_lines
             .iter()
-            .any(|line| line.contains("No files"))
+            .any(|line| line.contains("No matches"))
     );
 
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
@@ -1424,13 +1712,13 @@ fn at_file_picker_enter_on_explicit_absolute_file_submits_prompt() {
     model.current_dir = root.path().display().to_string();
     type_text(&mut model, &format!("@{}", outside_path.display()));
 
-    assert!(model.file_picker_active());
+    assert!(model.mention_picker_active());
     assert!(
         model
-            .current_file_picker_render_result()
+            .current_mention_picker_render_result()
             .plain_lines
             .iter()
-            .any(|line| line.contains("No files"))
+            .any(|line| line.contains("No matches"))
     );
 
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
@@ -1454,7 +1742,7 @@ fn file_picker_does_not_clear_status_lines_outside_popup_area() {
         StartupBannerOptions::default(),
         ModelOptions {
             style_mode: StyleMode::Ms,
-            file_picker_popup_height: 3,
+            file_picker_popup_height: 5,
             status_line_items: vec![StatusLineItem::GitBranch],
             ..ModelOptions::default()
         },
@@ -1596,7 +1884,7 @@ fn file_picker_overlay_does_not_shrink_the_composer_viewport() {
 
     type_text(&mut model, "\n@s");
 
-    assert!(model.file_picker_active());
+    assert!(model.mention_picker_active());
     assert_eq!(
         model.composer.visible_height(),
         before_visible_height,
@@ -1618,7 +1906,7 @@ fn file_picker_floating_layer_does_not_shrink_document_viewport() {
         "line one\nline two\nline three\nline four\nline five\n@s",
     );
 
-    assert!(model.file_picker_active());
+    assert!(model.mention_picker_active());
     let context = crate::frame_time::FrameRenderContext::capture();
     let layout = model.build_document_layout(context);
     let viewport = model.build_document_viewport(&layout, context);
@@ -1652,6 +1940,16 @@ fn file_picker_popup_anchors_below_the_at_token_with_full_width() {
         rendered_segment(&rows[1], 0, 40).contains("src/lib.rs"),
         "file picker popup should own the whole viewport row: {rows:?}"
     );
+    assert!(
+        rows.last()
+            .is_some_and(|line| line.contains("[All Results]")),
+        "downward mention popup should keep the footer on the last row: {rows:?}"
+    );
+    assert!(
+        rows.get(rows.len().saturating_sub(2))
+            .is_some_and(|line| line.trim().is_empty()),
+        "downward mention popup should keep a blank row above the footer: {rows:?}"
+    );
 }
 
 #[test]
@@ -1668,10 +1966,83 @@ fn file_picker_popup_flips_above_when_there_is_no_room_below_anchor() {
 
     let rows = rendered_rows_for_model(&mut model, 40, 8);
 
+    assert!(
+        rows.first()
+            .is_some_and(|line| line.contains("[All Results]")),
+        "upward mention popup should put the footer on the first row: {rows:?}"
+    );
+    assert!(
+        rows.get(1).is_some_and(|line| line.trim().is_empty()),
+        "upward mention popup should keep a blank row under the footer: {rows:?}"
+    );
     assert_eq!(
-        rendered_column(&rows[0], "src/lib.rs"),
+        rendered_column(&rows[2], "src/lib.rs"),
         Some(2),
         "file picker should flip above the @ row instead of appending below the composer: {rows:?}"
+    );
+}
+
+#[test]
+fn mention_picker_upward_scrollbar_covers_list_rows_only() {
+    let root = TempFileTree::new("popup-anchor-above-scrollbar");
+    for index in 0..8 {
+        root.write_file(&format!("src/file_{index:02}.rs"));
+    }
+
+    let mut model = Model::new_with_options(
+        StartupBannerOptions::default(),
+        ModelOptions {
+            style_mode: StyleMode::Ms,
+            file_picker_popup_height: 5,
+            ..ModelOptions::default()
+        },
+    );
+    model.transcript_mut().clear();
+    model.current_dir = root.path().display().to_string();
+    model.set_window(40, 8);
+    model.set_palette(default_palette(), true);
+    model.status_line_items.clear();
+    model.status_line_2_items.clear();
+    type_text(&mut model, "one\ntwo\nthree\nfour\nfive\nsix\nseven\n@s");
+
+    let rows = rendered_rows_for_model(&mut model, 40, 8);
+    let footer_index = rows
+        .iter()
+        .position(|line| line.contains("[All Results]"))
+        .expect("upward mention popup should render footer chrome");
+
+    assert!(
+        rows.get(footer_index + 1)
+            .is_some_and(|line| line.trim().is_empty()),
+        "upward mention popup should keep a blank row under the footer: {rows:?}"
+    );
+    assert!(
+        rows.get(footer_index + 2)
+            .is_some_and(|line| line.contains("src/file_")),
+        "upward mention popup should keep search results after the blank row: {rows:?}"
+    );
+    assert!(
+        !matches!(
+            rendered_segment(&rows[footer_index], 39, 1).as_str(),
+            "█" | "┃"
+        ),
+        "mention footer chrome should stay outside the scrollbar track: {rows:?}"
+    );
+    assert!(
+        !matches!(
+            rendered_segment(&rows[footer_index + 1], 39, 1).as_str(),
+            "█" | "┃"
+        ),
+        "the blank chrome row should stay outside the scrollbar track: {rows:?}"
+    );
+    let list_start = footer_index + 2;
+    let list_end = (footer_index + 5).min(rows.len());
+    let list_rows = &rows[list_start..list_end];
+    assert!(
+        list_rows
+            .iter()
+            .any(|row| matches!(rendered_segment(row, 39, 1).as_str(), "█" | "┃")),
+        "upward mention popup scrollbar should cover list rows only: {rows:?}"
     );
 }
 
@@ -1742,7 +2113,7 @@ fn file_picker_esc_restores_area_cleared_by_previous_floating_frame() {
     model.sync_document_viewport_for_composer_cursor();
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Right)));
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Right)));
-    assert!(model.file_picker_active());
+    assert!(model.mention_picker_active());
 
     let popup_buffer = render_model_buffer(&mut model, 40, 8);
     let popup_rows = rendered_rows(&popup_buffer);
@@ -1758,7 +2129,7 @@ fn file_picker_esc_restores_area_cleared_by_previous_floating_frame() {
     );
 
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
-    assert!(!model.file_picker_active());
+    assert!(!model.mention_picker_active());
     let restored_buffer = render_model_buffer(&mut model, 40, 8);
     let restored_rows = rendered_rows(&restored_buffer);
 
@@ -1783,7 +2154,7 @@ fn file_picker_esc_restores_flipped_popup_area_in_full_composer_viewport() {
         &mut model,
         "line one\nline two\nline three\nline four\nline five\nline six\nline seven\n@s",
     );
-    assert!(model.file_picker_active());
+    assert!(model.mention_picker_active());
 
     let popup_buffer = render_model_buffer(&mut model, 40, 8);
     let popup_rows = rendered_rows(&popup_buffer);
@@ -1793,7 +2164,7 @@ fn file_picker_esc_restores_flipped_popup_area_in_full_composer_viewport() {
     );
 
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
-    assert!(!model.file_picker_active());
+    assert!(!model.mention_picker_active());
     let restored_buffer = render_model_buffer(&mut model, 40, 8);
     let restored_rows = rendered_rows(&restored_buffer);
 
@@ -1825,14 +2196,14 @@ fn file_picker_esc_closes_overlay_without_moving_document_viewport() {
     model.sync_document_viewport_for_composer_cursor();
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Right)));
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Right)));
-    assert!(model.file_picker_active());
+    assert!(model.mention_picker_active());
 
     let before_document_offset = model.document_runtime.viewport_y;
     let before_composer_offset = model.composer.viewport_offset();
 
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
 
-    assert!(!model.file_picker_active());
+    assert!(!model.mention_picker_active());
     assert_eq!(
         model.document_runtime.viewport_y, before_document_offset,
         "closing a floating popup should not move the document viewport"
@@ -1855,7 +2226,7 @@ fn file_picker_mouse_wheel_scrolls_document_without_moving_popup_list() {
         StartupBannerOptions::default(),
         ModelOptions {
             style_mode: StyleMode::Ms,
-            file_picker_popup_height: 3,
+            file_picker_popup_height: 5,
             ..ModelOptions::default()
         },
     );
@@ -1870,10 +2241,10 @@ fn file_picker_mouse_wheel_scrolls_document_without_moving_popup_list() {
     model.set_window(40, 8);
     model.set_palette(default_palette(), true);
     type_text(&mut model, "@s");
-    assert!(model.file_picker_active());
+    assert!(model.mention_picker_active());
 
     let before_document_offset = model.document_runtime.viewport_y;
-    let before_picker_scroll = model.file_picker.as_ref().map(|state| state.scroll);
+    let before_picker_scroll = model.mention_picker.as_ref().map(|state| state.scroll);
     assert!(
         before_document_offset > 0,
         "fixture should start with scrollable document content"
@@ -1888,7 +2259,7 @@ fn file_picker_mouse_wheel_scrolls_document_without_moving_popup_list() {
         "mouse wheel should keep scrolling the underlying document while the file picker is active"
     );
     assert_eq!(
-        model.file_picker.as_ref().map(|state| state.scroll),
+        model.mention_picker.as_ref().map(|state| state.scroll),
         before_picker_scroll,
         "mouse wheel should not move the file picker list viewport"
     );
@@ -1903,7 +2274,7 @@ fn deleting_file_picker_trigger_after_mouse_wheel_keeps_manual_document_viewport
         StartupBannerOptions::default(),
         ModelOptions {
             style_mode: StyleMode::Ms,
-            file_picker_popup_height: 3,
+            file_picker_popup_height: 5,
             ..ModelOptions::default()
         },
     );
@@ -1918,7 +2289,7 @@ fn deleting_file_picker_trigger_after_mouse_wheel_keeps_manual_document_viewport
     model.set_window(40, 8);
     model.set_palette(default_palette(), true);
     type_text(&mut model, "@");
-    assert!(model.file_picker_active());
+    assert!(model.mention_picker_active());
 
     let bottom_offset = model.document_runtime.viewport_y;
     model.update(AppEvent::MouseWheel { delta_lines: -3 });
@@ -1933,7 +2304,7 @@ fn deleting_file_picker_trigger_after_mouse_wheel_keeps_manual_document_viewport
 
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Backspace)));
 
-    assert!(!model.file_picker_active());
+    assert!(!model.mention_picker_active());
     assert_eq!(model.composer_text(), "");
     assert_eq!(
         model.document_runtime.viewport_y, scrolled_offset,
@@ -3492,7 +3863,14 @@ fn stream_activity_line_can_hide_interrupt_hint() {
 }
 
 fn file_picker_model(root: &Path) -> Model {
-    let mut model = Model::new_with_style_mode(StartupBannerOptions::default(), StyleMode::Ms);
+    let mut model = Model::new_with_options(
+        StartupBannerOptions::default(),
+        ModelOptions {
+            style_mode: StyleMode::Ms,
+            file_picker_popup_height: 7,
+            ..ModelOptions::default()
+        },
+    );
     model.transcript_mut().clear();
     model.current_dir = root.display().to_string();
     model.set_window(40, 8);
@@ -3560,6 +3938,13 @@ fn skill_picker_model_with_manual_skills(
         },
     );
     model.transcript_mut().clear();
+    let empty_root = std::env::temp_dir().join(format!(
+        "hunea-mention-skills-empty-{}-{}",
+        std::process::id(),
+        file_picker_popup_height
+    ));
+    let _ = std::fs::create_dir_all(&empty_root);
+    model.current_dir = empty_root.display().to_string();
     model.set_window(40, 8);
     model.set_palette(default_palette(), true);
     model

@@ -126,10 +126,10 @@ esc_interrupt_presses = 2
 # 这类打断提示。默认开启。
 show_esc_interrupt_hint = true
 
-# `file_picker_popup_height` 控制 @ 文件选择浮窗的行数。
-# 文件选择浮窗固定使用完整终端宽度；垂直方向以 @ 位置为锚点，空间不足时自动翻转。
-# 取值范围 3..21，默认高度 7 行。
-file_picker_popup_height = 7
+# `file_picker_popup_height` 控制 @ 聚合搜索浮窗总高度（含空行和 footer）。
+# 文件与 skill 共用该浮窗；固定使用完整终端宽度，垂直方向以 @ 位置为锚点，空间不足时自动翻转。
+# 取值范围 3..21，默认高度 9 行。
+file_picker_popup_height = 9
 
 # `branch_picker_list_rows` 控制对话树分支选择浮窗的可见分支行数。
 # 取值范围 3..14，默认 7 行。

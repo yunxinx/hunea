@@ -11,7 +11,7 @@ use crate::{
     command_panel::COMMAND_MENU_ROWS_DEFAULT,
     composer::DEFAULT_COMPOSER_UNDO_LIMIT,
     entry_tree::BRANCH_PICKER_LIST_ROWS_DEFAULT,
-    file_picker::{FILE_PICKER_POPUP_MAX_HEIGHT, FILE_PICKER_POPUP_MIN_HEIGHT},
+    mention_picker::{FILE_PICKER_POPUP_MAX_HEIGHT, FILE_PICKER_POPUP_MIN_HEIGHT},
     status_line::StatusLineItem,
     status_phrases::default_status_phrases,
     style_mode::StyleMode,
@@ -107,7 +107,7 @@ impl Default for ModelOptions {
             command_menu_rows: COMMAND_MENU_ROWS_DEFAULT,
             keyboard_enhancement: KeyboardEnhancementPreference::Auto,
             show_esc_interrupt_hint: true,
-            file_picker_popup_height: 7
+            file_picker_popup_height: 9
                 .clamp(FILE_PICKER_POPUP_MIN_HEIGHT, FILE_PICKER_POPUP_MAX_HEIGHT),
             branch_picker_list_rows: BRANCH_PICKER_LIST_ROWS_DEFAULT,
             composer_undo_limit: DEFAULT_COMPOSER_UNDO_LIMIT,

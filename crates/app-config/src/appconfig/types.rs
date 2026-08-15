@@ -1,12 +1,12 @@
-/// @ 文件选择浮窗至少需要 3 行，避免列表在导航时过于局促。
+/// @ 聚合搜索浮窗至少需要 3 行（列表 + 空行 + footer）。
 pub const FILE_PICKER_POPUP_MIN_HEIGHT: u16 = 3;
-/// @ 文件选择浮窗最多显示 21 行，避免覆盖过多上下文。
+/// @ 聚合搜索浮窗最多显示 21 行，避免覆盖过多上下文。
 pub const FILE_PICKER_POPUP_MAX_HEIGHT: u16 = 21;
 /// Branch picker 至少显示 3 个分支行，保证有可导航空间。
 pub const BRANCH_PICKER_LIST_ROWS_MIN: u16 = 3;
 /// Branch picker 最多显示 14 个分支行，避免遮挡 `/tree` 过多上下文。
 pub const BRANCH_PICKER_LIST_ROWS_MAX: u16 = 14;
-/// Branch picker 默认显示 7 个分支行，与 file picker 默认密度一致。
+/// Branch picker 默认显示 7 个分支行。
 pub const BRANCH_PICKER_LIST_ROWS_DEFAULT: u16 = 7;
 /// 悬浮命令菜单至少显示 7 个命令行，与内联斜杠菜单默认密度一致。
 ///

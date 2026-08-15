@@ -573,7 +573,7 @@ fn manual_skill_mentions_emit_synthetic_skill_usage_events_before_worker_failure
         None,
         None,
         runtime_domain::session::TranscriptUserMessage {
-            content: "Please audit this diff with $code-review".to_string(),
+            content: "Please audit this diff with @code-review".to_string(),
             attachments: Vec::new(),
             skill_bindings: vec![runtime_domain::session::TranscriptSkillBinding {
                 skill_name: "code-review".to_string(),

@@ -423,8 +423,32 @@ fn replace_current_at_token_keeps_surrounding_text_and_moves_cursor() {
 }
 
 #[test]
+fn skill_bindings_ignore_dollar_sigil_tokens() {
+    let mut composer = test_composer(80, 3, "$code-review");
+    assert!(!composer.replace_current_skill_token(
+        "code-review",
+        std::path::Path::new("/tmp/code-review/SKILL.md"),
+        PromptSourceOrigin::Project,
+    ));
+    assert!(composer.source_message().skill_bindings().is_empty());
+
+    let mut composer = test_composer(80, 3, "@code");
+    assert!(composer.replace_current_skill_token(
+        "code-review",
+        std::path::Path::new("/tmp/code-review/SKILL.md"),
+        PromptSourceOrigin::Project,
+    ));
+    composer.move_to_begin_for_test();
+    composer.handle_key(KeyEvent::from(KeyCode::Delete));
+    composer.handle_key(KeyEvent::from(KeyCode::Char('$')));
+
+    assert_eq!(composer.value(), "$code-review ");
+    assert!(composer.source_message().skill_bindings().is_empty());
+}
+
+#[test]
 fn skill_binding_survives_edit_outside_bound_token() {
-    let mut composer = test_composer(80, 3, "$code");
+    let mut composer = test_composer(80, 3, "@code");
     assert!(composer.replace_current_skill_token(
         "code-review",
         std::path::Path::new("/tmp/code-review/SKILL.md"),
@@ -440,7 +464,7 @@ fn skill_binding_survives_edit_outside_bound_token() {
 
 #[test]
 fn skill_binding_drops_immediately_after_manual_token_edit() {
-    let mut composer = test_composer(80, 3, "$code");
+    let mut composer = test_composer(80, 3, "@code");
     assert!(composer.replace_current_skill_token(
         "code-review",
         std::path::Path::new("/tmp/code-review/SKILL.md"),
@@ -457,7 +481,7 @@ fn skill_binding_drops_immediately_after_manual_token_edit() {
 
 #[test]
 fn reset_same_text_invalidates_cleared_structured_bindings() {
-    let mut composer = test_composer(80, 3, "$code");
+    let mut composer = test_composer(80, 3, "@code");
     assert!(composer.replace_current_skill_token(
         "code-review",
         std::path::Path::new("/tmp/code-review/SKILL.md"),
@@ -478,7 +502,7 @@ fn reset_same_text_invalidates_cleared_structured_bindings() {
 
 #[test]
 fn undo_same_text_invalidates_restored_structured_bindings() {
-    let mut composer = test_composer(80, 3, "$code");
+    let mut composer = test_composer(80, 3, "@code");
     assert!(composer.replace_current_skill_token(
         "code-review",
         std::path::Path::new("/tmp/code-review/SKILL.md"),
@@ -500,7 +524,7 @@ fn undo_same_text_invalidates_restored_structured_bindings() {
 
 #[test]
 fn bound_skill_token_renders_with_command_accent_before_submit() {
-    let mut composer = test_composer(80, 3, "$code");
+    let mut composer = test_composer(80, 3, "@code");
     assert!(composer.replace_current_skill_token(
         "code-review",
         std::path::Path::new("/tmp/code-review/SKILL.md"),
@@ -514,7 +538,7 @@ fn bound_skill_token_renders_with_command_accent_before_submit() {
         .lines
         .iter()
         .flat_map(|line| line.spans.iter())
-        .find(|span| span.content.as_ref() == "$code-review")
+        .find(|span| span.content.as_ref() == "@code-review")
         .expect("bound skill token should render as a distinct span");
 
     assert_eq!(skill_span.style.fg, Some(palette.command_accent));
@@ -526,7 +550,7 @@ fn bound_skill_token_keeps_same_background_as_live_cx_input() {
     let mut composer = Composer::new(StyleMode::Cx);
     composer.set_width(82);
     composer.set_height(3);
-    composer.set_text_for_test("$code");
+    composer.set_text_for_test("@code");
     assert!(composer.replace_current_skill_token(
         "code-review",
         std::path::Path::new("/tmp/code-review/SKILL.md"),
@@ -540,7 +564,7 @@ fn bound_skill_token_keeps_same_background_as_live_cx_input() {
         .lines
         .iter()
         .flat_map(|line| line.spans.iter())
-        .find(|span| span.content.as_ref() == "$code-review")
+        .find(|span| span.content.as_ref() == "@code-review")
         .expect("bound skill token should render as a distinct span");
     let plain_text_span = document
         .lines
@@ -569,7 +593,7 @@ fn bound_custom_prompt_token_renders_from_sigil_on_later_logical_line() {
 
 #[test]
 fn bound_skill_token_renders_from_sigil_after_blank_lines() {
-    let mut composer = test_composer(80, 4, "\n\n$code");
+    let mut composer = test_composer(80, 4, "\n\n@code");
     assert!(composer.replace_current_skill_token(
         "code-review",
         std::path::Path::new("/tmp/code-review/SKILL.md"),
@@ -579,7 +603,7 @@ fn bound_skill_token_renders_from_sigil_after_blank_lines() {
     let palette = default_palette();
     let highlighted = highlighted_composer_contents(&composer, palette);
 
-    assert_eq!(highlighted, vec!["$code-review"]);
+    assert_eq!(highlighted, vec!["@code-review"]);
 }
 
 #[test]

@@ -28,7 +28,7 @@ fn assemble_attached_prompt_message_expands_unique_skill_mentions_in_first_use_o
         None,
         &work_dir,
         &TranscriptUserMessage {
-            content: "Please use $repo-bootstrap before $code-review and repeat $repo-bootstrap"
+            content: "Please use @repo-bootstrap before @code-review and repeat @repo-bootstrap"
                 .to_string(),
             attachments: Vec::new(),
             skill_bindings: vec![
@@ -75,7 +75,7 @@ fn assemble_attached_prompt_message_expands_unique_skill_mentions_in_first_use_o
     assert_eq!(
         assembled.provider_visible_user_text,
         format!(
-            "{}\n\n{}\n\nPlease use $repo-bootstrap before $code-review and repeat $repo-bootstrap",
+            "{}\n\n{}\n\nPlease use @repo-bootstrap before @code-review and repeat @repo-bootstrap",
             format_long_lived_skill_body(&DiscoveredSkill {
                 name: "repo-bootstrap".to_string(),
                 description: "Bootstrap repo".to_string(),
@@ -110,7 +110,7 @@ fn assemble_attached_prompt_message_ignores_plain_text_tokens_without_bindings()
         None,
         &work_dir,
         &TranscriptUserMessage {
-            content: "Please use $code-review".to_string(),
+            content: "Please use @code-review".to_string(),
             attachments: Vec::new(),
             skill_bindings: Vec::new(),
             custom_prompt_bindings: Vec::new(),
@@ -121,7 +121,7 @@ fn assemble_attached_prompt_message_ignores_plain_text_tokens_without_bindings()
     assert!(assembled.custom_prompt_uses.is_empty());
     assert_eq!(
         assembled.provider_visible_user_text,
-        "Please use $code-review"
+        "Please use @code-review"
     );
 }
 #[test]

@@ -242,7 +242,7 @@ fn session_resumed_keeps_valid_skill_binding_colored() {
             session_id: "session-1".to_string(),
             transcript: vec![TranscriptReplayItem::BoundUserMessage {
                 message: TranscriptUserMessage {
-                    content: "$code-review please inspect".to_string(),
+                    content: "@code-review please inspect".to_string(),
                     attachments: Vec::new(),
                     skill_bindings: vec![TranscriptSkillBinding {
                         skill_name: "code-review".to_string(),
@@ -259,7 +259,7 @@ fn session_resumed_keeps_valid_skill_binding_colored() {
     });
 
     let buffer = render_model_buffer(&mut model, 60, 10);
-    assert_text_cells_use_color(&buffer, "$code-review", default_palette().command_accent);
+    assert_text_cells_use_color(&buffer, "@code-review", default_palette().command_accent);
 }
 
 #[test]
@@ -302,7 +302,7 @@ fn session_resumed_drops_missing_skill_binding_color() {
             session_id: "session-1".to_string(),
             transcript: vec![TranscriptReplayItem::BoundUserMessage {
                 message: TranscriptUserMessage {
-                    content: "$code-review please inspect".to_string(),
+                    content: "@code-review please inspect".to_string(),
                     attachments: Vec::new(),
                     skill_bindings: vec![TranscriptSkillBinding {
                         skill_name: "code-review".to_string(),
@@ -319,7 +319,7 @@ fn session_resumed_drops_missing_skill_binding_color() {
     });
 
     let buffer = render_model_buffer(&mut model, 60, 10);
-    assert_text_cells_do_not_use_color(&buffer, "$code-review", default_palette().command_accent);
+    assert_text_cells_do_not_use_color(&buffer, "@code-review", default_palette().command_accent);
 }
 
 #[test]

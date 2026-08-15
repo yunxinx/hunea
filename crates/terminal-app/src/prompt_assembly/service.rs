@@ -50,7 +50,7 @@ impl<'a> PromptAssemblyWorkspace<'a> {
         )
     }
 
-    /// `assemble_attached_prompt_message` 解析当前用户消息中的 `$skill` / `#prompt` 绑定。
+    /// `assemble_attached_prompt_message` 解析当前用户消息中的 `@{name}` / `#prompt` 绑定。
     pub(crate) fn assemble_attached_prompt_message(
         &self,
         manager: Option<&PromptAssemblyManagerSnapshot>,

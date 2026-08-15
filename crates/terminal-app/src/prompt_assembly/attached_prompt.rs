@@ -22,7 +22,7 @@ impl PromptAttachment {
     }
 }
 
-/// `assemble_attached_prompt_message` 解析当前用户消息里的 `$skill` / `#prompt` 提及并拼装 provider-visible 文本。
+/// `assemble_attached_prompt_message` 解析当前用户消息里的 `@{name}` / `#prompt` 绑定并拼装 provider-visible 文本。
 pub(super) fn assemble_attached_prompt_message(
     manager: Option<&PromptAssemblyManagerSnapshot>,
     work_dir: &Path,

@@ -101,7 +101,7 @@ pub fn render(model: &mut Model, frame: &mut RenderFrame<'_>) {
     }
 
     if model.has_current_floating_layer() {
-        let floating_layer = model.current_floating_layer(&document, &viewport);
+        let floating_layer = model.current_floating_layer(&document, &viewport, area);
         frame.render_widget(floating_layer, area);
     }
 

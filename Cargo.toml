@@ -83,7 +83,7 @@ tachyonfx = { version = "0.25.0", default-features = false, features = ["std", "
 terminal-light = "1.8.0"
 tempfile = "3.23.0"
 thiserror = "2"
-tiktoken = "3.5.1"
+tiktoken = "4.1.2"
 tokio = { version = "1.52.1", features = ["process", "rt", "macros", "io-util", "time", "sync", "fs"] }
 tokio-util = { version = "0.7.18", features = ["compat"] }
 toml = "1.1.2"

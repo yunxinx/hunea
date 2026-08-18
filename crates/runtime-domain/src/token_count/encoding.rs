@@ -39,11 +39,22 @@ fn estimate_text_tokens_with_encoding_name(encoding_name: &str, text: &str) -> u
 }
 
 pub(crate) fn encoding_name_for_model(model_id: &str) -> &'static str {
-    if let Some(encoding) = tiktoken::model_to_encoding(model_id) {
-        return encoding;
-    }
+    encoding_from_tiktoken_catalog(model_id)
+        .or_else(|| alias_encoding_for_model(model_id))
+        .unwrap_or(FALLBACK_ENCODING)
+}
 
-    alias_encoding_for_model(model_id).unwrap_or(FALLBACK_ENCODING)
+/// tiktoken 的 `model_to_encoding` 只认 prefix/exact。`local/qwen3` 这种
+/// `provider/model` 写法先剥最后一段，才能命中 4.x 目录而不是掉进 o200k 兜底。
+fn encoding_from_tiktoken_catalog(model_id: &str) -> Option<&'static str> {
+    tiktoken::model_to_encoding(model_id).or_else(|| {
+        let basename = model_id.rsplit('/').next().unwrap_or(model_id);
+        if basename == model_id {
+            None
+        } else {
+            tiktoken::model_to_encoding(basename)
+        }
+    })
 }
 
 fn alias_encoding_for_model(model_id: &str) -> Option<&'static str> {
@@ -131,5 +142,64 @@ mod tests {
     #[test]
     fn encoding_name_for_model_falls_back_to_o200k_for_unknown_models() {
         assert_eq!(encoding_name_for_model("unknown-local-model"), "o200k_base");
+    }
+
+    #[test]
+    fn encoding_name_for_model_uses_tiktoken_catalog_instead_of_o200k_fallback() {
+        // 4.x 目录 / 别名能给出专用 encoding 的模型，不应再落到 o200k。
+        let cases = [
+            ("qwen3", "qwen2"),
+            ("local/qwen3", "qwen2"),
+            ("deepseek-chat", "deepseek_v4"),
+            ("deepseek-reasoner", "deepseek_v4"),
+            ("local/deepseek-chat", "deepseek_v4"),
+            ("custom-deepseek-chat", "deepseek_v4"),
+            ("deepseek-r1-distill", "deepseek_v3"),
+            ("deepseek-v4-flash", "deepseek_v4"),
+            ("kimi-k2", "kimi_k2"),
+            ("kimi-k2.6", "kimi_k2"),
+            ("local/kimi-k2", "kimi_k2"),
+            ("custom-kimi-k2", "kimi_k2"),
+            ("kimi-k3", "kimi_k3"),
+            ("kimi-latest", "kimi_k3"),
+            ("glm-4.5", "glm4"),
+            ("local/glm-4.5", "glm4"),
+            ("glm-5.2", "glm5"),
+            ("minimax-m2.7", "minimax_m2"),
+            ("local/minimax-m2", "minimax_m2"),
+            ("custom-minimax-m2", "minimax_m2"),
+            ("pixtral-12b", "mistral_v3"),
+            ("custom-pixtral-12b", "mistral_v3"),
+            ("llama-3.3", "llama3"),
+            ("local/llama3", "llama3"),
+        ];
+
+        for (model_id, encoding) in cases {
+            assert_eq!(
+                encoding_name_for_model(model_id),
+                encoding,
+                "{model_id} should use {encoding} rather than o200k fallback"
+            );
+        }
+    }
+
+    #[test]
+    fn encoding_name_for_model_keeps_o200k_when_tiktoken_has_no_tokenizer() {
+        // Claude / Gemini 在 tiktoken 里只有计价，没有词表；o200k 仍是估算兜底。
+        assert_eq!(encoding_name_for_model("claude-sonnet-4-5"), "o200k_base");
+        assert_eq!(encoding_name_for_model("gemini-2.5-pro"), "o200k_base");
+        assert_eq!(encoding_name_for_model("unknown-local-model"), "o200k_base");
+    }
+
+    #[test]
+    fn estimate_pins_newline_and_cjk_counts_for_tiktoken_4() {
+        // 3.8 起 o200k 把 ".\n/" 收成 1 token；换行 / CJK 是 3.6 起会漂的路径。
+        assert_eq!(
+            estimate_text_tokens_with_encoding_name("o200k_base", ".\n/"),
+            1
+        );
+        assert_eq!(estimate_text_tokens("gpt-4o", "hello\nworld"), 3);
+        assert_eq!(estimate_text_tokens("gpt-4", "hello\nworld"), 3);
+        assert_eq!(estimate_text_tokens("local/qwen3", "你好，hunea"), 5);
     }
 }

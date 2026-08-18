@@ -6,8 +6,14 @@ pub(crate) enum ModelFamily {
     ClaudeOpus4,
     Qwen,
     Deepseek,
+    DeepseekV4,
     Llama,
     MistralV3,
+    KimiK2,
+    KimiK3,
+    Glm4,
+    Glm5,
+    MiniMax,
     OpenAiLegacy,
     OpenAiGptOss,
     OpenAiModern,
@@ -21,8 +27,14 @@ impl ModelFamily {
             Self::ClaudeSonnet4 | Self::ClaudeOpus4 => Some(200_000),
             Self::Qwen
             | Self::Deepseek
+            | Self::DeepseekV4
             | Self::Llama
             | Self::MistralV3
+            | Self::KimiK2
+            | Self::KimiK3
+            | Self::Glm4
+            | Self::Glm5
+            | Self::MiniMax
             | Self::OpenAiLegacy
             | Self::OpenAiGptOss
             | Self::OpenAiModern
@@ -34,8 +46,14 @@ impl ModelFamily {
         match self {
             Self::Qwen => Some("qwen2"),
             Self::Deepseek => Some("deepseek_v3"),
+            Self::DeepseekV4 => Some("deepseek_v4"),
             Self::Llama => Some("llama3"),
             Self::MistralV3 => Some("mistral_v3"),
+            Self::KimiK2 => Some("kimi_k2"),
+            Self::KimiK3 => Some("kimi_k3"),
+            Self::Glm4 => Some("glm4"),
+            Self::Glm5 => Some("glm5"),
+            Self::MiniMax => Some("minimax_m2"),
             Self::OpenAiLegacy => Some("cl100k_base"),
             Self::OpenAiGptOss => Some("o200k_harmony"),
             Self::OpenAiGpt4o | Self::OpenAiGpt4oMini | Self::OpenAiModern => Some("o200k_base"),
@@ -59,8 +77,31 @@ pub(crate) fn classify_model_family(model_id: &str) -> ModelFamily {
     if model_family_matches(&normalized, "claude-opus-4") {
         return ModelFamily::ClaudeOpus4;
     }
+    if normalized.contains("kimi-k2") {
+        return ModelFamily::KimiK2;
+    }
+    if normalized.contains("kimi") {
+        return ModelFamily::KimiK3;
+    }
+    if normalized.contains("glm-5") || normalized.contains("glm5") {
+        return ModelFamily::Glm5;
+    }
+    if normalized.contains("glm-4") || normalized.contains("glm4") || normalized.starts_with("glm")
+    {
+        return ModelFamily::Glm4;
+    }
+    if normalized.contains("minimax") {
+        return ModelFamily::MiniMax;
+    }
     if normalized.contains("qwen") {
         return ModelFamily::Qwen;
+    }
+    // tiktoken 4.x 把 API 别名 deepseek-chat / deepseek-reasoner 指到 V4；其余 DeepSeek 仍走 V3。
+    if normalized.contains("deepseek-v4")
+        || normalized.contains("deepseek-chat")
+        || normalized.contains("deepseek-reasoner")
+    {
+        return ModelFamily::DeepseekV4;
     }
     if normalized.contains("deepseek") {
         return ModelFamily::Deepseek;
@@ -71,6 +112,7 @@ pub(crate) fn classify_model_family(model_id: &str) -> ModelFamily {
     if normalized.contains("mistral")
         || normalized.contains("mixtral")
         || normalized.contains("codestral")
+        || normalized.contains("pixtral")
     {
         return ModelFamily::MistralV3;
     }
@@ -127,11 +169,27 @@ mod tests {
         assert_eq!(classify_model_family("local/qwen3"), ModelFamily::Qwen);
         assert_eq!(
             classify_model_family("custom-deepseek-chat"),
+            ModelFamily::DeepseekV4
+        );
+        assert_eq!(
+            classify_model_family("deepseek-r1-distill"),
             ModelFamily::Deepseek
         );
         assert_eq!(
             classify_model_family("gpt-oss-120b-local"),
             ModelFamily::OpenAiGptOss
+        );
+        assert_eq!(classify_model_family("custom-kimi-k2"), ModelFamily::KimiK2);
+        assert_eq!(classify_model_family("kimi-latest"), ModelFamily::KimiK3);
+        assert_eq!(classify_model_family("my-glm-4.5"), ModelFamily::Glm4);
+        assert_eq!(classify_model_family("glm-5.2"), ModelFamily::Glm5);
+        assert_eq!(
+            classify_model_family("custom-minimax-m2"),
+            ModelFamily::MiniMax
+        );
+        assert_eq!(
+            classify_model_family("custom-pixtral-12b"),
+            ModelFamily::MistralV3
         );
     }
 }

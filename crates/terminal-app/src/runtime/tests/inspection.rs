@@ -2,7 +2,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use runtime_domain::{
     model_catalog::{ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource},
-    prompt_assembly::{PromptPreludeSection, PromptPreludeSnapshot, PromptSourceKind},
+    prompt_assembly::{
+        PromptAssemblyManagerSnapshot, PromptAssemblySelectionState, PromptAssemblyToolCandidate,
+        PromptPreludeSection, PromptPreludeSnapshot, PromptSourceKind, PromptSourceOrigin,
+        persistence::PromptAssemblyScope,
+    },
     provider::{ProviderApiKey, ProviderKind},
 };
 use terminal_ui::{RuntimeWake, UiRuntimePort};
@@ -60,10 +64,10 @@ fn composition_snapshot_is_deterministic_and_redacted() {
 
     let workspace_tool_names = coordinator
         .components
-        .workspace_tools
+        .tool_catalog
         .definitions()
-        .definitions()
-        .map(|definition| definition.name.clone())
+        .into_iter()
+        .map(|definition| definition.name)
         .collect::<Vec<_>>();
     let disabled_session_tool = workspace_tool_names
         .first()
@@ -71,7 +75,7 @@ fn composition_snapshot_is_deterministic_and_redacted() {
         .clone();
     coordinator.components.session_workspace_tools = coordinator
         .components
-        .workspace_tools
+        .tool_catalog
         .filtered(|name| name != disabled_session_tool);
 
     let first = serde_json::to_vec(&coordinator.inspect_composition())
@@ -125,8 +129,20 @@ fn composition_snapshot_is_deterministic_and_redacted() {
 
 #[test]
 fn ui_runtime_bridge_reacts_to_wake_binding_lifecycle() {
+    let mut prompt_assembly_manager = PromptAssemblyManagerSnapshot::default();
+    prompt_assembly_manager.candidates.tools = vec![PromptAssemblyToolCandidate {
+        name: "bash".to_string(),
+        label: None,
+        description: None,
+        prompt_guidelines: Some("private tool guidance".to_string()),
+        origin: PromptSourceOrigin::Builtin,
+        selection_scope: PromptAssemblyScope::Global,
+        tool_enabled: true,
+        selection: PromptAssemblySelectionState::Selected { order: None },
+    }];
     let mut coordinator = runtime_coordinator(AppRuntimeOptions {
         session_store: Some(Arc::new(InMemorySessionStore::new())),
+        prompt_assembly_manager: Some(prompt_assembly_manager),
         ..AppRuntimeOptions::default()
     });
     assert_eq!(
@@ -145,6 +161,16 @@ fn ui_runtime_bridge_reacts_to_wake_binding_lifecycle() {
     .expect("runtime wake should bind");
 
     assert_eq!(component_state(&coordinator, "ui_runtime_bridge"), "active");
+    assert_eq!(
+        composition_snapshot(&coordinator)["prompt_tools"],
+        serde_json::json!([{
+            "name": "bash",
+            "tool_enabled": true,
+            "session_enabled": true,
+            "guidelines_available": true,
+            "guidelines_selected": true,
+        }])
+    );
     coordinator.components.runtime_event_notifier.notify();
     assert_eq!(wake_count.load(Ordering::SeqCst), 1);
 
@@ -161,6 +187,13 @@ fn ui_runtime_bridge_reacts_to_wake_binding_lifecycle() {
     );
     let snapshot = composition_snapshot(&coordinator);
     assert_eq!(snapshot["session_persistence"]["available"], false);
+    assert_eq!(snapshot["workspace_tools"], serde_json::json!([]));
+    assert_eq!(snapshot["session_tools"], serde_json::json!([]));
+    assert_eq!(snapshot["prompt_tools"], serde_json::json!([]));
+    assert_eq!(
+        component_state(&coordinator, "native_agent_runtime"),
+        "pending"
+    );
 }
 
 #[test]
@@ -198,6 +231,8 @@ fn reset_replaces_session_component_generations_without_rebuilding_the_ui_bridge
     UiRuntimePort::bind_runtime_wake(&mut coordinator, RuntimeWake::new(|| {}))
         .expect("runtime wake should bind");
     let before = composition_snapshot(&coordinator);
+    let workspace_tools_before = before["workspace_tools"].clone();
+    let session_tools_before = before["session_tools"].clone();
 
     coordinator
         .handle_runtime_command(runtime_domain::session::RuntimeCommand::Reset)
@@ -224,6 +259,8 @@ fn reset_replaces_session_component_generations_without_rebuilding_the_ui_bridge
         "active"
     );
     assert_eq!(component_state(&coordinator, "ui_runtime_bridge"), "active");
+    assert_eq!(after["workspace_tools"], workspace_tools_before);
+    assert_eq!(after["session_tools"], session_tools_before);
 }
 
 fn names(value: &serde_json::Value) -> Vec<&str> {

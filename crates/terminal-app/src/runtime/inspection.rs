@@ -189,11 +189,9 @@ impl AppRuntimeCoordinator {
                 model_id: selection.model_id.clone(),
             });
 
-        let mut workspace_tools = self
-            .components
-            .workspace_tools
-            .definitions()
-            .definitions()
+        let tool_definitions = self.components.tool_catalog.definitions();
+        let mut workspace_tools = tool_definitions
+            .iter()
             .map(tool_snapshot)
             .collect::<Vec<_>>();
         workspace_tools.sort_by(|left, right| left.name.cmp(&right.name));
@@ -216,7 +214,7 @@ impl AppRuntimeCoordinator {
             selected_model,
             workspace_tools,
             session_tools,
-            prompt_tools: self.prompt_tool_snapshots(&session_tool_names),
+            prompt_tools: self.prompt_tool_snapshots(&tool_definitions, &session_tool_names),
             session_persistence: SessionPersistenceSnapshot {
                 available: self
                     .components
@@ -228,11 +226,21 @@ impl AppRuntimeCoordinator {
 
     fn prompt_tool_snapshots(
         &self,
+        tool_definitions: &[ToolDefinition],
         session_tool_names: &BTreeSet<String>,
     ) -> Vec<PromptToolSnapshot> {
         let mut tools = BTreeMap::new();
         if let Some(manager) = self.options.prompt_assembly_manager.as_ref() {
-            for candidate in &manager.candidates.tools {
+            let catalog_tool_names = tool_definitions
+                .iter()
+                .map(|definition| definition.name.as_str())
+                .collect::<BTreeSet<_>>();
+            for candidate in manager
+                .candidates
+                .tools
+                .iter()
+                .filter(|candidate| catalog_tool_names.contains(candidate.name.as_str()))
+            {
                 tools.insert(
                     candidate.name.clone(),
                     PromptToolSnapshot {
@@ -245,7 +253,7 @@ impl AppRuntimeCoordinator {
                 );
             }
         } else {
-            for definition in &self.components.prompt_assembly_tool_definitions {
+            for definition in tool_definitions {
                 tools.insert(
                     definition.name.clone(),
                     PromptToolSnapshot {

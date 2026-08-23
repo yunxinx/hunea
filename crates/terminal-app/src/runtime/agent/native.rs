@@ -772,6 +772,8 @@ impl AgentRuntime for NativeAgentRuntime {
             .reset_for_context_change()
             .map_err(AgentRuntimeError::Shutdown);
         self.active_turn = None;
+        self.session_workspace_tools = ToolExecutorRegistry::new();
+        self.prompt_assembly_tool_definitions.clear();
         worker_result
     }
 }

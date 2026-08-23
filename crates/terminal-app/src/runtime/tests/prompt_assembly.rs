@@ -891,14 +891,18 @@ fn session_tools_for_manager_filters_disabled_tools_and_keeps_full_registry() {
         }
     }
 
-    let mut workspace_tools = tool_runtime::ToolExecutorRegistry::new();
-    workspace_tools.insert(StubTool { name: "bash" });
-    workspace_tools.insert(StubTool { name: "read" });
+    let tool_catalog = super::super::tool_catalog::ToolCatalog::default();
+    let _bash_registration = tool_catalog
+        .register("fixture", StubTool { name: "bash" })
+        .expect("bash should register");
+    let _read_registration = tool_catalog
+        .register("fixture", StubTool { name: "read" })
+        .expect("read should register");
 
     let mut manager = PromptAssemblyManagerSnapshot::default();
     manager.candidates.tools = vec![tool_candidate("bash", false), tool_candidate("read", true)];
 
-    let session_tools = super::super::session_tools_for_manager(&workspace_tools, Some(&manager));
+    let session_tools = super::super::session_tools_for_manager(&tool_catalog, Some(&manager));
     assert_eq!(
         session_tools
             .definitions()
@@ -909,12 +913,12 @@ fn session_tools_for_manager_filters_disabled_tools_and_keeps_full_registry() {
         "disabled tools should be excluded from the session registry"
     );
     assert_eq!(
-        workspace_tools.definitions().definitions().count(),
+        tool_catalog.definitions().len(),
         2,
         "full registry should stay untouched for /prompt inventory"
     );
 
-    let unfiltered = super::super::session_tools_for_manager(&workspace_tools, None);
+    let unfiltered = super::super::session_tools_for_manager(&tool_catalog, None);
     assert_eq!(
         unfiltered.definitions().definitions().count(),
         2,
@@ -994,9 +998,9 @@ fn disabling_tool_on_empty_session_updates_session_tools_immediately() {
     assert!(
         coordinator
             .components
-            .workspace_tools
+            .tool_catalog
             .definitions()
-            .definitions()
+            .into_iter()
             .any(|definition| definition.name == disabled_tool_name),
         "full registry should keep the tool for /prompt inventory"
     );

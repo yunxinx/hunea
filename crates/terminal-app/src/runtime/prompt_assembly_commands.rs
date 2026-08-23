@@ -37,10 +37,8 @@ impl AppRuntimeCoordinator {
         }
         match self.prompt_session_config_refresh_target() {
             PromptSessionConfigRefreshTarget::CurrentEmptySession => {
-                let session_workspace_tools = super::session_tools_for_manager(
-                    &self.components.workspace_tools,
-                    Some(manager),
-                );
+                let session_workspace_tools =
+                    super::session_tools_for_manager(&self.components.tool_catalog, Some(manager));
                 self.components
                     .agent_runtime
                     .update_empty_session_configuration(
@@ -73,7 +71,7 @@ impl AppRuntimeCoordinator {
             store,
             header.work_dir,
             self.options.hunea_config_dir.clone(),
-            self.prompt_assembly_tool_definitions().to_vec(),
+            self.prompt_assembly_tool_definitions(),
         )
         .map_err(|error| error.to_string())?;
         let snapshot = session.snapshot();

@@ -11,6 +11,7 @@ mod prompt_assembly_commands;
 mod session_commands;
 mod session_tree_load;
 mod session_worker;
+mod tool_catalog;
 mod workspace_tools;
 
 use std::{
@@ -44,7 +45,8 @@ use self::{
         runtime_event_from_agent_event, should_defer_runtime_event_for_render_barrier,
     },
     session_worker::SessionStoreWorkerEvent,
-    workspace_tools::conversation_workspace_tools,
+    tool_catalog::ToolCatalog,
+    workspace_tools::conversation_workspace_tool_catalog,
 };
 use crate::prompt_assembly::PromptAssemblyEditSession;
 
@@ -54,15 +56,10 @@ pub(crate) fn tool_definitions_for_managed_ripgrep(
     managed_ripgrep: &ManagedRipgrepConfig,
     managed_root: &Path,
 ) -> Vec<ToolDefinition> {
-    tool_definitions_from_registry(&conversation_workspace_tools(managed_ripgrep, managed_root))
-}
-
-fn tool_definitions_from_registry(workspace_tools: &ToolExecutorRegistry) -> Vec<ToolDefinition> {
-    workspace_tools
-        .definitions()
-        .definitions()
-        .cloned()
-        .collect()
+    let (catalog, _registration) =
+        conversation_workspace_tool_catalog(managed_ripgrep, managed_root)
+            .expect("builtin workspace tools must have unique names");
+    catalog.definitions()
 }
 
 /// `manager_disabled_tool_names` 投影管理快照中被禁用的工具名集合；无快照视为无禁用。
@@ -89,11 +86,11 @@ fn manager_disabled_tool_names(
 /// 始终返回独立快照（`filtered`），避免与全量 registry 共享内部状态导致
 /// 后续注册的工具在"有无禁用记录"两种路径下可见性不一致。
 fn session_tools_for_manager(
-    workspace_tools: &ToolExecutorRegistry,
+    tool_catalog: &ToolCatalog,
     manager: Option<&PromptAssemblyManagerSnapshot>,
 ) -> ToolExecutorRegistry {
     let disabled_tools = manager_disabled_tool_names(manager);
-    workspace_tools.filtered(|tool_name| !disabled_tools.contains(tool_name))
+    tool_catalog.filtered(|tool_name| !disabled_tools.contains(tool_name))
 }
 
 /// `AppRuntimeOptions` 保存 app 层对话运行时所需的配置。
@@ -254,8 +251,8 @@ impl AppRuntimeCoordinator {
         Ok(())
     }
 
-    fn prompt_assembly_tool_definitions(&self) -> &[ToolDefinition] {
-        &self.components.prompt_assembly_tool_definitions
+    fn prompt_assembly_tool_definitions(&self) -> Vec<ToolDefinition> {
+        self.components.tool_catalog.definitions()
     }
 
     #[cfg(test)]

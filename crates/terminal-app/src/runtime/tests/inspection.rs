@@ -12,7 +12,10 @@ use runtime_domain::{
 use terminal_ui::{RuntimeWake, UiRuntimePort};
 
 use super::support::*;
-use crate::runtime::prompt_assembly::PromptSectionContribution;
+use crate::runtime::{
+    lifecycle::{ComponentDefinition, ComponentFailureReason},
+    prompt_assembly::PromptSectionContribution,
+};
 
 const SECRET_SENTINEL: &str = "inspection-secret-sentinel";
 
@@ -173,7 +176,15 @@ fn composition_snapshot_is_deterministic_and_redacted() {
 
     let snapshot: serde_json::Value =
         serde_json::from_str(&json).expect("snapshot JSON should decode");
-    assert_eq!(snapshot["schema_version"], 5);
+    assert_eq!(snapshot["schema_version"], 6);
+    assert_eq!(snapshot["failures"], serde_json::json!([]));
+    assert_eq!(
+        snapshot["pending"],
+        serde_json::json!([{
+            "component_id": "ui_runtime_bridge",
+            "missing_dependencies": ["runtime_wake"],
+        }])
+    );
     assert_eq!(snapshot["session_persistence"]["available"], true);
     assert_eq!(snapshot["session_persistence"]["mounted"], true);
     assert_eq!(
@@ -251,6 +262,52 @@ fn composition_snapshot_is_deterministic_and_redacted() {
                 "estimated_tokens": null,
             }
         ])
+    );
+}
+
+#[test]
+fn composition_snapshot_projects_safe_failure_and_pending_diagnostics() {
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions::default());
+    let declaration = coordinator
+        .components
+        .lifecycle
+        .declare(ComponentDefinition::new("failed_test_component"))
+        .expect("synthetic component id should be unique");
+    coordinator
+        .components
+        .lifecycle
+        .fail_activation(
+            declaration.activation_requests[0].clone(),
+            ComponentFailureReason::ActivationRejected,
+            true,
+        )
+        .expect("synthetic activation should fail at the current epoch");
+
+    let snapshot = coordinator.inspect_composition();
+    snapshot
+        .validate()
+        .expect("failure-aware composition snapshot should validate");
+    let json = serde_json::to_string(&snapshot).expect("snapshot should serialize");
+    assert!(!json.contains(SECRET_SENTINEL));
+    let snapshot: serde_json::Value = serde_json::from_str(&json).expect("snapshot should decode");
+
+    assert_eq!(
+        snapshot["pending"],
+        serde_json::json!([{
+            "component_id": "ui_runtime_bridge",
+            "missing_dependencies": ["runtime_wake"],
+        }])
+    );
+    assert_eq!(
+        snapshot["failures"],
+        serde_json::json!([{
+            "component_id": "failed_test_component",
+            "operation": "activation",
+            "code": "activation_rejected",
+            "message": "component activation was rejected",
+            "recoverable": true,
+            "epoch": 1,
+        }])
     );
 }
 
@@ -467,8 +524,11 @@ fn component_required(snapshot: &serde_json::Value, component_id: &str) -> Vec<S
 }
 
 fn composition_snapshot(coordinator: &AppRuntimeCoordinator) -> serde_json::Value {
-    serde_json::to_value(coordinator.inspect_composition())
-        .expect("composition snapshot should serialize")
+    let snapshot = coordinator.inspect_composition();
+    snapshot
+        .validate()
+        .expect("composition snapshot should be internally consistent");
+    serde_json::to_value(snapshot).expect("composition snapshot should serialize")
 }
 
 fn capability_generation(snapshot: &serde_json::Value, capability_key: &str) -> u64 {

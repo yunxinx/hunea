@@ -7,7 +7,10 @@ use super::{
     AppRuntimeOptions,
     agent::{AgentRuntime, NativeAgentRuntime},
     context_budget_worker::ContextBudgetWorker,
-    lifecycle::{CapabilityKey, ComponentDefinition, ComponentGraph, EffectId, EffectScope},
+    lifecycle::{
+        CapabilityKey, ComponentDefinition, ComponentGraph, EffectId, EffectScope,
+        ReconciliationReport,
+    },
     llm_port::{LlmPort, ProviderRegistrations},
     permission_policy::{
         ApprovalProviderRegistration, InteractiveApprovalProviderFactory, PermissionPolicy,
@@ -105,8 +108,10 @@ impl RuntimeComponents {
             permission_policy.clone(),
             TERMINAL_APPROVAL_PROVIDER_ID,
         )?;
+        let model_refresh = ModelRefreshWorker::new(runtime_event_notifier.clone());
         let mut lifecycle = ComponentGraph::default();
-        lifecycle.declare(
+        declare_component(
+            &mut lifecycle,
             ComponentDefinition::new("native_agent_runtime")
                 .requires("llm_port")
                 .requires("model_catalog")
@@ -114,24 +119,29 @@ impl RuntimeComponents {
                 .requires("prompt_assembly")
                 .requires("tool_catalog")
                 .observes("session_persistence"),
-        );
-        lifecycle.declare(
+        )?;
+        declare_component(
+            &mut lifecycle,
             ComponentDefinition::new("model_refresh")
                 .requires("llm_port")
                 .requires("model_catalog"),
-        );
-        lifecycle
-            .declare(ComponentDefinition::new("permission_policy").requires("approval_provider"));
-        lifecycle.declare(
+        )?;
+        declare_component(
+            &mut lifecycle,
+            ComponentDefinition::new("permission_policy").requires("approval_provider"),
+        )?;
+        declare_component(
+            &mut lifecycle,
             ComponentDefinition::new("prompt_assembly")
                 .requires("tool_catalog")
                 .observes("session_persistence"),
-        );
-        lifecycle.declare(
+        )?;
+        declare_component(
+            &mut lifecycle,
             ComponentDefinition::new("ui_runtime_bridge")
                 .requires("runtime_event_stream")
                 .requires("runtime_wake"),
-        );
+        )?;
         for capability in [
             "approval_provider",
             "llm_port",
@@ -141,15 +151,14 @@ impl RuntimeComponents {
             "runtime_event_stream",
             "tool_catalog",
         ] {
-            lifecycle.add_capability(capability);
+            publish_capability(&mut lifecycle, capability)?;
         }
         if session_backend_views.is_some() {
-            lifecycle.add_capability("session_persistence");
+            publish_capability(&mut lifecycle, "session_persistence")?;
         }
-        lifecycle.take_transitions();
         Ok(Self {
             agent_runtime,
-            model_refresh: ModelRefreshWorker::new(runtime_event_notifier.clone()),
+            model_refresh,
             llm_port,
             permission_policy,
             permission_provider_id: TERMINAL_APPROVAL_PROVIDER_ID.to_string(),
@@ -190,15 +199,21 @@ impl RuntimeComponents {
             })
             .map_err(|error| error.to_string())?;
         self.runtime_wake_effect = Some(effect_id);
-        self.lifecycle.add_capability("runtime_wake");
-        self.discard_lifecycle_transitions();
+        if let Err(error) = publish_capability(&mut self.lifecycle, "runtime_wake") {
+            self.runtime_wake_effect = None;
+            let rollback = self.effect_scope.dispose_effect(effect_id);
+            return Err(match rollback.error_message() {
+                Some(rollback_error) => format!("{error}; {rollback_error}"),
+                None => error,
+            });
+        }
         Ok(())
     }
 
     pub(super) fn remove_runtime_wake(&mut self) -> Result<(), String> {
         self.lifecycle
-            .remove_capability(&CapabilityKey::from("runtime_wake"));
-        self.discard_lifecycle_transitions();
+            .remove_capability(&CapabilityKey::from("runtime_wake"))
+            .map_err(|error| error.to_string())?;
         if let Some(effect_id) = self.runtime_wake_effect.take()
             && let Some(error) = self.effect_scope.dispose_effect(effect_id).error_message()
         {
@@ -231,9 +246,13 @@ impl RuntimeComponents {
         if self.is_shutdown {
             return Err("Runtime components are shut down".to_string());
         }
+        let session_capability = CapabilityKey::from("session_persistence");
         self.lifecycle
-            .remove_capability(&CapabilityKey::from("session_persistence"));
-        self.discard_lifecycle_transitions();
+            .validate_replacement(&session_capability)
+            .map_err(|error| error.to_string())?;
+        self.lifecycle
+            .remove_capability(&session_capability)
+            .map_err(|error| error.to_string())?;
 
         let mut failures = Vec::new();
         if let Err(error) = self.agent_runtime.shutdown() {
@@ -299,9 +318,7 @@ impl RuntimeComponents {
         self.session_port = fresh_session_port;
         self.session_backend_views = Some(fresh_views);
         self.session_backend_effect = fresh_effect;
-        self.lifecycle
-            .replace_capability(&CapabilityKey::from("session_persistence"));
-        self.discard_lifecycle_transitions();
+        replace_capability(&mut self.lifecycle, &session_capability);
         Ok(())
     }
 
@@ -367,10 +384,20 @@ impl RuntimeComponents {
         if self.is_shutdown {
             return Err("Runtime components are shut down".to_string());
         }
-        for key in ["approval_provider", "permission_policy"] {
-            self.lifecycle.remove_capability(&CapabilityKey::from(key));
+        let replaced = [
+            CapabilityKey::from("approval_provider"),
+            CapabilityKey::from("permission_policy"),
+        ];
+        for key in &replaced {
+            self.lifecycle
+                .validate_replacement(key)
+                .map_err(|error| error.to_string())?;
         }
-        self.discard_lifecycle_transitions();
+        for key in &replaced {
+            self.lifecycle
+                .remove_capability(key)
+                .map_err(|error| error.to_string())?;
+        }
 
         let mut failures = Vec::new();
         if let Err(error) = self.agent_runtime.shutdown() {
@@ -427,10 +454,9 @@ impl RuntimeComponents {
         self.permission_provider_id = provider_id;
         self.permission_policy_effect = Some(fresh_policy_effect);
         self.agent_runtime = fresh_agent_runtime;
-        for key in ["approval_provider", "permission_policy"] {
-            self.lifecycle.replace_capability(&CapabilityKey::from(key));
+        for key in replaced {
+            replace_capability(&mut self.lifecycle, &key);
         }
-        self.discard_lifecycle_transitions();
         Ok(())
     }
 
@@ -449,9 +475,15 @@ impl RuntimeComponents {
             CapabilityKey::from("tool_catalog"),
         ];
         for key in &replaced {
-            self.lifecycle.remove_capability(key);
+            self.lifecycle
+                .validate_replacement(key)
+                .map_err(|error| error.to_string())?;
         }
-        self.discard_lifecycle_transitions();
+        for key in &replaced {
+            self.lifecycle
+                .remove_capability(key)
+                .map_err(|error| error.to_string())?;
+        }
 
         let mut failures = Vec::new();
         if let Err(error) = self.agent_runtime.shutdown() {
@@ -566,9 +598,8 @@ impl RuntimeComponents {
         self.prompt_assembly_effect = Some(fresh_prompt_assembly_effect);
         self.session_workspace_tools = session_workspace_tools;
         for key in replaced {
-            self.lifecycle.replace_capability(&key);
+            replace_capability(&mut self.lifecycle, &key);
         }
-        self.discard_lifecycle_transitions();
         Ok(())
     }
 
@@ -591,9 +622,10 @@ impl RuntimeComponents {
             "tool_catalog",
             "session_persistence",
         ] {
-            self.lifecycle.remove_capability(&CapabilityKey::from(key));
+            if let Err(error) = self.lifecycle.remove_capability(&CapabilityKey::from(key)) {
+                failures.push(error.to_string());
+            }
         }
-        self.discard_lifecycle_transitions();
         if let Err(error) = self.agent_runtime.shutdown() {
             failures.push(error.to_string());
         }
@@ -655,9 +687,42 @@ impl RuntimeComponents {
             Err(failures.join("; "))
         }
     }
+}
 
-    fn discard_lifecycle_transitions(&mut self) {
-        let _ = self.lifecycle.take_transitions();
+fn declare_component(
+    graph: &mut ComponentGraph,
+    definition: ComponentDefinition,
+) -> Result<(), String> {
+    let report = graph
+        .declare(definition)
+        .map_err(|error| error.to_string())?;
+    acknowledge_activations(graph, report);
+    Ok(())
+}
+
+fn publish_capability(
+    graph: &mut ComponentGraph,
+    key: impl Into<CapabilityKey>,
+) -> Result<(), String> {
+    let report = graph
+        .add_capability(key)
+        .map_err(|error| error.to_string())?;
+    acknowledge_activations(graph, report);
+    Ok(())
+}
+
+fn replace_capability(graph: &mut ComponentGraph, key: &CapabilityKey) {
+    let report = graph
+        .replace_capability(key)
+        .expect("preflighted graph replacement must remain valid");
+    acknowledge_activations(graph, report);
+}
+
+fn acknowledge_activations(graph: &mut ComponentGraph, report: ReconciliationReport) {
+    for token in report.activation_requests {
+        graph
+            .complete_activation(token)
+            .expect("fresh graph activation token must remain current");
     }
 }
 

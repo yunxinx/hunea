@@ -5,11 +5,14 @@ use tool_runtime::{ToolDefinition, ToolKind, ToolPermissionPolicy};
 
 use super::{
     AppRuntimeCoordinator,
-    lifecycle::{CapabilityKey, ComponentSnapshot, OptionalCapabilitySnapshot},
+    lifecycle::{
+        CapabilityKey, ComponentFailureSnapshot, ComponentSnapshot, OptionalCapabilitySnapshot,
+        PendingComponentSnapshot,
+    },
     prompt_assembly::PromptContributionSnapshot,
 };
 
-const COMPOSITION_SNAPSHOT_VERSION: u32 = 5;
+const COMPOSITION_SNAPSHOT_VERSION: u32 = 6;
 
 /// `RuntimeCompositionSnapshot` 是默认 runtime composition 的只读诊断投影。
 ///
@@ -20,6 +23,8 @@ pub(super) struct RuntimeCompositionSnapshot {
     schema_version: u32,
     capabilities: Vec<CapabilitySnapshot>,
     components: Vec<RuntimeComponentSnapshot>,
+    pending: Vec<PendingSnapshot>,
+    failures: Vec<FailureSnapshot>,
     approval_providers: Vec<ApprovalProviderSnapshot>,
     providers: Vec<ProviderSnapshot>,
     selected_model: Option<ModelSelectionSnapshot>,
@@ -39,6 +44,14 @@ impl RuntimeCompositionSnapshot {
         ensure_sorted_unique(
             self.components.iter().map(|component| &component.id),
             "component",
+        )?;
+        ensure_sorted_unique(
+            self.pending.iter().map(|pending| &pending.component_id),
+            "pending component",
+        )?;
+        ensure_sorted_unique(
+            self.failures.iter().map(|failure| &failure.component_id),
+            "failed component",
         )?;
         ensure_sorted_unique(
             self.approval_providers
@@ -66,6 +79,11 @@ impl RuntimeCompositionSnapshot {
             .iter()
             .map(|capability| capability.key.as_str())
             .collect::<BTreeSet<_>>();
+        let components = self
+            .components
+            .iter()
+            .map(|component| (component.id.as_str(), component))
+            .collect::<BTreeMap<_, _>>();
         for component in &self.components {
             let requirements_ready = component
                 .required
@@ -84,7 +102,70 @@ impl RuntimeCompositionSnapshot {
                         component.id
                     ));
                 }
+                "failed"
+                    if !self
+                        .failures
+                        .iter()
+                        .any(|failure| failure.component_id == component.id) =>
+                {
+                    return Err(format!(
+                        "failed component {} has no failure diagnostic",
+                        component.id
+                    ));
+                }
                 _ => {}
+            }
+        }
+        for pending in &self.pending {
+            let component = components
+                .get(pending.component_id.as_str())
+                .ok_or_else(|| {
+                    format!("pending component {} is not declared", pending.component_id)
+                })?;
+            if component.state != "pending" {
+                return Err(format!(
+                    "pending diagnostic for {} does not match component state",
+                    pending.component_id
+                ));
+            }
+            ensure_sorted_unique(pending.missing_dependencies.iter(), "missing dependency")?;
+            let expected = component
+                .required
+                .iter()
+                .filter(|required| !capabilities.contains(required.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            if pending.missing_dependencies != expected {
+                return Err(format!(
+                    "pending component {} has inconsistent missing dependencies",
+                    pending.component_id
+                ));
+            }
+        }
+        let pending_ids = self
+            .pending
+            .iter()
+            .map(|pending| pending.component_id.as_str())
+            .collect::<BTreeSet<_>>();
+        if let Some(component) = self.components.iter().find(|component| {
+            component.state == "pending" && !pending_ids.contains(component.id.as_str())
+        }) {
+            return Err(format!(
+                "pending component {} has no dependency diagnostic",
+                component.id
+            ));
+        }
+        for failure in &self.failures {
+            let component = components
+                .get(failure.component_id.as_str())
+                .ok_or_else(|| {
+                    format!("failed component {} is not declared", failure.component_id)
+                })?;
+            if component.state != "failed" || component.epoch != failure.epoch {
+                return Err(format!(
+                    "failure diagnostic for {} does not match component state",
+                    failure.component_id
+                ));
             }
         }
         Ok(())
@@ -101,8 +182,25 @@ struct CapabilitySnapshot {
 struct RuntimeComponentSnapshot {
     id: String,
     state: String,
+    epoch: u64,
     required: Vec<String>,
     optional: Vec<OptionalDependencySnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct PendingSnapshot {
+    component_id: String,
+    missing_dependencies: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct FailureSnapshot {
+    component_id: String,
+    operation: String,
+    code: String,
+    message: String,
+    recoverable: bool,
+    epoch: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -189,6 +287,20 @@ impl AppRuntimeCoordinator {
             .into_iter()
             .map(runtime_component_snapshot)
             .collect();
+        let pending = self
+            .components
+            .lifecycle
+            .pending()
+            .into_iter()
+            .map(pending_snapshot)
+            .collect();
+        let failures = self
+            .components
+            .lifecycle
+            .failures()
+            .into_iter()
+            .map(failure_snapshot)
+            .collect();
 
         let mut providers = self
             .components
@@ -260,6 +372,8 @@ impl AppRuntimeCoordinator {
             schema_version: COMPOSITION_SNAPSHOT_VERSION,
             capabilities,
             components,
+            pending,
+            failures,
             approval_providers,
             providers,
             selected_model,
@@ -346,12 +460,31 @@ fn runtime_component_snapshot(component: ComponentSnapshot) -> RuntimeComponentS
     RuntimeComponentSnapshot {
         id: component.id,
         state: component.state.as_str().to_string(),
+        epoch: component.epoch,
         required: component.required,
         optional: component
             .optional
             .into_iter()
             .map(optional_dependency_snapshot)
             .collect(),
+    }
+}
+
+fn pending_snapshot(pending: PendingComponentSnapshot) -> PendingSnapshot {
+    PendingSnapshot {
+        component_id: pending.component_id,
+        missing_dependencies: pending.missing_dependencies,
+    }
+}
+
+fn failure_snapshot(failure: ComponentFailureSnapshot) -> FailureSnapshot {
+    FailureSnapshot {
+        component_id: failure.component_id,
+        operation: failure.operation.as_str().to_string(),
+        code: failure.reason.code().to_string(),
+        message: failure.reason.message().to_string(),
+        recoverable: failure.recoverable,
+        epoch: failure.epoch,
     }
 }
 

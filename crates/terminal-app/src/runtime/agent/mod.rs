@@ -1,6 +1,10 @@
 //! Agent loop 的内部可替换契约。
 
 mod native;
+#[cfg(test)]
+mod replay;
+#[cfg(test)]
+mod tests;
 
 use std::fmt;
 
@@ -22,6 +26,11 @@ pub(super) struct AgentId(u64);
 
 impl AgentId {
     pub(super) const MAIN: Self = Self(1);
+
+    #[cfg(test)]
+    pub(super) const fn new(value: u64) -> Self {
+        Self(value)
+    }
 }
 
 /// `AgentTurnId` 标识一次 Agent turn，避免事件依赖“唯一活跃 worker”的隐式假设。
@@ -297,229 +306,4 @@ pub(super) trait AgentRuntime {
 
     /// 幂等撤销 runtime 拥有的全部副作用并等待 producer quiescence。
     fn shutdown(&mut self) -> Result<(), AgentRuntimeError>;
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{
-        sync::mpsc,
-        thread,
-        time::{Duration, Instant},
-    };
-
-    use conversation_runtime::RuntimeEventNotifier;
-    use provider_protocol::{ConversationItem, Role};
-    use runtime_domain::{
-        prompt_assembly::PromptSourceOrigin,
-        provider::ProviderKind,
-        session::{TranscriptSkillBinding, TranscriptUserMessage},
-    };
-    use tool_runtime::ToolExecutorRegistry;
-
-    use super::*;
-    use crate::runtime::AppRuntimeOptions;
-
-    fn native_runtime(event_notifier: RuntimeEventNotifier) -> NativeAgentRuntime {
-        NativeAgentRuntime::new(
-            &AppRuntimeOptions {
-                runtime_request_policy: runtime_domain::request_policy::RuntimeRequestPolicy::new(
-                    0,
-                    Vec::new(),
-                    1,
-                ),
-                ..AppRuntimeOptions::default()
-            },
-            ToolExecutorRegistry::default(),
-            Vec::new(),
-            event_notifier,
-        )
-        .expect("native Agent runtime should initialize")
-    }
-
-    fn failing_turn_request() -> AgentTurnRequest {
-        AgentTurnRequest::from_conversation_request(ConversationTurnRequest::new(
-            "openai",
-            ProviderKind::OpenAi,
-            "gpt-4o-mini",
-            None,
-            None,
-            None,
-            ConversationItem::text(Role::User, "hello"),
-        ))
-    }
-
-    #[test]
-    fn request_debug_redacts_delivery_controls_and_native_credentials() {
-        let request = AgentTurnRequest::from_conversation_request(
-            ConversationTurnRequest::new_user_source_message(
-                "provider",
-                ProviderKind::OpenAi,
-                "model",
-                Some("https://credential.example/v1".to_string()),
-                Some(runtime_domain::provider::ProviderApiKey::new("secret-key")),
-                Some("SECRET_ENV".to_string()),
-                TranscriptUserMessage {
-                    content: "visible-sentinel".to_string(),
-                    attachments: Vec::new(),
-                    skill_bindings: vec![TranscriptSkillBinding {
-                        skill_name: "private-skill".to_string(),
-                        origin: PromptSourceOrigin::Project,
-                        skill_path: "/private/SKILL.md".to_string(),
-                        start_char: 0,
-                        end_char: 1,
-                    }],
-                    custom_prompt_bindings: Vec::new(),
-                },
-            ),
-        );
-
-        let debug = format!("{request:?}");
-        for secret in [
-            "visible-sentinel",
-            "private-skill",
-            "/private/SKILL.md",
-            "credential.example",
-            "secret-key",
-            "SECRET_ENV",
-        ] {
-            assert!(!debug.contains(secret), "debug output leaked {secret}");
-        }
-        assert!(debug.contains("content_chars"));
-        assert!(debug.contains("skill_binding_count"));
-    }
-
-    #[test]
-    fn native_runtime_wakes_only_after_an_identified_event_is_available() {
-        let (wake_tx, wake_rx) = mpsc::channel();
-        let notifier = RuntimeEventNotifier::default();
-        let _binding = notifier.bind_callback(move || {
-            let _ = wake_tx.send(());
-        });
-        let mut runtime = native_runtime(notifier);
-        let turn_id = AgentTurnId::new(17);
-        let target = failing_turn_request().target();
-        let runtime_contract: &mut dyn AgentRuntime = &mut runtime;
-
-        runtime_contract
-            .dispatch(AgentCommand::SubmitTurn {
-                agent_id: AgentId::MAIN,
-                turn_id,
-                request: Box::new(failing_turn_request()),
-            })
-            .expect("native turn should be admitted before provider preflight");
-        wake_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("accepted turn should wake after publishing an event");
-
-        let mut events = runtime_contract.drain_events();
-        let payload_deadline = Instant::now() + Duration::from_secs(2);
-        while events.is_empty() && Instant::now() < payload_deadline {
-            thread::sleep(Duration::from_millis(10));
-            events.extend(runtime_contract.drain_events());
-        }
-        assert!(
-            !events.is_empty(),
-            "wake should be followed by an available payload"
-        );
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !events.iter().any(|event| event.kind.is_terminal()) && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(10));
-            events.extend(runtime_contract.drain_events());
-        }
-        assert!(
-            events.iter().any(|event| event.kind.is_terminal()),
-            "provider preflight failure should terminate the test turn: {events:#?}"
-        );
-        assert!(events.iter().all(|event| {
-            event.agent_id == AgentId::MAIN && event.turn_id == turn_id && event.target == target
-        }));
-
-        thread::sleep(Duration::from_millis(20));
-        assert!(
-            runtime_contract.drain_events().is_empty(),
-            "terminal fact must close the turn against late deltas"
-        );
-        runtime_contract
-            .shutdown()
-            .expect("native runtime should shut down cleanly");
-    }
-
-    #[test]
-    fn native_runtime_shutdown_is_idempotent_and_rejects_new_commands() {
-        let mut runtime = native_runtime(RuntimeEventNotifier::default());
-        let runtime_contract: &mut dyn AgentRuntime = &mut runtime;
-
-        runtime_contract
-            .shutdown()
-            .expect("first shutdown should dispose native effects");
-        runtime_contract
-            .shutdown()
-            .expect("repeated shutdown should remain a no-op");
-        let error = runtime_contract
-            .dispatch(AgentCommand::Interrupt {
-                agent_id: AgentId::MAIN,
-                target: None,
-            })
-            .expect_err("disposed runtime must reject commands");
-
-        assert!(matches!(error, AgentRuntimeError::Disposed));
-        assert!(runtime_contract.drain_events().is_empty());
-    }
-
-    #[test]
-    fn permission_commands_are_routed_by_explicit_target() {
-        let mut runtime = native_runtime(RuntimeEventNotifier::default());
-        runtime.set_active_turn_for_test(
-            AgentId::MAIN,
-            AgentTurnId::new(23),
-            RuntimeTarget::provider("openai", "gpt-4o-mini"),
-        );
-        let runtime_contract: &mut dyn AgentRuntime = &mut runtime;
-
-        let error = runtime_contract
-            .dispatch(AgentCommand::RespondPermission {
-                agent_id: AgentId::MAIN,
-                target: Some(RuntimeTarget::provider("local", "qwen3")),
-                request_id: "permission-1".to_string(),
-                option_id: None,
-            })
-            .expect_err("permission response for another target must be rejected");
-
-        assert!(matches!(error, AgentRuntimeError::CommandRejected(_)));
-    }
-
-    #[test]
-    fn reset_discards_queued_events_before_installing_a_new_generation() {
-        let notifier = RuntimeEventNotifier::default();
-        let mut runtime = native_runtime(notifier.clone());
-        runtime.queue_event_for_test(AgentEvent {
-            agent_id: AgentId::MAIN,
-            turn_id: AgentTurnId::new(29),
-            target: RuntimeTarget::provider("openai", "gpt-4o-mini"),
-            kind: AgentEventKind::TurnInterrupted,
-        });
-        runtime
-            .shutdown()
-            .expect("old Agent generation should dispose cleanly");
-        let mut replacement = native_runtime(notifier);
-
-        assert!(replacement.drain_events().is_empty());
-        replacement
-            .shutdown()
-            .expect("replacement Agent generation should dispose cleanly");
-    }
-
-    #[test]
-    fn contract_module_does_not_import_terminal_or_native_worker_types() {
-        let source = include_str!("mod.rs");
-        for prohibited in [
-            ["Conversation", "Worker"].concat(),
-            ["LoopEvent", "Waker"].concat(),
-        ] {
-            assert!(
-                !source.contains(&prohibited),
-                "Agent contract must not expose {prohibited}"
-            );
-        }
-    }
 }

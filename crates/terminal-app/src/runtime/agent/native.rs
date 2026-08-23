@@ -512,25 +512,6 @@ impl NativeAgentRuntime {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn queue_event_for_test(&mut self, event: AgentEvent) {
-        self.pending_events.push_back(event);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_active_turn_for_test(
-        &mut self,
-        agent_id: AgentId,
-        turn_id: AgentTurnId,
-        target: RuntimeTarget,
-    ) {
-        self.active_turn = Some(ActiveNativeTurn {
-            agent_id,
-            turn_id,
-            target,
-        });
-    }
-
     fn agent_event_kind(
         &self,
         event: ConversationEvent,

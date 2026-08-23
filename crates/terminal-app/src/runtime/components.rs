@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use conversation_runtime::{ModelRefreshWorker, RuntimeEventNotifier};
+use conversation_runtime::{ModelRefreshWorker, RuntimeEventBinding, RuntimeEventNotifier};
 use tool_runtime::ToolExecutorRegistry;
 
 use super::{
@@ -8,14 +8,18 @@ use super::{
     agent::{AgentRuntime, NativeAgentRuntime},
     context_budget_worker::ContextBudgetWorker,
     effect_scope::{EffectScope, EffectScopeSnapshot},
-    lifecycle::{CapabilityKey, ComponentDefinition, ComponentGraph, ReconciliationReport},
+    lifecycle::{CapabilityKey, ComponentDefinition},
+    lifecycle_executor::{
+        ComponentActivationOutcome, ComponentLifecycleCallbacks, ComponentLifecycleExecutor,
+        ComponentLifecycleMode, LifecycleExecutionError,
+    },
     llm_port::{LlmPort, ProviderRegistrations},
     permission_policy::{
         ApprovalProviderRegistration, InteractiveApprovalProviderFactory, PermissionPolicy,
         TERMINAL_APPROVAL_PROVIDER_ID,
     },
     prompt_assembly::{PromptAssembly, PromptRegistration},
-    session_port::{SessionBackendViews, SessionPortHost},
+    session_port::{SessionBackendRegistration, SessionBackendViews, SessionPortHost},
     session_tools_for_manager,
     session_worker::SessionStoreWorker,
     tool_catalog::{ToolCatalog, ToolRegistration},
@@ -66,6 +70,21 @@ const TOOL_CATALOG: CapabilityOwner = CapabilityOwner {
     capability: "tool_catalog",
 };
 
+const NATIVE_AGENT_RUNTIME_COMPONENT: &str = "native_agent_runtime";
+const MODEL_REFRESH_COMPONENT: &str = "model_refresh";
+const CONTEXT_BUDGET_COMPONENT: &str = "context_budget";
+const UI_RUNTIME_BRIDGE_COMPONENT: &str = "ui_runtime_bridge";
+
+#[derive(Default)]
+struct ComponentActivationStaging {
+    approval_registration: Option<ApprovalProviderRegistration>,
+    provider_registrations: Option<ProviderRegistrations>,
+    tool_registration: Option<ToolRegistration>,
+    prompt_registration: Option<PromptRegistration>,
+    session_backend_registration: Option<SessionBackendRegistration>,
+    runtime_wake_binding: Option<RuntimeEventBinding>,
+}
+
 /// `RuntimeComponents` 是 coordinator 的长期 runtime owner。
 ///
 /// 它把 native Agent adapter、host workers、tool view、notifier 和 lifecycle graph 放在
@@ -85,20 +104,13 @@ pub(super) struct RuntimeComponents {
     pub(super) session_store_worker: SessionStoreWorker,
     pub(super) context_budget_worker: ContextBudgetWorker,
     pub(super) runtime_event_notifier: RuntimeEventNotifier,
-    effect_scope: EffectScope,
-    runtime_wake_scope: Option<EffectScope>,
-    llm_port_scope: Option<EffectScope>,
-    permission_policy_scope: Option<EffectScope>,
-    tool_catalog_scope: Option<EffectScope>,
-    prompt_assembly_scope: Option<EffectScope>,
-    session_backend_scope: Option<EffectScope>,
-    pub(super) lifecycle: ComponentGraph,
+    activation_staging: ComponentActivationStaging,
+    pub(super) lifecycle: ComponentLifecycleExecutor,
     is_shutdown: bool,
 }
 
 impl RuntimeComponents {
     pub(super) fn new(options: &mut AppRuntimeOptions) -> Result<Self, String> {
-        let effect_scope = EffectScope::default();
         let runtime_event_notifier = RuntimeEventNotifier::default();
         let permission_policy = PermissionPolicy::new(runtime_event_notifier.clone());
         let approval_registration = permission_policy
@@ -107,43 +119,30 @@ impl RuntimeComponents {
                 TERMINAL_APPROVAL_PROVIDER_ID,
                 Arc::new(InteractiveApprovalProviderFactory),
             )
-            .map_err(|error| dispose_scope_tree_after_error(error.to_string(), &effect_scope))?;
-        let permission_policy_scope =
-            register_permission_policy_scope(&effect_scope, approval_registration)
-                .map_err(|error| dispose_scope_tree_after_error(error, &effect_scope))?;
+            .map_err(|error| error.to_string())?;
         let llm_port = LlmPort::new();
         let provider_registrations = llm_port
             .mount_builtin_providers("models-config", &options.loaded_models.provider_configs)
-            .map_err(|error| dispose_scope_tree_after_error(error.to_string(), &effect_scope))?;
-        let llm_port_scope = register_llm_port_scope(&effect_scope, provider_registrations)
-            .map_err(|error| dispose_scope_tree_after_error(error, &effect_scope))?;
+            .map_err(|error| error.to_string())?;
         let (tool_catalog, tool_registration) = conversation_workspace_tool_catalog(
             &options.managed_ripgrep,
             &options.hunea_config_dir,
         )
-        .map_err(|error| dispose_scope_tree_after_error(error.to_string(), &effect_scope))?;
-        // initial composition 先安装 inverse，再把任何 catalog snapshot 交给 consumer；
-        // 后续构造失败时显式关闭 root tree，完整回滚此前 registration。
-        let tool_catalog_scope = register_tool_catalog_scope(&effect_scope, tool_registration)
-            .map_err(|error| dispose_scope_tree_after_error(error, &effect_scope))?;
+        .map_err(|error| error.to_string())?;
         let (prompt_assembly, prompt_registration) = PromptAssembly::adopt_manager(
             "workspace-prompt",
             options.initial_prompt_assembly.clone(),
         )
-        .map_err(|error| dispose_scope_tree_after_error(error.to_string(), &effect_scope))?;
-        let prompt_assembly_scope =
-            register_prompt_assembly_scope(&effect_scope, prompt_registration)
-                .map_err(|error| dispose_scope_tree_after_error(error, &effect_scope))?;
-        let (session_port, session_backend_views, session_backend_scope) =
-            mount_session_backend(&effect_scope, options.session_store.take())
-                .map_err(|error| dispose_scope_tree_after_error(error, &effect_scope))?;
+        .map_err(|error| error.to_string())?;
+        let (session_port, session_backend_views, session_backend_registration) =
+            mount_session_backend(options.session_store.take())?;
         let prompt_assembly_snapshot = prompt_assembly.session_snapshot();
         let prompt_assembly_tool_definitions = tool_catalog.definitions();
         let session_workspace_tools =
             session_tools_for_manager(&tool_catalog, prompt_assembly_snapshot.manager.as_ref());
         let session_store_worker = SessionStoreWorker::new(runtime_event_notifier.clone());
         let context_budget_worker = ContextBudgetWorker::new(runtime_event_notifier.clone())
-            .map_err(|error| dispose_scope_tree_after_error(error.to_string(), &effect_scope))?;
+            .map_err(|error| error.to_string())?;
         let agent_runtime = NativeAgentRuntime::new(
             options,
             session_workspace_tools.clone(),
@@ -156,8 +155,7 @@ impl RuntimeComponents {
             llm_port.clone(),
             permission_policy.clone(),
             TERMINAL_APPROVAL_PROVIDER_ID,
-        )
-        .map_err(|error| dispose_scope_tree_after_error(error, &effect_scope))?;
+        )?;
         let model_refresh = ModelRefreshWorker::new(runtime_event_notifier.clone());
         let has_session_backend = session_backend_views.is_some();
         let mut components = Self {
@@ -174,14 +172,15 @@ impl RuntimeComponents {
             session_store_worker,
             context_budget_worker,
             runtime_event_notifier,
-            effect_scope,
-            runtime_wake_scope: None,
-            llm_port_scope: Some(llm_port_scope),
-            permission_policy_scope: Some(permission_policy_scope),
-            tool_catalog_scope: Some(tool_catalog_scope),
-            prompt_assembly_scope: Some(prompt_assembly_scope),
-            session_backend_scope,
-            lifecycle: ComponentGraph::default(),
+            activation_staging: ComponentActivationStaging {
+                approval_registration: Some(approval_registration),
+                provider_registrations: Some(provider_registrations),
+                tool_registration: Some(tool_registration),
+                prompt_registration: Some(prompt_registration),
+                session_backend_registration,
+                runtime_wake_binding: None,
+            },
+            lifecycle: ComponentLifecycleExecutor::default(),
             is_shutdown: false,
         };
         if let Err(error) = components.initialize_lifecycle(has_session_backend) {
@@ -195,66 +194,72 @@ impl RuntimeComponents {
     }
 
     fn initialize_lifecycle(&mut self, has_session_backend: bool) -> Result<(), String> {
-        for definition in runtime_component_definitions() {
-            declare_component(&mut self.lifecycle, definition)?;
-        }
-        for capability in [
-            APPROVAL_PROVIDER,
-            LLM_PORT,
-            MODEL_CATALOG,
-            PERMISSION_POLICY,
-            PROMPT_ASSEMBLY,
-            RUNTIME_EVENT_STREAM,
-            TOOL_CATALOG,
-        ] {
-            publish_capability(&mut self.lifecycle, capability)?;
-        }
-        if has_session_backend {
-            publish_capability(&mut self.lifecycle, SESSION_PERSISTENCE)?;
-        }
-        Ok(())
+        debug_assert_eq!(
+            has_session_backend,
+            self.activation_staging
+                .session_backend_registration
+                .is_some()
+        );
+        self.with_lifecycle(|lifecycle, components| {
+            lifecycle.declare_all(runtime_component_definitions(), components)
+        })
+        .map_err(|error| error.to_string())
     }
 
     pub(super) fn bind_runtime_wake(&mut self, wake: RuntimeWake) -> Result<(), String> {
         if self.is_shutdown {
             return Err("Runtime components are shut down".to_string());
         }
+        let capability = CapabilityKey::from(RUNTIME_WAKE.capability);
+        let replacements = self
+            .lifecycle
+            .has_capability_generation(&capability)
+            .then_some((RUNTIME_WAKE.component_id, capability));
+        self.lifecycle
+            .validate_reconfiguration(replacements, [RUNTIME_WAKE.component_id])
+            .map_err(|error| error.to_string())?;
         self.remove_runtime_wake()?;
-        let mut binding = self
+        let binding = self
             .runtime_event_notifier
             .bind_callback(move || wake.wake());
-        let scope = self
-            .effect_scope
-            .child("ui_runtime_bridge")
-            .map_err(|error| error.to_string())?;
-        scope
-            .register("runtime_wake_binding", move || {
-                binding.dispose();
-                Ok(())
-            })
-            .map_err(|error| error.to_string())?;
-        self.runtime_wake_scope = Some(scope);
-        if let Err(error) = publish_capability(&mut self.lifecycle, RUNTIME_WAKE) {
-            return Err(dispose_scopes_after_error(
-                error,
-                self.runtime_wake_scope.take(),
-            ));
-        }
-        Ok(())
+        self.activation_staging.runtime_wake_binding = Some(binding);
+        self.with_lifecycle(|lifecycle, components| {
+            lifecycle.activate_components(
+                [RUNTIME_WAKE.component_id],
+                components,
+                ComponentLifecycleMode::WakeBinding,
+            )
+        })
+        .map_err(|error| error.to_string())
     }
 
     pub(super) fn remove_runtime_wake(&mut self) -> Result<(), String> {
-        remove_capability(&mut self.lifecycle, RUNTIME_WAKE)?;
-        dispose_scope(&mut self.runtime_wake_scope)?;
-        Ok(())
+        self.with_lifecycle(|lifecycle, components| {
+            lifecycle.deactivate_components(
+                [RUNTIME_WAKE.component_id],
+                components,
+                ComponentLifecycleMode::WakeBinding,
+            )
+        })
+        .map_err(|error| error.to_string())
     }
 
     /// 返回 composition root 下的 active component scope；root identity 不进入诊断投影。
     pub(super) fn effect_scope_snapshots(&self) -> Vec<EffectScopeSnapshot> {
-        self.effect_scope
-            .snapshot()
-            .map(|snapshot| snapshot.children)
-            .unwrap_or_default()
+        self.lifecycle.scope_snapshots()
+    }
+
+    fn with_lifecycle<T>(
+        &mut self,
+        operation: impl FnOnce(
+            &mut ComponentLifecycleExecutor,
+            &mut Self,
+        ) -> Result<T, LifecycleExecutionError>,
+    ) -> Result<T, LifecycleExecutionError> {
+        let mut lifecycle = std::mem::take(&mut self.lifecycle);
+        let result = operation(&mut lifecycle, self);
+        self.lifecycle = lifecycle;
+        result
     }
 
     pub(super) fn reset_after_clear(&mut self, options: &AppRuntimeOptions) -> Result<(), String> {
@@ -281,39 +286,36 @@ impl RuntimeComponents {
         if self.is_shutdown {
             return Err("Runtime components are shut down".to_string());
         }
-        validate_capability_replacement(&self.lifecycle, SESSION_PERSISTENCE)?;
-        remove_capability(&mut self.lifecycle, SESSION_PERSISTENCE)?;
-
-        let mut failures = Vec::new();
-        if let Err(error) = self.agent_runtime.shutdown() {
-            failures.push(error.to_string());
-        }
-        if self.session_store_worker.is_running()
-            && let Some(views) = self.session_backend_views.clone()
-            && let Err(error) = self.session_store_worker.flush_all(views)
-        {
-            failures.push(error);
-        }
-        if let Err(error) = self.session_store_worker.shutdown() {
-            failures.push(error);
-        }
-        if let Some(session_port) = &self.session_port {
-            session_port.deactivate();
-        }
-        if let Err(error) = dispose_scope(&mut self.session_backend_scope) {
-            failures.push(error);
-        }
-        self.session_port = None;
-        self.session_backend_views = None;
-        if !failures.is_empty() {
-            let cleanup_error = failures.join("; ");
+        self.lifecycle
+            .validate_reconfiguration(
+                [(
+                    SESSION_PERSISTENCE.component_id,
+                    CapabilityKey::from(SESSION_PERSISTENCE.capability),
+                )],
+                [
+                    SESSION_PERSISTENCE.component_id,
+                    NATIVE_AGENT_RUNTIME_COMPONENT,
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        if let Err(error) = self.with_lifecycle(|lifecycle, components| {
+            lifecycle.deactivate_components(
+                [
+                    NATIVE_AGENT_RUNTIME_COMPONENT,
+                    SESSION_PERSISTENCE.component_id,
+                ],
+                components,
+                ComponentLifecycleMode::Reconfigure,
+            )
+        }) {
+            let cleanup_error = error.to_string();
             self.restore_ephemeral_session_consumers(options)
                 .map_err(|fallback_error| format!("{cleanup_error}; {fallback_error}"))?;
             return Err(cleanup_error);
         }
 
-        let (fresh_session_port, fresh_views, fresh_scope) =
-            match mount_session_backend(&self.effect_scope, Some(store)) {
+        let (fresh_session_port, fresh_views, fresh_registration) =
+            match mount_session_backend(Some(store)) {
                 Ok(mounted) => mounted,
                 Err(error) => {
                     self.restore_ephemeral_session_consumers(options)
@@ -332,7 +334,7 @@ impl RuntimeComponents {
                 if let Some(session_port) = &fresh_session_port {
                     session_port.deactivate();
                 }
-                let error = dispose_scopes_after_error(error, fresh_scope);
+                drop(fresh_registration);
                 self.restore_ephemeral_session_consumers(options)
                     .map_err(|fallback_error| format!("{error}; {fallback_error}"))?;
                 return Err(error);
@@ -343,9 +345,18 @@ impl RuntimeComponents {
         self.agent_runtime = fresh_agent_runtime;
         self.session_port = fresh_session_port;
         self.session_backend_views = Some(fresh_views);
-        self.session_backend_scope = fresh_scope;
-        replace_capability(&mut self.lifecycle, SESSION_PERSISTENCE);
-        Ok(())
+        self.activation_staging.session_backend_registration = fresh_registration;
+        self.with_lifecycle(|lifecycle, components| {
+            lifecycle.activate_components(
+                [
+                    SESSION_PERSISTENCE.component_id,
+                    NATIVE_AGENT_RUNTIME_COMPONENT,
+                ],
+                components,
+                ComponentLifecycleMode::Reconfigure,
+            )
+        })
+        .map_err(|error| error.to_string())
     }
 
     fn fresh_native_agent_runtime(
@@ -375,7 +386,14 @@ impl RuntimeComponents {
             .map_err(|error| format!("restore ephemeral Agent after backend failure: {error}"))?;
         self.agent_runtime = fresh_agent_runtime;
         self.session_store_worker = SessionStoreWorker::new(self.runtime_event_notifier.clone());
-        Ok(())
+        self.with_lifecycle(|lifecycle, components| {
+            lifecycle.activate_components(
+                [NATIVE_AGENT_RUNTIME_COMPONENT],
+                components,
+                ComponentLifecycleMode::Reconfigure,
+            )
+        })
+        .map_err(|error| error.to_string())
     }
 
     /// Replaces the approval provider generation while keeping the other runtime capabilities
@@ -411,39 +429,31 @@ impl RuntimeComponents {
             return Err("Runtime components are shut down".to_string());
         }
         let replaced = [APPROVAL_PROVIDER, PERMISSION_POLICY];
-        for capability in replaced {
-            validate_capability_replacement(&self.lifecycle, capability)?;
-        }
-        for capability in replaced {
-            remove_capability(&mut self.lifecycle, capability)?;
-        }
-
-        let mut failures = Vec::new();
-        if let Err(error) = self.agent_runtime.shutdown() {
-            failures.push(error.to_string());
-        }
-        self.permission_policy.deactivate();
-        if let Err(error) = dispose_scope(&mut self.permission_policy_scope) {
-            failures.push(error);
-        }
-        if !failures.is_empty() {
-            return Err(failures.join("; "));
-        }
+        self.lifecycle
+            .validate_reconfiguration(
+                replaced.map(|capability| {
+                    (
+                        capability.component_id,
+                        CapabilityKey::from(capability.capability),
+                    )
+                }),
+                [APPROVAL_PROVIDER.component_id],
+            )
+            .map_err(|error| error.to_string())?;
+        self.with_lifecycle(|lifecycle, components| {
+            lifecycle.deactivate_components(
+                [APPROVAL_PROVIDER.component_id],
+                components,
+                ComponentLifecycleMode::Reconfigure,
+            )
+        })
+        .map_err(|error| error.to_string())?;
 
         let provider_id = provider_id.into();
         let fresh_policy = PermissionPolicy::new(self.runtime_event_notifier.clone());
         let fresh_registration = fresh_policy
             .register(owner, provider_id.clone(), factory)
             .map_err(|error| error.to_string())?;
-        let fresh_policy_scope =
-            match register_permission_policy_scope(&self.effect_scope, fresh_registration) {
-                Ok(scope) => scope,
-                Err(error) => {
-                    fresh_policy.deactivate();
-                    return Err(error);
-                }
-            };
-
         let fresh_agent_runtime = match native_mount_check().and_then(|()| {
             NativeAgentRuntime::new(
                 options,
@@ -461,20 +471,24 @@ impl RuntimeComponents {
         }) {
             Ok(runtime) => runtime,
             Err(error) => {
-                let error = dispose_scopes_after_error(error, [fresh_policy_scope]);
                 fresh_policy.deactivate();
+                drop(fresh_registration);
                 return Err(error);
             }
         };
 
         self.permission_policy = fresh_policy;
         self.permission_provider_id = provider_id;
-        self.permission_policy_scope = Some(fresh_policy_scope);
         self.agent_runtime = fresh_agent_runtime;
-        for capability in replaced {
-            replace_capability(&mut self.lifecycle, capability);
-        }
-        Ok(())
+        self.activation_staging.approval_registration = Some(fresh_registration);
+        self.with_lifecycle(|lifecycle, components| {
+            lifecycle.activate_components(
+                [APPROVAL_PROVIDER.component_id],
+                components,
+                ComponentLifecycleMode::Reconfigure,
+            )
+        })
+        .map_err(|error| error.to_string())
     }
 
     fn reset_after_clear_with_native_mount_check(
@@ -486,85 +500,41 @@ impl RuntimeComponents {
             return Err("Runtime components are shut down".to_string());
         }
         let replaced = [LLM_PORT, MODEL_CATALOG, PROMPT_ASSEMBLY, TOOL_CATALOG];
-        for capability in replaced {
-            validate_capability_replacement(&self.lifecycle, capability)?;
-        }
-        for capability in replaced {
-            remove_capability(&mut self.lifecycle, capability)?;
-        }
+        self.lifecycle
+            .validate_reconfiguration(
+                replaced.map(|capability| {
+                    (
+                        capability.component_id,
+                        CapabilityKey::from(capability.capability),
+                    )
+                }),
+                [LLM_PORT.component_id, TOOL_CATALOG.component_id],
+            )
+            .map_err(|error| error.to_string())?;
 
-        let mut failures = Vec::new();
-        if let Err(error) = self.agent_runtime.shutdown() {
-            failures.push(error.to_string());
-        }
-        if let Err(error) = self.model_refresh.reset_after_clear() {
-            failures.push(error);
-        }
-        self.context_budget_worker.cancel_pending();
-        self.session_workspace_tools = ToolExecutorRegistry::new();
         let current_prompt_assembly = self.prompt_assembly.manager_snapshot();
-        self.prompt_assembly.deactivate();
-        self.llm_port.deactivate();
-        if let Err(error) = dispose_scope(&mut self.prompt_assembly_scope) {
-            failures.push(error);
-        }
-        if let Err(error) = dispose_scope(&mut self.tool_catalog_scope) {
-            failures.push(error);
-        }
-        if let Err(error) = dispose_scope(&mut self.llm_port_scope) {
-            failures.push(error);
-        }
-        if !failures.is_empty() {
-            return Err(failures.join("; "));
-        }
+        self.with_lifecycle(|lifecycle, components| {
+            lifecycle.deactivate_components(
+                [TOOL_CATALOG.component_id, LLM_PORT.component_id],
+                components,
+                ComponentLifecycleMode::Reconfigure,
+            )
+        })
+        .map_err(|error| error.to_string())?;
 
         let fresh_llm_port = LlmPort::new();
         let fresh_provider_registrations = fresh_llm_port
             .mount_builtin_providers("models-config", &options.loaded_models.provider_configs)
             .map_err(|error| error.to_string())?;
-        let fresh_llm_port_scope =
-            register_llm_port_scope(&self.effect_scope, fresh_provider_registrations)?;
-        let (fresh_tool_catalog, fresh_tool_registration) =
-            match conversation_workspace_tool_catalog(
-                &options.managed_ripgrep,
-                &options.hunea_config_dir,
-            ) {
-                Ok(catalog) => catalog,
-                Err(error) => {
-                    return Err(dispose_scopes_after_error(
-                        error.to_string(),
-                        [fresh_llm_port_scope],
-                    ));
-                }
-            };
-        let fresh_tool_catalog_scope =
-            match register_tool_catalog_scope(&self.effect_scope, fresh_tool_registration) {
-                Ok(scope) => scope,
-                Err(error) => {
-                    return Err(dispose_scopes_after_error(error, [fresh_llm_port_scope]));
-                }
-            };
+        let (fresh_tool_catalog, fresh_tool_registration) = conversation_workspace_tool_catalog(
+            &options.managed_ripgrep,
+            &options.hunea_config_dir,
+        )
+        .map_err(|error| error.to_string())?;
         let prompt_assembly_tool_definitions = fresh_tool_catalog.definitions();
         let (fresh_prompt_assembly, fresh_prompt_registration) =
-            match PromptAssembly::adopt_manager("workspace-prompt", current_prompt_assembly) {
-                Ok(prompt_assembly) => prompt_assembly,
-                Err(error) => {
-                    return Err(dispose_scopes_after_error(
-                        error.to_string(),
-                        [fresh_tool_catalog_scope, fresh_llm_port_scope],
-                    ));
-                }
-            };
-        let fresh_prompt_assembly_scope =
-            match register_prompt_assembly_scope(&self.effect_scope, fresh_prompt_registration) {
-                Ok(scope) => scope,
-                Err(error) => {
-                    return Err(dispose_scopes_after_error(
-                        error,
-                        [fresh_tool_catalog_scope, fresh_llm_port_scope],
-                    ));
-                }
-            };
+            PromptAssembly::adopt_manager("workspace-prompt", current_prompt_assembly)
+                .map_err(|error| error.to_string())?;
         let fresh_prompt_assembly_snapshot = fresh_prompt_assembly.session_snapshot();
         let session_workspace_tools = session_tools_for_manager(
             &fresh_tool_catalog,
@@ -572,7 +542,7 @@ impl RuntimeComponents {
         );
         // 旧 adapter 完全 quiescent 后才创建新 generation，避免 reset 期间存在两个
         // native worker path；构造失败时 capability 仍保持 removed，不发布半成品。
-        let fresh_agent_runtime = match native_mount_check().and_then(|()| {
+        let fresh_agent_runtime = native_mount_check().and_then(|()| {
             NativeAgentRuntime::new(
                 options,
                 session_workspace_tools.clone(),
@@ -586,31 +556,23 @@ impl RuntimeComponents {
                 self.permission_policy.clone(),
                 self.permission_provider_id.as_str(),
             )
-        }) {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                return Err(dispose_scopes_after_error(
-                    error,
-                    [
-                        fresh_prompt_assembly_scope,
-                        fresh_tool_catalog_scope,
-                        fresh_llm_port_scope,
-                    ],
-                ));
-            }
-        };
+        })?;
         self.agent_runtime = fresh_agent_runtime;
         self.llm_port = fresh_llm_port;
         self.tool_catalog = fresh_tool_catalog;
         self.prompt_assembly = fresh_prompt_assembly;
-        self.tool_catalog_scope = Some(fresh_tool_catalog_scope);
-        self.llm_port_scope = Some(fresh_llm_port_scope);
-        self.prompt_assembly_scope = Some(fresh_prompt_assembly_scope);
         self.session_workspace_tools = session_workspace_tools;
-        for capability in replaced {
-            replace_capability(&mut self.lifecycle, capability);
-        }
-        Ok(())
+        self.activation_staging.provider_registrations = Some(fresh_provider_registrations);
+        self.activation_staging.tool_registration = Some(fresh_tool_registration);
+        self.activation_staging.prompt_registration = Some(fresh_prompt_registration);
+        self.with_lifecycle(|lifecycle, components| {
+            lifecycle.activate_components(
+                [LLM_PORT.component_id, TOOL_CATALOG.component_id],
+                components,
+                ComponentLifecycleMode::Reconfigure,
+            )
+        })
+        .map_err(|error| error.to_string())
     }
 
     pub(super) fn shutdown(&mut self) -> Result<(), String> {
@@ -618,73 +580,167 @@ impl RuntimeComponents {
             return Ok(());
         }
         self.is_shutdown = true;
-        let mut failures = Vec::new();
-        if let Err(error) = self.remove_runtime_wake() {
-            failures.push(error);
+        let shutdown_error = self
+            .with_lifecycle(|lifecycle, components| lifecycle.shutdown(components))
+            .err()
+            .map(|error| error.to_string());
+        match shutdown_error {
+            None => Ok(()),
+            Some(error) => Err(error),
         }
-        for capability in [
-            APPROVAL_PROVIDER,
-            LLM_PORT,
-            MODEL_CATALOG,
-            PERMISSION_POLICY,
-            PROMPT_ASSEMBLY,
-            RUNTIME_EVENT_STREAM,
-            TOOL_CATALOG,
-            SESSION_PERSISTENCE,
-        ] {
-            if let Err(error) = remove_capability(&mut self.lifecycle, capability) {
-                failures.push(error);
+    }
+}
+
+impl ComponentLifecycleCallbacks for RuntimeComponents {
+    fn activate_component(
+        &mut self,
+        component_id: &str,
+        scope: &EffectScope,
+        _mode: ComponentLifecycleMode,
+    ) -> Result<ComponentActivationOutcome, String> {
+        let outcome = match component_id {
+            id if id == APPROVAL_PROVIDER.component_id => {
+                let registration = self
+                    .activation_staging
+                    .approval_registration
+                    .take()
+                    .ok_or_else(|| "approval provider activation was not staged".to_string())?;
+                register_permission_policy_effect(scope, registration)?;
+                ComponentActivationOutcome::PublishCapabilities
             }
-        }
-        if let Err(error) = self.agent_runtime.shutdown() {
-            failures.push(error.to_string());
-        }
-        if let Err(error) = self.model_refresh.shutdown() {
-            failures.push(error);
-        }
-        self.permission_policy.deactivate();
-        if let Err(error) = dispose_scope(&mut self.permission_policy_scope) {
-            failures.push(error);
-        }
-        self.session_workspace_tools = ToolExecutorRegistry::new();
-        self.prompt_assembly.deactivate();
-        self.llm_port.deactivate();
-        if let Err(error) = dispose_scope(&mut self.prompt_assembly_scope) {
-            failures.push(error);
-        }
-        if let Err(error) = dispose_scope(&mut self.tool_catalog_scope) {
-            failures.push(error);
-        }
-        if let Err(error) = dispose_scope(&mut self.llm_port_scope) {
-            failures.push(error);
-        }
-        if let Err(error) = self.context_budget_worker.shutdown() {
-            failures.push(error);
-        }
-        if self.session_store_worker.is_running()
-            && let Some(views) = self.session_backend_views.clone()
-            && let Err(error) = self.session_store_worker.flush_all(views)
-        {
-            failures.push(error);
-        }
-        if let Err(error) = self.session_store_worker.shutdown() {
-            failures.push(error);
-        }
-        if let Some(session_port) = &self.session_port {
-            session_port.deactivate();
-        }
-        if let Err(error) = dispose_scope(&mut self.session_backend_scope) {
-            failures.push(error);
-        }
-        self.session_backend_views = None;
-        self.session_port = None;
-        if let Some(error) = self.effect_scope.dispose().error_message() {
-            failures.push(error);
-        }
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(failures.join("; "))
+            id if id == LLM_PORT.component_id => {
+                let registrations = self
+                    .activation_staging
+                    .provider_registrations
+                    .take()
+                    .ok_or_else(|| "LLM provider activation was not staged".to_string())?;
+                register_llm_port_effect(scope, registrations)?;
+                ComponentActivationOutcome::PublishCapabilities
+            }
+            id if id == TOOL_CATALOG.component_id => {
+                let registration = self
+                    .activation_staging
+                    .tool_registration
+                    .take()
+                    .ok_or_else(|| "tool catalog activation was not staged".to_string())?;
+                register_tool_catalog_effect(scope, registration)?;
+                ComponentActivationOutcome::PublishCapabilities
+            }
+            id if id == PROMPT_ASSEMBLY.component_id => {
+                let registration = self
+                    .activation_staging
+                    .prompt_registration
+                    .take()
+                    .ok_or_else(|| "prompt assembly activation was not staged".to_string())?;
+                register_prompt_assembly_effect(scope, registration)?;
+                ComponentActivationOutcome::PublishCapabilities
+            }
+            id if id == SESSION_PERSISTENCE.component_id => {
+                if let Some(registration) =
+                    self.activation_staging.session_backend_registration.take()
+                {
+                    register_session_backend_effect(scope, registration)?;
+                    ComponentActivationOutcome::PublishCapabilities
+                } else {
+                    ComponentActivationOutcome::Ready
+                }
+            }
+            id if id == RUNTIME_WAKE.component_id => {
+                if self.activation_staging.runtime_wake_binding.is_some() {
+                    ComponentActivationOutcome::PublishCapabilities
+                } else {
+                    ComponentActivationOutcome::Ready
+                }
+            }
+            id if id == PERMISSION_POLICY.component_id
+                || id == RUNTIME_EVENT_STREAM.component_id =>
+            {
+                ComponentActivationOutcome::PublishCapabilities
+            }
+            UI_RUNTIME_BRIDGE_COMPONENT => {
+                let binding = self
+                    .activation_staging
+                    .runtime_wake_binding
+                    .take()
+                    .ok_or_else(|| "runtime wake binding activation was not staged".to_string())?;
+                register_runtime_wake_effect(scope, binding)?;
+                ComponentActivationOutcome::Ready
+            }
+            NATIVE_AGENT_RUNTIME_COMPONENT | MODEL_REFRESH_COMPONENT | CONTEXT_BUDGET_COMPONENT => {
+                ComponentActivationOutcome::Ready
+            }
+            unknown => return Err(format!("unknown component lifecycle callback `{unknown}`")),
+        };
+        Ok(outcome)
+    }
+
+    fn quiesce_component(
+        &mut self,
+        component_id: &str,
+        mode: ComponentLifecycleMode,
+    ) -> Result<(), String> {
+        match component_id {
+            NATIVE_AGENT_RUNTIME_COMPONENT => self
+                .agent_runtime
+                .shutdown()
+                .map_err(|error| error.to_string()),
+            MODEL_REFRESH_COMPONENT => match mode {
+                ComponentLifecycleMode::Shutdown => self.model_refresh.shutdown(),
+                _ => self.model_refresh.reset_after_clear(),
+            },
+            CONTEXT_BUDGET_COMPONENT => match mode {
+                ComponentLifecycleMode::Shutdown => self.context_budget_worker.shutdown(),
+                _ => {
+                    self.context_budget_worker.cancel_pending();
+                    Ok(())
+                }
+            },
+            id if id == PERMISSION_POLICY.component_id => {
+                self.permission_policy.deactivate();
+                Ok(())
+            }
+            id if id == LLM_PORT.component_id => {
+                self.llm_port.deactivate();
+                Ok(())
+            }
+            id if id == TOOL_CATALOG.component_id => {
+                self.session_workspace_tools = ToolExecutorRegistry::new();
+                Ok(())
+            }
+            id if id == PROMPT_ASSEMBLY.component_id => {
+                self.prompt_assembly.deactivate();
+                Ok(())
+            }
+            id if id == SESSION_PERSISTENCE.component_id => {
+                let mut failures = Vec::new();
+                if self.session_store_worker.is_running()
+                    && let Some(views) = self.session_backend_views.clone()
+                    && let Err(error) = self.session_store_worker.flush_all(views)
+                {
+                    failures.push(error);
+                }
+                if let Err(error) = self.session_store_worker.shutdown() {
+                    failures.push(error);
+                }
+                if let Some(session_port) = &self.session_port {
+                    session_port.deactivate();
+                }
+                self.session_backend_views = None;
+                self.session_port = None;
+                if failures.is_empty() {
+                    Ok(())
+                } else {
+                    Err(failures.join("; "))
+                }
+            }
+            id if id == APPROVAL_PROVIDER.component_id
+                || id == RUNTIME_EVENT_STREAM.component_id
+                || id == RUNTIME_WAKE.component_id
+                || component_id == UI_RUNTIME_BRIDGE_COMPONENT =>
+            {
+                Ok(())
+            }
+            unknown => Err(format!("unknown component lifecycle callback `{unknown}`")),
         }
     }
 }
@@ -719,149 +775,76 @@ fn runtime_component_definitions() -> Vec<ComponentDefinition> {
         ComponentDefinition::new("model_refresh")
             .requires(LLM_PORT.capability)
             .requires(MODEL_CATALOG.capability),
+        ComponentDefinition::new(CONTEXT_BUDGET_COMPONENT)
+            .requires(LLM_PORT.capability)
+            .requires(MODEL_CATALOG.capability)
+            .requires(PROMPT_ASSEMBLY.capability)
+            .requires(TOOL_CATALOG.capability),
         ComponentDefinition::new("ui_runtime_bridge")
             .requires(RUNTIME_EVENT_STREAM.capability)
             .requires(RUNTIME_WAKE.capability),
     ]
 }
 
-fn declare_component(
-    graph: &mut ComponentGraph,
-    definition: ComponentDefinition,
-) -> Result<(), String> {
-    let report = graph
-        .declare(definition)
-        .map_err(|error| error.to_string())?;
-    acknowledge_activations(graph, report);
-    Ok(())
-}
-
-fn publish_capability(
-    graph: &mut ComponentGraph,
-    capability: CapabilityOwner,
-) -> Result<(), String> {
-    let report = graph
-        .add_capability(capability.component_id, capability.capability)
-        .map_err(|error| error.to_string())?;
-    acknowledge_activations(graph, report);
-    Ok(())
-}
-
-fn remove_capability(
-    graph: &mut ComponentGraph,
-    capability: CapabilityOwner,
-) -> Result<(), String> {
-    graph
-        .remove_capability(
-            capability.component_id,
-            &CapabilityKey::from(capability.capability),
-        )
-        .map(|_| ())
-        .map_err(|error| error.to_string())
-}
-
-fn validate_capability_replacement(
-    graph: &ComponentGraph,
-    capability: CapabilityOwner,
-) -> Result<(), String> {
-    graph
-        .validate_replacement(
-            capability.component_id,
-            &CapabilityKey::from(capability.capability),
-        )
-        .map_err(|error| error.to_string())
-}
-
-fn replace_capability(graph: &mut ComponentGraph, capability: CapabilityOwner) {
-    let report = graph
-        .replace_capability(
-            capability.component_id,
-            &CapabilityKey::from(capability.capability),
-        )
-        .expect("preflighted graph replacement must remain valid");
-    acknowledge_activations(graph, report);
-}
-
-fn acknowledge_activations(graph: &mut ComponentGraph, report: ReconciliationReport) {
-    for token in report.activation_requests {
-        graph
-            .complete_activation(token)
-            .expect("fresh graph activation token must remain current");
-    }
-}
-
-fn register_tool_catalog_scope(
-    root_scope: &EffectScope,
+fn register_tool_catalog_effect(
+    scope: &EffectScope,
     mut registration: ToolRegistration,
-) -> Result<EffectScope, String> {
-    let scope = root_scope
-        .child("tool_catalog")
-        .map_err(|error| error.to_string())?;
+) -> Result<(), String> {
     scope
         .register("tool_registrations", move || {
             registration.dispose();
             Ok(())
         })
         .map_err(|error| error.to_string())?;
-    Ok(scope)
+    Ok(())
 }
 
-fn register_llm_port_scope(
-    root_scope: &EffectScope,
+fn register_llm_port_effect(
+    scope: &EffectScope,
     mut registrations: ProviderRegistrations,
-) -> Result<EffectScope, String> {
-    let scope = root_scope
-        .child("llm_port")
-        .map_err(|error| error.to_string())?;
+) -> Result<(), String> {
     scope
         .register("provider_registrations", move || {
             registrations.dispose();
             Ok(())
         })
         .map_err(|error| error.to_string())?;
-    Ok(scope)
+    Ok(())
 }
 
-fn register_permission_policy_scope(
-    root_scope: &EffectScope,
+fn register_permission_policy_effect(
+    scope: &EffectScope,
     mut registration: ApprovalProviderRegistration,
-) -> Result<EffectScope, String> {
-    let scope = root_scope
-        .child("permission_policy")
-        .map_err(|error| error.to_string())?;
+) -> Result<(), String> {
     scope
         .register("approval_provider_registration", move || {
             registration.dispose();
             Ok(())
         })
         .map_err(|error| error.to_string())?;
-    Ok(scope)
+    Ok(())
 }
 
-fn register_prompt_assembly_scope(
-    root_scope: &EffectScope,
+fn register_prompt_assembly_effect(
+    scope: &EffectScope,
     mut registration: PromptRegistration,
-) -> Result<EffectScope, String> {
-    let scope = root_scope
-        .child("prompt_assembly")
-        .map_err(|error| error.to_string())?;
+) -> Result<(), String> {
     scope
         .register("prompt_registration", move || {
             registration.dispose();
             Ok(())
         })
         .map_err(|error| error.to_string())?;
-    Ok(scope)
+    Ok(())
 }
 
 type MountedSessionBackend = (
     Option<SessionPortHost>,
     Option<SessionBackendViews>,
-    Option<EffectScope>,
+    Option<SessionBackendRegistration>,
 );
 
 fn mount_session_backend(
-    root_scope: &EffectScope,
     store: Option<Arc<dyn session_store::SessionStore>>,
 ) -> Result<MountedSessionBackend, String> {
     let Some(store) = store else {
@@ -871,59 +854,39 @@ fn mount_session_backend(
     let registration = session_port
         .register("terminal-runtime", "configured-session-store", store)
         .map_err(|error| error.to_string())?;
-    let scope = register_session_backend_scope(root_scope, registration)?;
     let views = match session_port.views() {
         Ok(views) => views,
         Err(error) => {
             session_port.deactivate();
-            return Err(dispose_scopes_after_error(error.to_string(), [scope]));
+            return Err(error.to_string());
         }
     };
-    Ok((Some(session_port), Some(views), Some(scope)))
+    Ok((Some(session_port), Some(views), Some(registration)))
 }
 
-fn register_session_backend_scope(
-    root_scope: &EffectScope,
-    mut registration: super::session_port::SessionBackendRegistration,
-) -> Result<EffectScope, String> {
-    let scope = root_scope
-        .child("session_persistence")
-        .map_err(|error| error.to_string())?;
+fn register_session_backend_effect(
+    scope: &EffectScope,
+    mut registration: SessionBackendRegistration,
+) -> Result<(), String> {
     scope
         .register("backend_registration", move || {
             registration.dispose();
             Ok(())
         })
         .map_err(|error| error.to_string())?;
-    Ok(scope)
+    Ok(())
 }
 
-fn dispose_scope(scope: &mut Option<EffectScope>) -> Result<(), String> {
+fn register_runtime_wake_effect(
+    scope: &EffectScope,
+    mut binding: RuntimeEventBinding,
+) -> Result<(), String> {
     scope
-        .take()
-        .and_then(|scope| scope.dispose().error_message())
-        .map_or(Ok(()), Err)
-}
-
-fn dispose_scopes_after_error(
-    error: String,
-    scopes: impl IntoIterator<Item = EffectScope>,
-) -> String {
-    let mut failures = vec![error];
-    for scope in scopes {
-        if let Some(error) = scope.dispose().error_message() {
-            failures.push(error);
-        }
-    }
-    failures.join("; ")
-}
-
-fn dispose_scope_tree_after_error(error: String, root_scope: &EffectScope) -> String {
-    let mut failures = vec![error];
-    if let Some(error) = root_scope.dispose().error_message() {
-        failures.push(error);
-    }
-    failures.join("; ")
+        .register("runtime_wake_binding", move || {
+            binding.dispose();
+            Ok(())
+        })
+        .map_err(|error| error.to_string())
 }
 
 impl Drop for RuntimeComponents {
@@ -1054,11 +1017,11 @@ mod tests {
         assert!(components.llm_port.inspection_snapshot().is_empty());
         assert_eq!(
             components.lifecycle.state("native_agent_runtime"),
-            Some(ComponentState::Pending)
+            Some(ComponentState::Disposed)
         );
         assert_eq!(
             components.lifecycle.state("prompt_assembly"),
-            Some(ComponentState::Pending)
+            Some(ComponentState::Disposed)
         );
     }
 
@@ -1269,6 +1232,31 @@ mod tests {
             components.lifecycle.state("model_refresh"),
             Some(ComponentState::Pending)
         );
+
+        components
+            .reset_after_clear(&options)
+            .expect("a clean retry should mount a fresh composition");
+        assert_eq!(
+            components.lifecycle.state("native_agent_runtime"),
+            Some(ComponentState::Active)
+        );
+        assert_eq!(
+            components.lifecycle.state("model_refresh"),
+            Some(ComponentState::Active)
+        );
+        for capability in [
+            "llm_port",
+            "model_catalog",
+            "prompt_assembly",
+            "tool_catalog",
+        ] {
+            assert!(
+                components
+                    .lifecycle
+                    .has_capability(&CapabilityKey::from(capability)),
+                "clean retry should publish {capability}"
+            );
+        }
     }
 
     #[test]
@@ -1490,5 +1478,64 @@ mod tests {
             components.lifecycle.state("permission_policy"),
             Some(ComponentState::Pending)
         );
+    }
+
+    #[test]
+    fn reset_epoch_preflight_preserves_the_live_composition() {
+        let mut options = options_with_provider();
+        let mut components =
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+        let capabilities_before = components.lifecycle.capabilities();
+        components.lifecycle.inject_epoch_exhaustion("llm_port");
+
+        let error = components
+            .reset_after_clear(&options)
+            .expect_err("provider epoch exhaustion should reject reset before cleanup");
+
+        assert!(error.contains("component `llm_port` activation epoch is exhausted"));
+        assert_eq!(components.lifecycle.capabilities(), capabilities_before);
+        assert_eq!(
+            components.lifecycle.state("llm_port"),
+            Some(ComponentState::Active)
+        );
+        assert_eq!(
+            components.lifecycle.state("native_agent_runtime"),
+            Some(ComponentState::Active)
+        );
+        assert!(!components.agent_runtime.is_shutdown_for_test());
+        assert!(!components.llm_port.inspection_snapshot().is_empty());
+    }
+
+    #[test]
+    fn observed_consumer_epoch_preflight_preserves_the_session_backend() {
+        let store = Arc::new(session_store::InMemorySessionStore::new());
+        let mut options = AppRuntimeOptions {
+            session_store: Some(store.clone()),
+            ..options_with_provider()
+        };
+        let mut components =
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+        let capabilities_before = components.lifecycle.capabilities();
+        components
+            .lifecycle
+            .inject_epoch_exhaustion(NATIVE_AGENT_RUNTIME_COMPONENT);
+
+        let error = components
+            .replace_session_backend(
+                &options,
+                Arc::new(session_store::InMemorySessionStore::new()),
+            )
+            .expect_err("observed consumer exhaustion should reject replacement before cleanup");
+
+        assert!(error.contains("component `native_agent_runtime` activation epoch is exhausted"));
+        assert_eq!(components.lifecycle.capabilities(), capabilities_before);
+        assert!(components.session_port.is_some());
+        assert!(components.session_backend_views.is_some());
+        assert_eq!(
+            components.lifecycle.state(NATIVE_AGENT_RUNTIME_COMPONENT),
+            Some(ComponentState::Active)
+        );
+        assert!(!components.agent_runtime.is_shutdown_for_test());
+        assert!(Arc::strong_count(&store) > 1);
     }
 }

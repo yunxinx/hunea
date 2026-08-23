@@ -229,6 +229,7 @@ fn composition_snapshot_is_deterministic_and_redacted() {
         names(&snapshot["components"]),
         vec![
             "approval_provider",
+            "context_budget",
             "llm_port",
             "model_refresh",
             "native_agent_runtime",
@@ -265,6 +266,7 @@ fn composition_snapshot_is_deterministic_and_redacted() {
             "session_persistence",
             "tool_catalog",
             "prompt_assembly",
+            "context_budget",
             "native_agent_runtime",
             "ui_runtime_bridge",
         ])
@@ -274,6 +276,7 @@ fn composition_snapshot_is_deterministic_and_redacted() {
         serde_json::json!([
             "ui_runtime_bridge",
             "native_agent_runtime",
+            "context_budget",
             "prompt_assembly",
             "tool_catalog",
             "session_persistence",
@@ -329,18 +332,48 @@ fn composition_snapshot_is_deterministic_and_redacted() {
         snapshot["effect_scopes"],
         serde_json::json!([
             {
+                "owner": "approval_provider",
+                "effects": ["approval_provider_registration"],
+                "children": [],
+            },
+            {
+                "owner": "context_budget",
+                "effects": [],
+                "children": [],
+            },
+            {
                 "owner": "llm_port",
                 "effects": ["provider_registrations"],
                 "children": [],
             },
             {
+                "owner": "model_refresh",
+                "effects": [],
+                "children": [],
+            },
+            {
+                "owner": "native_agent_runtime",
+                "effects": [],
+                "children": [],
+            },
+            {
                 "owner": "permission_policy",
-                "effects": ["approval_provider_registration"],
+                "effects": [],
                 "children": [],
             },
             {
                 "owner": "prompt_assembly",
                 "effects": ["prompt_registration"],
+                "children": [],
+            },
+            {
+                "owner": "runtime_event_stream",
+                "effects": [],
+                "children": [],
+            },
+            {
+                "owner": "runtime_wake_binding",
+                "effects": [],
                 "children": [],
             },
             {
@@ -408,7 +441,7 @@ fn composition_snapshot_projects_safe_failure_and_pending_diagnostics() {
     let declaration = coordinator
         .components
         .lifecycle
-        .declare(ComponentDefinition::new("failed_test_component"))
+        .declare(ComponentDefinition::new("failed_activation_test_component"))
         .expect("synthetic component id should be unique");
     coordinator
         .components
@@ -419,6 +452,32 @@ fn composition_snapshot_projects_safe_failure_and_pending_diagnostics() {
             true,
         )
         .expect("synthetic activation should fail at the current epoch");
+    let declaration = coordinator
+        .components
+        .lifecycle
+        .declare(ComponentDefinition::new(
+            "failed_deactivation_test_component",
+        ))
+        .expect("synthetic component id should be unique");
+    coordinator
+        .components
+        .lifecycle
+        .complete_activation(declaration.activation_requests[0].clone())
+        .expect("synthetic activation should complete");
+    let deactivation = coordinator
+        .components
+        .lifecycle
+        .deactivate("failed_deactivation_test_component")
+        .expect("synthetic component should begin deactivation");
+    coordinator
+        .components
+        .lifecycle
+        .fail_deactivation(
+            deactivation.deactivation_requests[0].clone(),
+            ComponentFailureReason::EffectDisposalRejected,
+            false,
+        )
+        .expect("synthetic deactivation should fail at the current epoch");
 
     let snapshot = coordinator.inspect_composition();
     snapshot
@@ -437,14 +496,24 @@ fn composition_snapshot_projects_safe_failure_and_pending_diagnostics() {
     );
     assert_eq!(
         snapshot["failures"],
-        serde_json::json!([{
-            "component_id": "failed_test_component",
-            "operation": "activation",
-            "code": "activation_rejected",
-            "message": "component activation was rejected",
-            "recoverable": true,
-            "epoch": 1,
-        }])
+        serde_json::json!([
+            {
+                "component_id": "failed_activation_test_component",
+                "operation": "activation",
+                "code": "activation_rejected",
+                "message": "component activation was rejected",
+                "recoverable": true,
+                "epoch": 1,
+            },
+            {
+                "component_id": "failed_deactivation_test_component",
+                "operation": "deactivation",
+                "code": "effect_disposal_rejected",
+                "message": "component effect disposal was rejected",
+                "recoverable": false,
+                "epoch": 1,
+            },
+        ])
     );
 }
 
@@ -499,7 +568,7 @@ fn ui_runtime_bridge_reacts_to_wake_binding_lifecycle() {
             .expect("effect scopes should be an array")
             .iter()
             .find(|scope| scope["owner"] == "ui_runtime_bridge")
-            .expect("bound wake should own a UI bridge scope")["effects"],
+            .expect("wake consumer should own its binding effect")["effects"],
         serde_json::json!(["runtime_wake_binding"])
     );
     assert_eq!(
@@ -522,7 +591,7 @@ fn ui_runtime_bridge_reacts_to_wake_binding_lifecycle() {
     coordinator.shutdown().expect("runtime should shut down");
     assert_eq!(
         component_state(&coordinator, "ui_runtime_bridge"),
-        "pending"
+        "disposed"
     );
     coordinator.components.runtime_event_notifier.notify();
     assert_eq!(
@@ -546,7 +615,7 @@ fn ui_runtime_bridge_reacts_to_wake_binding_lifecycle() {
     assert_eq!(snapshot["effect_scopes"], serde_json::json!([]));
     assert_eq!(
         component_state(&coordinator, "native_agent_runtime"),
-        "pending"
+        "disposed"
     );
 }
 
@@ -562,6 +631,9 @@ fn rebinding_ui_runtime_bridge_disposes_the_previous_wake_effect() {
         }),
     )
     .expect("first runtime wake should bind");
+    let first_generation =
+        capability_generation(&composition_snapshot(&coordinator), "runtime_wake");
+    assert_eq!(first_generation, 0);
 
     let second_wake_count = Arc::new(AtomicUsize::new(0));
     let second_wake_count_for_callback = Arc::clone(&second_wake_count);
@@ -576,6 +648,10 @@ fn rebinding_ui_runtime_bridge_disposes_the_previous_wake_effect() {
     coordinator.components.runtime_event_notifier.notify();
     assert_eq!(first_wake_count.load(Ordering::SeqCst), 0);
     assert_eq!(second_wake_count.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        capability_generation(&composition_snapshot(&coordinator), "runtime_wake",),
+        first_generation + 1
+    );
     assert_eq!(component_state(&coordinator, "ui_runtime_bridge"), "active");
 }
 

@@ -121,21 +121,51 @@ pub(super) struct CapabilityChange {
     pub(super) new_generation: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct ActivationToken {
     component_id: String,
     epoch: u64,
 }
 
 impl ActivationToken {
-    #[cfg(test)]
-    fn component_id(&self) -> &str {
+    pub(super) fn component_id(&self) -> &str {
         self.component_id.as_str()
     }
 
     #[cfg(test)]
-    const fn epoch(&self) -> u64 {
+    pub(super) const fn epoch(&self) -> u64 {
         self.epoch
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum DeactivationDisposition {
+    Reconcile,
+    Suspend,
+    Dispose,
+}
+
+/// `DeactivationToken` 把 concrete quiescence 绑定到发起它的 component epoch。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct DeactivationToken {
+    component_id: String,
+    epoch: u64,
+    disposition: DeactivationDisposition,
+}
+
+impl DeactivationToken {
+    pub(super) fn component_id(&self) -> &str {
+        self.component_id.as_str()
+    }
+
+    pub(super) const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_dispose_disposition(mut self) -> Self {
+        self.disposition = DeactivationDisposition::Dispose;
+        self
     }
 }
 
@@ -143,6 +173,7 @@ impl ActivationToken {
 #[cfg_attr(not(test), allow(dead_code))]
 pub(super) enum ComponentFailureOperation {
     Activation,
+    Deactivation,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -150,6 +181,7 @@ impl ComponentFailureOperation {
     pub(super) const fn as_str(self) -> &'static str {
         match self {
             Self::Activation => "activation",
+            Self::Deactivation => "deactivation",
         }
     }
 }
@@ -160,18 +192,29 @@ impl ComponentFailureOperation {
 pub(super) enum ComponentFailureReason {
     ActivationRejected,
     ActivationCancelled,
+    QuiescenceRejected,
+    EffectDisposalRejected,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
 impl ComponentFailureReason {
     const fn operation(self) -> ComponentFailureOperation {
-        ComponentFailureOperation::Activation
+        match self {
+            Self::ActivationRejected | Self::ActivationCancelled => {
+                ComponentFailureOperation::Activation
+            }
+            Self::QuiescenceRejected | Self::EffectDisposalRejected => {
+                ComponentFailureOperation::Deactivation
+            }
+        }
     }
 
     pub(super) const fn code(self) -> &'static str {
         match self {
             Self::ActivationRejected => "activation_rejected",
             Self::ActivationCancelled => "activation_cancelled",
+            Self::QuiescenceRejected => "quiescence_rejected",
+            Self::EffectDisposalRejected => "effect_disposal_rejected",
         }
     }
 
@@ -179,6 +222,8 @@ impl ComponentFailureReason {
         match self {
             Self::ActivationRejected => "component activation was rejected",
             Self::ActivationCancelled => "component activation was cancelled",
+            Self::QuiescenceRejected => "component quiescence was rejected",
+            Self::EffectDisposalRejected => "component effect disposal was rejected",
         }
     }
 }
@@ -203,6 +248,7 @@ pub(super) struct ReconciliationReport {
     pub(super) capability_change: Option<CapabilityChange>,
     pub(super) affected_components: Vec<String>,
     pub(super) transitions: Vec<ComponentTransition>,
+    pub(super) deactivation_requests: Vec<DeactivationToken>,
     pub(super) activation_requests: Vec<ActivationToken>,
     pub(super) failures: Vec<ComponentFailureSnapshot>,
 }
@@ -230,6 +276,7 @@ pub(super) struct ComponentSnapshot {
     pub(super) provides: Vec<String>,
 }
 
+#[derive(Clone)]
 struct ComponentRecord {
     definition: ComponentDefinition,
     state: ComponentState,
@@ -276,6 +323,16 @@ pub(super) enum ComponentGraphError {
         expected: u64,
         current: u64,
     },
+    #[error("component `{component_id}` is not deactivating")]
+    NotDeactivating { component_id: String },
+    #[error(
+        "component `{component_id}` deactivation epoch is stale (expected {expected}, current {current})"
+    )]
+    StaleDeactivation {
+        component_id: String,
+        expected: u64,
+        current: u64,
+    },
     #[error("component `{component_id}` is not failed")]
     NotFailed { component_id: String },
     #[error("component `{component_id}` failure is not recoverable")]
@@ -290,7 +347,7 @@ pub(super) enum ComponentGraphError {
 ///
 /// capability mutation 只通过反向依赖索引 reconcile 受影响 component。依赖齐全只会产生
 /// 带 epoch 的 activation request；host 明确确认成功后，component 才能进入 `Active`。
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct ComponentGraph {
     capabilities: BTreeMap<CapabilityKey, String>,
     capability_generations: BTreeMap<CapabilityKey, u64>,
@@ -387,6 +444,56 @@ impl ComponentGraph {
         self.ensure_activation_epochs_available(key, true)
     }
 
+    pub(super) fn validate_activation_epoch(
+        &self,
+        component_id: &str,
+    ) -> Result<(), ComponentGraphError> {
+        let record = self.components.get(component_id).ok_or_else(|| {
+            ComponentGraphError::UnknownComponent {
+                component_id: component_id.to_string(),
+            }
+        })?;
+        if record.epoch == u64::MAX {
+            return Err(ComponentGraphError::ActivationEpochExhausted {
+                component_id: component_id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    pub(super) fn activation_closure(
+        &self,
+        component_ids: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Result<Vec<String>, ComponentGraphError> {
+        let mut pending = component_ids
+            .into_iter()
+            .map(Into::into)
+            .collect::<Vec<_>>();
+        let mut closure = BTreeSet::new();
+        while let Some(component_id) = pending.pop() {
+            let record = self.components.get(&component_id).ok_or_else(|| {
+                ComponentGraphError::UnknownComponent {
+                    component_id: component_id.clone(),
+                }
+            })?;
+            if !closure.insert(component_id) {
+                continue;
+            }
+            for capability in &record.definition.provides {
+                for dependent_id in self.dependents_for_key(capability) {
+                    let dependent = self
+                        .components
+                        .get(&dependent_id)
+                        .expect("dependency index should reference a declared component");
+                    if dependent.definition.required.contains(capability) {
+                        pending.push(dependent_id);
+                    }
+                }
+            }
+        }
+        Ok(closure.into_iter().collect())
+    }
+
     pub(super) fn replace_capability(
         &mut self,
         provider_component: &str,
@@ -434,6 +541,120 @@ impl ComponentGraph {
         Ok(report)
     }
 
+    pub(super) fn complete_activation_and_publish(
+        &mut self,
+        token: ActivationToken,
+    ) -> Result<Vec<ReconciliationReport>, ComponentGraphError> {
+        let component_id = token.component_id.clone();
+        let mut tentative = self.clone();
+        let mut reports = vec![tentative.complete_activation(token)?];
+        for capability in tentative.provided_capabilities(&component_id)? {
+            let publication = if tentative.has_capability_generation(&capability) {
+                tentative.replace_capability(&component_id, &capability)?
+            } else {
+                tentative.add_capability(&component_id, capability)?
+            };
+            reports.push(publication);
+        }
+        *self = tentative;
+        Ok(reports)
+    }
+
+    pub(super) fn complete_deactivation(
+        &mut self,
+        token: DeactivationToken,
+    ) -> Result<ReconciliationReport, ComponentGraphError> {
+        self.validate_deactivation_token(&token)?;
+        let component_id = token.component_id.clone();
+        let mut report = self.report_for_component(component_id.clone());
+        self.transition(&component_id, ComponentState::Disposed, &mut report);
+        match token.disposition {
+            DeactivationDisposition::Reconcile => {
+                self.reconcile_component(&component_id, &mut report, true)?;
+            }
+            DeactivationDisposition::Suspend => {
+                self.transition(&component_id, ComponentState::Pending, &mut report);
+            }
+            DeactivationDisposition::Dispose => {}
+        }
+        self.refresh_report_failures(&mut report);
+        Ok(report)
+    }
+
+    pub(super) fn deactivate(
+        &mut self,
+        component_id: &str,
+    ) -> Result<ReconciliationReport, ComponentGraphError> {
+        self.begin_deactivation(component_id, DeactivationDisposition::Dispose)
+    }
+
+    pub(super) fn suspend(
+        &mut self,
+        component_id: &str,
+    ) -> Result<ReconciliationReport, ComponentGraphError> {
+        self.begin_deactivation(component_id, DeactivationDisposition::Suspend)
+    }
+
+    fn begin_deactivation(
+        &mut self,
+        component_id: &str,
+        disposition: DeactivationDisposition,
+    ) -> Result<ReconciliationReport, ComponentGraphError> {
+        let state = self
+            .components
+            .get(component_id)
+            .ok_or_else(|| ComponentGraphError::UnknownComponent {
+                component_id: component_id.to_string(),
+            })?
+            .state;
+        let mut report = self.report_for_component(component_id.to_string());
+        match state {
+            ComponentState::Active => {
+                self.transition(component_id, ComponentState::Deactivating, &mut report);
+                let epoch = self
+                    .components
+                    .get(component_id)
+                    .expect("component should remain declared during deactivation")
+                    .epoch;
+                report.deactivation_requests.push(DeactivationToken {
+                    component_id: component_id.to_string(),
+                    epoch,
+                    disposition,
+                });
+            }
+            ComponentState::Deactivating => {}
+            _ => {
+                let target = match disposition {
+                    DeactivationDisposition::Suspend => ComponentState::Pending,
+                    DeactivationDisposition::Reconcile | DeactivationDisposition::Dispose => {
+                        ComponentState::Disposed
+                    }
+                };
+                if state != target {
+                    self.clear_failure(component_id);
+                    self.transition(component_id, target, &mut report);
+                }
+            }
+        }
+        self.refresh_report_failures(&mut report);
+        Ok(report)
+    }
+
+    pub(super) fn activate(
+        &mut self,
+        component_id: &str,
+    ) -> Result<ReconciliationReport, ComponentGraphError> {
+        if !self.components.contains_key(component_id) {
+            return Err(ComponentGraphError::UnknownComponent {
+                component_id: component_id.to_string(),
+            });
+        }
+        let mut report = self.report_for_component(component_id.to_string());
+        self.reconcile_component(component_id, &mut report, true)?;
+        self.refresh_report_failures(&mut report);
+        Ok(report)
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn fail_activation(
         &mut self,
@@ -442,6 +663,32 @@ impl ComponentGraph {
         recoverable: bool,
     ) -> Result<ReconciliationReport, ComponentGraphError> {
         self.validate_activation_token(&token)?;
+        let component_id = token.component_id.clone();
+        let failure = ComponentFailureSnapshot {
+            component_id: component_id.clone(),
+            operation: reason.operation(),
+            reason,
+            recoverable,
+            epoch: token.epoch,
+        };
+        self.components
+            .get_mut(&component_id)
+            .expect("validated component should remain declared")
+            .failure = Some(failure);
+        let mut report = self.report_for_component(component_id.clone());
+        self.transition(&component_id, ComponentState::Failed, &mut report);
+        self.refresh_report_failures(&mut report);
+        Ok(report)
+    }
+
+    pub(super) fn fail_deactivation(
+        &mut self,
+        token: DeactivationToken,
+        reason: ComponentFailureReason,
+        recoverable: bool,
+    ) -> Result<ReconciliationReport, ComponentGraphError> {
+        self.validate_deactivation_token(&token)?;
+        debug_assert_eq!(reason.operation(), ComponentFailureOperation::Deactivation);
         let component_id = token.component_id.clone();
         let failure = ComponentFailureSnapshot {
             component_id: component_id.clone(),
@@ -502,7 +749,7 @@ impl ComponentGraph {
     }
 
     #[cfg(test)]
-    fn inject_epoch_exhaustion(&mut self, component_id: &str) {
+    pub(super) fn inject_epoch_exhaustion(&mut self, component_id: &str) {
         self.components
             .get_mut(component_id)
             .expect("component should exist before epoch exhaustion is injected")
@@ -510,7 +757,7 @@ impl ComponentGraph {
     }
 
     #[cfg(test)]
-    fn inject_generation_exhaustion(&mut self, key: CapabilityKey) {
+    pub(super) fn inject_generation_exhaustion(&mut self, key: CapabilityKey) {
         self.capability_generations.insert(key, u64::MAX);
     }
 
@@ -540,6 +787,22 @@ impl ComponentGraph {
 
     pub(super) fn has_capability(&self, key: &CapabilityKey) -> bool {
         self.capabilities.contains_key(key)
+    }
+
+    pub(super) fn has_capability_generation(&self, key: &CapabilityKey) -> bool {
+        self.capability_generations.contains_key(key)
+    }
+
+    pub(super) fn provided_capabilities(
+        &self,
+        component_id: &str,
+    ) -> Result<Vec<CapabilityKey>, ComponentGraphError> {
+        let record = self.components.get(component_id).ok_or_else(|| {
+            ComponentGraphError::UnknownComponent {
+                component_id: component_id.to_string(),
+            }
+        })?;
+        Ok(record.definition.provides.iter().cloned().collect())
     }
 
     /// 返回 required provider edge 的稳定 provider-first 顺序。
@@ -703,41 +966,71 @@ impl ComponentGraph {
         report: &mut ReconciliationReport,
     ) -> Result<(), ComponentGraphError> {
         for id in component_ids {
-            let record = self
-                .components
-                .get(id)
-                .expect("dependency index should reference a declared component");
-            let required_ready = record
-                .definition
-                .required
-                .iter()
-                .all(|required| self.capabilities.contains_key(required));
-            let state = record.state;
-            match (state, required_ready) {
-                (
-                    ComponentState::Declared | ComponentState::Pending | ComponentState::Disposed,
-                    true,
-                ) => self.begin_activation(id, report)?,
-                (
-                    ComponentState::Declared | ComponentState::Pending | ComponentState::Disposed,
-                    false,
-                ) => {
-                    if state != ComponentState::Pending {
-                        self.clear_failure(id);
-                        self.transition(id, ComponentState::Pending, report);
-                    }
-                }
-                (ComponentState::Activating | ComponentState::Failed, false) => {
+            self.reconcile_component(id, report, false)?;
+        }
+        Ok(())
+    }
+
+    fn reconcile_component(
+        &mut self,
+        id: &str,
+        report: &mut ReconciliationReport,
+        may_reactivate_disposed: bool,
+    ) -> Result<(), ComponentGraphError> {
+        let record = self
+            .components
+            .get(id)
+            .expect("dependency index should reference a declared component");
+        let required_ready = record
+            .definition
+            .required
+            .iter()
+            .all(|required| self.capabilities.contains_key(required));
+        let state = record.state;
+        match (state, required_ready) {
+            (ComponentState::Declared | ComponentState::Pending, true) => {
+                self.begin_activation(id, report)?;
+            }
+            (ComponentState::Disposed, true) if may_reactivate_disposed => {
+                self.begin_activation(id, report)?;
+            }
+            (ComponentState::Declared | ComponentState::Pending, false) => {
+                if state != ComponentState::Pending {
                     self.clear_failure(id);
                     self.transition(id, ComponentState::Pending, report);
                 }
-                (ComponentState::Active, false) => {
-                    self.transition(id, ComponentState::Deactivating, report);
-                    self.transition(id, ComponentState::Disposed, report);
-                    self.transition(id, ComponentState::Pending, report);
-                }
-                _ => {}
             }
+            (ComponentState::Disposed, false) if may_reactivate_disposed => {
+                self.clear_failure(id);
+                self.transition(id, ComponentState::Pending, report);
+            }
+            (ComponentState::Failed, false)
+                if self.components.get(id).is_some_and(|record| {
+                    record.failure.as_ref().is_some_and(|failure| {
+                        failure.operation == ComponentFailureOperation::Deactivation
+                    })
+                }) => {}
+            (ComponentState::Activating | ComponentState::Failed, false) => {
+                self.clear_failure(id);
+                self.transition(id, ComponentState::Pending, report);
+            }
+            (ComponentState::Active, false) => {
+                self.transition(id, ComponentState::Deactivating, report);
+                let epoch = self
+                    .components
+                    .get(id)
+                    .expect("component should remain declared during deactivation")
+                    .epoch;
+                report.deactivation_requests.push(DeactivationToken {
+                    component_id: id.to_string(),
+                    epoch,
+                    disposition: DeactivationDisposition::Reconcile,
+                });
+            }
+            // `Disposed` 是 explicit removal 的稳定状态；只有显式 activate 或 dependency-loss
+            // acknowledgement 才能重新进入 reconciliation，普通 coeffect 通知不能复活它。
+            (ComponentState::Disposed, _) => {}
+            _ => {}
         }
         Ok(())
     }
@@ -825,6 +1118,30 @@ impl ComponentGraph {
         }
         if record.state != ComponentState::Activating {
             return Err(ComponentGraphError::NotActivating {
+                component_id: token.component_id.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_deactivation_token(
+        &self,
+        token: &DeactivationToken,
+    ) -> Result<(), ComponentGraphError> {
+        let record = self.components.get(&token.component_id).ok_or_else(|| {
+            ComponentGraphError::UnknownComponent {
+                component_id: token.component_id.clone(),
+            }
+        })?;
+        if record.epoch != token.epoch {
+            return Err(ComponentGraphError::StaleDeactivation {
+                component_id: token.component_id.clone(),
+                expected: token.epoch,
+                current: record.epoch,
+            });
+        }
+        if record.state != ComponentState::Deactivating {
+            return Err(ComponentGraphError::NotDeactivating {
                 component_id: token.component_id.clone(),
             });
         }
@@ -1146,18 +1463,31 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 ("a-agent", ComponentState::Deactivating),
-                ("a-agent", ComponentState::Disposed),
-                ("a-agent", ComponentState::Pending),
                 ("z-agent", ComponentState::Deactivating),
-                ("z-agent", ComponentState::Disposed),
-                ("z-agent", ComponentState::Pending),
-                ("a-agent", ComponentState::Activating),
-                ("z-agent", ComponentState::Activating),
             ]
         );
         assert_eq!(
             replacement
-                .activation_requests
+                .deactivation_requests
+                .iter()
+                .map(|token| (token.component_id(), token.epoch()))
+                .collect::<Vec<_>>(),
+            vec![("a-agent", 1), ("z-agent", 1)]
+        );
+        assert!(replacement.activation_requests.is_empty());
+        assert_eq!(graph.state("a-agent"), Some(ComponentState::Deactivating));
+        assert_eq!(graph.state("z-agent"), Some(ComponentState::Deactivating));
+
+        let mut activation_tokens = Vec::new();
+        for token in replacement.deactivation_requests.into_iter().rev() {
+            let completion = graph
+                .complete_deactivation(token)
+                .expect("current deactivation should complete");
+            activation_tokens.extend(completion.activation_requests);
+        }
+        activation_tokens.sort_by(|left, right| left.component_id().cmp(right.component_id()));
+        assert_eq!(
+            activation_tokens
                 .iter()
                 .map(|token| (token.component_id(), token.epoch()))
                 .collect::<Vec<_>>(),
@@ -1227,7 +1557,7 @@ mod tests {
     }
 
     #[test]
-    fn removing_required_capability_disposes_the_active_dependent() {
+    fn removing_required_capability_waits_for_concrete_deactivation() {
         let mut graph = ComponentGraph::default();
         declare_provider(&mut graph, "llm-provider", "llm");
         graph
@@ -1244,29 +1574,15 @@ mod tests {
             .remove_capability("llm-provider", &CapabilityKey::from("llm"))
             .expect("required capability removal should reconcile");
 
-        assert_eq!(graph.state("agent"), Some(ComponentState::Pending));
+        assert_eq!(graph.state("agent"), Some(ComponentState::Deactivating));
         assert_eq!(
             removed.transitions,
-            vec![
-                ComponentTransition {
-                    component_id: "agent".to_string(),
-                    from: ComponentState::Active,
-                    to: ComponentState::Deactivating,
-                    epoch: 1,
-                },
-                ComponentTransition {
-                    component_id: "agent".to_string(),
-                    from: ComponentState::Deactivating,
-                    to: ComponentState::Disposed,
-                    epoch: 1,
-                },
-                ComponentTransition {
-                    component_id: "agent".to_string(),
-                    from: ComponentState::Disposed,
-                    to: ComponentState::Pending,
-                    epoch: 1,
-                },
-            ]
+            vec![ComponentTransition {
+                component_id: "agent".to_string(),
+                from: ComponentState::Active,
+                to: ComponentState::Deactivating,
+                epoch: 1,
+            }]
         );
         assert_eq!(
             removed
@@ -1275,11 +1591,96 @@ mod tests {
                 .map(|change| change.reason.as_str()),
             Some("removed")
         );
+        assert!(graph.pending().is_empty());
+        let completion = graph
+            .complete_deactivation(removed.deactivation_requests[0].clone())
+            .expect("current deactivation should complete");
+        assert_eq!(graph.state("agent"), Some(ComponentState::Pending));
         assert_eq!(
-            graph.pending()[0].missing_dependencies,
-            vec!["llm".to_string()]
+            completion
+                .transitions
+                .iter()
+                .map(|transition| transition.to)
+                .collect::<Vec<_>>(),
+            vec![ComponentState::Disposed, ComponentState::Pending]
         );
+        assert_eq!(graph.pending()[0].missing_dependencies, vec!["llm"]);
         assert!(graph.failures().is_empty());
+    }
+
+    #[test]
+    fn deactivation_failure_is_typed_and_completion_cannot_override_it() {
+        let mut graph = ComponentGraph::default();
+        declare_provider(&mut graph, "llm-provider", "llm");
+        graph
+            .add_capability("llm-provider", "llm")
+            .expect("initial capability should add");
+        let declaration = graph
+            .declare(ComponentDefinition::new("agent").requires("llm"))
+            .expect("consumer should declare");
+        graph
+            .complete_activation(declaration.activation_requests[0].clone())
+            .expect("initial activation should complete");
+
+        let removed = graph
+            .remove_capability("llm-provider", &CapabilityKey::from("llm"))
+            .expect("required capability should begin deactivation");
+        let token = removed.deactivation_requests[0].clone();
+        let failure = graph
+            .fail_deactivation(
+                token.clone(),
+                ComponentFailureReason::QuiescenceRejected,
+                false,
+            )
+            .expect("current deactivation should be fail-able");
+
+        assert_eq!(graph.state("agent"), Some(ComponentState::Failed));
+        assert_eq!(failure.failures[0].operation.as_str(), "deactivation");
+        assert_eq!(failure.failures[0].reason.code(), "quiescence_rejected");
+        assert_eq!(
+            graph.complete_deactivation(token),
+            Err(ComponentGraphError::NotDeactivating {
+                component_id: "agent".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn stale_deactivation_completion_cannot_modify_a_fresh_activation_epoch() {
+        let mut graph = ComponentGraph::default();
+        declare_provider(&mut graph, "llm-provider", "llm");
+        graph
+            .add_capability("llm-provider", "llm")
+            .expect("initial capability should add");
+        let declaration = graph
+            .declare(ComponentDefinition::new("agent").requires("llm"))
+            .expect("consumer should declare");
+        graph
+            .complete_activation(declaration.activation_requests[0].clone())
+            .expect("initial activation should complete");
+
+        let removed = graph
+            .remove_capability("llm-provider", &CapabilityKey::from("llm"))
+            .expect("required capability should begin deactivation");
+        let stale = removed.deactivation_requests[0].clone();
+        graph
+            .complete_deactivation(stale.clone())
+            .expect("current deactivation should complete");
+        graph
+            .add_capability("llm-provider", "llm")
+            .expect("capability recovery should begin a fresh epoch");
+
+        assert_eq!(graph.state("agent"), Some(ComponentState::Activating));
+        assert_eq!(graph.epoch("agent"), Some(2));
+        assert_eq!(
+            graph.complete_deactivation(stale),
+            Err(ComponentGraphError::StaleDeactivation {
+                component_id: "agent".to_string(),
+                expected: 1,
+                current: 2,
+            })
+        );
+        assert_eq!(graph.state("agent"), Some(ComponentState::Activating));
     }
 
     #[test]
@@ -1643,6 +2044,48 @@ mod tests {
             })
         );
         assert_eq!(graph.capabilities(), active_before);
+    }
+
+    #[test]
+    fn atomic_activation_publication_keeps_independent_change_reports() {
+        let mut graph = ComponentGraph::default();
+        let declaration = graph
+            .declare(
+                ComponentDefinition::new("provider")
+                    .provides("alpha")
+                    .provides("beta"),
+            )
+            .expect("provider declaration should activate");
+
+        let reports = graph
+            .complete_activation_and_publish(declaration.activation_requests[0].clone())
+            .expect("activation and publication should commit atomically");
+
+        assert_eq!(reports.len(), 3);
+        assert!(reports[0].capability_change.is_none());
+        assert_eq!(
+            reports[1]
+                .capability_change
+                .as_ref()
+                .map(|change| change.key.as_str()),
+            Some("alpha")
+        );
+        assert_eq!(
+            reports[2]
+                .capability_change
+                .as_ref()
+                .map(|change| change.key.as_str()),
+            Some("beta")
+        );
+        assert_eq!(
+            graph
+                .capabilities()
+                .into_iter()
+                .map(|capability| capability.key)
+                .collect::<Vec<_>>(),
+            vec!["alpha", "beta"]
+        );
+        assert_eq!(graph.state("provider"), Some(ComponentState::Active));
     }
 
     #[test]

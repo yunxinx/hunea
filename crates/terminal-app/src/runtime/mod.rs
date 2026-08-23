@@ -9,6 +9,7 @@ mod effect_scope;
 mod event_mapping;
 mod inspection;
 mod lifecycle;
+mod lifecycle_executor;
 mod llm_port;
 mod permission_policy;
 mod prompt_assembly;

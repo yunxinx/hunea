@@ -178,8 +178,113 @@ fn composition_snapshot_is_deterministic_and_redacted() {
 
     let snapshot: serde_json::Value =
         serde_json::from_str(&json).expect("snapshot JSON should decode");
-    assert_eq!(snapshot["schema_version"], 7);
+    assert_eq!(snapshot["schema_version"], 8);
     assert_eq!(snapshot["failures"], serde_json::json!([]));
+    assert_eq!(
+        snapshot["capabilities"],
+        serde_json::json!([
+            {
+                "key": "approval_provider",
+                "provider_component": "approval_provider",
+                "generation": 0,
+            },
+            {
+                "key": "llm_port",
+                "provider_component": "llm_port",
+                "generation": 0,
+            },
+            {
+                "key": "model_catalog",
+                "provider_component": "llm_port",
+                "generation": 0,
+            },
+            {
+                "key": "permission_policy",
+                "provider_component": "permission_policy",
+                "generation": 0,
+            },
+            {
+                "key": "prompt_assembly",
+                "provider_component": "prompt_assembly",
+                "generation": 0,
+            },
+            {
+                "key": "runtime_event_stream",
+                "provider_component": "runtime_event_stream",
+                "generation": 0,
+            },
+            {
+                "key": "session_persistence",
+                "provider_component": "session_persistence",
+                "generation": 0,
+            },
+            {
+                "key": "tool_catalog",
+                "provider_component": "tool_catalog",
+                "generation": 0,
+            },
+        ])
+    );
+    assert_eq!(
+        names(&snapshot["components"]),
+        vec![
+            "approval_provider",
+            "llm_port",
+            "model_refresh",
+            "native_agent_runtime",
+            "permission_policy",
+            "prompt_assembly",
+            "runtime_event_stream",
+            "runtime_wake_binding",
+            "session_persistence",
+            "tool_catalog",
+            "ui_runtime_bridge",
+        ]
+    );
+    for (component_id, provides) in [
+        ("approval_provider", &["approval_provider"][..]),
+        ("llm_port", &["llm_port", "model_catalog"][..]),
+        ("permission_policy", &["permission_policy"][..]),
+        ("prompt_assembly", &["prompt_assembly"][..]),
+        ("runtime_event_stream", &["runtime_event_stream"][..]),
+        ("runtime_wake_binding", &["runtime_wake"][..]),
+        ("session_persistence", &["session_persistence"][..]),
+        ("tool_catalog", &["tool_catalog"][..]),
+    ] {
+        assert_eq!(component_provides(&snapshot, component_id), provides);
+    }
+    assert_eq!(
+        snapshot["activation_order"],
+        serde_json::json!([
+            "approval_provider",
+            "llm_port",
+            "model_refresh",
+            "permission_policy",
+            "runtime_event_stream",
+            "runtime_wake_binding",
+            "session_persistence",
+            "tool_catalog",
+            "prompt_assembly",
+            "native_agent_runtime",
+            "ui_runtime_bridge",
+        ])
+    );
+    assert_eq!(
+        snapshot["deactivation_order"],
+        serde_json::json!([
+            "ui_runtime_bridge",
+            "native_agent_runtime",
+            "prompt_assembly",
+            "tool_catalog",
+            "session_persistence",
+            "runtime_wake_binding",
+            "runtime_event_stream",
+            "permission_policy",
+            "model_refresh",
+            "llm_port",
+            "approval_provider",
+        ])
+    );
     assert_eq!(
         snapshot["pending"],
         serde_json::json!([{
@@ -561,6 +666,23 @@ fn component_required(snapshot: &serde_json::Value, component_id: &str) -> Vec<S
         .map(|key| {
             key.as_str()
                 .expect("required capability should be a string")
+                .to_string()
+        })
+        .collect()
+}
+
+fn component_provides(snapshot: &serde_json::Value, component_id: &str) -> Vec<String> {
+    snapshot["components"]
+        .as_array()
+        .expect("components should be an array")
+        .iter()
+        .find(|component| component["id"] == component_id)
+        .and_then(|component| component["provides"].as_array())
+        .expect("component should expose provided capabilities")
+        .iter()
+        .map(|key| {
+            key.as_str()
+                .expect("provided capability should be a string")
                 .to_string()
         })
         .collect()

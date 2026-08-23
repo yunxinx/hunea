@@ -23,6 +23,49 @@ use super::{
 };
 use terminal_ui::RuntimeWake;
 
+#[derive(Clone, Copy)]
+struct CapabilityOwner {
+    component_id: &'static str,
+    capability: &'static str,
+}
+
+const APPROVAL_PROVIDER: CapabilityOwner = CapabilityOwner {
+    component_id: "approval_provider",
+    capability: "approval_provider",
+};
+const LLM_PORT: CapabilityOwner = CapabilityOwner {
+    component_id: "llm_port",
+    capability: "llm_port",
+};
+const MODEL_CATALOG: CapabilityOwner = CapabilityOwner {
+    component_id: "llm_port",
+    capability: "model_catalog",
+};
+const PERMISSION_POLICY: CapabilityOwner = CapabilityOwner {
+    component_id: "permission_policy",
+    capability: "permission_policy",
+};
+const PROMPT_ASSEMBLY: CapabilityOwner = CapabilityOwner {
+    component_id: "prompt_assembly",
+    capability: "prompt_assembly",
+};
+const RUNTIME_EVENT_STREAM: CapabilityOwner = CapabilityOwner {
+    component_id: "runtime_event_stream",
+    capability: "runtime_event_stream",
+};
+const RUNTIME_WAKE: CapabilityOwner = CapabilityOwner {
+    component_id: "runtime_wake_binding",
+    capability: "runtime_wake",
+};
+const SESSION_PERSISTENCE: CapabilityOwner = CapabilityOwner {
+    component_id: "session_persistence",
+    capability: "session_persistence",
+};
+const TOOL_CATALOG: CapabilityOwner = CapabilityOwner {
+    component_id: "tool_catalog",
+    capability: "tool_catalog",
+};
+
 /// `RuntimeComponents` 是 coordinator 的长期 runtime owner。
 ///
 /// 它把 native Agent adapter、host workers、tool view、notifier 和 lifecycle graph 放在
@@ -152,51 +195,22 @@ impl RuntimeComponents {
     }
 
     fn initialize_lifecycle(&mut self, has_session_backend: bool) -> Result<(), String> {
-        declare_component(
-            &mut self.lifecycle,
-            ComponentDefinition::new("native_agent_runtime")
-                .requires("llm_port")
-                .requires("model_catalog")
-                .requires("permission_policy")
-                .requires("prompt_assembly")
-                .requires("tool_catalog")
-                .observes("session_persistence"),
-        )?;
-        declare_component(
-            &mut self.lifecycle,
-            ComponentDefinition::new("model_refresh")
-                .requires("llm_port")
-                .requires("model_catalog"),
-        )?;
-        declare_component(
-            &mut self.lifecycle,
-            ComponentDefinition::new("permission_policy").requires("approval_provider"),
-        )?;
-        declare_component(
-            &mut self.lifecycle,
-            ComponentDefinition::new("prompt_assembly")
-                .requires("tool_catalog")
-                .observes("session_persistence"),
-        )?;
-        declare_component(
-            &mut self.lifecycle,
-            ComponentDefinition::new("ui_runtime_bridge")
-                .requires("runtime_event_stream")
-                .requires("runtime_wake"),
-        )?;
+        for definition in runtime_component_definitions() {
+            declare_component(&mut self.lifecycle, definition)?;
+        }
         for capability in [
-            "approval_provider",
-            "llm_port",
-            "model_catalog",
-            "permission_policy",
-            "prompt_assembly",
-            "runtime_event_stream",
-            "tool_catalog",
+            APPROVAL_PROVIDER,
+            LLM_PORT,
+            MODEL_CATALOG,
+            PERMISSION_POLICY,
+            PROMPT_ASSEMBLY,
+            RUNTIME_EVENT_STREAM,
+            TOOL_CATALOG,
         ] {
             publish_capability(&mut self.lifecycle, capability)?;
         }
         if has_session_backend {
-            publish_capability(&mut self.lifecycle, "session_persistence")?;
+            publish_capability(&mut self.lifecycle, SESSION_PERSISTENCE)?;
         }
         Ok(())
     }
@@ -220,7 +234,7 @@ impl RuntimeComponents {
             })
             .map_err(|error| error.to_string())?;
         self.runtime_wake_scope = Some(scope);
-        if let Err(error) = publish_capability(&mut self.lifecycle, "runtime_wake") {
+        if let Err(error) = publish_capability(&mut self.lifecycle, RUNTIME_WAKE) {
             return Err(dispose_scopes_after_error(
                 error,
                 self.runtime_wake_scope.take(),
@@ -230,9 +244,7 @@ impl RuntimeComponents {
     }
 
     pub(super) fn remove_runtime_wake(&mut self) -> Result<(), String> {
-        self.lifecycle
-            .remove_capability(&CapabilityKey::from("runtime_wake"))
-            .map_err(|error| error.to_string())?;
+        remove_capability(&mut self.lifecycle, RUNTIME_WAKE)?;
         dispose_scope(&mut self.runtime_wake_scope)?;
         Ok(())
     }
@@ -269,13 +281,8 @@ impl RuntimeComponents {
         if self.is_shutdown {
             return Err("Runtime components are shut down".to_string());
         }
-        let session_capability = CapabilityKey::from("session_persistence");
-        self.lifecycle
-            .validate_replacement(&session_capability)
-            .map_err(|error| error.to_string())?;
-        self.lifecycle
-            .remove_capability(&session_capability)
-            .map_err(|error| error.to_string())?;
+        validate_capability_replacement(&self.lifecycle, SESSION_PERSISTENCE)?;
+        remove_capability(&mut self.lifecycle, SESSION_PERSISTENCE)?;
 
         let mut failures = Vec::new();
         if let Err(error) = self.agent_runtime.shutdown() {
@@ -337,7 +344,7 @@ impl RuntimeComponents {
         self.session_port = fresh_session_port;
         self.session_backend_views = Some(fresh_views);
         self.session_backend_scope = fresh_scope;
-        replace_capability(&mut self.lifecycle, &session_capability);
+        replace_capability(&mut self.lifecycle, SESSION_PERSISTENCE);
         Ok(())
     }
 
@@ -403,19 +410,12 @@ impl RuntimeComponents {
         if self.is_shutdown {
             return Err("Runtime components are shut down".to_string());
         }
-        let replaced = [
-            CapabilityKey::from("approval_provider"),
-            CapabilityKey::from("permission_policy"),
-        ];
-        for key in &replaced {
-            self.lifecycle
-                .validate_replacement(key)
-                .map_err(|error| error.to_string())?;
+        let replaced = [APPROVAL_PROVIDER, PERMISSION_POLICY];
+        for capability in replaced {
+            validate_capability_replacement(&self.lifecycle, capability)?;
         }
-        for key in &replaced {
-            self.lifecycle
-                .remove_capability(key)
-                .map_err(|error| error.to_string())?;
+        for capability in replaced {
+            remove_capability(&mut self.lifecycle, capability)?;
         }
 
         let mut failures = Vec::new();
@@ -471,8 +471,8 @@ impl RuntimeComponents {
         self.permission_provider_id = provider_id;
         self.permission_policy_scope = Some(fresh_policy_scope);
         self.agent_runtime = fresh_agent_runtime;
-        for key in replaced {
-            replace_capability(&mut self.lifecycle, &key);
+        for capability in replaced {
+            replace_capability(&mut self.lifecycle, capability);
         }
         Ok(())
     }
@@ -485,21 +485,12 @@ impl RuntimeComponents {
         if self.is_shutdown {
             return Err("Runtime components are shut down".to_string());
         }
-        let replaced = [
-            CapabilityKey::from("llm_port"),
-            CapabilityKey::from("model_catalog"),
-            CapabilityKey::from("prompt_assembly"),
-            CapabilityKey::from("tool_catalog"),
-        ];
-        for key in &replaced {
-            self.lifecycle
-                .validate_replacement(key)
-                .map_err(|error| error.to_string())?;
+        let replaced = [LLM_PORT, MODEL_CATALOG, PROMPT_ASSEMBLY, TOOL_CATALOG];
+        for capability in replaced {
+            validate_capability_replacement(&self.lifecycle, capability)?;
         }
-        for key in &replaced {
-            self.lifecycle
-                .remove_capability(key)
-                .map_err(|error| error.to_string())?;
+        for capability in replaced {
+            remove_capability(&mut self.lifecycle, capability)?;
         }
 
         let mut failures = Vec::new();
@@ -616,8 +607,8 @@ impl RuntimeComponents {
         self.llm_port_scope = Some(fresh_llm_port_scope);
         self.prompt_assembly_scope = Some(fresh_prompt_assembly_scope);
         self.session_workspace_tools = session_workspace_tools;
-        for key in replaced {
-            replace_capability(&mut self.lifecycle, &key);
+        for capability in replaced {
+            replace_capability(&mut self.lifecycle, capability);
         }
         Ok(())
     }
@@ -631,18 +622,18 @@ impl RuntimeComponents {
         if let Err(error) = self.remove_runtime_wake() {
             failures.push(error);
         }
-        for key in [
-            "approval_provider",
-            "llm_port",
-            "model_catalog",
-            "permission_policy",
-            "prompt_assembly",
-            "runtime_event_stream",
-            "tool_catalog",
-            "session_persistence",
+        for capability in [
+            APPROVAL_PROVIDER,
+            LLM_PORT,
+            MODEL_CATALOG,
+            PERMISSION_POLICY,
+            PROMPT_ASSEMBLY,
+            RUNTIME_EVENT_STREAM,
+            TOOL_CATALOG,
+            SESSION_PERSISTENCE,
         ] {
-            if let Err(error) = self.lifecycle.remove_capability(&CapabilityKey::from(key)) {
-                failures.push(error.to_string());
+            if let Err(error) = remove_capability(&mut self.lifecycle, capability) {
+                failures.push(error);
             }
         }
         if let Err(error) = self.agent_runtime.shutdown() {
@@ -698,6 +689,42 @@ impl RuntimeComponents {
     }
 }
 
+fn runtime_component_definitions() -> Vec<ComponentDefinition> {
+    vec![
+        ComponentDefinition::new(APPROVAL_PROVIDER.component_id)
+            .provides(APPROVAL_PROVIDER.capability),
+        ComponentDefinition::new(LLM_PORT.component_id)
+            .provides(LLM_PORT.capability)
+            .provides(MODEL_CATALOG.capability),
+        ComponentDefinition::new(RUNTIME_EVENT_STREAM.component_id)
+            .provides(RUNTIME_EVENT_STREAM.capability),
+        ComponentDefinition::new(RUNTIME_WAKE.component_id).provides(RUNTIME_WAKE.capability),
+        ComponentDefinition::new(SESSION_PERSISTENCE.component_id)
+            .provides(SESSION_PERSISTENCE.capability),
+        ComponentDefinition::new(TOOL_CATALOG.component_id).provides(TOOL_CATALOG.capability),
+        ComponentDefinition::new(PERMISSION_POLICY.component_id)
+            .requires(APPROVAL_PROVIDER.capability)
+            .provides(PERMISSION_POLICY.capability),
+        ComponentDefinition::new(PROMPT_ASSEMBLY.component_id)
+            .requires(TOOL_CATALOG.capability)
+            .observes(SESSION_PERSISTENCE.capability)
+            .provides(PROMPT_ASSEMBLY.capability),
+        ComponentDefinition::new("native_agent_runtime")
+            .requires(LLM_PORT.capability)
+            .requires(MODEL_CATALOG.capability)
+            .requires(PERMISSION_POLICY.capability)
+            .requires(PROMPT_ASSEMBLY.capability)
+            .requires(TOOL_CATALOG.capability)
+            .observes(SESSION_PERSISTENCE.capability),
+        ComponentDefinition::new("model_refresh")
+            .requires(LLM_PORT.capability)
+            .requires(MODEL_CATALOG.capability),
+        ComponentDefinition::new("ui_runtime_bridge")
+            .requires(RUNTIME_EVENT_STREAM.capability)
+            .requires(RUNTIME_WAKE.capability),
+    ]
+}
+
 fn declare_component(
     graph: &mut ComponentGraph,
     definition: ComponentDefinition,
@@ -711,18 +738,46 @@ fn declare_component(
 
 fn publish_capability(
     graph: &mut ComponentGraph,
-    key: impl Into<CapabilityKey>,
+    capability: CapabilityOwner,
 ) -> Result<(), String> {
     let report = graph
-        .add_capability(key)
+        .add_capability(capability.component_id, capability.capability)
         .map_err(|error| error.to_string())?;
     acknowledge_activations(graph, report);
     Ok(())
 }
 
-fn replace_capability(graph: &mut ComponentGraph, key: &CapabilityKey) {
+fn remove_capability(
+    graph: &mut ComponentGraph,
+    capability: CapabilityOwner,
+) -> Result<(), String> {
+    graph
+        .remove_capability(
+            capability.component_id,
+            &CapabilityKey::from(capability.capability),
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn validate_capability_replacement(
+    graph: &ComponentGraph,
+    capability: CapabilityOwner,
+) -> Result<(), String> {
+    graph
+        .validate_replacement(
+            capability.component_id,
+            &CapabilityKey::from(capability.capability),
+        )
+        .map_err(|error| error.to_string())
+}
+
+fn replace_capability(graph: &mut ComponentGraph, capability: CapabilityOwner) {
     let report = graph
-        .replace_capability(key)
+        .replace_capability(
+            capability.component_id,
+            &CapabilityKey::from(capability.capability),
+        )
         .expect("preflighted graph replacement must remain valid");
     acknowledge_activations(graph, report);
 }

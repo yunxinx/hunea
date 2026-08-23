@@ -58,6 +58,7 @@ pub(super) struct ComponentDefinition {
     pub(super) id: String,
     pub(super) required: BTreeSet<CapabilityKey>,
     pub(super) optional: BTreeSet<CapabilityKey>,
+    pub(super) provides: BTreeSet<CapabilityKey>,
 }
 
 impl ComponentDefinition {
@@ -66,6 +67,7 @@ impl ComponentDefinition {
             id: id.into(),
             required: BTreeSet::new(),
             optional: BTreeSet::new(),
+            provides: BTreeSet::new(),
         }
     }
 
@@ -76,6 +78,11 @@ impl ComponentDefinition {
 
     pub(super) fn observes(mut self, key: impl Into<CapabilityKey>) -> Self {
         self.optional.insert(key.into());
+        self
+    }
+
+    pub(super) fn provides(mut self, key: impl Into<CapabilityKey>) -> Self {
+        self.provides.insert(key.into());
         self
     }
 }
@@ -203,6 +210,7 @@ pub(super) struct ReconciliationReport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct CapabilitySnapshot {
     pub(super) key: String,
+    pub(super) provider_component: String,
     pub(super) generation: u64,
 }
 
@@ -219,6 +227,7 @@ pub(super) struct ComponentSnapshot {
     pub(super) epoch: u64,
     pub(super) required: Vec<String>,
     pub(super) optional: Vec<OptionalCapabilitySnapshot>,
+    pub(super) provides: Vec<String>,
 }
 
 struct ComponentRecord {
@@ -235,6 +244,28 @@ pub(super) enum ComponentGraphError {
     DuplicateComponent { component_id: String },
     #[error("component `{component_id}` is not declared")]
     UnknownComponent { component_id: String },
+    #[error(
+        "capability `{capability}` is provided by component `{existing_component_id}`, not `{requested_component_id}`"
+    )]
+    CapabilityProviderMismatch {
+        capability: String,
+        existing_component_id: String,
+        requested_component_id: String,
+    },
+    #[error("capability `{capability}` has no declared provider")]
+    UndeclaredCapabilityProvider { capability: String },
+    #[error("capability `{capability}` is already provided by component `{existing_component_id}`")]
+    DuplicateCapabilityProvider {
+        capability: String,
+        existing_component_id: String,
+    },
+    #[error("component `{component_id}` requires its own capability `{capability}`")]
+    SelfDependency {
+        component_id: String,
+        capability: String,
+    },
+    #[error("required capability topology contains a cycle involving {component_ids:?}")]
+    DependencyCycle { component_ids: Vec<String> },
     #[error("component `{component_id}` is not activating")]
     NotActivating { component_id: String },
     #[error(
@@ -261,9 +292,10 @@ pub(super) enum ComponentGraphError {
 /// 带 epoch 的 activation request；host 明确确认成功后，component 才能进入 `Active`。
 #[derive(Default)]
 pub(super) struct ComponentGraph {
-    capabilities: BTreeSet<CapabilityKey>,
+    capabilities: BTreeMap<CapabilityKey, String>,
     capability_generations: BTreeMap<CapabilityKey, u64>,
     components: BTreeMap<String, ComponentRecord>,
+    providers: BTreeMap<CapabilityKey, String>,
     dependents: BTreeMap<CapabilityKey, BTreeSet<String>>,
 }
 
@@ -277,11 +309,16 @@ impl ComponentGraph {
             return Err(ComponentGraphError::DuplicateComponent { component_id: id });
         }
 
+        self.validate_definition(&definition)?;
+
         for dependency in definition.required.iter().chain(&definition.optional) {
             self.dependents
                 .entry(dependency.clone())
                 .or_default()
                 .insert(id.clone());
+        }
+        for capability in &definition.provides {
+            self.providers.insert(capability.clone(), id.clone());
         }
         self.components.insert(
             id.clone(),
@@ -297,14 +334,17 @@ impl ComponentGraph {
 
     pub(super) fn add_capability(
         &mut self,
+        provider_component: &str,
         key: impl Into<CapabilityKey>,
     ) -> Result<ReconciliationReport, ComponentGraphError> {
         let key = key.into();
-        if self.capabilities.contains(&key) {
+        self.validate_capability_provider(provider_component, &key)?;
+        if self.capabilities.contains_key(&key) {
             return Ok(ReconciliationReport::default());
         }
         self.ensure_activation_epochs_available(&key, false)?;
-        self.capabilities.insert(key.clone());
+        self.capabilities
+            .insert(key.clone(), provider_component.to_string());
         let generation = *self.capability_generations.entry(key.clone()).or_insert(0);
         let change = CapabilityChange {
             key: key.to_string(),
@@ -317,9 +357,11 @@ impl ComponentGraph {
 
     pub(super) fn remove_capability(
         &mut self,
+        provider_component: &str,
         key: &CapabilityKey,
     ) -> Result<ReconciliationReport, ComponentGraphError> {
-        if !self.capabilities.remove(key) {
+        self.validate_capability_provider(provider_component, key)?;
+        if self.capabilities.remove(key).is_none() {
             return Ok(ReconciliationReport::default());
         }
         let change = CapabilityChange {
@@ -337,17 +379,20 @@ impl ComponentGraph {
     /// 为新 generation 创建唯一的 active owner。
     pub(super) fn validate_replacement(
         &self,
+        provider_component: &str,
         key: &CapabilityKey,
     ) -> Result<(), ComponentGraphError> {
+        self.validate_capability_provider(provider_component, key)?;
         self.next_capability_generation(key)?;
         self.ensure_activation_epochs_available(key, true)
     }
 
     pub(super) fn replace_capability(
         &mut self,
+        provider_component: &str,
         key: &CapabilityKey,
     ) -> Result<ReconciliationReport, ComponentGraphError> {
-        self.validate_replacement(key)?;
+        self.validate_replacement(provider_component, key)?;
         let was_available = self.capabilities.remove(key);
         let old_generation = self.capability_generations.get(key).copied();
         let new_generation = self.next_capability_generation(key)?;
@@ -364,10 +409,11 @@ impl ComponentGraph {
             affected_components: affected.clone(),
             ..ReconciliationReport::default()
         };
-        if was_available {
+        if was_available.is_some() {
             self.reconcile_into(&affected, &mut report)?;
         }
-        self.capabilities.insert(key.clone());
+        self.capabilities
+            .insert(key.clone(), provider_component.to_string());
         self.reconcile_into(&affected, &mut report)?;
         self.refresh_report_failures(&mut report);
         Ok(report)
@@ -478,21 +524,35 @@ impl ComponentGraph {
         if !record.definition.optional.contains(key) {
             return None;
         }
-        Some(self.capabilities.contains(key))
+        Some(self.capabilities.contains_key(key))
     }
 
     pub(super) fn capabilities(&self) -> Vec<CapabilitySnapshot> {
         self.capabilities
             .iter()
-            .map(|key| CapabilitySnapshot {
+            .map(|(key, provider_component)| CapabilitySnapshot {
                 key: key.to_string(),
+                provider_component: provider_component.clone(),
                 generation: self.capability_generations.get(key).copied().unwrap_or(0),
             })
             .collect()
     }
 
     pub(super) fn has_capability(&self, key: &CapabilityKey) -> bool {
-        self.capabilities.contains(key)
+        self.capabilities.contains_key(key)
+    }
+
+    /// 返回 required provider edge 的稳定 provider-first 顺序。
+    pub(super) fn activation_order(&self) -> Vec<String> {
+        topology_order(&self.component_definitions(), &self.providers)
+            .expect("declared component topology must remain acyclic")
+    }
+
+    /// 返回 activation order 的精确逆序，供 consumer-first teardown 使用。
+    pub(super) fn deactivation_order(&self) -> Vec<String> {
+        let mut order = self.activation_order();
+        order.reverse();
+        order
     }
 
     pub(super) fn components(&self) -> Vec<ComponentSnapshot> {
@@ -514,8 +574,14 @@ impl ComponentGraph {
                     .iter()
                     .map(|key| OptionalCapabilitySnapshot {
                         key: key.to_string(),
-                        available: self.capabilities.contains(key),
+                        available: self.capabilities.contains_key(key),
                     })
+                    .collect(),
+                provides: record
+                    .definition
+                    .provides
+                    .iter()
+                    .map(ToString::to_string)
                     .collect(),
             })
             .collect()
@@ -530,7 +596,8 @@ impl ComponentGraph {
                 missing_dependencies: record
                     .definition
                     .required
-                    .difference(&self.capabilities)
+                    .iter()
+                    .filter(|required| !self.capabilities.contains_key(*required))
                     .map(ToString::to_string)
                     .collect(),
             })
@@ -550,6 +617,67 @@ impl ComponentGraph {
             .into_iter()
             .flat_map(BTreeSet::iter)
             .cloned()
+            .collect()
+    }
+
+    fn validate_definition(
+        &self,
+        definition: &ComponentDefinition,
+    ) -> Result<(), ComponentGraphError> {
+        for capability in &definition.provides {
+            if let Some(existing_component_id) = self.providers.get(capability) {
+                return Err(ComponentGraphError::DuplicateCapabilityProvider {
+                    capability: capability.to_string(),
+                    existing_component_id: existing_component_id.clone(),
+                });
+            }
+            if definition.required.contains(capability) {
+                return Err(ComponentGraphError::SelfDependency {
+                    component_id: definition.id.clone(),
+                    capability: capability.to_string(),
+                });
+            }
+        }
+
+        let mut definitions = self.component_definitions();
+        definitions.insert(definition.id.clone(), definition.clone());
+        let mut providers = self.providers.clone();
+        for capability in &definition.provides {
+            providers.insert(capability.clone(), definition.id.clone());
+        }
+        topology_order(&definitions, &providers)?;
+        Ok(())
+    }
+
+    fn validate_capability_provider(
+        &self,
+        provider_component: &str,
+        capability: &CapabilityKey,
+    ) -> Result<(), ComponentGraphError> {
+        if !self.components.contains_key(provider_component) {
+            return Err(ComponentGraphError::UnknownComponent {
+                component_id: provider_component.to_string(),
+            });
+        }
+        let Some(existing_component_id) = self.providers.get(capability) else {
+            return Err(ComponentGraphError::UndeclaredCapabilityProvider {
+                capability: capability.to_string(),
+            });
+        };
+        if existing_component_id != provider_component {
+            return Err(ComponentGraphError::CapabilityProviderMismatch {
+                capability: capability.to_string(),
+                existing_component_id: existing_component_id.clone(),
+                requested_component_id: provider_component.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    fn component_definitions(&self) -> BTreeMap<String, ComponentDefinition> {
+        self.components
+            .iter()
+            .map(|(id, record)| (id.clone(), record.definition.clone()))
             .collect()
     }
 
@@ -579,7 +707,11 @@ impl ComponentGraph {
                 .components
                 .get(id)
                 .expect("dependency index should reference a declared component");
-            let required_ready = record.definition.required.is_subset(&self.capabilities);
+            let required_ready = record
+                .definition
+                .required
+                .iter()
+                .all(|required| self.capabilities.contains_key(required));
             let state = record.state;
             match (state, required_ready) {
                 (
@@ -648,7 +780,7 @@ impl ComponentGraph {
                 .definition
                 .required
                 .iter()
-                .all(|required| required == key || self.capabilities.contains(required));
+                .all(|required| required == key || self.capabilities.contains_key(required));
             let will_begin = if is_replacement {
                 record.definition.required.contains(key) && will_be_ready
             } else {
@@ -733,13 +865,111 @@ impl ComponentGraph {
     }
 }
 
+fn topology_order(
+    definitions: &BTreeMap<String, ComponentDefinition>,
+    providers: &BTreeMap<CapabilityKey, String>,
+) -> Result<Vec<String>, ComponentGraphError> {
+    let mut dependents = definitions
+        .keys()
+        .map(|id| (id.clone(), BTreeSet::new()))
+        .collect::<BTreeMap<_, _>>();
+    let mut incoming = definitions
+        .keys()
+        .map(|id| (id.clone(), 0_usize))
+        .collect::<BTreeMap<_, _>>();
+
+    for (consumer_id, definition) in definitions {
+        for required in &definition.required {
+            let Some(provider_id) = providers.get(required) else {
+                continue;
+            };
+            if dependents
+                .get_mut(provider_id)
+                .expect("provider index must reference a declared component")
+                .insert(consumer_id.clone())
+            {
+                *incoming
+                    .get_mut(consumer_id)
+                    .expect("consumer must remain declared") += 1;
+            }
+        }
+    }
+
+    let mut ready = incoming
+        .iter()
+        .filter(|(_, count)| **count == 0)
+        .map(|(id, _)| id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut order = Vec::with_capacity(definitions.len());
+    while let Some(id) = ready.pop_first() {
+        order.push(id.clone());
+        for dependent in dependents
+            .get(&id)
+            .expect("topology node must have a dependent set")
+        {
+            let count = incoming
+                .get_mut(dependent)
+                .expect("dependent must remain declared");
+            *count -= 1;
+            if *count == 0 {
+                ready.insert(dependent.clone());
+            }
+        }
+    }
+
+    if order.len() == definitions.len() {
+        Ok(order)
+    } else {
+        Err(ComponentGraphError::DependencyCycle {
+            component_ids: definitions
+                .keys()
+                .filter(|id| is_cycle_member(id, &dependents))
+                .cloned()
+                .collect(),
+        })
+    }
+}
+
+fn is_cycle_member(component_id: &str, dependents: &BTreeMap<String, BTreeSet<String>>) -> bool {
+    let mut pending = dependents
+        .get(component_id)
+        .into_iter()
+        .flat_map(BTreeSet::iter)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut visited = BTreeSet::new();
+    while let Some(current) = pending.pop() {
+        if current == component_id {
+            return true;
+        }
+        if visited.insert(current.clone())
+            && let Some(next) = dependents.get(&current)
+        {
+            pending.extend(next.iter().cloned());
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn declare_provider(graph: &mut ComponentGraph, component_id: &str, capability: &str) {
+        let report = graph
+            .declare(ComponentDefinition::new(component_id).provides(capability))
+            .expect("provider component should declare");
+        for token in report.activation_requests {
+            graph
+                .complete_activation(token)
+                .expect("provider activation should complete");
+        }
+    }
+
     #[test]
     fn missing_required_capability_keeps_component_pending() {
         let mut graph = ComponentGraph::default();
+        declare_provider(&mut graph, "llm-provider", "llm");
         let declaration = graph
             .declare(ComponentDefinition::new("agent").requires("llm"))
             .expect("unique component should declare");
@@ -762,7 +992,7 @@ mod tests {
         );
 
         let added = graph
-            .add_capability("llm")
+            .add_capability("llm-provider", "llm")
             .expect("capability add should reconcile");
         assert_eq!(graph.state("agent"), Some(ComponentState::Activating));
         assert_eq!(added.affected_components, vec!["agent"]);
@@ -789,8 +1019,9 @@ mod tests {
     #[test]
     fn activation_failure_is_redacted_and_retry_rejects_stale_completion() {
         let mut graph = ComponentGraph::default();
+        declare_provider(&mut graph, "llm-provider", "llm");
         graph
-            .add_capability("llm")
+            .add_capability("llm-provider", "llm")
             .expect("initial capability should add");
         let declaration = graph
             .declare(ComponentDefinition::new("agent").requires("llm"))
@@ -880,8 +1111,9 @@ mod tests {
     #[test]
     fn replacement_deactivates_all_dependents_before_deterministic_reactivation() {
         let mut graph = ComponentGraph::default();
+        declare_provider(&mut graph, "llm-provider", "llm");
         graph
-            .add_capability("llm")
+            .add_capability("llm-provider", "llm")
             .expect("initial capability should add");
         for id in ["z-agent", "a-agent"] {
             let declaration = graph
@@ -893,7 +1125,7 @@ mod tests {
         }
 
         let replacement = graph
-            .replace_capability(&CapabilityKey::from("llm"))
+            .replace_capability("llm-provider", &CapabilityKey::from("llm"))
             .expect("replacement should reconcile");
 
         assert_eq!(replacement.affected_components, vec!["a-agent", "z-agent"]);
@@ -937,6 +1169,8 @@ mod tests {
     #[test]
     fn observed_and_unrelated_capabilities_do_not_restart_components() {
         let mut graph = ComponentGraph::default();
+        declare_provider(&mut graph, "metrics-provider", "metrics");
+        declare_provider(&mut graph, "tracing-provider", "tracing");
         let declaration = graph
             .declare(ComponentDefinition::new("agent").observes("metrics"))
             .expect("unique component should declare");
@@ -945,14 +1179,14 @@ mod tests {
             .expect("initial activation should complete");
 
         let unrelated = graph
-            .add_capability("tracing")
+            .add_capability("tracing-provider", "tracing")
             .expect("unrelated capability should add");
         assert!(unrelated.affected_components.is_empty());
         assert!(unrelated.transitions.is_empty());
         assert_eq!(graph.epoch("agent"), Some(1));
 
         let observed = graph
-            .add_capability("metrics")
+            .add_capability("metrics-provider", "metrics")
             .expect("observed capability should add");
         assert_eq!(observed.affected_components, vec!["agent"]);
         assert!(observed.transitions.is_empty());
@@ -967,8 +1201,9 @@ mod tests {
     #[test]
     fn observed_change_does_not_retry_failed_component() {
         let mut graph = ComponentGraph::default();
+        declare_provider(&mut graph, "metrics-provider", "metrics");
         graph
-            .add_capability("metrics")
+            .add_capability("metrics-provider", "metrics")
             .expect("observed capability should add");
         let declaration = graph
             .declare(ComponentDefinition::new("agent").observes("metrics"))
@@ -982,7 +1217,7 @@ mod tests {
             .expect("current activation should be fail-able");
 
         let removed = graph
-            .remove_capability(&CapabilityKey::from("metrics"))
+            .remove_capability("metrics-provider", &CapabilityKey::from("metrics"))
             .expect("observed capability removal should reconcile");
         assert_eq!(removed.affected_components, vec!["agent"]);
         assert!(removed.transitions.is_empty());
@@ -994,8 +1229,9 @@ mod tests {
     #[test]
     fn removing_required_capability_disposes_the_active_dependent() {
         let mut graph = ComponentGraph::default();
+        declare_provider(&mut graph, "llm-provider", "llm");
         graph
-            .add_capability("llm")
+            .add_capability("llm-provider", "llm")
             .expect("initial capability should add");
         let declaration = graph
             .declare(ComponentDefinition::new("agent").requires("llm"))
@@ -1005,7 +1241,7 @@ mod tests {
             .expect("initial activation should complete");
 
         let removed = graph
-            .remove_capability(&CapabilityKey::from("llm"))
+            .remove_capability("llm-provider", &CapabilityKey::from("llm"))
             .expect("required capability removal should reconcile");
 
         assert_eq!(graph.state("agent"), Some(ComponentState::Pending));
@@ -1049,6 +1285,8 @@ mod tests {
     #[test]
     fn duplicate_declaration_and_repeated_capability_mutations_are_no_ops() {
         let mut graph = ComponentGraph::default();
+        declare_provider(&mut graph, "llm-provider", "llm");
+        declare_provider(&mut graph, "metrics-provider", "metrics");
         graph
             .declare(ComponentDefinition::new("agent").requires("llm"))
             .expect("initial declaration should succeed");
@@ -1060,7 +1298,7 @@ mod tests {
             })
         );
         let added = graph
-            .add_capability("llm")
+            .add_capability("llm-provider", "llm")
             .expect("required capability should add");
         assert_eq!(added.affected_components, vec!["agent"]);
         assert_eq!(
@@ -1071,21 +1309,21 @@ mod tests {
             Some("added")
         );
         assert_eq!(
-            graph.add_capability("llm"),
+            graph.add_capability("llm-provider", "llm"),
             Ok(ReconciliationReport::default())
         );
         graph
             .complete_activation(added.activation_requests[0].clone())
             .expect("current activation should complete");
         graph
-            .remove_capability(&CapabilityKey::from("llm"))
+            .remove_capability("llm-provider", &CapabilityKey::from("llm"))
             .expect("required capability should remove");
         assert_eq!(
-            graph.remove_capability(&CapabilityKey::from("llm")),
+            graph.remove_capability("llm-provider", &CapabilityKey::from("llm")),
             Ok(ReconciliationReport::default())
         );
         let observed = graph
-            .add_capability("metrics")
+            .add_capability("metrics-provider", "metrics")
             .expect("unindexed capability should add");
         assert!(
             observed.affected_components.is_empty(),
@@ -1096,6 +1334,7 @@ mod tests {
     #[test]
     fn pending_dependencies_and_index_use_stable_natural_order() {
         let mut graph = ComponentGraph::default();
+        declare_provider(&mut graph, "llm-provider", "llm");
         graph
             .declare(
                 ComponentDefinition::new("z-agent")
@@ -1121,7 +1360,7 @@ mod tests {
             ]
         );
         let report = graph
-            .add_capability("llm")
+            .add_capability("llm-provider", "llm")
             .expect("capability add should reconcile indexed dependents");
         assert_eq!(report.affected_components, vec!["a-agent", "z-agent"]);
     }
@@ -1129,8 +1368,9 @@ mod tests {
     #[test]
     fn required_capability_recovery_clears_failure_and_starts_a_new_epoch() {
         let mut graph = ComponentGraph::default();
+        declare_provider(&mut graph, "llm-provider", "llm");
         graph
-            .add_capability("llm")
+            .add_capability("llm-provider", "llm")
             .expect("initial capability should add");
         let declaration = graph
             .declare(ComponentDefinition::new("agent").requires("llm"))
@@ -1144,14 +1384,14 @@ mod tests {
             .expect("current activation should fail");
 
         let removal = graph
-            .remove_capability(&CapabilityKey::from("llm"))
+            .remove_capability("llm-provider", &CapabilityKey::from("llm"))
             .expect("required capability removal should reconcile");
         assert_eq!(graph.state("agent"), Some(ComponentState::Pending));
         assert!(removal.failures.is_empty());
         assert!(graph.failures().is_empty());
 
         let recovery = graph
-            .add_capability("llm")
+            .add_capability("llm-provider", "llm")
             .expect("required capability recovery should reconcile");
         assert_eq!(graph.state("agent"), Some(ComponentState::Activating));
         assert_eq!(recovery.activation_requests[0].epoch(), 2);
@@ -1161,6 +1401,7 @@ mod tests {
     #[test]
     fn reconciliation_reports_all_current_failures_in_component_order() {
         let mut graph = ComponentGraph::default();
+        declare_provider(&mut graph, "metrics-provider", "metrics");
         for id in ["z-failed", "a-failed"] {
             let declaration = graph
                 .declare(ComponentDefinition::new(id))
@@ -1181,7 +1422,7 @@ mod tests {
             .expect("observer activation should complete");
 
         let report = graph
-            .add_capability("metrics")
+            .add_capability("metrics-provider", "metrics")
             .expect("observed capability should reconcile");
 
         assert_eq!(report.affected_components, vec!["metrics-observer"]);
@@ -1198,13 +1439,14 @@ mod tests {
     #[test]
     fn activation_epoch_exhaustion_rejects_capability_add_without_mutation() {
         let mut graph = ComponentGraph::default();
+        declare_provider(&mut graph, "llm-provider", "llm");
         graph
             .declare(ComponentDefinition::new("agent").requires("llm"))
             .expect("unique component should declare");
         graph.inject_epoch_exhaustion("agent");
 
         assert_eq!(
-            graph.add_capability("llm"),
+            graph.add_capability("llm-provider", "llm"),
             Err(ComponentGraphError::ActivationEpochExhausted {
                 component_id: "agent".to_string(),
             })
@@ -1215,16 +1457,206 @@ mod tests {
     }
 
     #[test]
+    fn provider_declaration_failures_are_typed_and_mutation_free() {
+        let mut graph = ComponentGraph::default();
+        declare_provider(&mut graph, "llm-provider", "llm");
+        let components_before = graph.components();
+        let order_before = graph.activation_order();
+
+        assert_eq!(
+            graph.declare(ComponentDefinition::new("other-provider").provides("llm")),
+            Err(ComponentGraphError::DuplicateCapabilityProvider {
+                capability: "llm".to_string(),
+                existing_component_id: "llm-provider".to_string(),
+            })
+        );
+        assert_eq!(
+            graph.declare(
+                ComponentDefinition::new("self-dependent")
+                    .requires("self-capability")
+                    .provides("self-capability"),
+            ),
+            Err(ComponentGraphError::SelfDependency {
+                component_id: "self-dependent".to_string(),
+                capability: "self-capability".to_string(),
+            })
+        );
+        assert_eq!(graph.components(), components_before);
+        assert_eq!(graph.activation_order(), order_before);
+        assert_eq!(
+            graph.add_capability("other-provider", "llm"),
+            Err(ComponentGraphError::UnknownComponent {
+                component_id: "other-provider".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn provider_declaration_that_closes_a_cycle_is_rejected_before_mutation() {
+        let mut graph = ComponentGraph::default();
+        graph
+            .declare(
+                ComponentDefinition::new("component-a")
+                    .requires("capability-b")
+                    .provides("capability-a"),
+            )
+            .expect("unresolved provider may be declared later");
+        graph
+            .declare(ComponentDefinition::new("downstream").requires("capability-a"))
+            .expect("downstream consumer should remain outside the unresolved cycle");
+        let components_before = graph.components();
+
+        assert_eq!(
+            graph.declare(
+                ComponentDefinition::new("component-b")
+                    .requires("capability-a")
+                    .provides("capability-b"),
+            ),
+            Err(ComponentGraphError::DependencyCycle {
+                component_ids: vec!["component-a".to_string(), "component-b".to_string()],
+            })
+        );
+        assert_eq!(graph.components(), components_before);
+        assert_eq!(
+            graph.add_capability("component-b", "capability-b"),
+            Err(ComponentGraphError::UnknownComponent {
+                component_id: "component-b".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn topology_order_is_stable_and_observed_edges_do_not_constrain_activation() {
+        fn graph_from_order(order: &[&str]) -> ComponentGraph {
+            let definitions = BTreeMap::from([
+                (
+                    "a-observer",
+                    ComponentDefinition::new("a-observer").observes("z-capability"),
+                ),
+                (
+                    "agent-a",
+                    ComponentDefinition::new("agent-a")
+                        .requires("llm")
+                        .requires("prompt"),
+                ),
+                (
+                    "agent-z",
+                    ComponentDefinition::new("agent-z")
+                        .requires("llm")
+                        .requires("prompt"),
+                ),
+                ("llm", ComponentDefinition::new("llm").provides("llm")),
+                (
+                    "prompt",
+                    ComponentDefinition::new("prompt")
+                        .requires("tools")
+                        .provides("prompt"),
+                ),
+                ("tools", ComponentDefinition::new("tools").provides("tools")),
+                (
+                    "z-provider",
+                    ComponentDefinition::new("z-provider").provides("z-capability"),
+                ),
+            ]);
+            let mut graph = ComponentGraph::default();
+            for id in order {
+                graph
+                    .declare(definitions[*id].clone())
+                    .expect("acyclic definition should declare");
+            }
+            graph
+        }
+
+        let ids = [
+            "z-provider",
+            "agent-z",
+            "prompt",
+            "tools",
+            "agent-a",
+            "llm",
+            "a-observer",
+        ];
+        let forward = graph_from_order(&ids);
+        let reverse = graph_from_order(&ids.iter().rev().copied().collect::<Vec<_>>());
+        let expected = vec![
+            "a-observer".to_string(),
+            "llm".to_string(),
+            "tools".to_string(),
+            "prompt".to_string(),
+            "agent-a".to_string(),
+            "agent-z".to_string(),
+            "z-provider".to_string(),
+        ];
+
+        assert_eq!(forward.activation_order(), expected);
+        assert_eq!(reverse.activation_order(), expected);
+        assert_eq!(
+            forward.deactivation_order(),
+            expected.into_iter().rev().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn capability_mutation_requires_the_declared_provider_without_partial_state() {
+        let mut graph = ComponentGraph::default();
+        declare_provider(&mut graph, "llm-provider", "llm");
+        declare_provider(&mut graph, "metrics-provider", "metrics");
+        let components_before = graph.components();
+
+        assert_eq!(
+            graph.add_capability("metrics-provider", "llm"),
+            Err(ComponentGraphError::CapabilityProviderMismatch {
+                capability: "llm".to_string(),
+                existing_component_id: "llm-provider".to_string(),
+                requested_component_id: "metrics-provider".to_string(),
+            })
+        );
+        assert_eq!(
+            graph.add_capability("llm-provider", "undeclared"),
+            Err(ComponentGraphError::UndeclaredCapabilityProvider {
+                capability: "undeclared".to_string(),
+            })
+        );
+        assert!(graph.capabilities().is_empty());
+        assert_eq!(graph.components(), components_before);
+
+        graph
+            .add_capability("llm-provider", "llm")
+            .expect("declared provider should publish");
+        let active_before = graph.capabilities();
+        assert_eq!(active_before[0].provider_component, "llm-provider");
+        assert_eq!(
+            graph.remove_capability("metrics-provider", &CapabilityKey::from("llm")),
+            Err(ComponentGraphError::CapabilityProviderMismatch {
+                capability: "llm".to_string(),
+                existing_component_id: "llm-provider".to_string(),
+                requested_component_id: "metrics-provider".to_string(),
+            })
+        );
+        assert_eq!(graph.capabilities(), active_before);
+        assert_eq!(
+            graph.replace_capability("metrics-provider", &CapabilityKey::from("llm")),
+            Err(ComponentGraphError::CapabilityProviderMismatch {
+                capability: "llm".to_string(),
+                existing_component_id: "llm-provider".to_string(),
+                requested_component_id: "metrics-provider".to_string(),
+            })
+        );
+        assert_eq!(graph.capabilities(), active_before);
+    }
+
+    #[test]
     fn generation_exhaustion_rejects_replacement_without_mutation() {
         let mut graph = ComponentGraph::default();
         let capability = CapabilityKey::from("llm");
+        declare_provider(&mut graph, "llm-provider", "llm");
         graph
-            .add_capability(capability.clone())
+            .add_capability("llm-provider", capability.clone())
             .expect("initial capability should add");
         graph.inject_generation_exhaustion(capability.clone());
 
         assert_eq!(
-            graph.replace_capability(&capability),
+            graph.replace_capability("llm-provider", &capability),
             Err(ComponentGraphError::CapabilityGenerationExhausted {
                 capability: "llm".to_string(),
             })

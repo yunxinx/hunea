@@ -13,7 +13,7 @@ use super::{
     prompt_assembly::PromptContributionSnapshot,
 };
 
-const COMPOSITION_SNAPSHOT_VERSION: u32 = 7;
+const COMPOSITION_SNAPSHOT_VERSION: u32 = 8;
 
 /// `RuntimeCompositionSnapshot` 是默认 runtime composition 的只读诊断投影。
 ///
@@ -24,6 +24,8 @@ pub(super) struct RuntimeCompositionSnapshot {
     schema_version: u32,
     capabilities: Vec<CapabilitySnapshot>,
     components: Vec<RuntimeComponentSnapshot>,
+    activation_order: Vec<String>,
+    deactivation_order: Vec<String>,
     pending: Vec<PendingSnapshot>,
     failures: Vec<FailureSnapshot>,
     effect_scopes: Vec<EffectScopeOwnershipSnapshot>,
@@ -87,7 +89,30 @@ impl RuntimeCompositionSnapshot {
             .iter()
             .map(|component| (component.id.as_str(), component))
             .collect::<BTreeMap<_, _>>();
+        validate_topology_orders(
+            &self.activation_order,
+            &self.deactivation_order,
+            &components,
+        )?;
+        for capability in &self.capabilities {
+            let provider = components
+                .get(capability.provider_component.as_str())
+                .ok_or_else(|| {
+                    format!(
+                        "capability {} references undeclared provider component {}",
+                        capability.key, capability.provider_component
+                    )
+                })?;
+            if !provider.provides.contains(&capability.key) {
+                return Err(format!(
+                    "component {} does not declare provided capability {}",
+                    capability.provider_component, capability.key
+                ));
+            }
+        }
         for component in &self.components {
+            ensure_sorted_unique(component.required.iter(), "required dependency")?;
+            ensure_sorted_unique(component.provides.iter(), "provided capability")?;
             let requirements_ready = component
                 .required
                 .iter()
@@ -178,6 +203,7 @@ impl RuntimeCompositionSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct CapabilitySnapshot {
     key: String,
+    provider_component: String,
     generation: u64,
 }
 
@@ -188,6 +214,7 @@ struct RuntimeComponentSnapshot {
     epoch: u64,
     required: Vec<String>,
     optional: Vec<OptionalDependencySnapshot>,
+    provides: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -287,6 +314,7 @@ impl AppRuntimeCoordinator {
             .into_iter()
             .map(|capability| CapabilitySnapshot {
                 key: capability.key,
+                provider_component: capability.provider_component,
                 generation: capability.generation,
             })
             .collect();
@@ -382,6 +410,8 @@ impl AppRuntimeCoordinator {
             schema_version: COMPOSITION_SNAPSHOT_VERSION,
             capabilities,
             components,
+            activation_order: self.components.lifecycle.activation_order(),
+            deactivation_order: self.components.lifecycle.deactivation_order(),
             pending,
             failures,
             effect_scopes: self
@@ -496,6 +526,65 @@ fn validate_effect_scopes(scopes: &[EffectScopeOwnershipSnapshot]) -> Result<(),
     Ok(())
 }
 
+fn validate_topology_orders(
+    activation_order: &[String],
+    deactivation_order: &[String],
+    components: &BTreeMap<&str, &RuntimeComponentSnapshot>,
+) -> Result<(), String> {
+    let activation_ids = activation_order.iter().collect::<BTreeSet<_>>();
+    if activation_ids.len() != activation_order.len()
+        || activation_ids
+            != components
+                .values()
+                .map(|component| &component.id)
+                .collect::<BTreeSet<_>>()
+    {
+        return Err(
+            "runtime composition activation order must contain every component exactly once"
+                .to_string(),
+        );
+    }
+    if deactivation_order != activation_order.iter().rev().cloned().collect::<Vec<_>>() {
+        return Err(
+            "runtime composition deactivation order must reverse activation order".to_string(),
+        );
+    }
+
+    let positions = activation_order
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (id.as_str(), index))
+        .collect::<BTreeMap<_, _>>();
+    let mut providers = BTreeMap::new();
+    for component in components.values() {
+        for capability in &component.provides {
+            if providers
+                .insert(capability.as_str(), component.id.as_str())
+                .is_some()
+            {
+                return Err(format!(
+                    "runtime composition capability {} has multiple providers",
+                    capability
+                ));
+            }
+        }
+    }
+    for component in components.values() {
+        for required in &component.required {
+            let Some(provider_id) = providers.get(required.as_str()) else {
+                continue;
+            };
+            if positions[provider_id] >= positions[component.id.as_str()] {
+                return Err(format!(
+                    "runtime composition provider {} must precede consumer {}",
+                    provider_id, component.id
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn runtime_component_snapshot(component: ComponentSnapshot) -> RuntimeComponentSnapshot {
     RuntimeComponentSnapshot {
         id: component.id,
@@ -507,6 +596,7 @@ fn runtime_component_snapshot(component: ComponentSnapshot) -> RuntimeComponentS
             .into_iter()
             .map(optional_dependency_snapshot)
             .collect(),
+        provides: component.provides,
     }
 }
 

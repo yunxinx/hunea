@@ -4,11 +4,110 @@ use std::{fs, time::Duration};
 mod support;
 
 use provider_protocol::{ContentBlock, ConversationItem, Role, ToolCall};
+use runtime_domain::session::{TranscriptReplayItem, TranscriptReplayRole};
 use session_store::{
-    InMemorySessionStore, ProjectDir, ResolveError, SessionCatalogStore, SessionFlushStore,
-    SessionLifecycleStore, SessionListOptions, SessionStoreError, SessionTreeStore,
+    ConfigSnapshot, InMemorySessionStore, ProjectDir, ResolveError, SessionCatalogStore,
+    SessionFlushStore, SessionLifecycleStore, SessionListOptions, SessionPort, SessionStoreError,
+    SessionTreeStore,
 };
 use support::{TestSessionRoot, first_item_entry_id, item_entry_ids, open_store, sample_header};
+
+async fn assert_session_port_contract(
+    port: &dyn SessionPort,
+    header: session_store::SessionHeader,
+) {
+    let expected_config = ConfigSnapshot {
+        provider_id: "contract-provider".to_string(),
+        model: "contract-model".to_string(),
+        system_prompt: Some("contract system prompt".to_string()),
+        prompt_prelude: None,
+        dynamic_environment_session_config: None,
+        dynamic_environment_observations: Vec::new(),
+    };
+    let expected_transcript = TranscriptReplayItem::Message {
+        role: TranscriptReplayRole::Assistant,
+        content: "contract transcript".to_string(),
+    };
+    let expected_items = vec![
+        ConversationItem::text(Role::User, "contract user"),
+        ConversationItem::text(Role::Assistant, "contract assistant"),
+        ConversationItem::text(Role::User, "contract follow-up"),
+    ];
+
+    let session_id = port
+        .create_session(header)
+        .await
+        .expect("contract session should be created");
+    port.append(&session_id, expected_items[0].clone())
+        .await
+        .expect("single contract item should append");
+    port.append_many(&session_id, expected_items[1..].to_vec())
+        .await
+        .expect("contract item batch should append");
+    port.append_config_change(&session_id, expected_config.clone())
+        .await
+        .expect("contract config should append");
+    port.append_transcript_replay(&session_id, expected_transcript.clone())
+        .await
+        .expect("contract transcript should append");
+    port.flush(&session_id)
+        .await
+        .expect("contract session should flush");
+    port.flush_all()
+        .await
+        .expect("contract backend should flush all sessions");
+
+    let restored = port
+        .load_session(&session_id, None)
+        .await
+        .expect("contract session should load for resume");
+    assert_eq!(
+        restored
+            .items
+            .into_iter()
+            .map(|item| item.item)
+            .collect::<Vec<_>>(),
+        expected_items
+    );
+    assert_eq!(restored.latest_config, Some(expected_config));
+    assert_eq!(restored.transcript, vec![expected_transcript]);
+
+    let missing_session_id = session_store::SessionId::new();
+    let error = port
+        .load_session(&missing_session_id, None)
+        .await
+        .expect_err("missing session should preserve the backend error");
+    assert!(matches!(
+        error,
+        SessionStoreError::SessionNotFound { session_id } if session_id == missing_session_id
+    ));
+}
+
+#[tokio::test]
+async fn local_store_satisfies_session_port_contract() {
+    let root = TestSessionRoot::new("local-session-port-contract");
+    let work_dir = root.workspace_path("repo");
+    let store = open_store(&root).await;
+
+    assert_session_port_contract(
+        &store,
+        sample_header(&work_dir, "contract-model", Some("local port contract")),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn in_memory_store_satisfies_session_port_contract() {
+    let root = TestSessionRoot::new("memory-session-port-contract");
+    let work_dir = root.workspace_path("repo");
+    let store = InMemorySessionStore::new();
+
+    assert_session_port_contract(
+        &store,
+        sample_header(&work_dir, "contract-model", Some("memory port contract")),
+    )
+    .await;
+}
 
 #[tokio::test]
 async fn local_store_creates_appends_and_resolves_history() {

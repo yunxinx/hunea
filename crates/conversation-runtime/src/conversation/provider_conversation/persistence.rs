@@ -2,11 +2,11 @@ use std::sync::Arc;
 
 use provider_protocol::ConversationItem;
 use runtime_domain::session::{TranscriptReplayItem, TranscriptUserMessage};
-use session_store::{ConfigSnapshot, SessionHeader, SessionId, SessionStore};
+use session_store::{ConfigSnapshot, SessionHeader, SessionId, SessionPort};
 
 #[derive(Clone)]
 pub(crate) struct PreparedConversationPersistence {
-    pub(crate) store: Arc<dyn SessionStore>,
+    pub(crate) store: Arc<dyn SessionPort>,
     pub(crate) session_id: Option<SessionId>,
     pub(crate) header_template: SessionHeader,
     pub(crate) config_snapshot: ConfigSnapshot,
@@ -16,7 +16,7 @@ pub(crate) struct PreparedConversationPersistence {
 }
 
 pub(super) struct ProviderConversationPersistence {
-    pub(super) store: Arc<dyn SessionStore>,
+    pub(super) store: Arc<dyn SessionPort>,
     pub(super) session_id: Option<SessionId>,
     pub(super) header_template: SessionHeader,
 }

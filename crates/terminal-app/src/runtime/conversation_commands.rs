@@ -23,10 +23,10 @@ impl AppRuntimeCoordinator {
             .agent_runtime
             .truncate_after_user_turns(retained_user_turns)?
         {
-            let store = self.session_store()?;
+            let views = self.session_views()?;
             self.components
                 .session_store_worker
-                .set_leaf(store, session_id, leaf_id)?;
+                .set_leaf(views, session_id, leaf_id)?;
         }
         Ok(RuntimeCommandReceipt::Accepted)
     }

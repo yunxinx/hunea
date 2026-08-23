@@ -13,6 +13,7 @@ mod permission_policy;
 mod prompt_assembly;
 mod prompt_assembly_commands;
 mod session_commands;
+mod session_port;
 mod session_tree_load;
 mod session_worker;
 mod tool_catalog;
@@ -47,6 +48,7 @@ use self::{
     event_mapping::{
         runtime_event_from_agent_event, should_defer_runtime_event_for_render_barrier,
     },
+    session_port::SessionBackendViews,
     session_worker::SessionStoreWorkerEvent,
     tool_catalog::ToolCatalog,
     workspace_tools::conversation_workspace_tool_catalog,
@@ -139,8 +141,8 @@ impl Default for AppRuntimeOptions {
 }
 
 impl AppRuntimeCoordinator {
-    pub(crate) fn new(options: AppRuntimeOptions) -> Result<Self, String> {
-        let components = RuntimeComponents::new(&options)?;
+    pub(crate) fn new(mut options: AppRuntimeOptions) -> Result<Self, String> {
+        let components = RuntimeComponents::new(&mut options)?;
         let coordinator = Self {
             options,
             components,
@@ -225,11 +227,10 @@ impl AppRuntimeCoordinator {
         }
     }
 
-    fn session_store(&self) -> Result<Arc<dyn SessionStore>, String> {
-        self.options
-            .session_store
-            .as_ref()
-            .cloned()
+    fn session_views(&self) -> Result<SessionBackendViews, String> {
+        self.components
+            .session_backend_views
+            .clone()
             .ok_or_else(|| "Session store is not available".to_string())
     }
 
@@ -271,8 +272,7 @@ impl AppRuntimeCoordinator {
 
     pub(crate) fn shutdown(&mut self) -> Result<(), String> {
         self.pending_runtime_events.clear();
-        self.components
-            .shutdown(self.options.session_store.as_ref())
+        self.components.shutdown()
     }
 
     #[cfg(test)]

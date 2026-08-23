@@ -96,7 +96,7 @@ mod tests {
     #[test]
     fn prepared_official_openai_request_uses_session_id_as_prompt_cache_key() {
         let header = sample_header();
-        let mut conversation = ProviderConversation::with_session_store(
+        let mut conversation = ProviderConversation::with_session_port(
             Arc::new(InMemorySessionStore::new()),
             header.clone(),
         )
@@ -127,7 +127,7 @@ mod tests {
     fn prepared_openai_compatible_request_omits_prompt_cache_key() {
         let header = sample_header();
         let mut conversation =
-            ProviderConversation::with_session_store(Arc::new(InMemorySessionStore::new()), header)
+            ProviderConversation::with_session_port(Arc::new(InMemorySessionStore::new()), header)
                 .expect("conversation should initialize");
         let prepared = conversation
             .prepare_turn(&ConversationTurnRequest::new(
@@ -150,7 +150,7 @@ mod tests {
     #[test]
     fn prepared_openai_compatible_remote_request_uses_long_prompt_cache_retention() {
         let header = sample_header();
-        let mut conversation = ProviderConversation::with_session_store(
+        let mut conversation = ProviderConversation::with_session_port(
             Arc::new(InMemorySessionStore::new()),
             header.clone(),
         )
@@ -183,7 +183,7 @@ mod tests {
     #[test]
     fn prepared_openai_compatible_direct_openai_request_uses_prompt_cache_key() {
         let header = sample_header();
-        let mut conversation = ProviderConversation::with_session_store(
+        let mut conversation = ProviderConversation::with_session_port(
             Arc::new(InMemorySessionStore::new()),
             header.clone(),
         )
@@ -213,7 +213,7 @@ mod tests {
     #[test]
     fn prepared_openai_responses_request_uses_prompt_cache_key_for_any_base_url() {
         let header = sample_header();
-        let mut conversation = ProviderConversation::with_session_store(
+        let mut conversation = ProviderConversation::with_session_port(
             Arc::new(InMemorySessionStore::new()),
             header.clone(),
         )
@@ -250,7 +250,7 @@ mod tests {
         let actual_session_id = SessionId::new();
         assert_ne!(actual_session_id.to_string(), initial_cache_key);
         let mut conversation =
-            ProviderConversation::with_session_store(Arc::new(InMemorySessionStore::new()), header)
+            ProviderConversation::with_session_port(Arc::new(InMemorySessionStore::new()), header)
                 .expect("conversation should initialize");
         conversation.set_session_id(actual_session_id);
         let prepared = conversation

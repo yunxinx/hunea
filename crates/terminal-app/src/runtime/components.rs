@@ -14,6 +14,7 @@ use super::{
         TERMINAL_APPROVAL_PROVIDER_ID,
     },
     prompt_assembly::{PromptAssembly, PromptRegistration},
+    session_port::{SessionBackendViews, SessionPortHost},
     session_tools_for_manager,
     session_worker::SessionStoreWorker,
     tool_catalog::{ToolCatalog, ToolRegistration},
@@ -35,6 +36,8 @@ pub(super) struct RuntimeComponents {
     pub(super) tool_catalog: ToolCatalog,
     pub(super) prompt_assembly: PromptAssembly,
     pub(super) session_workspace_tools: ToolExecutorRegistry,
+    pub(super) session_port: Option<SessionPortHost>,
+    pub(super) session_backend_views: Option<SessionBackendViews>,
     pub(super) session_store_worker: SessionStoreWorker,
     pub(super) context_budget_worker: ContextBudgetWorker,
     pub(super) runtime_event_notifier: RuntimeEventNotifier,
@@ -44,12 +47,13 @@ pub(super) struct RuntimeComponents {
     permission_policy_effect: Option<EffectId>,
     tool_catalog_effect: Option<EffectId>,
     prompt_assembly_effect: Option<EffectId>,
+    session_backend_effect: Option<EffectId>,
     pub(super) lifecycle: ComponentGraph,
     is_shutdown: bool,
 }
 
 impl RuntimeComponents {
-    pub(super) fn new(options: &AppRuntimeOptions) -> Result<Self, String> {
+    pub(super) fn new(options: &mut AppRuntimeOptions) -> Result<Self, String> {
         let effect_scope = EffectScope::default();
         let runtime_event_notifier = RuntimeEventNotifier::default();
         let permission_policy = PermissionPolicy::new(runtime_event_notifier.clone());
@@ -82,6 +86,8 @@ impl RuntimeComponents {
         .map_err(|error| error.to_string())?;
         let prompt_assembly_effect =
             register_prompt_assembly_effect(&effect_scope, prompt_registration)?;
+        let (session_port, session_backend_views, session_backend_effect) =
+            mount_session_backend(&effect_scope, options.session_store.take())?;
         let prompt_assembly_snapshot = prompt_assembly.session_snapshot();
         let prompt_assembly_tool_definitions = tool_catalog.definitions();
         let session_workspace_tools =
@@ -91,6 +97,9 @@ impl RuntimeComponents {
             session_workspace_tools.clone(),
             prompt_assembly_tool_definitions,
             prompt_assembly_snapshot,
+            session_backend_views
+                .as_ref()
+                .map(|views| Arc::clone(&views.port)),
             runtime_event_notifier.clone(),
             llm_port.clone(),
             permission_policy.clone(),
@@ -134,7 +143,7 @@ impl RuntimeComponents {
         ] {
             lifecycle.add_capability(capability);
         }
-        if options.session_store.is_some() {
+        if session_backend_views.is_some() {
             lifecycle.add_capability("session_persistence");
         }
         lifecycle.take_transitions();
@@ -147,6 +156,8 @@ impl RuntimeComponents {
             tool_catalog,
             prompt_assembly,
             session_workspace_tools,
+            session_port,
+            session_backend_views,
             session_store_worker: SessionStoreWorker::new(runtime_event_notifier.clone()),
             context_budget_worker: ContextBudgetWorker::new(runtime_event_notifier.clone())
                 .map_err(|error| error.to_string())?,
@@ -157,6 +168,7 @@ impl RuntimeComponents {
             permission_policy_effect: Some(permission_policy_effect),
             tool_catalog_effect: Some(tool_catalog_effect),
             prompt_assembly_effect: Some(prompt_assembly_effect),
+            session_backend_effect,
             lifecycle,
             is_shutdown: false,
         })
@@ -197,6 +209,130 @@ impl RuntimeComponents {
 
     pub(super) fn reset_after_clear(&mut self, options: &AppRuntimeOptions) -> Result<(), String> {
         self.reset_after_clear_with_native_mount_check(options, || Ok(()))
+    }
+
+    /// 在全部 consumer 与旧 worker quiesce 后替换当前 session backend。
+    #[allow(dead_code)]
+    pub(super) fn replace_session_backend(
+        &mut self,
+        options: &AppRuntimeOptions,
+        store: Arc<dyn session_store::SessionStore>,
+    ) -> Result<(), String> {
+        self.replace_session_backend_with_native_mount_check(options, store, || Ok(()))
+    }
+
+    #[allow(dead_code)]
+    fn replace_session_backend_with_native_mount_check(
+        &mut self,
+        options: &AppRuntimeOptions,
+        store: Arc<dyn session_store::SessionStore>,
+        native_mount_check: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        if self.is_shutdown {
+            return Err("Runtime components are shut down".to_string());
+        }
+        self.lifecycle
+            .remove_capability(&CapabilityKey::from("session_persistence"));
+        self.discard_lifecycle_transitions();
+
+        let mut failures = Vec::new();
+        if let Err(error) = self.agent_runtime.shutdown() {
+            failures.push(error.to_string());
+        }
+        if self.session_store_worker.is_running()
+            && let Some(views) = self.session_backend_views.clone()
+            && let Err(error) = self.session_store_worker.flush_all(views)
+        {
+            failures.push(error);
+        }
+        if let Err(error) = self.session_store_worker.shutdown() {
+            failures.push(error);
+        }
+        if let Some(session_port) = &self.session_port {
+            session_port.deactivate();
+        }
+        if let Some(effect_id) = self.session_backend_effect.take()
+            && let Some(error) = self.effect_scope.dispose_effect(effect_id).error_message()
+        {
+            failures.push(error);
+        }
+        self.session_port = None;
+        self.session_backend_views = None;
+        if !failures.is_empty() {
+            let cleanup_error = failures.join("; ");
+            self.restore_ephemeral_session_consumers(options)
+                .map_err(|fallback_error| format!("{cleanup_error}; {fallback_error}"))?;
+            return Err(cleanup_error);
+        }
+
+        let (fresh_session_port, fresh_views, fresh_effect) =
+            match mount_session_backend(&self.effect_scope, Some(store)) {
+                Ok(mounted) => mounted,
+                Err(error) => {
+                    self.restore_ephemeral_session_consumers(options)
+                        .map_err(|fallback_error| format!("{error}; {fallback_error}"))?;
+                    return Err(error);
+                }
+            };
+        let Some(fresh_views) = fresh_views else {
+            return Err("session backend mount did not produce views".to_string());
+        };
+        let fresh_agent_runtime = match native_mount_check().and_then(|()| {
+            self.fresh_native_agent_runtime(options, Some(Arc::clone(&fresh_views.port)))
+        }) {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                if let Some(session_port) = &fresh_session_port {
+                    session_port.deactivate();
+                }
+                if let Some(effect_id) = fresh_effect {
+                    let _ = self.effect_scope.dispose_effect(effect_id);
+                }
+                self.restore_ephemeral_session_consumers(options)
+                    .map_err(|fallback_error| format!("{error}; {fallback_error}"))?;
+                return Err(error);
+            }
+        };
+
+        self.session_store_worker = SessionStoreWorker::new(self.runtime_event_notifier.clone());
+        self.agent_runtime = fresh_agent_runtime;
+        self.session_port = fresh_session_port;
+        self.session_backend_views = Some(fresh_views);
+        self.session_backend_effect = fresh_effect;
+        self.lifecycle
+            .replace_capability(&CapabilityKey::from("session_persistence"));
+        self.discard_lifecycle_transitions();
+        Ok(())
+    }
+
+    fn fresh_native_agent_runtime(
+        &self,
+        options: &AppRuntimeOptions,
+        session_port: Option<Arc<dyn session_store::SessionPort>>,
+    ) -> Result<NativeAgentRuntime, String> {
+        NativeAgentRuntime::new(
+            options,
+            self.session_workspace_tools.clone(),
+            self.tool_catalog.definitions(),
+            self.prompt_assembly.session_snapshot(),
+            session_port,
+            self.runtime_event_notifier.clone(),
+            self.llm_port.clone(),
+            self.permission_policy.clone(),
+            self.permission_provider_id.as_str(),
+        )
+    }
+
+    fn restore_ephemeral_session_consumers(
+        &mut self,
+        options: &AppRuntimeOptions,
+    ) -> Result<(), String> {
+        let fresh_agent_runtime = self
+            .fresh_native_agent_runtime(options, None)
+            .map_err(|error| format!("restore ephemeral Agent after backend failure: {error}"))?;
+        self.agent_runtime = fresh_agent_runtime;
+        self.session_store_worker = SessionStoreWorker::new(self.runtime_event_notifier.clone());
+        Ok(())
     }
 
     /// Replaces the approval provider generation while keeping the other runtime capabilities
@@ -270,6 +406,9 @@ impl RuntimeComponents {
                 self.session_workspace_tools.clone(),
                 self.tool_catalog.definitions(),
                 self.prompt_assembly.session_snapshot(),
+                self.session_backend_views
+                    .as_ref()
+                    .map(|views| Arc::clone(&views.port)),
                 self.runtime_event_notifier.clone(),
                 self.llm_port.clone(),
                 fresh_policy.clone(),
@@ -399,6 +538,9 @@ impl RuntimeComponents {
                 session_workspace_tools.clone(),
                 prompt_assembly_tool_definitions,
                 fresh_prompt_assembly_snapshot,
+                self.session_backend_views
+                    .as_ref()
+                    .map(|views| Arc::clone(&views.port)),
                 self.runtime_event_notifier.clone(),
                 fresh_llm_port.clone(),
                 self.permission_policy.clone(),
@@ -430,10 +572,7 @@ impl RuntimeComponents {
         Ok(())
     }
 
-    pub(super) fn shutdown(
-        &mut self,
-        session_store: Option<&Arc<dyn session_store::SessionStore>>,
-    ) -> Result<(), String> {
+    pub(super) fn shutdown(&mut self) -> Result<(), String> {
         if self.is_shutdown {
             return Ok(());
         }
@@ -485,19 +624,29 @@ impl RuntimeComponents {
         {
             failures.push(error);
         }
-        if let Some(error) = self.effect_scope.dispose().error_message() {
-            failures.push(error);
-        }
         if let Err(error) = self.context_budget_worker.shutdown() {
             failures.push(error);
         }
         if self.session_store_worker.is_running()
-            && let Some(store) = session_store
-            && let Err(error) = self.session_store_worker.flush_all(Arc::clone(store))
+            && let Some(views) = self.session_backend_views.clone()
+            && let Err(error) = self.session_store_worker.flush_all(views)
         {
             failures.push(error);
         }
         if let Err(error) = self.session_store_worker.shutdown() {
+            failures.push(error);
+        }
+        if let Some(session_port) = &self.session_port {
+            session_port.deactivate();
+        }
+        if let Some(effect_id) = self.session_backend_effect.take()
+            && let Some(error) = self.effect_scope.dispose_effect(effect_id).error_message()
+        {
+            failures.push(error);
+        }
+        self.session_backend_views = None;
+        self.session_port = None;
+        if let Some(error) = self.effect_scope.dispose().error_message() {
             failures.push(error);
         }
         if failures.is_empty() {
@@ -560,14 +709,54 @@ fn register_prompt_assembly_effect(
         .map_err(|error| error.to_string())
 }
 
+type MountedSessionBackend = (
+    Option<SessionPortHost>,
+    Option<SessionBackendViews>,
+    Option<EffectId>,
+);
+
+fn mount_session_backend(
+    effect_scope: &EffectScope,
+    store: Option<Arc<dyn session_store::SessionStore>>,
+) -> Result<MountedSessionBackend, String> {
+    let Some(store) = store else {
+        return Ok((None, None, None));
+    };
+    let session_port = SessionPortHost::new();
+    let registration = session_port
+        .register("terminal-runtime", "configured-session-store", store)
+        .map_err(|error| error.to_string())?;
+    let effect_id = register_session_backend_effect(effect_scope, registration)?;
+    let views = session_port.views().map_err(|error| error.to_string())?;
+    Ok((Some(session_port), Some(views), Some(effect_id)))
+}
+
+fn register_session_backend_effect(
+    effect_scope: &EffectScope,
+    mut registration: super::session_port::SessionBackendRegistration,
+) -> Result<EffectId, String> {
+    effect_scope
+        .register("session-backend", move || {
+            registration.dispose();
+            Ok(())
+        })
+        .map_err(|error| error.to_string())
+}
+
 impl Drop for RuntimeComponents {
     fn drop(&mut self) {
-        let _ = self.shutdown(None);
+        let _ = self.shutdown();
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        future::Future,
+        pin::Pin,
+        sync::atomic::{AtomicBool, Ordering},
+    };
+
     use super::*;
     use crate::runtime::lifecycle::ComponentState;
     use runtime_domain::prompt_assembly::{
@@ -610,11 +799,63 @@ mod tests {
         }
     }
 
+    struct BackendStateCheckingFlush {
+        host: SessionPortHost,
+        did_flush_while_mounted: Arc<AtomicBool>,
+    }
+
+    struct FailingFlush;
+
+    impl session_store::SessionFlushStore for FailingFlush {
+        fn flush<'a>(
+            &'a self,
+            _session_id: &'a session_store::SessionId,
+        ) -> Pin<Box<dyn Future<Output = Result<(), session_store::SessionStoreError>> + Send + 'a>>
+        {
+            Box::pin(async {
+                Err(session_store::SessionStoreError::ConfigurationError {
+                    message: "injected flush failure".to_string(),
+                })
+            })
+        }
+
+        fn flush_all<'a>(
+            &'a self,
+        ) -> Pin<Box<dyn Future<Output = Result<(), session_store::SessionStoreError>> + Send + 'a>>
+        {
+            Box::pin(async {
+                Err(session_store::SessionStoreError::ConfigurationError {
+                    message: "injected flush failure".to_string(),
+                })
+            })
+        }
+    }
+
+    impl session_store::SessionFlushStore for BackendStateCheckingFlush {
+        fn flush<'a>(
+            &'a self,
+            _session_id: &'a session_store::SessionId,
+        ) -> Pin<Box<dyn Future<Output = Result<(), session_store::SessionStoreError>> + Send + 'a>>
+        {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn flush_all<'a>(
+            &'a self,
+        ) -> Pin<Box<dyn Future<Output = Result<(), session_store::SessionStoreError>> + Send + 'a>>
+        {
+            let is_mounted = self.host.inspection_snapshot().is_some();
+            self.did_flush_while_mounted
+                .store(is_mounted, Ordering::SeqCst);
+            Box::pin(async { Ok(()) })
+        }
+    }
+
     #[test]
     fn failed_tool_catalog_remount_keeps_capabilities_removed_and_effects_reverted() {
-        let options = options_with_provider();
+        let mut options = options_with_provider();
         let mut components =
-            RuntimeComponents::new(&options).expect("runtime components should initialize");
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
         assert!(!components.tool_catalog.definitions().is_empty());
         assert_eq!(components.llm_port.inspection_snapshot().len(), 1);
 
@@ -661,16 +902,16 @@ mod tests {
 
     #[test]
     fn shutdown_clears_prompt_and_tool_generations() {
-        let options = AppRuntimeOptions {
+        let mut options = AppRuntimeOptions {
             loaded_models: options_with_provider().loaded_models,
             initial_prompt_assembly: Some(manager_with_section("initial", "initial body")),
             ..AppRuntimeOptions::default()
         };
         let mut components =
-            RuntimeComponents::new(&options).expect("runtime components should initialize");
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
 
         components
-            .shutdown(None)
+            .shutdown()
             .expect("shutdown should dispose all runtime effects");
 
         assert!(components.prompt_assembly.manager_snapshot().is_none());
@@ -688,14 +929,87 @@ mod tests {
     }
 
     #[test]
+    fn shutdown_flushes_session_worker_before_backend_inverse() {
+        let store = Arc::new(session_store::InMemorySessionStore::new());
+        let mut options = AppRuntimeOptions {
+            session_store: Some(store.clone()),
+            ..options_with_provider()
+        };
+        let mut components =
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+        assert!(
+            options.session_store.is_none(),
+            "bootstrap options must transfer the raw store into RuntimeComponents"
+        );
+        let host = components
+            .session_port
+            .clone()
+            .expect("configured backend should have a host");
+        let did_flush_while_mounted = Arc::new(AtomicBool::new(false));
+        components
+            .session_backend_views
+            .as_mut()
+            .expect("configured backend should expose views")
+            .flush = Arc::new(BackendStateCheckingFlush {
+            host,
+            did_flush_while_mounted: Arc::clone(&did_flush_while_mounted),
+        });
+
+        components
+            .shutdown()
+            .expect("shutdown should flush and dispose the backend");
+
+        assert!(did_flush_while_mounted.load(Ordering::SeqCst));
+        assert!(components.session_port.is_none());
+        assert!(components.session_backend_views.is_none());
+        assert_eq!(
+            Arc::strong_count(&store),
+            1,
+            "shutdown must release every backend lease before returning"
+        );
+    }
+
+    #[test]
+    fn missing_session_backend_keeps_optional_consumers_ephemeral_and_active() {
+        let mut options = options_with_provider();
+        let components =
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+
+        assert!(components.session_port.is_none());
+        assert!(components.session_backend_views.is_none());
+        assert!(
+            !components
+                .lifecycle
+                .has_capability(&CapabilityKey::from("session_persistence"))
+        );
+        assert_eq!(
+            components.lifecycle.optional_available(
+                "native_agent_runtime",
+                &CapabilityKey::from("session_persistence"),
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            components.lifecycle.state("native_agent_runtime"),
+            Some(ComponentState::Active)
+        );
+        assert_eq!(
+            components.lifecycle.state("prompt_assembly"),
+            Some(ComponentState::Active)
+        );
+        assert!(components.agent_runtime.is_idle_empty_session());
+        assert!(!components.agent_runtime.is_shutdown_for_test());
+    }
+
+    #[test]
     fn reset_rebinds_the_current_live_prompt_manager() {
-        let options = AppRuntimeOptions {
+        let mut options = AppRuntimeOptions {
             loaded_models: options_with_provider().loaded_models,
             initial_prompt_assembly: Some(manager_with_section("initial", "initial body")),
             ..AppRuntimeOptions::default()
         };
         let mut components =
-            RuntimeComponents::new(&options).expect("runtime components should initialize");
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
         components
             .prompt_assembly
             .replace_manager(Some(manager_with_section("live", "live body")))
@@ -716,13 +1030,13 @@ mod tests {
 
     #[test]
     fn failed_native_mount_reverts_fresh_provider_prompt_and_tool_effects() {
-        let options = AppRuntimeOptions {
+        let mut options = AppRuntimeOptions {
             loaded_models: options_with_provider().loaded_models,
             initial_prompt_assembly: Some(manager_with_section("initial", "initial body")),
             ..AppRuntimeOptions::default()
         };
         let mut components =
-            RuntimeComponents::new(&options).expect("runtime components should initialize");
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
 
         let error = components
             .reset_after_clear_with_native_mount_check(&options, || {
@@ -767,9 +1081,9 @@ mod tests {
 
     #[test]
     fn failed_provider_remount_keeps_old_generation_removed_and_dependents_pending() {
-        let options = options_with_provider();
+        let mut options = options_with_provider();
         let mut components =
-            RuntimeComponents::new(&options).expect("runtime components should initialize");
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
         let duplicate_options = AppRuntimeOptions {
             loaded_models: conversation_runtime::models::LoadedModelCatalog {
                 provider_configs: vec![
@@ -825,9 +1139,9 @@ mod tests {
 
     #[test]
     fn permission_provider_replacement_quiesces_old_generation_before_publish() {
-        let options = options_with_provider();
+        let mut options = options_with_provider();
         let mut components =
-            RuntimeComponents::new(&options).expect("runtime components should initialize");
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
         let before = components.permission_policy.inspection_snapshot();
         assert_eq!(before.len(), 1);
         assert_eq!(before[0].provider_id, TERMINAL_APPROVAL_PROVIDER_ID);
@@ -867,10 +1181,124 @@ mod tests {
     }
 
     #[test]
-    fn permission_provider_replacement_keeps_provider_id_across_reset() {
-        let options = options_with_provider();
+    fn failed_session_backend_replacement_does_not_revive_old_generation() {
+        let mut options = AppRuntimeOptions {
+            session_store: Some(Arc::new(session_store::InMemorySessionStore::new())),
+            ..options_with_provider()
+        };
         let mut components =
-            RuntimeComponents::new(&options).expect("runtime components should initialize");
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+        assert!(options.session_store.is_none());
+        assert!(components.session_backend_views.is_some());
+        assert!(
+            components
+                .lifecycle
+                .has_capability(&CapabilityKey::from("session_persistence"))
+        );
+
+        let error = components
+            .replace_session_backend_with_native_mount_check(
+                &options,
+                Arc::new(session_store::InMemorySessionStore::new()),
+                || Err("injected session Agent mount failure".to_string()),
+            )
+            .expect_err("injected session backend mount failure should abort publication");
+
+        assert_eq!(error, "injected session Agent mount failure");
+        assert!(components.session_backend_views.is_none());
+        assert!(
+            !components
+                .lifecycle
+                .has_capability(&CapabilityKey::from("session_persistence"))
+        );
+        assert!(components.agent_runtime.is_idle_empty_session());
+        assert!(!components.agent_runtime.is_shutdown_for_test());
+        assert!(components.session_store_worker.is_running());
+    }
+
+    #[test]
+    fn failed_old_backend_flush_releases_it_and_restores_ephemeral_consumers() {
+        let store = Arc::new(session_store::InMemorySessionStore::new());
+        let mut options = AppRuntimeOptions {
+            session_store: Some(store.clone()),
+            ..options_with_provider()
+        };
+        let mut components =
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+        components
+            .session_backend_views
+            .as_mut()
+            .expect("configured backend should expose views")
+            .flush = Arc::new(FailingFlush);
+
+        let error = components
+            .replace_session_backend(
+                &options,
+                Arc::new(session_store::InMemorySessionStore::new()),
+            )
+            .expect_err("old backend flush failure must abort replacement");
+
+        assert!(error.contains("injected flush failure"));
+        assert!(components.session_port.is_none());
+        assert!(components.session_backend_views.is_none());
+        assert!(
+            !components
+                .lifecycle
+                .has_capability(&CapabilityKey::from("session_persistence"))
+        );
+        assert_eq!(
+            components.lifecycle.state("native_agent_runtime"),
+            Some(ComponentState::Active)
+        );
+        assert!(!components.agent_runtime.is_shutdown_for_test());
+        assert!(components.session_store_worker.is_running());
+        assert_eq!(
+            Arc::strong_count(&store),
+            1,
+            "failed teardown must not retain the old backend generation"
+        );
+    }
+
+    #[test]
+    fn session_backend_replacement_publishes_a_fresh_generation() {
+        let mut options = AppRuntimeOptions {
+            session_store: Some(Arc::new(session_store::InMemorySessionStore::new())),
+            ..options_with_provider()
+        };
+        let mut components =
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+        let before_generation = components
+            .lifecycle
+            .capabilities()
+            .into_iter()
+            .find(|capability| capability.key == "session_persistence")
+            .expect("initial backend capability should be published")
+            .generation;
+
+        components
+            .replace_session_backend(
+                &options,
+                Arc::new(session_store::InMemorySessionStore::new()),
+            )
+            .expect("backend replacement should succeed");
+
+        let after_generation = components
+            .lifecycle
+            .capabilities()
+            .into_iter()
+            .find(|capability| capability.key == "session_persistence")
+            .expect("replacement backend capability should be published")
+            .generation;
+        assert_eq!(after_generation, before_generation + 1);
+        assert!(components.session_backend_views.is_some());
+        assert!(!components.agent_runtime.is_shutdown_for_test());
+    }
+
+    #[test]
+    fn permission_provider_replacement_keeps_provider_id_across_reset() {
+        let mut options = options_with_provider();
+        let mut components =
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
 
         components
             .replace_permission_provider(
@@ -892,9 +1320,9 @@ mod tests {
 
     #[test]
     fn failed_permission_provider_replacement_does_not_revive_old_generation() {
-        let options = options_with_provider();
+        let mut options = options_with_provider();
         let mut components =
-            RuntimeComponents::new(&options).expect("runtime components should initialize");
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
 
         let error = components
             .replace_permission_provider_with_native_mount_check(

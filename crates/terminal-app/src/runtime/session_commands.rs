@@ -7,7 +7,7 @@ use super::{AppRuntimeCoordinator, session_tree_load::SessionTreeLoadConsumer};
 
 impl AppRuntimeCoordinator {
     pub(super) fn list_sessions(&mut self) -> Result<RuntimeCommandReceipt, String> {
-        let store = self.session_store()?;
+        let views = self.session_views()?;
         let header = self.session_header()?;
         let project_dir = ProjectDir::from_work_dir(&header.work_dir);
         let active_session_id = self
@@ -17,7 +17,7 @@ impl AppRuntimeCoordinator {
             .cloned()
             .or(Some(header.session_id));
         self.components.session_store_worker.list_sessions(
-            store,
+            views,
             project_dir,
             active_session_id,
         )?;
@@ -36,11 +36,11 @@ impl AppRuntimeCoordinator {
         let session_id = session_id
             .parse::<SessionId>()
             .map_err(|error| format!("Invalid session id: {error}"))?;
-        let store = self.session_store()?;
+        let views = self.session_views()?;
         let header = self.session_header()?;
         self.components
             .session_store_worker
-            .resume_session(store, header, session_id)?;
+            .resume_session(views, header, session_id)?;
         Ok(RuntimeCommandReceipt::Accepted)
     }
 
@@ -51,10 +51,10 @@ impl AppRuntimeCoordinator {
         let session_id = session_id
             .parse::<SessionId>()
             .map_err(|error| format!("Invalid session id: {error}"))?;
-        let store = self.session_store()?;
+        let views = self.session_views()?;
         self.components
             .session_store_worker
-            .load_session_preview(store, session_id)?;
+            .load_session_preview(views, session_id)?;
         Ok(RuntimeCommandReceipt::Accepted)
     }
 
@@ -81,22 +81,22 @@ impl AppRuntimeCoordinator {
     pub(super) fn load_message_history_startup_cache(
         &mut self,
     ) -> Result<RuntimeCommandReceipt, String> {
-        let store = self.session_store()?;
+        let views = self.session_views()?;
         self.components
             .session_store_worker
-            .load_message_history_startup_cache(store)?;
+            .load_message_history_startup_cache(views)?;
         Ok(RuntimeCommandReceipt::Accepted)
     }
 
     pub(super) fn check_prompt_assembly_missing_sources(
         &mut self,
     ) -> Result<RuntimeCommandReceipt, String> {
-        let store = self.session_store()?;
+        let views = self.session_views()?;
         let header = self.session_header()?;
         self.components
             .session_store_worker
             .check_prompt_assembly_missing_sources(
-                store,
+                views,
                 header.work_dir,
                 self.options.hunea_config_dir.clone(),
             )?;
@@ -107,10 +107,10 @@ impl AppRuntimeCoordinator {
         &mut self,
         request_id: SessionLoadRequestId,
     ) -> Result<RuntimeCommandReceipt, String> {
-        let store = self.session_store()?;
+        let views = self.session_views()?;
         self.components
             .session_store_worker
-            .load_message_history_picker_rows(store, request_id)?;
+            .load_message_history_picker_rows(views, request_id)?;
         Ok(RuntimeCommandReceipt::Accepted)
     }
 
@@ -120,10 +120,10 @@ impl AppRuntimeCoordinator {
         text: String,
         limit: usize,
     ) -> Result<RuntimeCommandReceipt, String> {
-        let store = self.session_store()?;
+        let views = self.session_views()?;
         self.components
             .session_store_worker
-            .record_message_history(store, entry_id, text, limit)?;
+            .record_message_history(views, entry_id, text, limit)?;
         Ok(RuntimeCommandReceipt::Accepted)
     }
 
@@ -136,17 +136,20 @@ impl AppRuntimeCoordinator {
         else {
             return Ok(RuntimeCommandReceipt::Accepted);
         };
-        let store = self.session_store()?;
+        let views = self.session_views()?;
         match target {
             SessionTreeLoadTarget::SessionTree(consumer) => {
-                self.components
-                    .session_store_worker
-                    .load_session_tree(store, session_id, consumer, request_id)?;
+                self.components.session_store_worker.load_session_tree(
+                    views.clone(),
+                    session_id,
+                    consumer,
+                    request_id,
+                )?;
             }
             SessionTreeLoadTarget::BranchTree => {
                 self.components
                     .session_store_worker
-                    .load_branch_tree(store, session_id, request_id)?;
+                    .load_branch_tree(views, session_id, request_id)?;
             }
         }
         Ok(RuntimeCommandReceipt::Accepted)
@@ -163,9 +166,9 @@ impl AppRuntimeCoordinator {
             .session_id()
             .cloned()
             .ok_or_else(|| "No active persisted session to preview".to_string())?;
-        let store = self.session_store()?;
+        let views = self.session_views()?;
         self.components.session_store_worker.load_branch_preview(
-            store,
+            views,
             session_id,
             request_id,
             branch_row_id.to_string(),
@@ -195,10 +198,10 @@ impl AppRuntimeCoordinator {
             .session_id()
             .cloned()
             .ok_or_else(|| "No active persisted session to switch branch".to_string())?;
-        let store = self.session_store()?;
+        let views = self.session_views()?;
         let header = self.session_header()?;
         self.components.session_store_worker.switch_branch(
-            store,
+            views,
             header,
             session_id,
             request_id,
@@ -221,10 +224,10 @@ impl AppRuntimeCoordinator {
             .session_id()
             .cloned()
             .ok_or_else(|| "No active persisted session to rewind".to_string())?;
-        let store = self.session_store()?;
+        let views = self.session_views()?;
         let header = self.session_header()?;
         self.components.session_store_worker.select_entry_rewind(
-            store,
+            views,
             header,
             session_id,
             entry_id.to_string(),

@@ -168,12 +168,22 @@ fn composition_snapshot_is_deterministic_and_redacted() {
         "snapshot must not contain credentials or instruction bodies: {json}"
     );
     assert!(!json.contains("runtime-private-owner"));
+    assert!(!json.contains("terminal-runtime"));
     assert!(!json.contains("registration_id"));
 
     let snapshot: serde_json::Value =
         serde_json::from_str(&json).expect("snapshot JSON should decode");
-    assert_eq!(snapshot["schema_version"], 4);
+    assert_eq!(snapshot["schema_version"], 5);
     assert_eq!(snapshot["session_persistence"]["available"], true);
+    assert_eq!(snapshot["session_persistence"]["mounted"], true);
+    assert_eq!(
+        snapshot["session_persistence"]["backend_id"],
+        "configured-session-store"
+    );
+    assert_eq!(
+        snapshot["session_persistence"]["adapter_kind"],
+        "session-store"
+    );
     assert_eq!(
         snapshot["selected_model"],
         serde_json::json!({"provider_id": "z-provider", "model_id": "z-model"})
@@ -319,6 +329,11 @@ fn ui_runtime_bridge_reacts_to_wake_binding_lifecycle() {
     );
     let snapshot = composition_snapshot(&coordinator);
     assert_eq!(snapshot["session_persistence"]["available"], false);
+    assert_eq!(snapshot["session_persistence"]["mounted"], false);
+    assert_eq!(
+        snapshot["session_persistence"]["backend_id"],
+        serde_json::Value::Null
+    );
     assert_eq!(snapshot["workspace_tools"], serde_json::json!([]));
     assert_eq!(snapshot["session_tools"], serde_json::json!([]));
     assert_eq!(snapshot["prompt_tools"], serde_json::json!([]));

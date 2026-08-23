@@ -9,7 +9,7 @@ use super::{
     prompt_assembly::PromptContributionSnapshot,
 };
 
-const COMPOSITION_SNAPSHOT_VERSION: u32 = 4;
+const COMPOSITION_SNAPSHOT_VERSION: u32 = 5;
 
 /// `RuntimeCompositionSnapshot` 是默认 runtime composition 的只读诊断投影。
 ///
@@ -165,6 +165,9 @@ struct PromptSourceSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct SessionPersistenceSnapshot {
     available: bool,
+    mounted: bool,
+    backend_id: Option<String>,
+    adapter_kind: Option<String>,
 }
 
 impl AppRuntimeCoordinator {
@@ -270,12 +273,26 @@ impl AppRuntimeCoordinator {
                 .into_iter()
                 .map(prompt_source_snapshot)
                 .collect(),
-            session_persistence: SessionPersistenceSnapshot {
-                available: self
-                    .components
-                    .lifecycle
-                    .has_capability(&CapabilityKey::from("session_persistence")),
-            },
+            session_persistence: self.session_persistence_snapshot(),
+        }
+    }
+
+    fn session_persistence_snapshot(&self) -> SessionPersistenceSnapshot {
+        let snapshot = self
+            .components
+            .session_port
+            .as_ref()
+            .and_then(|session_port| session_port.inspection_snapshot());
+        SessionPersistenceSnapshot {
+            available: self
+                .components
+                .lifecycle
+                .has_capability(&CapabilityKey::from("session_persistence")),
+            mounted: snapshot.as_ref().is_some_and(|snapshot| snapshot.mounted),
+            backend_id: snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.backend_id.clone()),
+            adapter_kind: snapshot.map(|snapshot| snapshot.adapter_kind),
         }
     }
 

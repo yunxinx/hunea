@@ -9,7 +9,7 @@ fn conversation_worker_persists_config_change_and_flushes_finished_turn() {
         Arc::new(run_store(LocalSessionStore::open_in(root)).expect("local store should open"));
     let store_trait: Arc<dyn SessionStore> = store.clone();
     let mut conversation =
-        ProviderConversation::with_session_store(store_trait, sample_header(&work_dir, "qwen3"))
+        ProviderConversation::with_session_port(store_trait, sample_header(&work_dir, "qwen3"))
             .expect("persisted conversation should initialize");
     let user = ConversationItem::text(Role::User, "hello");
     let request = conversation
@@ -83,7 +83,7 @@ fn conversation_worker_persists_user_turn_when_request_fails_before_streaming() 
     let store =
         Arc::new(run_store(LocalSessionStore::open_in(root)).expect("local store should open"));
     let store_trait: Arc<dyn SessionStore> = store.clone();
-    let mut conversation = ProviderConversation::with_session_store(
+    let mut conversation = ProviderConversation::with_session_port(
         store_trait,
         sample_header(&work_dir, "gpt-5-mini"),
     )
@@ -155,7 +155,7 @@ fn flush_session_persistence_preserves_store_error_source() {
     let missing_session_id = SessionId::new();
     let store_trait: Arc<dyn SessionStore> = store;
     let mut conversation =
-        ProviderConversation::with_session_store(store_trait, sample_header(&work_dir, "qwen3"))
+        ProviderConversation::with_session_port(store_trait, sample_header(&work_dir, "qwen3"))
             .expect("persisted conversation should initialize");
     conversation.set_session_id(missing_session_id.clone());
     let request = conversation
@@ -204,7 +204,7 @@ fn session_persistence_actor_replies_to_pending_flush_when_error_stops_actor() {
         Arc::new(run_store(LocalSessionStore::open_in(root)).expect("local store should open"));
     let store_trait: Arc<dyn SessionStore> = store;
     let mut conversation =
-        ProviderConversation::with_session_store(store_trait, sample_header(&work_dir, "qwen3"))
+        ProviderConversation::with_session_port(store_trait, sample_header(&work_dir, "qwen3"))
             .expect("persisted conversation should initialize");
     let request = conversation
         .prepare_turn(&runtime_domain::session::ConversationTurnRequest::new(
@@ -262,7 +262,7 @@ fn session_persistence_actor_flushes_finish_work_after_conversation_cancellation
         Arc::new(run_store(LocalSessionStore::open_in(root)).expect("local store should open"));
     let store_trait: Arc<dyn SessionStore> = store.clone();
     let mut conversation =
-        ProviderConversation::with_session_store(store_trait, sample_header(&work_dir, "qwen3"))
+        ProviderConversation::with_session_port(store_trait, sample_header(&work_dir, "qwen3"))
             .expect("persisted conversation should initialize");
     let user = ConversationItem::text(Role::User, "run a tool");
     let assistant = ConversationItem::text(Role::Assistant, "tool was interrupted");
@@ -333,7 +333,7 @@ fn persistence_helpers_store_rich_tool_replay_without_duplicate_tool_result() {
         Arc::new(run_store(LocalSessionStore::open_in(root)).expect("local store should open"));
     let store_trait: Arc<dyn SessionStore> = store.clone();
     let mut conversation =
-        ProviderConversation::with_session_store(store_trait, sample_header(&work_dir, "qwen3"))
+        ProviderConversation::with_session_port(store_trait, sample_header(&work_dir, "qwen3"))
             .expect("persisted conversation should initialize");
     let request = conversation
         .prepare_turn(&runtime_domain::session::ConversationTurnRequest::new(
@@ -472,7 +472,7 @@ fn persist_turn_start_keeps_provider_message_in_items_and_transcript_projection_
         Arc::new(run_store(LocalSessionStore::open_in(root)).expect("local store should open"));
     let store_trait: Arc<dyn SessionStore> = store.clone();
     let mut conversation =
-        ProviderConversation::with_session_store(store_trait, sample_header(&work_dir, "qwen3"))
+        ProviderConversation::with_session_port(store_trait, sample_header(&work_dir, "qwen3"))
             .expect("persisted conversation should initialize");
     let provider_user = ConversationItem::text(
         Role::User,
@@ -567,7 +567,7 @@ fn persist_turn_start_replays_image_only_user_message_as_bound_message() {
         Arc::new(run_store(LocalSessionStore::open_in(root)).expect("local store should open"));
     let store_trait: Arc<dyn SessionStore> = store.clone();
     let mut conversation =
-        ProviderConversation::with_session_store(store_trait, sample_header(&work_dir, "gpt-4o"))
+        ProviderConversation::with_session_port(store_trait, sample_header(&work_dir, "gpt-4o"))
             .expect("persisted conversation should initialize");
     let transcript_user = runtime_domain::session::TranscriptUserMessage {
         content: String::new(),
@@ -627,7 +627,7 @@ fn persist_context_item_replays_image_only_tool_result_with_visible_summary() {
         Arc::new(run_store(LocalSessionStore::open_in(root)).expect("local store should open"));
     let store_trait: Arc<dyn SessionStore> = store.clone();
     let mut conversation =
-        ProviderConversation::with_session_store(store_trait, sample_header(&work_dir, "gpt-4o"))
+        ProviderConversation::with_session_port(store_trait, sample_header(&work_dir, "gpt-4o"))
             .expect("persisted conversation should initialize");
     let user = ConversationItem::text(Role::User, "inspect image");
     let request = conversation

@@ -17,7 +17,7 @@ use runtime_domain::{
         RuntimeToolActivityStatus, RuntimeToolKind, TranscriptReplayItem, TranscriptUserMessage,
     },
 };
-use session_store::{SessionHeader, SessionId};
+use session_store::{SessionHeader, SessionId, SessionPort};
 use tool_runtime::{ToolDefinition, ToolExecutorRegistry};
 
 use super::{
@@ -96,12 +96,14 @@ impl NativeAgentRuntime {
         session_workspace_tools: ToolExecutorRegistry,
         prompt_assembly_tool_definitions: Vec<ToolDefinition>,
         prompt_assembly: PromptAssemblySessionSnapshot,
+        session_port: Option<Arc<dyn SessionPort>>,
         event_notifier: RuntimeEventNotifier,
         llm_port: LlmPort,
         permission_policy: PermissionPolicy,
         permission_provider_id: impl Into<String>,
     ) -> Result<Self, String> {
-        let provider_conversation = fresh_provider_conversation(options, &prompt_assembly)?;
+        let provider_conversation =
+            fresh_provider_conversation(session_port, options, &prompt_assembly)?;
         Ok(Self {
             worker: ConversationWorker::new(event_notifier.clone()),
             llm_port,
@@ -159,6 +161,11 @@ impl NativeAgentRuntime {
         !self.is_busy()
             && self.provider_conversation.is_history_empty()
             && self.provider_conversation.session_id().is_none()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_shutdown_for_test(&self) -> bool {
+        self.is_shutdown
     }
 
     pub(crate) fn truncate_after_user_turns(
@@ -851,6 +858,7 @@ impl AgentRuntime for NativeAgentRuntime {
             .map_err(AgentRuntimeError::Shutdown);
         self.cancel_permission_turn();
         self.active_turn = None;
+        self.provider_conversation = ProviderConversation::default();
         self.session_workspace_tools = ToolExecutorRegistry::new();
         self.prompt_assembly_tool_definitions.clear();
         worker_result
@@ -876,15 +884,13 @@ impl Drop for NativeAgentRuntime {
 }
 
 fn fresh_provider_conversation(
+    session_port: Option<Arc<dyn SessionPort>>,
     options: &AppRuntimeOptions,
     prompt_assembly: &PromptAssemblySessionSnapshot,
 ) -> Result<ProviderConversation, String> {
-    let mut provider_conversation = match (
-        options.session_store.clone(),
-        options.session_header_template.clone(),
-    ) {
-        (Some(store), Some(header_template)) => {
-            ProviderConversation::with_session_store(store, header_template)
+    let mut provider_conversation = match (session_port, options.session_header_template.clone()) {
+        (Some(session_port), Some(header_template)) => {
+            ProviderConversation::with_session_port(session_port, header_template)
                 .map_err(|error| error.to_string())?
         }
         _ => ProviderConversation::default(),

@@ -195,14 +195,18 @@ pub trait PromptAssemblyStore: Send + Sync {
     >;
 }
 
+/// `SessionPort` 是 Agent loop 需要的最小 durable-session capability。
+///
+/// 它只组合 session lifecycle 与 flush；tree、catalog、message history 和 prompt assembly
+/// persistence 仍通过各自 capability view 暴露，避免 Agent 获得 aggregate `SessionStore`
+/// 的无关 authority。
+pub trait SessionPort: SessionLifecycleStore + SessionFlushStore {}
+
+impl<T> SessionPort for T where T: SessionLifecycleStore + SessionFlushStore + ?Sized {}
+
 /// `SessionStore` 聚合 runtime 当前需要的持久化能力。
 pub trait SessionStore:
-    SessionLifecycleStore
-    + SessionTreeStore
-    + SessionCatalogStore
-    + SessionFlushStore
-    + MessageHistoryStore
-    + PromptAssemblyStore
+    SessionPort + SessionTreeStore + SessionCatalogStore + MessageHistoryStore + PromptAssemblyStore
 {
 }
 

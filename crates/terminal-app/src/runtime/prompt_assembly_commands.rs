@@ -62,10 +62,10 @@ impl AppRuntimeCoordinator {
         if let Some(session) = self.prompt_assembly_edit_session.as_ref() {
             return Ok(session.snapshot());
         }
-        let store = self.session_store()?;
+        let views = self.session_views()?;
         let header = self.session_header()?;
         let session = PromptAssemblyEditSession::load(
-            store,
+            views.prompt_assembly,
             header.work_dir,
             self.options.hunea_config_dir.clone(),
             self.prompt_assembly_tool_definitions(),
@@ -106,11 +106,11 @@ impl AppRuntimeCoordinator {
                 .map_err(|error| error.to_string())?;
         }
         let outcome = {
-            let store = self.session_store()?;
+            let views = self.session_views()?;
             let Some(session) = self.prompt_assembly_edit_session.as_mut() else {
                 return Ok(());
             };
-            session.commit(store)
+            session.commit(views.prompt_assembly)
         }
         .map_err(|error| error.to_string())?;
         let manager = match outcome {

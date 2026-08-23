@@ -11,7 +11,7 @@ use runtime_domain::{
     },
 };
 use session_store::{
-    ConfigSnapshot, ResolvedSessionState, SessionHeader, SessionId, SessionStore, SessionStoreError,
+    ConfigSnapshot, ResolvedSessionState, SessionHeader, SessionId, SessionPort, SessionStoreError,
 };
 
 mod history;
@@ -181,13 +181,13 @@ impl ProviderConversation {
         Self::default()
     }
 
-    /// `with_session_store` 创建带持久化能力的 provider-visible 对话。
+    /// `with_session_port` 创建带持久化能力的 provider-visible 对话。
     #[must_use = "creating a persisted provider conversation can fail and must be handled"]
-    pub fn with_session_store(
-        store: Arc<dyn SessionStore>,
+    pub fn with_session_port(
+        store: Arc<dyn SessionPort>,
         header_template: SessionHeader,
     ) -> Result<Self, ProviderConversationError> {
-        Ok(Self::from_resolved_session_store(
+        Ok(Self::from_resolved_session_port(
             store,
             header_template,
             None,
@@ -195,15 +195,15 @@ impl ProviderConversation {
         ))
     }
 
-    /// `with_resolved_session_store` 使用调用方已显式解析的 session state 构造对话。
+    /// `with_resolved_session_port` 使用调用方已显式解析的 session state 构造对话。
     #[must_use = "restoring a persisted provider conversation can fail and must be handled"]
-    pub fn with_resolved_session_store(
-        store: Arc<dyn SessionStore>,
+    pub fn with_resolved_session_port(
+        store: Arc<dyn SessionPort>,
         header_template: SessionHeader,
         session_id: Option<SessionId>,
         restored_state: &ResolvedSessionState,
     ) -> Result<Self, ProviderConversationError> {
-        Ok(Self::from_resolved_session_store(
+        Ok(Self::from_resolved_session_port(
             store,
             header_template,
             session_id,
@@ -211,8 +211,8 @@ impl ProviderConversation {
         ))
     }
 
-    fn from_resolved_session_store(
-        store: Arc<dyn SessionStore>,
+    fn from_resolved_session_port(
+        store: Arc<dyn SessionPort>,
         header_template: SessionHeader,
         session_id: Option<SessionId>,
         restored_state: &ResolvedSessionState,

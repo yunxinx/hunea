@@ -11,11 +11,16 @@ use runtime_domain::session::{
     MessageHistoryEntryId, PromptAssemblyCommandFailureKind, RuntimeEvent, SessionLoadRequestId,
     SessionPickerRow, SessionResumePayload, SessionTreePayload,
 };
-use session_store::{ProjectDir, SessionHeader, SessionId, SessionListOptions, SessionStore};
+use session_store::{
+    MessageHistoryStore, ProjectDir, PromptAssemblyStore, SessionCatalogStore, SessionFlushStore,
+    SessionHeader, SessionId, SessionLifecycleStore, SessionListOptions, SessionPort,
+    SessionTreeStore,
+};
 
 use super::{
-    session_branch_tree_payload, session_picker_row_from_meta, session_preview_payload,
-    session_resume_payload, session_tree_load::SessionTreeLoadConsumer, session_tree_payload,
+    session_branch_tree_payload, session_picker_row_from_meta, session_port::SessionBackendViews,
+    session_preview_payload, session_resume_payload, session_tree_load::SessionTreeLoadConsumer,
+    session_tree_payload,
 };
 
 const SESSION_SHUTDOWN_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -55,72 +60,76 @@ type SessionStoreWorkerEventSender = NotifyingSender<SessionStoreWorkerEvent>;
 
 enum SessionStoreCommand {
     ListSessions {
-        store: Arc<dyn SessionStore>,
+        store: Arc<dyn SessionCatalogStore>,
         project_dir: ProjectDir,
         active_session_id: Option<SessionId>,
     },
     LoadSessionPreview {
-        store: Arc<dyn SessionStore>,
+        store: Arc<dyn SessionLifecycleStore>,
         session_id: SessionId,
     },
     ResumeSession {
-        store: Arc<dyn SessionStore>,
+        store: Arc<dyn SessionPort>,
         header: SessionHeader,
         session_id: SessionId,
     },
     LoadSessionTree {
-        store: Arc<dyn SessionStore>,
+        store: Arc<dyn SessionTreeStore>,
         session_id: SessionId,
         request_id: SessionLoadRequestId,
         consumer: SessionTreeLoadConsumer,
     },
     LoadBranchTree {
-        store: Arc<dyn SessionStore>,
+        store: Arc<dyn SessionTreeStore>,
         session_id: SessionId,
         request_id: SessionLoadRequestId,
     },
     LoadBranchPreview {
-        store: Arc<dyn SessionStore>,
+        store: Arc<dyn SessionTreeStore>,
         session_id: SessionId,
         request_id: SessionLoadRequestId,
         branch_row_id: String,
     },
     SwitchBranch {
-        store: Arc<dyn SessionStore>,
+        port: Arc<dyn SessionPort>,
+        tree: Arc<dyn SessionTreeStore>,
+        lifecycle: Arc<dyn SessionLifecycleStore>,
         header: SessionHeader,
         session_id: SessionId,
         request_id: SessionLoadRequestId,
         leaf_id: String,
     },
     SelectEntryRewind {
-        store: Arc<dyn SessionStore>,
+        port: Arc<dyn SessionPort>,
+        tree: Arc<dyn SessionTreeStore>,
+        lifecycle: Arc<dyn SessionLifecycleStore>,
         header: SessionHeader,
         session_id: SessionId,
         entry_id: String,
     },
     SetLeaf {
-        store: Arc<dyn SessionStore>,
+        store: Arc<dyn SessionLifecycleStore>,
         session_id: SessionId,
         leaf_id: String,
     },
     FlushAll {
-        store: Arc<dyn SessionStore>,
+        store: Arc<dyn SessionFlushStore>,
         ack: Sender<Result<(), String>>,
     },
     LoadMessageHistoryStartupCache {
-        store: Arc<dyn SessionStore>,
+        store: Arc<dyn MessageHistoryStore>,
     },
     CheckPromptAssemblyMissingSources {
-        store: Arc<dyn SessionStore>,
+        store: Arc<dyn PromptAssemblyStore>,
         work_dir: std::path::PathBuf,
         config_dir: std::path::PathBuf,
     },
     LoadMessageHistoryPickerRows {
-        store: Arc<dyn SessionStore>,
+        store: Arc<dyn MessageHistoryStore>,
         request_id: SessionLoadRequestId,
     },
     RecordMessageHistory {
-        store: Arc<dyn SessionStore>,
+        store: Arc<dyn MessageHistoryStore>,
         entry_id: MessageHistoryEntryId,
         text: String,
         limit: usize,
@@ -191,13 +200,13 @@ impl SessionStoreWorker {
 
     pub(super) fn list_sessions(
         &mut self,
-        store: Arc<dyn SessionStore>,
+        views: SessionBackendViews,
         project_dir: ProjectDir,
         active_session_id: Option<SessionId>,
     ) -> Result<(), String> {
         self.send_command(
             SessionStoreCommand::ListSessions {
-                store,
+                store: views.catalog,
                 project_dir,
                 active_session_id,
             },
@@ -207,24 +216,27 @@ impl SessionStoreWorker {
 
     pub(super) fn load_session_preview(
         &mut self,
-        store: Arc<dyn SessionStore>,
+        views: SessionBackendViews,
         session_id: SessionId,
     ) -> Result<(), String> {
         self.send_command(
-            SessionStoreCommand::LoadSessionPreview { store, session_id },
+            SessionStoreCommand::LoadSessionPreview {
+                store: views.lifecycle,
+                session_id,
+            },
             false,
         )
     }
 
     pub(super) fn resume_session(
         &mut self,
-        store: Arc<dyn SessionStore>,
+        views: SessionBackendViews,
         header: SessionHeader,
         session_id: SessionId,
     ) -> Result<(), String> {
         self.send_command(
             SessionStoreCommand::ResumeSession {
-                store,
+                store: views.port,
                 header,
                 session_id,
             },
@@ -234,14 +246,14 @@ impl SessionStoreWorker {
 
     pub(super) fn load_session_tree(
         &mut self,
-        store: Arc<dyn SessionStore>,
+        views: SessionBackendViews,
         session_id: SessionId,
         consumer: SessionTreeLoadConsumer,
         request_id: SessionLoadRequestId,
     ) -> Result<(), String> {
         self.send_command(
             SessionStoreCommand::LoadSessionTree {
-                store,
+                store: views.tree,
                 session_id,
                 request_id,
                 consumer,
@@ -252,13 +264,13 @@ impl SessionStoreWorker {
 
     pub(super) fn load_branch_tree(
         &mut self,
-        store: Arc<dyn SessionStore>,
+        views: SessionBackendViews,
         session_id: SessionId,
         request_id: SessionLoadRequestId,
     ) -> Result<(), String> {
         self.send_command(
             SessionStoreCommand::LoadBranchTree {
-                store,
+                store: views.tree,
                 session_id,
                 request_id,
             },
@@ -268,14 +280,14 @@ impl SessionStoreWorker {
 
     pub(super) fn load_branch_preview(
         &mut self,
-        store: Arc<dyn SessionStore>,
+        views: SessionBackendViews,
         session_id: SessionId,
         request_id: SessionLoadRequestId,
         branch_row_id: String,
     ) -> Result<(), String> {
         self.send_command(
             SessionStoreCommand::LoadBranchPreview {
-                store,
+                store: views.tree,
                 session_id,
                 request_id,
                 branch_row_id,
@@ -286,7 +298,7 @@ impl SessionStoreWorker {
 
     pub(super) fn switch_branch(
         &mut self,
-        store: Arc<dyn SessionStore>,
+        views: SessionBackendViews,
         header: SessionHeader,
         session_id: SessionId,
         request_id: SessionLoadRequestId,
@@ -294,7 +306,9 @@ impl SessionStoreWorker {
     ) -> Result<(), String> {
         self.send_command(
             SessionStoreCommand::SwitchBranch {
-                store,
+                port: views.port,
+                tree: views.tree,
+                lifecycle: views.lifecycle,
                 header,
                 session_id,
                 request_id,
@@ -306,14 +320,16 @@ impl SessionStoreWorker {
 
     pub(super) fn select_entry_rewind(
         &mut self,
-        store: Arc<dyn SessionStore>,
+        views: SessionBackendViews,
         header: SessionHeader,
         session_id: SessionId,
         entry_id: String,
     ) -> Result<(), String> {
         self.send_command(
             SessionStoreCommand::SelectEntryRewind {
-                store,
+                port: views.port,
+                tree: views.tree,
+                lifecycle: views.lifecycle,
                 header,
                 session_id,
                 entry_id,
@@ -324,13 +340,13 @@ impl SessionStoreWorker {
 
     pub(super) fn set_leaf(
         &mut self,
-        store: Arc<dyn SessionStore>,
+        views: SessionBackendViews,
         session_id: SessionId,
         leaf_id: String,
     ) -> Result<(), String> {
         self.send_command(
             SessionStoreCommand::SetLeaf {
-                store,
+                store: views.lifecycle,
                 session_id,
                 leaf_id,
             },
@@ -338,12 +354,15 @@ impl SessionStoreWorker {
         )
     }
 
-    pub(super) fn flush_all(&self, store: Arc<dyn SessionStore>) -> Result<(), String> {
+    pub(super) fn flush_all(&self, views: SessionBackendViews) -> Result<(), String> {
         let (ack, receiver) = mpsc::channel();
         self.command_sender
             .as_ref()
             .ok_or_else(|| "session store worker stopped".to_string())?
-            .send(SessionStoreCommand::FlushAll { store, ack })
+            .send(SessionStoreCommand::FlushAll {
+                store: views.flush,
+                ack,
+            })
             .map_err(|_| "session store worker stopped".to_string())?;
         receiver
             .recv_timeout(SESSION_SHUTDOWN_WAIT)
@@ -352,23 +371,25 @@ impl SessionStoreWorker {
 
     pub(super) fn load_message_history_startup_cache(
         &mut self,
-        store: Arc<dyn SessionStore>,
+        views: SessionBackendViews,
     ) -> Result<(), String> {
         self.send_command(
-            SessionStoreCommand::LoadMessageHistoryStartupCache { store },
+            SessionStoreCommand::LoadMessageHistoryStartupCache {
+                store: views.message_history,
+            },
             false,
         )
     }
 
     pub(super) fn check_prompt_assembly_missing_sources(
         &mut self,
-        store: Arc<dyn SessionStore>,
+        views: SessionBackendViews,
         work_dir: std::path::PathBuf,
         config_dir: std::path::PathBuf,
     ) -> Result<(), String> {
         self.send_command(
             SessionStoreCommand::CheckPromptAssemblyMissingSources {
-                store,
+                store: views.prompt_assembly,
                 work_dir,
                 config_dir,
             },
@@ -378,25 +399,28 @@ impl SessionStoreWorker {
 
     pub(super) fn load_message_history_picker_rows(
         &mut self,
-        store: Arc<dyn SessionStore>,
+        views: SessionBackendViews,
         request_id: SessionLoadRequestId,
     ) -> Result<(), String> {
         self.send_command(
-            SessionStoreCommand::LoadMessageHistoryPickerRows { store, request_id },
+            SessionStoreCommand::LoadMessageHistoryPickerRows {
+                store: views.message_history,
+                request_id,
+            },
             false,
         )
     }
 
     pub(super) fn record_message_history(
         &mut self,
-        store: Arc<dyn SessionStore>,
+        views: SessionBackendViews,
         entry_id: MessageHistoryEntryId,
         text: String,
         limit: usize,
     ) -> Result<(), String> {
         self.send_command(
             SessionStoreCommand::RecordMessageHistory {
-                store,
+                store: views.message_history,
                 entry_id,
                 text,
                 limit,
@@ -559,7 +583,7 @@ fn run_session_worker(
 }
 
 async fn handle_list_sessions_command(
-    store: Arc<dyn SessionStore>,
+    store: Arc<dyn SessionCatalogStore>,
     project_dir: ProjectDir,
     active_session_id: Option<SessionId>,
     event_sender: &SessionStoreWorkerEventSender,
@@ -689,12 +713,14 @@ async fn handle_session_command(command: SessionStoreCommand) -> SessionStoreWor
             }
         },
         SessionStoreCommand::SwitchBranch {
-            store,
+            port,
+            tree,
+            lifecycle,
             header,
             session_id,
             request_id,
             leaf_id,
-        } => match switch_branch(store, header, session_id, leaf_id).await {
+        } => match switch_branch(port, tree, lifecycle, header, session_id, leaf_id).await {
             Ok((conversation, resume_payload, tree_payload)) => {
                 SessionStoreWorkerEvent::RestoredWithTree {
                     conversation,
@@ -711,11 +737,13 @@ async fn handle_session_command(command: SessionStoreCommand) -> SessionStoreWor
             }
         },
         SessionStoreCommand::SelectEntryRewind {
-            store,
+            port,
+            tree,
+            lifecycle,
             header,
             session_id,
             entry_id,
-        } => match select_entry_rewind(store, header, session_id, entry_id).await {
+        } => match select_entry_rewind(port, tree, lifecycle, header, session_id, entry_id).await {
             Ok(Some((conversation, payload))) => SessionStoreWorkerEvent::Restored {
                 conversation,
                 payload,
@@ -836,7 +864,7 @@ async fn handle_session_command(command: SessionStoreCommand) -> SessionStoreWor
 }
 
 async fn list_session_rows(
-    store: &dyn SessionStore,
+    store: &dyn SessionCatalogStore,
     project_dir: &ProjectDir,
     active_session_id: Option<&SessionId>,
     options: SessionListOptions,
@@ -850,7 +878,7 @@ async fn list_session_rows(
 }
 
 async fn restore_conversation(
-    store: Arc<dyn SessionStore>,
+    store: Arc<dyn SessionPort>,
     header: SessionHeader,
     session_id: SessionId,
     leaf_id: Option<&str>,
@@ -859,7 +887,7 @@ async fn restore_conversation(
         .load_session(&session_id, leaf_id)
         .await
         .map_err(|error| error.to_string())?;
-    let conversation = ProviderConversation::with_resolved_session_store(
+    let conversation = ProviderConversation::with_resolved_session_port(
         store,
         header,
         Some(session_id.clone()),
@@ -871,7 +899,9 @@ async fn restore_conversation(
 }
 
 async fn switch_branch(
-    store: Arc<dyn SessionStore>,
+    port: Arc<dyn SessionPort>,
+    tree: Arc<dyn SessionTreeStore>,
+    lifecycle: Arc<dyn SessionLifecycleStore>,
     header: SessionHeader,
     session_id: SessionId,
     leaf_id: String,
@@ -884,12 +914,12 @@ async fn switch_branch(
     String,
 > {
     let (conversation, resume_payload) =
-        restore_conversation(store.clone(), header, session_id.clone(), Some(&leaf_id)).await?;
-    let tree_snapshot = store
+        restore_conversation(port, header, session_id.clone(), Some(&leaf_id)).await?;
+    let tree_snapshot = tree
         .load_session_tree_for_leaf(&session_id, &leaf_id)
         .await
         .map_err(|error| error.to_string())?;
-    store
+    lifecycle
         .set_leaf(&session_id, Some(&leaf_id))
         .await
         .map_err(|error| error.to_string())?;
@@ -901,12 +931,14 @@ async fn switch_branch(
 }
 
 async fn select_entry_rewind(
-    store: Arc<dyn SessionStore>,
+    port: Arc<dyn SessionPort>,
+    tree: Arc<dyn SessionTreeStore>,
+    lifecycle: Arc<dyn SessionLifecycleStore>,
     header: SessionHeader,
     session_id: SessionId,
     entry_id: String,
 ) -> Result<Option<(ProviderConversation, SessionResumePayload)>, String> {
-    let snapshot = store
+    let snapshot = tree
         .load_session_tree(&session_id)
         .await
         .map_err(|error| error.to_string())?;
@@ -919,14 +951,9 @@ async fn select_entry_rewind(
         return Ok(None);
     };
     let rewind_target_id = rewind_target_id.to_string();
-    let (conversation, payload) = restore_conversation(
-        store.clone(),
-        header,
-        session_id.clone(),
-        Some(&rewind_target_id),
-    )
-    .await?;
-    store
+    let (conversation, payload) =
+        restore_conversation(port, header, session_id.clone(), Some(&rewind_target_id)).await?;
+    lifecycle
         .set_leaf(&session_id, Some(&rewind_target_id))
         .await
         .map_err(|error| error.to_string())?;

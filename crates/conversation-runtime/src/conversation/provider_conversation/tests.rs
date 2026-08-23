@@ -254,7 +254,7 @@ fn prepare_turn_with_transcript_keeps_provider_and_transcript_user_messages_sepa
     let work_dir = PathBuf::from("/tmp/hunea-provider-conversation");
     let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
     let mut conversation =
-        ProviderConversation::with_session_store(store, sample_header(&work_dir, "qwen3"))
+        ProviderConversation::with_session_port(store, sample_header(&work_dir, "qwen3"))
             .expect("persisted conversation should initialize");
     let turn = ConversationTurnRequest::new(
         "local",
@@ -318,7 +318,7 @@ fn prepare_turn_with_transcript_appends_dynamic_environment_block_to_same_user_m
     let work_dir = PathBuf::from("/tmp/hunea-provider-conversation-append");
     let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
     let mut conversation =
-        ProviderConversation::with_session_store(store, sample_header(&work_dir, "qwen3"))
+        ProviderConversation::with_session_port(store, sample_header(&work_dir, "qwen3"))
             .expect("persisted conversation should initialize");
     let transcript_user_message = TranscriptUserMessage {
         content: "actual user message".to_string(),
@@ -377,7 +377,7 @@ fn prepare_turn_options_bind_transcript_append_and_dynamic_environment() {
     let work_dir = PathBuf::from("/tmp/hunea-provider-conversation-options");
     let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
     let mut conversation =
-        ProviderConversation::with_session_store(store, sample_header(&work_dir, "qwen3"))
+        ProviderConversation::with_session_port(store, sample_header(&work_dir, "qwen3"))
             .expect("persisted conversation should initialize");
     let turn = ConversationTurnRequest::new(
         "local",
@@ -450,7 +450,7 @@ fn persisted_conversation_loads_resolved_history_for_prepare_turn() {
     let restored_state =
         block_on_session(store.load_session(&session_id, None)).expect("session state should load");
     let store_trait: Arc<dyn SessionStore> = store;
-    let mut session = ProviderConversation::with_resolved_session_store(
+    let mut session = ProviderConversation::with_resolved_session_port(
         store_trait,
         sample_header(&work_dir, "qwen3"),
         Some(session_id),
@@ -480,7 +480,7 @@ fn append_items_keeps_provider_history_in_sync() {
     let work_dir = tempdir_path("append-items");
     let store_trait: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
     let mut session =
-        ProviderConversation::with_session_store(store_trait, sample_header(&work_dir, "qwen3"))
+        ProviderConversation::with_session_port(store_trait, sample_header(&work_dir, "qwen3"))
             .expect("persisted conversation should initialize");
     let items = vec![
         ConversationItem::text(Role::User, "question"),
@@ -526,7 +526,7 @@ fn persisted_conversation_restores_latest_system_prompt_snapshot() {
     let restored_state =
         block_on_session(store.load_session(&session_id, None)).expect("session state should load");
     let store_trait: Arc<dyn SessionStore> = store;
-    let session = ProviderConversation::with_resolved_session_store(
+    let session = ProviderConversation::with_resolved_session_port(
         store_trait,
         sample_header(&work_dir, "qwen3"),
         Some(session_id),
@@ -577,7 +577,7 @@ fn persisted_conversation_restores_prompt_prelude_snapshot() {
     let restored_state =
         block_on_session(store.load_session(&session_id, None)).expect("session state should load");
     let store_trait: Arc<dyn SessionStore> = store;
-    let session = ProviderConversation::with_resolved_session_store(
+    let session = ProviderConversation::with_resolved_session_port(
         store_trait,
         sample_header(&work_dir, "qwen3"),
         Some(session_id),
@@ -624,7 +624,7 @@ fn persisted_conversation_restores_dynamic_environment_session_config() {
     let restored_state =
         block_on_session(store.load_session(&session_id, None)).expect("session state should load");
     let store_trait: Arc<dyn SessionStore> = store;
-    let session = ProviderConversation::with_resolved_session_store(
+    let session = ProviderConversation::with_resolved_session_port(
         store_trait,
         sample_header(&work_dir, "qwen3"),
         Some(session_id),
@@ -658,7 +658,7 @@ fn truncate_after_user_turns_branches_within_existing_session() {
         block_on_session(store.load_session(&session_id, None)).expect("session state should load");
     let first_assistant_entry_id = restored_state.items[1].entry_id.clone();
     let store_trait: Arc<dyn SessionStore> = store;
-    let mut session = ProviderConversation::with_resolved_session_store(
+    let mut session = ProviderConversation::with_resolved_session_port(
         store_trait,
         sample_header(&work_dir, "qwen3"),
         Some(session_id.clone()),

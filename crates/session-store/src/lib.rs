@@ -26,7 +26,8 @@ pub(crate) mod util;
 
 pub use store::{
     InMemorySessionStore, LocalSessionStore, MessageHistoryStore, PromptAssemblyStore,
-    SessionCatalogStore, SessionFlushStore, SessionLifecycleStore, SessionStore, SessionTreeStore,
+    SessionCatalogStore, SessionFlushStore, SessionLifecycleStore, SessionPort, SessionStore,
+    SessionTreeStore,
 };
 
 /// 短 entry id 固定为 8 个 hex 字符。

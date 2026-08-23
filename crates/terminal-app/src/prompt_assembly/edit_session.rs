@@ -7,7 +7,7 @@ use runtime_domain::prompt_assembly::persistence::{
     save_project_prompt_assembly_state,
 };
 use runtime_domain::prompt_assembly::{PromptAssemblyManagerSnapshot, PromptAssemblyMutation};
-use session_store::SessionStore;
+use session_store::PromptAssemblyStore;
 use tool_runtime::ToolDefinition;
 
 use crate::session_store_bridge::run_session_store_future;
@@ -36,7 +36,7 @@ pub(crate) struct PromptAssemblyEditSession {
 impl PromptAssemblyEditSession {
     /// `load` 同步读取 global + project state 构造 edit session。
     pub(crate) fn load(
-        store: Arc<dyn SessionStore>,
+        store: Arc<dyn PromptAssemblyStore>,
         work_dir: PathBuf,
         config_dir: PathBuf,
         tool_definitions: Vec<ToolDefinition>,
@@ -110,7 +110,7 @@ impl PromptAssemblyEditSession {
     /// 每次 save 成功后同步 baseline，避免重试时重复 save 已成功的部分。
     pub(crate) fn commit(
         &mut self,
-        store: Arc<dyn SessionStore>,
+        store: Arc<dyn PromptAssemblyStore>,
     ) -> Result<Option<PromptAssemblyCommitOutcome>> {
         let global_changed = self.global_state != self.baseline_global_state;
         let project_changed = self.project_state != self.baseline_project_state;

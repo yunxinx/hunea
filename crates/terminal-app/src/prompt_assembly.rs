@@ -231,7 +231,7 @@ fn apply_prompt_assembly_mutation(
     tool_definitions: &[ToolDefinition],
 ) -> Result<PromptAssemblyManagerSnapshot> {
     let mut session = PromptAssemblyEditSession::load(
-        Arc::clone(&store),
+        store.clone(),
         work_dir.to_path_buf(),
         config_dir.to_path_buf(),
         tool_definitions.to_vec(),

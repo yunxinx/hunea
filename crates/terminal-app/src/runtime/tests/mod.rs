@@ -4,6 +4,7 @@ mod branch_tree;
 mod context_budget;
 mod conversation;
 mod event_wake;
+mod inspection;
 mod prompt_assembly;
 mod rewind;
 mod session_list;

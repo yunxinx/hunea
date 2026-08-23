@@ -15,6 +15,7 @@ fn conversation_runtime_clears_receiver_after_terminal_event() {
         .expect("send terminal event");
     let mut runtime = ConversationWorker {
         receiver: Some(receiver),
+        worker_thread: None,
         cancellation: Some(CancellationToken::new()),
         target: Some(RuntimeTarget::provider("provider", "model")),
         permission_broker: ConversationPermissionBroker::default(),
@@ -38,6 +39,7 @@ fn conversation_runtime_keeps_receiver_after_retry_event() {
     let (sender, receiver) = mpsc::channel();
     let mut runtime = ConversationWorker {
         receiver: Some(receiver),
+        worker_thread: None,
         cancellation: Some(CancellationToken::new()),
         target: Some(RuntimeTarget::provider("provider", "model")),
         permission_broker: ConversationPermissionBroker::default(),
@@ -89,6 +91,7 @@ fn conversation_runtime_keeps_receiver_after_token_estimate_event() {
     let (sender, receiver) = mpsc::channel();
     let mut runtime = ConversationWorker {
         receiver: Some(receiver),
+        worker_thread: None,
         cancellation: Some(CancellationToken::new()),
         target: Some(RuntimeTarget::provider("provider", "model")),
         permission_broker: ConversationPermissionBroker::default(),
@@ -117,6 +120,7 @@ fn conversation_runtime_keeps_receiver_after_text_delta_event() {
     let (sender, receiver) = mpsc::channel();
     let mut runtime = ConversationWorker {
         receiver: Some(receiver),
+        worker_thread: None,
         cancellation: Some(CancellationToken::new()),
         target: Some(RuntimeTarget::provider("provider", "model")),
         permission_broker: ConversationPermissionBroker::default(),
@@ -149,6 +153,7 @@ fn conversation_runtime_buffers_session_events_without_ui_event() {
     let (sender, receiver) = mpsc::channel();
     let mut runtime = ConversationWorker {
         receiver: Some(receiver),
+        worker_thread: None,
         cancellation: Some(CancellationToken::new()),
         target: Some(RuntimeTarget::provider("provider", "model")),
         permission_broker: ConversationPermissionBroker::default(),
@@ -197,6 +202,7 @@ fn conversation_runtime_preserves_turn_entry_id_when_retry_replays_turn_start() 
     let (sender, receiver) = mpsc::channel();
     let mut runtime = ConversationWorker {
         receiver: Some(receiver),
+        worker_thread: None,
         cancellation: Some(CancellationToken::new()),
         target: Some(RuntimeTarget::provider("provider", "model")),
         permission_broker: ConversationPermissionBroker::default(),
@@ -236,6 +242,7 @@ fn conversation_interrupt_keeps_receiver_until_worker_terminal_event() {
     let (_sender, receiver) = mpsc::channel();
     let mut runtime = ConversationWorker {
         receiver: Some(receiver),
+        worker_thread: None,
         cancellation: Some(CancellationToken::new()),
         target: Some(RuntimeTarget::provider("provider", "model")),
         permission_broker: ConversationPermissionBroker::default(),
@@ -299,7 +306,9 @@ async fn conversation_worker_reset_keeps_existing_permission_rules_for_the_next_
     let mut runtime = ConversationWorker::new(RuntimeEventNotifier::default());
     runtime.permission_broker = broker.clone();
 
-    runtime.reset_after_clear();
+    runtime
+        .reset_after_clear()
+        .expect("worker without a thread should reset cleanly");
 
     let second_handler = broker.handler(sender);
     let second_cancellation = CancellationToken::new();
@@ -365,6 +374,7 @@ async fn conversation_worker_context_change_cancels_turn_and_clears_permission_r
     let turn_cancellation = CancellationToken::new();
     let mut runtime = ConversationWorker {
         receiver: Some(worker_receiver),
+        worker_thread: None,
         cancellation: Some(turn_cancellation.clone()),
         target: Some(RuntimeTarget::provider("provider", "model")),
         permission_broker: broker.clone(),
@@ -375,7 +385,9 @@ async fn conversation_worker_context_change_cancels_turn_and_clears_permission_r
         event_notifier: RuntimeEventNotifier::default(),
     };
 
-    runtime.reset_for_context_change();
+    runtime
+        .reset_for_context_change()
+        .expect("worker without a thread should reset cleanly");
 
     assert!(turn_cancellation.is_cancelled());
     assert!(!runtime.is_running());

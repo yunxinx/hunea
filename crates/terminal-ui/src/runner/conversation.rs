@@ -7,7 +7,7 @@ use runtime_domain::session::{
 };
 use runtime_domain::session::{ConversationTurnRequest, RuntimeCommand, RuntimeCommandReceipt};
 
-use super::RuntimeCoordinator;
+use super::UiRuntimePort;
 
 #[cfg(test)]
 pub(super) fn apply_conversation_event(
@@ -78,7 +78,7 @@ pub(super) fn apply_conversation_event(
 
 pub(super) fn run_send_conversation_turn_effect(
     model: &mut Model,
-    runtime_coordinator: &mut impl RuntimeCoordinator,
+    runtime_coordinator: &mut impl UiRuntimePort,
     request: ConversationTurnRequest,
 ) {
     match runtime_coordinator

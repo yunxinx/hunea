@@ -27,6 +27,7 @@ fn conversation_worker_persists_config_change_and_flushes_finished_turn() {
     let (sender, receiver) = conversation_worker_event_channel();
     let mut runtime = ConversationWorker {
         receiver: Some(receiver),
+        worker_thread: None,
         cancellation: Some(CancellationToken::new()),
         target: Some(RuntimeTarget::provider("local", "qwen3")),
         permission_broker: ConversationPermissionBroker::default(),

@@ -12,6 +12,14 @@ impl ModelCatalog {
         Self { providers }
     }
 
+    /// `providers` 返回目录中的全部 provider，包含当前禁用的配置项。
+    ///
+    /// 诊断投影需要同时观察 enabled 与 disabled 状态；模型选择 UI 仍应使用
+    /// `enabled_providers`，避免把配置观察面和用户可选列表混在一起。
+    pub fn providers(&self) -> impl Iterator<Item = &ModelProvider> {
+        self.providers.iter()
+    }
+
     /// `enabled_providers` 返回当前允许展示的 provider。
     pub fn enabled_providers(&self) -> impl Iterator<Item = &ModelProvider> {
         self.providers.iter().filter(|provider| provider.enabled)

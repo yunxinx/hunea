@@ -11,6 +11,7 @@ use super::input::{
     coalesced_input_actions_with_options,
 };
 use super::*;
+use super::{RuntimeWake, UiRuntimePort};
 use crate::{
     AppEffect, AppEvent, ReasoningDisplayMode, Sender, StatusLineItem,
     runtime::RuntimeEventApply,
@@ -34,8 +35,9 @@ use runtime_domain::session::{
 };
 
 #[derive(Default)]
-struct TestRuntimeCoordinator {
+struct TestUiRuntimePort {
     runtime_events: Vec<RuntimeEvent>,
+    runtime_epoch: u64,
     conversation_running: bool,
     conversation_interrupted: bool,
     conversation_request: Option<ConversationTurnRequest>,
@@ -45,6 +47,9 @@ struct TestRuntimeCoordinator {
     next_record_message_history_error: Option<String>,
     reset_count: usize,
     conversation_retained_user_turns: Option<usize>,
+    runtime_wake: Option<RuntimeWake>,
+    control_metadata: Vec<String>,
+    delivery_content: Vec<String>,
 }
 
 fn assistant_response(content: impl Into<String>) -> ConversationResponse {
@@ -70,7 +75,12 @@ fn context_limit(value: usize) -> ContextTokenLimit {
     ContextTokenLimit::try_from(value).expect("fixture limit should be valid")
 }
 
-impl RuntimeCoordinator for TestRuntimeCoordinator {
+impl UiRuntimePort for TestUiRuntimePort {
+    fn bind_runtime_wake(&mut self, wake: RuntimeWake) -> Result<(), String> {
+        self.runtime_wake = Some(wake);
+        Ok(())
+    }
+
     fn drain_runtime_events(&mut self) -> Vec<RuntimeEvent> {
         std::mem::take(&mut self.runtime_events)
     }
@@ -81,6 +91,7 @@ impl RuntimeCoordinator for TestRuntimeCoordinator {
     ) -> Result<RuntimeCommandReceipt, String> {
         self.commands.push(command.clone());
         self.last_command = Some(command.clone());
+        self.control_metadata.push(format!("command:{command:?}"));
         if let RuntimeCommand::RecordMessageHistory { .. } = &command
             && let Some(message) = self.next_record_message_history_error.take()
         {
@@ -101,6 +112,7 @@ impl RuntimeCoordinator for TestRuntimeCoordinator {
         match command {
             RuntimeCommand::Reset => {
                 self.runtime_events.clear();
+                self.runtime_epoch = self.runtime_epoch.saturating_add(1);
                 self.conversation_running = false;
                 self.reset_count += 1;
                 Ok(RuntimeCommandReceipt::Accepted)
@@ -174,6 +186,192 @@ impl RuntimeCoordinator for TestRuntimeCoordinator {
     }
 }
 
+impl TestUiRuntimePort {
+    fn publish_event(&mut self, event: RuntimeEvent) {
+        self.publish_event_for_epoch(self.runtime_epoch, event);
+    }
+
+    fn publish_event_for_epoch(&mut self, epoch: u64, event: RuntimeEvent) {
+        if epoch != self.runtime_epoch {
+            return;
+        }
+        self.runtime_events.push(event);
+        if let Some(wake) = self.runtime_wake.as_ref() {
+            wake.wake();
+        }
+    }
+
+    fn publish_delivery(&mut self, target: RuntimeTarget, content: &str) {
+        self.delivery_content.push(content.to_string());
+        self.publish_event(RuntimeEvent::AssistantDelta {
+            target,
+            content: content.to_string(),
+        });
+    }
+}
+
+#[test]
+fn replay_runtime_port_keeps_control_metadata_separate_from_delivery_content() {
+    let mut runtime = TestUiRuntimePort::default();
+    let target = RuntimeTarget::provider("local", "qwen3");
+    let wake_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let wake_count_for_callback = std::sync::Arc::clone(&wake_count);
+    runtime
+        .bind_runtime_wake(RuntimeWake::new(move || {
+            wake_count_for_callback.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }))
+        .expect("replay port should accept a wake binding");
+
+    runtime.publish_delivery(target.clone(), "assistant delivery");
+    let events = runtime.drain_runtime_events();
+
+    assert_eq!(wake_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(runtime.delivery_content, vec!["assistant delivery"]);
+    assert!(runtime.control_metadata.is_empty());
+    assert_eq!(events.len(), 1);
+    assert!(matches!(
+        &events[0],
+        RuntimeEvent::AssistantDelta { content, .. } if content == "assistant delivery"
+    ));
+}
+
+#[test]
+fn replay_runtime_port_drains_all_ready_events_in_publication_order() {
+    let mut runtime = TestUiRuntimePort {
+        runtime_events: vec![
+            RuntimeEvent::ReasoningDelta {
+                target: RuntimeTarget::provider("local", "qwen3"),
+                content: "analysis".to_string(),
+            },
+            RuntimeEvent::AssistantDelta {
+                target: RuntimeTarget::provider("local", "qwen3"),
+                content: "answer".to_string(),
+            },
+            RuntimeEvent::MessageFinished {
+                target: Some(RuntimeTarget::provider("local", "qwen3")),
+                response: ConversationResponse::assistant_text("answer"),
+                finish_reason: None,
+                metrics: None,
+                context_usage: None,
+            },
+        ],
+        ..TestUiRuntimePort::default()
+    };
+
+    let first = runtime.drain_runtime_events();
+    let second = runtime.drain_runtime_events();
+
+    assert_eq!(first.len(), 3);
+    assert!(matches!(
+        &first[0],
+        RuntimeEvent::ReasoningDelta { content, .. } if content == "analysis"
+    ));
+    assert!(matches!(&first[2], RuntimeEvent::MessageFinished { .. }));
+    assert!(second.is_empty());
+}
+
+#[test]
+fn replay_runtime_port_exposes_sync_receipts_for_accept_reject_and_interrupt() {
+    let mut runtime = TestUiRuntimePort::default();
+    let request = ConversationTurnRequest::new_user_text(
+        "local",
+        ProviderKind::OpenAiCompatible,
+        "qwen3",
+        None,
+        None,
+        None,
+        "hello",
+    );
+    let target = request.target();
+
+    assert_eq!(
+        runtime
+            .dispatch_runtime_command(RuntimeCommand::SubmitConversationTurn {
+                target: target.clone(),
+                request: Box::new(request),
+            })
+            .expect("first turn should be accepted"),
+        RuntimeCommandReceipt::ConversationStarted {
+            activity_label: "qwen3".to_string(),
+        }
+    );
+
+    let duplicate_request = ConversationTurnRequest::new_user_text(
+        "local",
+        ProviderKind::OpenAiCompatible,
+        "qwen3",
+        None,
+        None,
+        None,
+        "duplicate",
+    );
+    assert_eq!(
+        runtime.dispatch_runtime_command(RuntimeCommand::SubmitConversationTurn {
+            target: duplicate_request.target(),
+            request: Box::new(duplicate_request),
+        }),
+        Err("Chat request is already running".to_string())
+    );
+
+    assert_eq!(
+        runtime
+            .dispatch_runtime_command(RuntimeCommand::Interrupt {
+                target: Some(target.clone()),
+            })
+            .expect("running turn should be interruptible"),
+        RuntimeCommandReceipt::Interrupted {
+            target: Some(target)
+        }
+    );
+    assert!(runtime.conversation_interrupted);
+    assert_eq!(
+        runtime
+            .dispatch_runtime_command(RuntimeCommand::RespondPermission {
+                target: None,
+                request_id: "permission-1".to_string(),
+                option_id: None,
+            })
+            .expect("permission response should be accepted"),
+        RuntimeCommandReceipt::Accepted
+    );
+}
+
+#[test]
+fn replay_runtime_port_rejects_late_events_after_reset_without_waking() {
+    let mut runtime = TestUiRuntimePort::default();
+    let wake_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let wake_count_for_callback = std::sync::Arc::clone(&wake_count);
+    runtime
+        .bind_runtime_wake(RuntimeWake::new(move || {
+            wake_count_for_callback.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }))
+        .expect("replay port should accept a wake binding");
+    let stale_epoch = runtime.runtime_epoch;
+    runtime.publish_event(RuntimeEvent::AssistantDelta {
+        target: RuntimeTarget::provider("local", "qwen3"),
+        content: "queued before reset".to_string(),
+    });
+    assert_eq!(wake_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    runtime
+        .dispatch_runtime_command(RuntimeCommand::Reset)
+        .expect("reset should be accepted");
+    runtime.publish_event_for_epoch(
+        stale_epoch,
+        RuntimeEvent::AssistantDelta {
+            target: RuntimeTarget::provider("local", "qwen3"),
+            content: "late stale delivery".to_string(),
+        },
+    );
+
+    assert!(runtime.drain_runtime_events().is_empty());
+    assert_eq!(
+        wake_count.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "reset must clear queued events and a rejected stale event must not wake the consumer"
+    );
+}
+
 #[test]
 fn conversation_completion_appends_assistant_message_after_request_finishes() {
     let mut model = Model::new(StartupBannerOptions::default());
@@ -199,7 +397,7 @@ fn conversation_completion_appends_assistant_message_after_request_finishes() {
 #[test]
 fn open_copy_picker_effect_dispatches_copy_picker_tree_load() {
     let mut model = Model::new(StartupBannerOptions::default());
-    let mut runtime_coordinator = TestRuntimeCoordinator::default();
+    let mut runtime_coordinator = TestUiRuntimePort::default();
 
     run_open_copy_picker_effect(&mut model, &mut runtime_coordinator);
 
@@ -213,7 +411,7 @@ fn open_copy_picker_effect_dispatches_copy_picker_tree_load() {
 
 #[test]
 fn unrelated_runtime_commands_do_not_inject_context_budget_events() {
-    let mut runtime_coordinator = TestRuntimeCoordinator::default();
+    let mut runtime_coordinator = TestUiRuntimePort::default();
 
     runtime_coordinator
         .dispatch_runtime_command(RuntimeCommand::ListSessions)
@@ -233,7 +431,7 @@ fn open_context_budget_effect_dispatches_snapshot_load_with_request_id() {
         .set(Some(runtime_domain::model_catalog::ModelSelection::new(
             "local", "qwen3",
         )));
-    let mut runtime_coordinator = TestRuntimeCoordinator::default();
+    let mut runtime_coordinator = TestUiRuntimePort::default();
 
     super::effects::run_open_context_budget_effect(&mut model, &mut runtime_coordinator);
 
@@ -257,9 +455,9 @@ fn open_context_budget_effect_dispatch_failure_uses_runtime_internal_error() {
         .set(Some(runtime_domain::model_catalog::ModelSelection::new(
             "local", "qwen3",
         )));
-    let mut runtime_coordinator = TestRuntimeCoordinator {
+    let mut runtime_coordinator = TestUiRuntimePort {
         next_runtime_error: Some("runtime unavailable".to_string()),
-        ..TestRuntimeCoordinator::default()
+        ..TestUiRuntimePort::default()
     };
 
     super::effects::run_open_context_budget_effect(&mut model, &mut runtime_coordinator);
@@ -281,7 +479,7 @@ fn closing_context_budget_dispatches_runtime_cancellation_housekeeping() {
     let mut model = Model::new(StartupBannerOptions::default());
     model.open_context_budget_loading();
     let effect = model.update(AppEvent::Key(KeyCode::Esc.into()));
-    let mut runtime_coordinator = TestRuntimeCoordinator::default();
+    let mut runtime_coordinator = TestUiRuntimePort::default();
 
     apply_effect_if_needed_for_test(&mut model, &mut runtime_coordinator, effect);
 
@@ -294,7 +492,7 @@ fn closing_context_budget_dispatches_runtime_cancellation_housekeeping() {
 #[test]
 fn open_message_history_effect_dispatches_picker_rows_load_with_request_id() {
     let mut model = Model::new(StartupBannerOptions::default());
-    let mut runtime_coordinator = TestRuntimeCoordinator::default();
+    let mut runtime_coordinator = TestUiRuntimePort::default();
 
     run_open_message_history_picker_effect(&mut model, &mut runtime_coordinator);
 
@@ -311,9 +509,9 @@ fn open_message_history_effect_dispatches_picker_rows_load_with_request_id() {
 #[test]
 fn open_branch_tree_effect_keeps_immediate_failure_inside_branch_tree_overlay() {
     let mut model = ready_model();
-    let mut runtime_coordinator = TestRuntimeCoordinator {
+    let mut runtime_coordinator = TestUiRuntimePort {
         next_runtime_error: Some("branch tree unavailable".to_string()),
-        ..TestRuntimeCoordinator::default()
+        ..TestUiRuntimePort::default()
     };
 
     run_open_branch_tree_effect(&mut model, &mut runtime_coordinator);
@@ -359,9 +557,9 @@ fn open_branch_preview_effect_keeps_immediate_failure_inside_branch_preview_over
     let request_id = model
         .entry_tree_branch_preview_pending_request_id_for_test()
         .unwrap();
-    let mut runtime_coordinator = TestRuntimeCoordinator {
+    let mut runtime_coordinator = TestUiRuntimePort {
         next_runtime_error: Some("branch preview unavailable".to_string()),
-        ..TestRuntimeCoordinator::default()
+        ..TestUiRuntimePort::default()
     };
 
     run_open_branch_preview_effect(
@@ -1738,7 +1936,7 @@ fn conversation_tool_finished_updates_runtime_tool_activity() {
 #[test]
 fn conversation_send_effect_starts_conversation_target() {
     let mut model = Model::new(StartupBannerOptions::default());
-    let mut runtime_coordinator = TestRuntimeCoordinator::default();
+    let mut runtime_coordinator = TestUiRuntimePort::default();
     let request = ConversationTurnRequest::new_user_text(
         "local",
         ProviderKind::OpenAiCompatible,
@@ -1764,7 +1962,7 @@ fn conversation_send_effect_starts_conversation_target() {
 #[test]
 fn conversation_send_effect_records_history_after_conversation_start() {
     let mut model = Model::new(StartupBannerOptions::default());
-    let mut runtime_coordinator = TestRuntimeCoordinator::default();
+    let mut runtime_coordinator = TestUiRuntimePort::default();
     let request = ConversationTurnRequest::new_user_text(
         "local",
         ProviderKind::OpenAiCompatible,
@@ -1804,9 +2002,9 @@ fn conversation_send_effect_records_history_after_conversation_start() {
 #[test]
 fn conversation_send_effect_failure_uses_toast_not_status_notice() {
     let mut model = Model::new(StartupBannerOptions::default());
-    let mut runtime_coordinator = TestRuntimeCoordinator {
+    let mut runtime_coordinator = TestUiRuntimePort {
         next_runtime_error: Some("runtime unavailable".to_string()),
-        ..TestRuntimeCoordinator::default()
+        ..TestUiRuntimePort::default()
     };
     let request = ConversationTurnRequest::new_user_text(
         "local",
@@ -1863,9 +2061,9 @@ fn record_message_history_dispatch_failure_reverts_blind_recall_cache() {
         .expect("hello should stage a pending persist");
     assert_eq!(model.blind_recall.cache().len(), 2);
 
-    let mut runtime_coordinator = TestRuntimeCoordinator {
+    let mut runtime_coordinator = TestUiRuntimePort {
         next_record_message_history_error: Some("session store worker stopped".to_string()),
-        ..TestRuntimeCoordinator::default()
+        ..TestUiRuntimePort::default()
     };
     apply_effect_if_needed_for_test(
         &mut model,
@@ -1886,7 +2084,7 @@ fn record_message_history_dispatch_failure_reverts_blind_recall_cache() {
 
 #[test]
 fn truncate_conversation_command_records_retained_turns() {
-    let mut runtime_coordinator = TestRuntimeCoordinator::default();
+    let mut runtime_coordinator = TestUiRuntimePort::default();
 
     runtime_coordinator
         .dispatch_runtime_command(RuntimeCommand::truncate_conversation(2))
@@ -1915,9 +2113,9 @@ fn conversation_turn_request_keeps_runtime_target_in_core_dto() {
 
 #[test]
 fn interrupt_conversation_clears_runtime_without_immediate_notice() {
-    let mut runtime_coordinator = TestRuntimeCoordinator {
+    let mut runtime_coordinator = TestUiRuntimePort {
         conversation_running: true,
-        ..TestRuntimeCoordinator::default()
+        ..TestUiRuntimePort::default()
     };
     let mut model = Model::new(StartupBannerOptions::default());
     model.transcript_mut().clear();
@@ -1936,9 +2134,9 @@ fn interrupt_conversation_clears_runtime_without_immediate_notice() {
 
 #[test]
 fn interrupt_receipt_and_runtime_event_append_single_system_message() {
-    let mut runtime_coordinator = TestRuntimeCoordinator {
+    let mut runtime_coordinator = TestUiRuntimePort {
         conversation_running: true,
-        ..TestRuntimeCoordinator::default()
+        ..TestUiRuntimePort::default()
     };
     let target = RuntimeTarget::provider("local", "qwen3");
     let mut model = Model::new(StartupBannerOptions::default());
@@ -1967,7 +2165,7 @@ fn switch_branch_effect_preserves_composer_and_reopens_entry_tree_loading() {
     model.composer_mut().reset_text_and_move_to_end("draft");
     model.sync_composer_height();
     open_branch_picker_for_switch_test(&mut model);
-    let mut runtime_coordinator = TestRuntimeCoordinator::default();
+    let mut runtime_coordinator = TestUiRuntimePort::default();
 
     run_switch_branch_effect(&mut model, &mut runtime_coordinator, "leaf-b");
     let request_id = model.entry_tree_pending_request_id_for_test().unwrap();
@@ -2003,9 +2201,9 @@ fn switch_branch_effect_keeps_picker_open_and_shows_error_on_rejection() {
     model.composer_mut().reset_text_and_move_to_end("draft");
     model.sync_composer_height();
     open_branch_picker_for_switch_test(&mut model);
-    let mut runtime_coordinator = TestRuntimeCoordinator {
+    let mut runtime_coordinator = TestUiRuntimePort {
         next_runtime_error: Some("Cannot switch branch while a request is running".to_string()),
-        ..TestRuntimeCoordinator::default()
+        ..TestUiRuntimePort::default()
     };
 
     run_switch_branch_effect(&mut model, &mut runtime_coordinator, "leaf-b");
@@ -2318,7 +2516,7 @@ fn switch_branch_tree_payload() -> SessionTreePayload {
 
 fn apply_send_conversation_turn_effect_for_test(
     model: &mut Model,
-    runtime_coordinator: &mut TestRuntimeCoordinator,
+    runtime_coordinator: &mut TestUiRuntimePort,
     request: ConversationTurnRequest,
     record_message_history: Option<runtime_domain::session::PendingMessageHistoryEntry>,
 ) {
@@ -2330,7 +2528,7 @@ fn apply_send_conversation_turn_effect_for_test(
 
 fn apply_effect_if_needed_for_test(
     model: &mut Model,
-    runtime_coordinator: &mut TestRuntimeCoordinator,
+    runtime_coordinator: &mut TestUiRuntimePort,
     effect: Option<AppEffect>,
 ) {
     if model.take_context_budget_cancellation_request() {

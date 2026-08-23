@@ -3,7 +3,7 @@ use std::{
         Arc,
         mpsc::{self, Receiver, Sender},
     },
-    thread,
+    thread::{self, JoinHandle},
 };
 
 use conversation_runtime::{NotifyingSender, ProviderConversation, RuntimeEventNotifier};
@@ -21,8 +21,9 @@ use super::{
 const SESSION_SHUTDOWN_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub(super) struct SessionStoreWorker {
-    command_sender: Sender<SessionStoreCommand>,
+    command_sender: Option<Sender<SessionStoreCommand>>,
     event_receiver: Receiver<SessionStoreWorkerEvent>,
+    worker_thread: Option<JoinHandle<()>>,
     pending_commands: usize,
     pending_mutations: usize,
 }
@@ -139,10 +140,12 @@ impl SessionStoreWorker {
         let event_sender = SessionStoreWorkerEventSender::new(event_sender, event_notifier);
         // session store 可能包含阻塞文件系统路径；这里固定为专用 OS 线程，
         // 线程内用 current-thread runtime 驱动 store 的 async trait，避免阻塞 TUI 主循环。
-        thread::spawn(move || run_session_worker(command_receiver, event_sender));
+        let worker_thread =
+            thread::spawn(move || run_session_worker(command_receiver, event_sender));
         Self {
-            command_sender,
+            command_sender: Some(command_sender),
             event_receiver,
+            worker_thread: Some(worker_thread),
             pending_commands: 0,
             pending_mutations: 0,
         }
@@ -151,6 +154,10 @@ impl SessionStoreWorker {
     #[cfg(test)]
     pub(super) fn has_pending_work(&self) -> bool {
         self.pending_commands > 0
+    }
+
+    pub(super) fn is_running(&self) -> bool {
+        self.command_sender.is_some()
     }
 
     pub(super) fn has_pending_mutation(&self) -> bool {
@@ -334,6 +341,8 @@ impl SessionStoreWorker {
     pub(super) fn flush_all(&self, store: Arc<dyn SessionStore>) -> Result<(), String> {
         let (ack, receiver) = mpsc::channel();
         self.command_sender
+            .as_ref()
+            .ok_or_else(|| "session store worker stopped".to_string())?
             .send(SessionStoreCommand::FlushAll { store, ack })
             .map_err(|_| "session store worker stopped".to_string())?;
         receiver
@@ -402,6 +411,8 @@ impl SessionStoreWorker {
         is_mutation: bool,
     ) -> Result<(), String> {
         self.command_sender
+            .as_ref()
+            .ok_or_else(|| "session store worker stopped".to_string())?
             .send(command)
             .map_err(|_| "session store worker stopped".to_string())?;
         self.pending_commands = self.pending_commands.saturating_add(1);
@@ -411,6 +422,23 @@ impl SessionStoreWorker {
         Ok(())
     }
 
+    pub(super) fn shutdown(&mut self) -> Result<(), String> {
+        self.command_sender = None;
+        let join_result = self
+            .worker_thread
+            .take()
+            .map(|worker_thread| {
+                worker_thread
+                    .join()
+                    .map_err(|_| "session store worker thread panicked".to_string())
+            })
+            .unwrap_or(Ok(()));
+        while self.event_receiver.try_recv().is_ok() {}
+        self.pending_commands = 0;
+        self.pending_mutations = 0;
+        join_result
+    }
+
     fn mark_event_drained(&mut self, event: &SessionStoreWorkerEvent) {
         if event.completes_command() {
             self.pending_commands = self.pending_commands.saturating_sub(1);
@@ -418,6 +446,12 @@ impl SessionStoreWorker {
                 self.pending_mutations = self.pending_mutations.saturating_sub(1);
             }
         }
+    }
+}
+
+impl Drop for SessionStoreWorker {
+    fn drop(&mut self) {
+        let _ = self.shutdown();
     }
 }
 
@@ -924,7 +958,7 @@ mod tests {
         let notification_count = Arc::new(AtomicUsize::new(0));
         let callback_count = Arc::clone(&notification_count);
         let notifier = RuntimeEventNotifier::default();
-        notifier.replace_callback(move || {
+        let _wake_binding = notifier.bind_callback(move || {
             callback_count.fetch_add(1, Ordering::SeqCst);
         });
         let sender = SessionStoreWorkerEventSender::new(event_sender, notifier);
@@ -941,13 +975,25 @@ mod tests {
     }
 
     #[test]
+    fn shutdown_joins_the_owned_worker_thread() {
+        let mut worker = SessionStoreWorker::new(RuntimeEventNotifier::default());
+
+        worker.shutdown().expect("worker should shut down cleanly");
+
+        assert!(worker.command_sender.is_none());
+        assert!(worker.worker_thread.is_none());
+        assert!(!worker.has_pending_work());
+    }
+
+    #[test]
     fn disconnected_session_worker_clears_pending_commands_and_reports_failure() {
         let (command_sender, _command_receiver) = mpsc::channel();
         let (event_sender, event_receiver) = mpsc::channel();
         drop(event_sender);
         let mut worker = SessionStoreWorker {
-            command_sender,
+            command_sender: Some(command_sender),
             event_receiver,
+            worker_thread: None,
             pending_commands: 2,
             pending_mutations: 1,
         };

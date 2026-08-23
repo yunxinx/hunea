@@ -3,7 +3,7 @@ use runtime_domain::session::{RuntimeCommand, RuntimeCommandReceipt, RuntimeTarg
 
 use crate::{AppEffect, Model, toast::ToastSeverity};
 
-use super::RuntimeCoordinator;
+use super::UiRuntimePort;
 use super::conversation::run_send_conversation_turn_effect;
 use super::external_io::{
     ExternalIoRuntime, run_copy_selection_effect, run_external_editor_effect,
@@ -14,7 +14,7 @@ use super::terminal::{TerminalSession, TuiTerminal};
 
 pub(crate) fn dispatch_record_message_history(
     model: &mut Model,
-    runtime_coordinator: &mut impl RuntimeCoordinator,
+    runtime_coordinator: &mut impl UiRuntimePort,
     entry_id: runtime_domain::session::MessageHistoryEntryId,
     text: String,
 ) {
@@ -35,7 +35,7 @@ pub(super) fn apply_effect_if_needed(
     terminal: &mut TuiTerminal,
     terminal_session: &mut TerminalSession,
     model: &mut Model,
-    runtime_coordinator: &mut impl RuntimeCoordinator,
+    runtime_coordinator: &mut impl UiRuntimePort,
     external_io: &mut ExternalIoRuntime,
     loop_events: &mut LoopEventPump,
     effect: Option<AppEffect>,
@@ -213,7 +213,7 @@ pub(super) fn apply_effect_if_needed(
 
 fn dispatch_context_budget_cancellation_if_needed(
     model: &mut Model,
-    runtime_coordinator: &mut impl RuntimeCoordinator,
+    runtime_coordinator: &mut impl UiRuntimePort,
 ) {
     if !model.take_context_budget_cancellation_request() {
         return;
@@ -228,7 +228,7 @@ fn dispatch_context_budget_cancellation_if_needed(
 
 fn dispatch_prompt_assembly_commit_if_needed(
     model: &mut Model,
-    runtime_coordinator: &mut impl RuntimeCoordinator,
+    runtime_coordinator: &mut impl UiRuntimePort,
 ) {
     if !model.take_prompt_assembly_commit_request() {
         return;
@@ -241,7 +241,7 @@ fn dispatch_prompt_assembly_commit_if_needed(
 
 pub(super) fn run_switch_branch_effect(
     model: &mut Model,
-    runtime_coordinator: &mut impl RuntimeCoordinator,
+    runtime_coordinator: &mut impl UiRuntimePort,
     leaf_id: &str,
 ) {
     let request_id = model.next_session_load_request_id();
@@ -256,7 +256,7 @@ pub(super) fn run_switch_branch_effect(
 
 pub(super) fn run_open_copy_picker_effect(
     model: &mut Model,
-    runtime_coordinator: &mut impl RuntimeCoordinator,
+    runtime_coordinator: &mut impl UiRuntimePort,
 ) {
     let request_id = model.open_copy_picker_loading();
     if let Err(message) = runtime_coordinator
@@ -268,7 +268,7 @@ pub(super) fn run_open_copy_picker_effect(
 
 pub(super) fn run_open_context_budget_effect(
     model: &mut Model,
-    runtime_coordinator: &mut impl RuntimeCoordinator,
+    runtime_coordinator: &mut impl UiRuntimePort,
 ) {
     let Some(selection) = model.selected_model.selection().cloned() else {
         model.show_toast(
@@ -295,7 +295,7 @@ pub(super) fn run_open_context_budget_effect(
 
 pub(crate) fn run_open_message_history_picker_effect(
     model: &mut Model,
-    runtime_coordinator: &mut impl RuntimeCoordinator,
+    runtime_coordinator: &mut impl UiRuntimePort,
 ) {
     let request_id = model.open_message_history_picker_loading();
     if let Err(message) = runtime_coordinator
@@ -307,7 +307,7 @@ pub(crate) fn run_open_message_history_picker_effect(
 
 pub(super) fn run_open_branch_tree_effect(
     model: &mut Model,
-    runtime_coordinator: &mut impl RuntimeCoordinator,
+    runtime_coordinator: &mut impl UiRuntimePort,
 ) {
     let request_id = model.open_entry_tree_branch_tree_loading();
     if let Err(message) =
@@ -319,7 +319,7 @@ pub(super) fn run_open_branch_tree_effect(
 
 pub(super) fn run_open_branch_preview_effect(
     model: &mut Model,
-    runtime_coordinator: &mut impl RuntimeCoordinator,
+    runtime_coordinator: &mut impl UiRuntimePort,
     request_id: runtime_domain::session::SessionLoadRequestId,
     branch_row_id: String,
 ) {
@@ -335,7 +335,7 @@ pub(super) fn run_open_branch_preview_effect(
 
 fn run_simple_runtime_command_effect(
     model: &mut Model,
-    runtime_coordinator: &mut impl RuntimeCoordinator,
+    runtime_coordinator: &mut impl UiRuntimePort,
     command: RuntimeCommand,
 ) {
     if let Err(message) = runtime_coordinator.dispatch_runtime_command(command) {
@@ -345,7 +345,7 @@ fn run_simple_runtime_command_effect(
 
 fn run_truncate_conversation_effect(
     model: &mut Model,
-    runtime_coordinator: &mut impl RuntimeCoordinator,
+    runtime_coordinator: &mut impl UiRuntimePort,
     retained_user_turns: usize,
 ) {
     if let Err(message) = runtime_coordinator
@@ -357,7 +357,7 @@ fn run_truncate_conversation_effect(
 
 fn run_respond_runtime_permission_effect(
     model: &mut Model,
-    runtime_coordinator: &mut impl RuntimeCoordinator,
+    runtime_coordinator: &mut impl UiRuntimePort,
     target: RuntimeTarget,
     request_id: &str,
     option_id: Option<String>,
@@ -373,13 +373,13 @@ fn run_respond_runtime_permission_effect(
     }
 }
 
-pub(super) fn reset_runtime_session_after_clear(runtime_coordinator: &mut impl RuntimeCoordinator) {
+pub(super) fn reset_runtime_session_after_clear(runtime_coordinator: &mut impl UiRuntimePort) {
     let _ = runtime_coordinator.dispatch_runtime_command(RuntimeCommand::Reset);
 }
 
 pub(super) fn run_interrupt_current_turn_effect(
     model: &mut Model,
-    runtime_coordinator: &mut impl RuntimeCoordinator,
+    runtime_coordinator: &mut impl UiRuntimePort,
 ) {
     match runtime_coordinator.dispatch_runtime_command(RuntimeCommand::interrupt_current()) {
         Ok(RuntimeCommandReceipt::Interrupted {

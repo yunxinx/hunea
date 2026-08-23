@@ -13,17 +13,21 @@ impl ConversationWorker {
                 Ok(event) => event,
                 Err(mpsc::TryRecvError::Empty) => return None,
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    self.clear_runtime_state();
+                    let cleanup_error = self.clear_runtime_state().err();
                     return Some(ConversationEvent::Failed {
-                        message: "conversation request stopped before completion".to_string(),
+                        message: cleanup_error.unwrap_or_else(|| {
+                            "conversation request stopped before completion".to_string()
+                        }),
                     });
                 }
             };
 
             match event {
                 ConversationWorkerEvent::Progress(event) => {
-                    if event.is_terminal() {
-                        self.clear_runtime_state();
+                    if event.is_terminal()
+                        && let Err(message) = self.clear_runtime_state()
+                    {
+                        return Some(ConversationEvent::Failed { message });
                     }
                     return Some(event);
                 }
@@ -36,7 +40,9 @@ impl ConversationWorker {
                     upstream_context_tokens,
                 } => {
                     self.upstream_context_tokens = upstream_context_tokens;
-                    self.clear_runtime_state();
+                    if let Err(message) = self.clear_runtime_state() {
+                        return Some(ConversationEvent::Failed { message });
+                    }
                     return Some(ConversationEvent::Finished { response, metrics });
                 }
             }
@@ -67,12 +73,13 @@ impl ConversationWorker {
         }
     }
 
-    fn clear_runtime_state(&mut self) {
+    fn clear_runtime_state(&mut self) -> Result<(), String> {
         self.receiver = None;
         self.cancellation = None;
         self.target = None;
         self.pending_session_id = None;
         self.pending_user_entry_id = None;
         self.permission_broker.cancel_all();
+        self.join_worker_thread()
     }
 }

@@ -6,7 +6,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver},
     },
-    thread,
+    thread::{self, JoinHandle},
     time::Duration,
 };
 
@@ -75,6 +75,7 @@ type ConversationWorkerEventSender = NotifyingSender<ConversationWorkerEvent>;
 /// `ConversationWorker` 管理对话请求的后台 worker 与取消状态。
 pub struct ConversationWorker {
     receiver: Option<Receiver<ConversationWorkerEvent>>,
+    worker_thread: Option<JoinHandle<()>>,
     pub cancellation: Option<CancellationToken>,
     pub target: Option<RuntimeTarget>,
     permission_broker: ConversationPermissionBroker,
@@ -89,6 +90,7 @@ impl ConversationWorker {
     pub fn new(event_notifier: RuntimeEventNotifier) -> Self {
         Self {
             receiver: None,
+            worker_thread: None,
             cancellation: None,
             target: None,
             permission_broker: ConversationPermissionBroker::default(),
@@ -113,7 +115,7 @@ impl ConversationWorker {
         let target = request.target();
         let permission_broker = self.permission_broker.clone();
         let thread_permission_broker = permission_broker.clone();
-        thread::spawn(move || {
+        let worker_thread = thread::spawn(move || {
             let _exit_notification = sender.notify_on_drop();
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -139,6 +141,7 @@ impl ConversationWorker {
             }
         });
         self.receiver = Some(receiver);
+        self.worker_thread = Some(worker_thread);
         self.cancellation = Some(cancellation);
         self.target = Some(target);
         self.pending_session_id = None;
@@ -151,7 +154,7 @@ impl ConversationWorker {
         self.receiver.is_some()
     }
 
-    pub fn reset_after_clear(&mut self) {
+    pub fn reset_after_clear(&mut self) -> Result<(), String> {
         if let Some(cancellation) = self.cancellation.take() {
             cancellation.cancel();
         }
@@ -162,12 +165,14 @@ impl ConversationWorker {
         self.pending_user_entry_id = None;
         self.session_items.clear();
         self.upstream_context_tokens = None;
+        self.join_worker_thread()
     }
 
     /// 取消当前 turn，并清除切换 conversation 后不得继续复用的权限规则。
-    pub fn reset_for_context_change(&mut self) {
-        self.reset_after_clear();
+    pub fn reset_for_context_change(&mut self) -> Result<(), String> {
+        let cleanup_result = self.reset_after_clear();
         self.clear_permission_context();
+        cleanup_result
     }
 
     pub fn interrupt(&mut self) -> bool {
@@ -213,6 +218,21 @@ impl ConversationWorker {
 
     pub fn take_upstream_context_tokens(&mut self) -> Option<usize> {
         self.upstream_context_tokens.take()
+    }
+
+    fn join_worker_thread(&mut self) -> Result<(), String> {
+        let Some(worker_thread) = self.worker_thread.take() else {
+            return Ok(());
+        };
+        worker_thread
+            .join()
+            .map_err(|_| "conversation worker thread panicked".to_string())
+    }
+}
+
+impl Drop for ConversationWorker {
+    fn drop(&mut self) {
+        let _ = self.reset_after_clear();
     }
 }
 

@@ -564,7 +564,7 @@ mod tests {
     fn dynamic_environment_result_wakes_after_the_payload_is_queued() {
         let (wake_sender, wake_receiver) = std_mpsc::channel();
         let notifier = conversation_runtime::RuntimeEventNotifier::default();
-        notifier.replace_callback(move || {
+        let _wake_binding = notifier.bind_callback(move || {
             let _ = wake_sender.send(());
         });
         let observer = Arc::new(FixedObserver::new(vec![observation(
@@ -603,7 +603,7 @@ mod tests {
     fn panicking_dynamic_environment_observer_reports_failure_and_clears_active_request() {
         let (wake_sender, wake_receiver) = std_mpsc::channel();
         let notifier = conversation_runtime::RuntimeEventNotifier::default();
-        notifier.replace_callback(move || {
+        let _wake_binding = notifier.bind_callback(move || {
             let _ = wake_sender.send(());
         });
         let mut worker = DynamicEnvironmentWorker::new(Arc::new(PanickingObserver), notifier);

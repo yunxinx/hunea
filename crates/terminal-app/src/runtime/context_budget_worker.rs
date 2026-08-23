@@ -198,12 +198,18 @@ impl ContextBudgetWorker {
             let _ = worker_tx.send(WorkerControl::Shutdown);
         }
 
-        // `/context` cancellation is cooperative. Dropping the handle lets shutdown return even
-        // when a stale projection is still between cancellation checkpoints.
-        let _ = self.worker_thread.take();
+        let join_result = self
+            .worker_thread
+            .take()
+            .map(|worker_thread| {
+                worker_thread
+                    .join()
+                    .map_err(|_| "context budget worker thread panicked".to_string())
+            })
+            .unwrap_or(Ok(()));
 
         self.drain_result_channel();
-        Ok(())
+        join_result
     }
 
     pub(super) fn drain_events(&mut self) -> Vec<RuntimeEvent> {
@@ -313,6 +319,12 @@ impl ContextBudgetWorker {
 
     fn drain_result_channel(&mut self) {
         while self.result_rx.try_recv().is_ok() {}
+    }
+}
+
+impl Drop for ContextBudgetWorker {
+    fn drop(&mut self) {
+        let _ = self.shutdown();
     }
 }
 
@@ -527,10 +539,22 @@ mod tests {
     }
 
     #[test]
+    fn shutdown_joins_the_owned_worker_thread() {
+        let mut worker = ContextBudgetWorker::new(RuntimeEventNotifier::default())
+            .expect("worker should initialize");
+
+        worker.shutdown().expect("worker should shut down cleanly");
+
+        assert!(worker.worker_tx.is_none());
+        assert!(worker.worker_thread.is_none());
+        assert!(!worker.has_pending_work());
+    }
+
+    #[test]
     fn context_budget_result_wakes_after_the_payload_is_queued() {
         let (wake_sender, wake_receiver) = mpsc::channel();
         let notifier = conversation_runtime::RuntimeEventNotifier::default();
-        notifier.replace_callback(move || {
+        let _wake_binding = notifier.bind_callback(move || {
             let _ = wake_sender.send(());
         });
         let mut worker = ContextBudgetWorker::new(notifier).expect("worker should initialize");

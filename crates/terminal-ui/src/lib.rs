@@ -97,7 +97,7 @@ pub use model::{
 };
 pub use motion::MotionMode;
 pub use runner::{
-    LoopEventWaker, NoopRuntimeCoordinator, RuntimeCoordinator, run, run_with_options,
+    NoopUiRuntimePort, RuntimeWake, UiRuntimePort, run, run_with_options,
     run_with_runtime_coordinator, run_with_style_mode,
 };
 pub use sender::Sender;

@@ -1,0 +1,184 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use runtime_domain::{
+    model_catalog::{ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource},
+    prompt_assembly::{PromptPreludeSection, PromptPreludeSnapshot, PromptSourceKind},
+    provider::{ProviderApiKey, ProviderKind},
+};
+use terminal_ui::{RuntimeWake, UiRuntimePort};
+
+use super::support::*;
+
+const SECRET_SENTINEL: &str = "inspection-secret-sentinel";
+
+#[test]
+fn composition_snapshot_is_deterministic_and_redacted() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+    let provider = ModelProvider::new(
+        "z-provider",
+        ProviderKind::OpenAiCompatible,
+        "Z Provider",
+        Some(format!("https://{SECRET_SENTINEL}@example.test/v1")),
+        ModelSource::Configured,
+        vec![
+            ModelEntry::new("z-model", None, ModelSource::Configured),
+            ModelEntry::new("a-model", None, ModelSource::Configured),
+        ],
+    )
+    .with_api_key(Some(ProviderApiKey::new(SECRET_SENTINEL)))
+    .with_api_key_env(Some(SECRET_SENTINEL.to_string()));
+    let disabled_provider = ModelProvider::disabled(
+        "a-provider",
+        ProviderKind::Anthropic,
+        "A Provider",
+        None,
+        ModelSource::Configured,
+        vec![ModelEntry::new(
+            "disabled-model",
+            None,
+            ModelSource::Configured,
+        )],
+    );
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        loaded_models: conversation_runtime::models::LoadedModelCatalog {
+            catalog: ModelCatalog::new(vec![provider, disabled_provider]),
+            selected_model: Some(ModelSelection::new("z-provider", "z-model")),
+            ..conversation_runtime::models::LoadedModelCatalog::default()
+        },
+        session_store: Some(store),
+        initial_prompt_prelude: Some(PromptPreludeSnapshot {
+            sections: vec![PromptPreludeSection {
+                reference_id: "private-instruction".to_string(),
+                kind: PromptSourceKind::CoreSystemPrompt,
+                title: "private instruction".to_string(),
+                origin: None,
+                body: SECRET_SENTINEL.to_string(),
+            }],
+        }),
+        ..AppRuntimeOptions::default()
+    });
+
+    let workspace_tool_names = coordinator
+        .workspace_tools
+        .definitions()
+        .definitions()
+        .map(|definition| definition.name.clone())
+        .collect::<Vec<_>>();
+    let disabled_session_tool = workspace_tool_names
+        .first()
+        .expect("default composition should expose workspace tools")
+        .clone();
+    coordinator.session_workspace_tools = coordinator
+        .workspace_tools
+        .filtered(|name| name != disabled_session_tool);
+
+    let first = serde_json::to_vec(&coordinator.inspect_composition())
+        .expect("composition snapshot should serialize");
+    let second = serde_json::to_vec(&coordinator.inspect_composition())
+        .expect("composition snapshot should serialize repeatedly");
+    assert_eq!(first, second);
+
+    let json = String::from_utf8(first).expect("snapshot JSON should be UTF-8");
+    assert!(
+        !json.contains(SECRET_SENTINEL),
+        "snapshot must not contain credentials or instruction bodies: {json}"
+    );
+
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&json).expect("snapshot JSON should decode");
+    assert_eq!(snapshot["session_persistence"]["available"], true);
+    assert_eq!(
+        snapshot["selected_model"],
+        serde_json::json!({"provider_id": "z-provider", "model_id": "z-model"})
+    );
+    assert_eq!(
+        names(&snapshot["providers"]),
+        vec!["a-provider", "z-provider"]
+    );
+    assert_eq!(
+        snapshot["providers"][1]["model_ids"],
+        serde_json::json!(["a-model", "z-model"])
+    );
+
+    let workspace_names = names(&snapshot["workspace_tools"]);
+    let mut sorted_workspace_names = workspace_names.clone();
+    sorted_workspace_names.sort();
+    assert_eq!(workspace_names, sorted_workspace_names);
+    assert!(
+        !snapshot["session_tools"]
+            .as_array()
+            .expect("session tool names should be an array")
+            .iter()
+            .any(|name| name == &disabled_session_tool)
+    );
+    let disabled_prompt_tool = snapshot["prompt_tools"]
+        .as_array()
+        .expect("prompt tools should be an array")
+        .iter()
+        .find(|tool| tool["name"] == disabled_session_tool)
+        .expect("prompt inventory should retain tools disabled for the session");
+    assert_eq!(disabled_prompt_tool["tool_enabled"], true);
+    assert_eq!(disabled_prompt_tool["session_enabled"], false);
+}
+
+#[test]
+fn ui_runtime_bridge_reacts_to_wake_binding_lifecycle() {
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions::default());
+    assert_eq!(
+        component_state(&coordinator, "ui_runtime_bridge"),
+        "pending"
+    );
+
+    let wake_count = Arc::new(AtomicUsize::new(0));
+    let wake_count_for_callback = Arc::clone(&wake_count);
+    UiRuntimePort::bind_runtime_wake(
+        &mut coordinator,
+        RuntimeWake::new(move || {
+            wake_count_for_callback.fetch_add(1, Ordering::SeqCst);
+        }),
+    )
+    .expect("runtime wake should bind");
+
+    assert_eq!(component_state(&coordinator, "ui_runtime_bridge"), "active");
+    coordinator.runtime_event_notifier.notify();
+    assert_eq!(wake_count.load(Ordering::SeqCst), 1);
+
+    coordinator.shutdown().expect("runtime should shut down");
+    assert_eq!(
+        component_state(&coordinator, "ui_runtime_bridge"),
+        "pending"
+    );
+    coordinator.runtime_event_notifier.notify();
+    assert_eq!(
+        wake_count.load(Ordering::SeqCst),
+        1,
+        "disposing the runtime owner must remove the old wake callback"
+    );
+}
+
+fn names(value: &serde_json::Value) -> Vec<&str> {
+    value
+        .as_array()
+        .expect("snapshot field should be an array")
+        .iter()
+        .map(|entry| {
+            entry["id"]
+                .as_str()
+                .or_else(|| entry["name"].as_str())
+                .expect("snapshot entry should have an id or name")
+        })
+        .collect()
+}
+
+fn component_state(coordinator: &AppRuntimeCoordinator, component_id: &str) -> String {
+    let snapshot = serde_json::to_value(coordinator.inspect_composition())
+        .expect("composition snapshot should serialize");
+    snapshot["components"]
+        .as_array()
+        .expect("components should be an array")
+        .iter()
+        .find(|component| component["id"] == component_id)
+        .and_then(|component| component["state"].as_str())
+        .expect("component should have a lifecycle state")
+        .to_string()
+}

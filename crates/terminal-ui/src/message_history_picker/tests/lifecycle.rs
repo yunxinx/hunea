@@ -127,9 +127,9 @@ fn modal_layer_message_history_is_lowest_priority() {
 
 #[test]
 fn noop_coordinator_reports_picker_unavailable_in_overlay() {
-    use crate::runner::{NoopRuntimeCoordinator, run_open_message_history_picker_effect};
+    use crate::runner::{NoopUiRuntimePort, run_open_message_history_picker_effect};
 
-    let mut coordinator = NoopRuntimeCoordinator;
+    let mut coordinator = NoopUiRuntimePort;
     let mut model = Model::new(StartupBannerOptions::default());
     model.set_window(80, 24);
     run_open_message_history_picker_effect(&mut model, &mut coordinator);

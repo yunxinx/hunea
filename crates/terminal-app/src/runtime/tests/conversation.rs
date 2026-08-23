@@ -101,6 +101,21 @@ fn shutdown_cancels_the_previous_approval_context_turn() {
 }
 
 #[test]
+fn shutdown_is_idempotent_with_session_persistence_enabled() {
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        session_store: Some(Arc::new(InMemorySessionStore::new())),
+        ..AppRuntimeOptions::default()
+    });
+
+    coordinator
+        .shutdown()
+        .expect("first shutdown should dispose every runtime owner");
+    coordinator
+        .shutdown()
+        .expect("repeated shutdown should remain a no-op");
+}
+
+#[test]
 fn token_estimate_creates_render_barrier_before_permission_request() {
     let output_batch = vec![RuntimeEvent::OutputTokenEstimate {
         target: Some(RuntimeTarget::provider("local", "qwen3")),
@@ -163,7 +178,7 @@ fn conversation_failure_before_provider_request_rolls_back_pending_user() {
 
     let mut events = Vec::new();
     for _ in 0..50 {
-        events.extend(RuntimeCoordinator::drain_runtime_events(&mut coordinator));
+        events.extend(RuntimePort::drain_runtime_events(&mut coordinator));
         if events
             .iter()
             .any(|event| matches!(event, RuntimeEvent::Failed { .. }))
@@ -594,7 +609,7 @@ fn manual_skill_mentions_emit_synthetic_skill_usage_events_before_worker_failure
         })
         .expect("conversation should start");
 
-    let events = RuntimeCoordinator::drain_runtime_events(&mut coordinator);
+    let events = RuntimePort::drain_runtime_events(&mut coordinator);
     assert!(
         matches!(
             events.first(),

@@ -12,13 +12,11 @@ use super::support::*;
 fn model_refresh_completion_notifies_the_coordinator_consumer() {
     let mut coordinator = runtime_coordinator(AppRuntimeOptions::default());
     let (wake_sender, wake_receiver) = mpsc::channel();
-    coordinator
-        .runtime_event_notifier
-        .replace_callback(move || {
-            let _ = wake_sender.send(());
-        });
+    let _wake_binding = coordinator.runtime_event_notifier.bind_callback(move || {
+        let _ = wake_sender.send(());
+    });
 
-    RuntimeCoordinator::refresh_model_provider(
+    RuntimePort::refresh_model_provider(
         &mut coordinator,
         ProviderSyncRequest {
             provider_id: "anthropic".to_string(),
@@ -35,7 +33,7 @@ fn model_refresh_completion_notifies_the_coordinator_consumer() {
         .recv_timeout(Duration::from_secs(1))
         .expect("refresh completion should wake the coordinator consumer");
     assert_eq!(
-        RuntimeCoordinator::drain_model_provider_refresh_events(&mut coordinator).len(),
+        RuntimePort::drain_model_provider_refresh_events(&mut coordinator).len(),
         1
     );
 }
@@ -44,11 +42,9 @@ fn model_refresh_completion_notifies_the_coordinator_consumer() {
 fn render_barrier_deferral_rearms_the_coordinator_consumer() {
     let mut coordinator = runtime_coordinator(AppRuntimeOptions::default());
     let (wake_sender, wake_receiver) = mpsc::channel();
-    coordinator
-        .runtime_event_notifier
-        .replace_callback(move || {
-            let _ = wake_sender.send(());
-        });
+    let _wake_binding = coordinator.runtime_event_notifier.bind_callback(move || {
+        let _ = wake_sender.send(());
+    });
     let deferred = RuntimeEvent::PermissionRequested {
         target: RuntimeTarget::provider("local", "qwen3"),
         request: RuntimePermissionRequest::new("permission-1", None, Vec::new()),
@@ -85,14 +81,12 @@ fn deferred_event_does_not_skip_ready_worker_payloads() {
         ..AppRuntimeOptions::default()
     });
     let (wake_sender, wake_receiver) = mpsc::channel();
-    coordinator
-        .runtime_event_notifier
-        .replace_callback(move || {
-            let _ = wake_sender.send(());
-        });
+    let _wake_binding = coordinator.runtime_event_notifier.bind_callback(move || {
+        let _ = wake_sender.send(());
+    });
     let context_request_id = request_id(91);
 
-    RuntimeCoordinator::dispatch_runtime_command(
+    RuntimePort::dispatch_runtime_command(
         &mut coordinator,
         RuntimeCommand::LoadContextBudgetSnapshot {
             request_id: context_request_id,
@@ -110,7 +104,7 @@ fn deferred_event_does_not_skip_ready_worker_payloads() {
     };
     coordinator.defer_runtime_event_until_next_render(deferred.clone());
 
-    let events = RuntimeCoordinator::drain_runtime_events(&mut coordinator);
+    let events = RuntimePort::drain_runtime_events(&mut coordinator);
 
     assert_eq!(events.first(), Some(&deferred));
     assert!(events.iter().any(|event| matches!(

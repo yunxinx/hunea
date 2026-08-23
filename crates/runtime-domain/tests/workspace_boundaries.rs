@@ -83,7 +83,15 @@ fn runtime_domain_has_no_frontend_or_runtime_crate_dependencies() {
     let manifest = include_str!("../Cargo.toml");
     let dependencies = dependency_section(manifest);
 
-    for crate_name in ["tool-runtime", "conversation-runtime", "terminal-ui"] {
+    for crate_name in [
+        "tool-runtime",
+        "tool-loop-runtime",
+        "conversation-runtime",
+        "openai-compat-provider",
+        "session-store",
+        "terminal-app",
+        "terminal-ui",
+    ] {
         assert!(
             !dependencies.contains(crate_name),
             "runtime-domain should define shared DTOs without depending on {crate_name}"

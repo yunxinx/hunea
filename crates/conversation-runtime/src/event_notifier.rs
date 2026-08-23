@@ -11,6 +11,15 @@ pub struct RuntimeEventNotifier {
     callback: Arc<RwLock<Option<Arc<RuntimeEventCallback>>>>,
 }
 
+/// `RuntimeEventBinding` 拥有一次 wake callback 注册，并在释放时撤销该 effect。
+///
+/// 新 callback 替换旧 callback 后，释放旧 binding 不会误删新注册。
+#[must_use = "必须持有 binding，wake callback 才保持注册"]
+pub struct RuntimeEventBinding {
+    callback_slot: Arc<RwLock<Option<Arc<RuntimeEventCallback>>>>,
+    owned_callback: Option<Arc<RuntimeEventCallback>>,
+}
+
 /// worker scope 退出时补发一次通知，使 receiver disconnect 能被立即观察。
 #[must_use = "必须持有到 worker scope 结束，才能在退出时发送通知"]
 pub struct RuntimeEventExitNotification {
@@ -41,12 +50,20 @@ impl<T> NotifyingSender<T> {
 }
 
 impl RuntimeEventNotifier {
-    /// 替换当前 event loop 的 wake callback。
-    ///
-    /// notifier clone 共享同一个 callback slot；新 runner 绑定后，后续通知会发往
-    /// 最新 callback。旧 callback 在锁外释放，避免其析构影响 notifier lock。
-    pub fn replace_callback(&self, callback: impl Fn() + Send + Sync + 'static) {
+    /// 绑定 wake callback，并返回拥有该注册的可逆 binding。
+    pub fn bind_callback(
+        &self,
+        callback: impl Fn() + Send + Sync + 'static,
+    ) -> RuntimeEventBinding {
         let callback: Arc<RuntimeEventCallback> = Arc::new(callback);
+        self.install_callback(Arc::clone(&callback));
+        RuntimeEventBinding {
+            callback_slot: Arc::clone(&self.callback),
+            owned_callback: Some(callback),
+        }
+    }
+
+    fn install_callback(&self, callback: Arc<RuntimeEventCallback>) {
         let previous = {
             let mut callback_slot = self
                 .callback
@@ -74,6 +91,34 @@ impl RuntimeEventNotifier {
         RuntimeEventExitNotification {
             notifier: self.clone(),
         }
+    }
+}
+
+impl RuntimeEventBinding {
+    /// `dispose` 幂等撤销当前 binding 拥有的 callback。
+    pub fn dispose(&mut self) {
+        let Some(owned_callback) = self.owned_callback.take() else {
+            return;
+        };
+        let removed = {
+            let mut callback_slot = self
+                .callback_slot
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let owns_current_callback = callback_slot
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &owned_callback));
+            owns_current_callback
+                .then(|| callback_slot.take())
+                .flatten()
+        };
+        drop(removed);
+    }
+}
+
+impl Drop for RuntimeEventBinding {
+    fn drop(&mut self) {
+        self.dispose();
     }
 }
 

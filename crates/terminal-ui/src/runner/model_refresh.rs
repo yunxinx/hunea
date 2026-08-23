@@ -3,7 +3,7 @@ use runtime_domain::model_catalog::{
     ModelProviderRefreshEvent, ModelSelection, ProviderSyncRequest,
 };
 
-use super::RuntimeCoordinator;
+use super::UiRuntimePort;
 
 pub(super) fn apply_model_provider_refresh_event(
     model: &mut Model,
@@ -23,7 +23,7 @@ pub(super) fn apply_model_provider_refresh_event(
 
 pub(super) fn run_refresh_model_provider_effect(
     model: &mut Model,
-    runtime_coordinator: &mut impl RuntimeCoordinator,
+    runtime_coordinator: &mut impl UiRuntimePort,
     request: ProviderSyncRequest,
 ) {
     if let Err(message) = runtime_coordinator.refresh_model_provider(request) {
@@ -33,7 +33,7 @@ pub(super) fn run_refresh_model_provider_effect(
 
 pub(super) fn persist_selected_model(
     model: &mut Model,
-    runtime_coordinator: &mut impl RuntimeCoordinator,
+    runtime_coordinator: &mut impl UiRuntimePort,
     selection: &ModelSelection,
 ) {
     if let Err(message) = runtime_coordinator.persist_selected_model(selection) {

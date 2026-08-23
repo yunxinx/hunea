@@ -3,10 +3,7 @@
 use std::time::Instant;
 
 use color_eyre::eyre::Result;
-use runtime_domain::{
-    model_catalog::{ModelProviderRefreshEvent, ModelSelection, ProviderSyncRequest},
-    session::{RuntimeCommand, RuntimeCommandReceipt, RuntimeEvent},
-};
+use runtime_domain::session::RuntimeCommand;
 
 use super::{
     AppEvent, Model, ModelOptions, STARTUP_PROBE_TIMEOUT, StartupBannerOptions, StyleMode,
@@ -22,6 +19,7 @@ mod external_io;
 mod input;
 mod loop_event_pump;
 mod model_refresh;
+mod runtime_port;
 mod terminal;
 mod terminal_probe;
 pub(crate) mod terminal_surface;
@@ -32,95 +30,11 @@ use effects::apply_effect_if_needed;
 use external_io::{ExternalIoRuntime, apply_external_io_event};
 pub(crate) use input::TerminalInputCoalescing;
 use input::{TerminalInputAction, coalesced_input_actions_with_options};
-pub use loop_event_pump::LoopEventWaker;
 use loop_event_pump::{LoopEvent, LoopEventPump};
 use model_refresh::apply_model_provider_refresh_event;
+pub use runtime_port::{NoopUiRuntimePort, RuntimeWake, UiRuntimePort};
 pub(crate) use terminal::TerminalMouseModePreference;
 use terminal::{TerminalMouseMode, TerminalSession};
-
-/// `RuntimeCoordinator` 是 TUI runner 与具体对话运行时之间的最小边界。
-pub trait RuntimeCoordinator {
-    fn install_loop_event_waker(
-        &mut self,
-        _waker: LoopEventWaker,
-    ) -> std::result::Result<(), String> {
-        Ok(())
-    }
-
-    fn drain_runtime_events(&mut self) -> Vec<RuntimeEvent> {
-        Vec::new()
-    }
-
-    fn drain_model_provider_refresh_events(&mut self) -> Vec<ModelProviderRefreshEvent> {
-        Vec::new()
-    }
-
-    fn dispatch_runtime_command(
-        &mut self,
-        command: RuntimeCommand,
-    ) -> std::result::Result<RuntimeCommandReceipt, String> {
-        Err(match command.target() {
-            Some(target) => format!("Runtime is not available: {}", target.display_label()),
-            None => "Runtime is not available".to_string(),
-        })
-    }
-
-    fn persist_selected_model(
-        &mut self,
-        _selection: &ModelSelection,
-    ) -> std::result::Result<(), String> {
-        Ok(())
-    }
-
-    fn refresh_model_provider(
-        &mut self,
-        _request: ProviderSyncRequest,
-    ) -> std::result::Result<(), String> {
-        Err("Model refresh runtime is not available".to_string())
-    }
-
-    /// `begin_prompt_assembly_edit` 进入 `/prompt` overlay 时调用，加载 working copy，返回初始 snapshot。
-    fn begin_prompt_assembly_edit(
-        &mut self,
-    ) -> std::result::Result<runtime_domain::prompt_assembly::PromptAssemblyManagerSnapshot, String>
-    {
-        Err("Prompt assembly editing is not available".to_string())
-    }
-
-    /// `apply_prompt_assembly_edit_mutation` 在 working copy 上同步应用 mutation，返回刷新后的 snapshot。
-    fn apply_prompt_assembly_edit_mutation(
-        &mut self,
-        _mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation,
-    ) -> std::result::Result<runtime_domain::prompt_assembly::PromptAssemblyManagerSnapshot, String>
-    {
-        Err("Prompt assembly editing is not available".to_string())
-    }
-
-    /// `commit_prompt_assembly_edit` 退出 `/prompt` overlay 时调用，diff baseline 决定是否落盘+通知。
-    fn commit_prompt_assembly_edit(&mut self) -> std::result::Result<(), String> {
-        Ok(())
-    }
-}
-
-/// `NoopRuntimeCoordinator` 让纯 TUI 构建可以独立运行到模型更新层。
-#[derive(Debug, Default)]
-pub struct NoopRuntimeCoordinator;
-
-impl RuntimeCoordinator for NoopRuntimeCoordinator {
-    fn dispatch_runtime_command(
-        &mut self,
-        command: RuntimeCommand,
-    ) -> std::result::Result<RuntimeCommandReceipt, String> {
-        match command {
-            RuntimeCommand::LoadMessageHistoryStartupCache
-            | RuntimeCommand::RecordMessageHistory { .. } => Ok(RuntimeCommandReceipt::Accepted),
-            _ => Err(match command.target() {
-                Some(target) => format!("Runtime is not available: {}", target.display_label()),
-                None => "Runtime is not available".to_string(),
-            }),
-        }
-    }
-}
 
 /// `run` 启动交互式 TUI，并在退出后返回最终模型。
 pub fn run(startup_banner_options: StartupBannerOptions) -> Result<Model> {
@@ -146,15 +60,15 @@ pub fn run_with_options(
     startup_banner_options: StartupBannerOptions,
     options: ModelOptions,
 ) -> Result<Model> {
-    let mut runtime_coordinator = NoopRuntimeCoordinator;
+    let mut runtime_coordinator = NoopUiRuntimePort;
     run_with_runtime_coordinator(startup_banner_options, options, &mut runtime_coordinator)
 }
 
-/// `run_with_runtime_coordinator` 启动由外部 runtime coordinator 驱动的交互式 TUI。
+/// `run_with_runtime_coordinator` 启动由外部 runtime port 驱动的交互式 TUI。
 pub fn run_with_runtime_coordinator(
     startup_banner_options: StartupBannerOptions,
     options: ModelOptions,
-    runtime_coordinator: &mut impl RuntimeCoordinator,
+    runtime_coordinator: &mut impl UiRuntimePort,
 ) -> Result<Model> {
     spawn_markdown_highlighting_prewarm();
     let keyboard_enhancement = options.keyboard_enhancement;
@@ -180,8 +94,9 @@ pub fn run_with_runtime_coordinator(
     );
 
     let mut loop_events = LoopEventPump::start()?;
+    let runtime_waker = loop_events.waker();
     runtime_coordinator
-        .install_loop_event_waker(loop_events.waker())
+        .bind_runtime_wake(RuntimeWake::new(move || runtime_waker.wake()))
         .map_err(color_eyre::eyre::Report::msg)?;
 
     if let Err(message) =
@@ -304,7 +219,7 @@ fn apply_terminal_input_actions(
     terminal: &mut terminal::TuiTerminal,
     terminal_session: &mut TerminalSession,
     model: &mut Model,
-    runtime_coordinator: &mut impl RuntimeCoordinator,
+    runtime_coordinator: &mut impl UiRuntimePort,
     external_io: &mut ExternalIoRuntime,
     loop_events: &mut LoopEventPump,
 ) -> Result<bool> {
@@ -368,7 +283,7 @@ fn apply_external_io_shutdown_events(
 
 fn drain_runtime_coordinator_events(
     model: &mut Model,
-    runtime_coordinator: &mut impl RuntimeCoordinator,
+    runtime_coordinator: &mut impl UiRuntimePort,
 ) -> bool {
     let mut changed = false;
 

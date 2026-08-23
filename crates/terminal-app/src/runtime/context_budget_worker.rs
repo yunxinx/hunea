@@ -7,7 +7,6 @@ use std::thread::{self, JoinHandle};
 
 use conversation_runtime::context_budget::{
     ContextBudgetProbe, build_context_budget_snapshot_with_cancellation,
-    context_budget_tool_definitions,
 };
 use conversation_runtime::{
     ConversationItem, NotifyingSender, RuntimeEventNotifier, ToolDefinition,
@@ -18,7 +17,6 @@ use runtime_domain::{
     provider::ProviderKind,
     session::{ContextBudgetLoadErrorPayload, RuntimeEvent, SessionLoadRequestId},
 };
-use tool_runtime::ToolExecutorRegistry;
 
 pub(super) struct ContextBudgetWorker {
     current_generation: Arc<AtomicU64>,
@@ -422,12 +420,6 @@ fn handle_context_budget_command(
         Ok(None) => ContextBudgetTaskResult::Cancelled,
         Err(error) => ContextBudgetTaskResult::Failed(context_budget_load_error_payload(error)),
     }
-}
-
-pub(super) fn context_budget_tool_definitions_for_worker(
-    executor: &ToolExecutorRegistry,
-) -> Vec<ToolDefinition> {
-    context_budget_tool_definitions(executor)
 }
 
 fn context_budget_load_error_payload(

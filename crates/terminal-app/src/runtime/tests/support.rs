@@ -6,9 +6,9 @@ pub(super) use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+pub(super) use super::super::conversation_commands::ensure_conversation_target;
 pub(super) use super::super::{
-    AppRuntimeCoordinator, AppRuntimeOptions, ensure_conversation_target,
-    should_defer_runtime_event_for_render_barrier,
+    AppRuntimeCoordinator, AppRuntimeOptions, should_defer_runtime_event_for_render_barrier,
 };
 pub(super) use provider_protocol::{ContentBlock, ConversationItem, Role, ToolCall};
 pub(super) use runtime_domain::{

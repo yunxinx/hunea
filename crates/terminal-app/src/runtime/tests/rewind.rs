@@ -93,8 +93,10 @@ fn select_entry_rewind_rebuilds_provider_history_to_selected_entry() {
         "visible assistant row should rewind through hidden transcript replay"
     );
     let previous_context_cancellation = tokio_util::sync::CancellationToken::new();
-    coordinator.components.conversation_worker.cancellation =
-        Some(previous_context_cancellation.clone());
+    coordinator
+        .components
+        .agent_runtime
+        .set_worker_cancellation_for_test(previous_context_cancellation.clone());
 
     coordinator
         .handle_runtime_command(RuntimeCommand::SelectEntryRewind {
@@ -110,7 +112,8 @@ fn select_entry_rewind_rebuilds_provider_history_to_selected_entry() {
     assert_eq!(
         coordinator
             .components
-            .provider_conversation
+            .agent_runtime
+            .provider_conversation_for_test()
             .history()
             .map(ConversationItem::text_content)
             .collect::<Vec<_>>(),
@@ -208,7 +211,8 @@ fn select_entry_rewind_ignores_reasoning_without_restore_target() {
     assert!(
         coordinator
             .components
-            .provider_conversation
+            .agent_runtime
+            .provider_conversation_for_test()
             .history()
             .eq(expected_history.iter())
     );

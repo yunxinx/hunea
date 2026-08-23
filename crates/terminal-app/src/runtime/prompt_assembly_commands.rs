@@ -15,11 +15,7 @@ enum PromptSessionConfigRefreshTarget {
 
 impl AppRuntimeCoordinator {
     fn prompt_session_config_refresh_target(&self) -> PromptSessionConfigRefreshTarget {
-        if !self.components.conversation_worker.is_running()
-            && self.pending_conversation_turn.is_none()
-            && self.components.provider_conversation.is_history_empty()
-            && self.components.provider_conversation.session_id().is_none()
-        {
+        if self.components.agent_runtime.is_idle_empty_session() {
             PromptSessionConfigRefreshTarget::CurrentEmptySession
         } else {
             PromptSessionConfigRefreshTarget::NextNewSession
@@ -41,18 +37,18 @@ impl AppRuntimeCoordinator {
         }
         match self.prompt_session_config_refresh_target() {
             PromptSessionConfigRefreshTarget::CurrentEmptySession => {
-                self.components
-                    .provider_conversation
-                    .set_prompt_prelude(Some(manager.resolution.prelude.clone()));
-                self.components
-                    .provider_conversation
-                    .set_dynamic_environment_session_config(Some(
-                        dynamic_environment_session_config.clone(),
-                    ));
-                self.components.session_workspace_tools = super::session_tools_for_manager(
+                let session_workspace_tools = super::session_tools_for_manager(
                     &self.components.workspace_tools,
                     Some(manager),
                 );
+                self.components
+                    .agent_runtime
+                    .update_empty_session_configuration(
+                        manager,
+                        dynamic_environment_session_config.clone(),
+                        session_workspace_tools.clone(),
+                    );
+                self.components.session_workspace_tools = session_workspace_tools;
                 Some(PromptAssemblyUpdateNotice::CurrentEmptySessionUpdated)
             }
             PromptSessionConfigRefreshTarget::NextNewSession => {

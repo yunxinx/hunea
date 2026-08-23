@@ -7,12 +7,7 @@ use runtime_domain::{
     },
 };
 
-use super::{
-    AppRuntimeCoordinator,
-    context_budget_worker::{
-        ContextBudgetSnapshotRequest, context_budget_tool_definitions_for_worker,
-    },
-};
+use super::{AppRuntimeCoordinator, context_budget_worker::ContextBudgetSnapshotRequest};
 
 impl AppRuntimeCoordinator {
     pub(super) fn load_context_budget_snapshot_command(
@@ -29,12 +24,7 @@ impl AppRuntimeCoordinator {
             self.context_budget_unknown_provider_event(request_id, selection.provider_id.clone());
             return Ok(RuntimeCommandReceipt::Accepted);
         };
-        let items = self
-            .components
-            .provider_conversation
-            .context_budget_probe_items();
-        let tool_definitions =
-            context_budget_tool_definitions_for_worker(&self.components.session_workspace_tools);
+        let snapshot = self.components.agent_runtime.context_budget_snapshot();
         if let Err(error) =
             self.components
                 .context_budget_worker
@@ -42,18 +32,11 @@ impl AppRuntimeCoordinator {
                     request_id,
                     provider_kind: provider.connection().kind,
                     model_id: selection.model_id.clone(),
-                    items,
-                    prompt_prelude: self
-                        .components
-                        .provider_conversation
-                        .prompt_prelude()
-                        .cloned(),
-                    tool_definitions,
+                    items: snapshot.items,
+                    prompt_prelude: snapshot.prompt_prelude,
+                    tool_definitions: snapshot.tool_definitions,
                     context_limit: self.options.loaded_models.context_limit_for(selection),
-                    upstream_context_tokens: self
-                        .components
-                        .provider_conversation
-                        .upstream_context_tokens(),
+                    upstream_context_tokens: snapshot.upstream_context_tokens,
                 })
         {
             self.pending_runtime_events

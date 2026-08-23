@@ -204,12 +204,7 @@ fn reset_replaces_session_component_generations_without_rebuilding_the_ui_bridge
         .expect("runtime reset should succeed");
     let after = composition_snapshot(&coordinator);
 
-    for capability in [
-        "conversation_worker",
-        "model_catalog",
-        "prompt_assembly",
-        "tool_catalog",
-    ] {
+    for capability in ["model_catalog", "prompt_assembly", "tool_catalog"] {
         assert_eq!(
             capability_generation(&after, capability),
             capability_generation(&before, capability) + 1,

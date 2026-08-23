@@ -1,78 +1,70 @@
-//! Conversation event 到 TUI runtime event 的转换。
+//! Agent fact 到 TUI runtime event 的转换。
 
-use runtime_domain::context_budget::ContextWindowUsage;
-use runtime_domain::session::{
-    ConversationEvent, RuntimeEvent, RuntimeRequestMetrics, RuntimeTarget,
-};
+use runtime_domain::session::RuntimeEvent;
 
-pub(crate) fn runtime_event_from_conversation_event(
-    target: Option<RuntimeTarget>,
-    event: ConversationEvent,
-    context_usage: Option<ContextWindowUsage>,
-) -> RuntimeEvent {
-    match event {
-        ConversationEvent::SystemMessage { message } => {
-            RuntimeEvent::SystemMessage { target, message }
-        }
-        ConversationEvent::Retrying { message } => RuntimeEvent::Retrying { target, message },
-        ConversationEvent::OutputTokenEstimate { total_tokens } => {
-            RuntimeEvent::OutputTokenEstimate {
-                target,
-                total_tokens,
-            }
-        }
-        ConversationEvent::InputTokenEstimate { total_tokens } => {
-            RuntimeEvent::InputTokenEstimate {
-                target,
-                total_tokens,
-            }
-        }
-        ConversationEvent::Thinking { is_thinking } => RuntimeEvent::Thinking {
-            target,
+use super::agent::{AgentEvent, AgentEventKind};
+
+pub(crate) fn runtime_event_from_agent_event(event: AgentEvent) -> RuntimeEvent {
+    let target = event.target;
+    match event.kind {
+        AgentEventKind::SystemMessage { message } => RuntimeEvent::SystemMessage {
+            target: Some(target),
+            message,
+        },
+        AgentEventKind::Retrying { message } => RuntimeEvent::Retrying {
+            target: Some(target),
+            message,
+        },
+        AgentEventKind::OutputTokenEstimate { total_tokens } => RuntimeEvent::OutputTokenEstimate {
+            target: Some(target),
+            total_tokens,
+        },
+        AgentEventKind::InputTokenEstimate { total_tokens } => RuntimeEvent::InputTokenEstimate {
+            target: Some(target),
+            total_tokens,
+        },
+        AgentEventKind::Thinking { is_thinking } => RuntimeEvent::Thinking {
+            target: Some(target),
             is_thinking,
         },
-        ConversationEvent::AssistantDelta { content } => match target {
-            Some(target) => RuntimeEvent::AssistantDelta { target, content },
-            None => missing_target_event("assistant delta"),
-        },
-        ConversationEvent::ReasoningDelta { content } => match target {
-            Some(target) => RuntimeEvent::ReasoningDelta { target, content },
-            None => missing_target_event("reasoning delta"),
-        },
-        ConversationEvent::ToolActivityStarted { activity } => match target {
-            Some(target) => RuntimeEvent::ToolActivityStarted { target, activity },
-            None => missing_target_event("tool activity start"),
-        },
-        ConversationEvent::ToolActivityUpdated { update } => match target {
-            Some(target) => RuntimeEvent::ToolActivityUpdated { target, update },
-            None => missing_target_event("tool activity update"),
-        },
-        ConversationEvent::TerminalUpdated { snapshot } => match target {
-            Some(target) => RuntimeEvent::TerminalUpdated { target, snapshot },
-            None => missing_target_event("terminal update"),
-        },
-        ConversationEvent::PermissionRequested { request } => match target {
-            Some(target) => RuntimeEvent::PermissionRequested { target, request },
-            None => missing_target_event("permission request"),
-        },
-        ConversationEvent::Finished { response, metrics } => RuntimeEvent::MessageFinished {
-            target,
+        AgentEventKind::AssistantDelta { content } => {
+            RuntimeEvent::AssistantDelta { target, content }
+        }
+        AgentEventKind::ReasoningDelta { content } => {
+            RuntimeEvent::ReasoningDelta { target, content }
+        }
+        AgentEventKind::ToolActivityStarted { activity } => {
+            RuntimeEvent::ToolActivityStarted { target, activity }
+        }
+        AgentEventKind::ToolActivityUpdated { update } => {
+            RuntimeEvent::ToolActivityUpdated { target, update }
+        }
+        AgentEventKind::TerminalUpdated { snapshot } => {
+            RuntimeEvent::TerminalUpdated { target, snapshot }
+        }
+        AgentEventKind::PermissionRequested { request } => {
+            RuntimeEvent::PermissionRequested { target, request }
+        }
+        AgentEventKind::PreparationWarning { message } | AgentEventKind::TurnFailed { message } => {
+            RuntimeEvent::Failed {
+                target: Some(target),
+                message,
+            }
+        }
+        AgentEventKind::TurnFinished {
+            response,
+            metrics,
+            context_usage,
+        } => RuntimeEvent::MessageFinished {
+            target: Some(target),
             response,
             finish_reason: None,
-            metrics: metrics.map(|metrics| {
-                RuntimeRequestMetrics::new(metrics.latency, metrics.output_tokens, metrics.duration)
-            }),
+            metrics,
             context_usage,
         },
-        ConversationEvent::Failed { message } => RuntimeEvent::Failed { target, message },
-        ConversationEvent::Interrupted => RuntimeEvent::Interrupted { target },
-    }
-}
-
-fn missing_target_event(event_name: &str) -> RuntimeEvent {
-    RuntimeEvent::Failed {
-        target: None,
-        message: format!("Conversation target is missing for {event_name}"),
+        AgentEventKind::TurnInterrupted => RuntimeEvent::Interrupted {
+            target: Some(target),
+        },
     }
 }
 
@@ -93,10 +85,11 @@ fn is_runtime_token_estimate(event: &RuntimeEvent) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use runtime_domain::context_budget::ContextTokenLimit;
-    use runtime_domain::session::ConversationResponse;
+    use runtime_domain::context_budget::{ContextTokenLimit, ContextWindowUsage};
+    use runtime_domain::session::{ConversationResponse, RuntimeTarget};
 
     use super::*;
+    use crate::runtime::agent::{AgentId, AgentTurnId};
 
     fn sample_usage() -> ContextWindowUsage {
         ContextWindowUsage {
@@ -108,14 +101,16 @@ mod tests {
     #[test]
     fn finished_event_carries_context_usage() {
         let usage = sample_usage();
-        let event = runtime_event_from_conversation_event(
-            Some(RuntimeTarget::provider("openai", "gpt-4o-mini")),
-            ConversationEvent::Finished {
+        let event = runtime_event_from_agent_event(AgentEvent {
+            agent_id: AgentId::MAIN,
+            turn_id: AgentTurnId::new(1),
+            target: RuntimeTarget::provider("openai", "gpt-4o-mini"),
+            kind: AgentEventKind::TurnFinished {
                 response: ConversationResponse::assistant_text("done"),
                 metrics: None,
+                context_usage: Some(usage),
             },
-            Some(usage),
-        );
+        });
 
         let RuntimeEvent::MessageFinished { context_usage, .. } = event else {
             panic!("finished conversation event should map to MessageFinished, got {event:?}");
@@ -125,14 +120,16 @@ mod tests {
 
     #[test]
     fn finished_event_without_usage_keeps_context_usage_hidden() {
-        let event = runtime_event_from_conversation_event(
-            Some(RuntimeTarget::provider("openai", "gpt-4o-mini")),
-            ConversationEvent::Finished {
+        let event = runtime_event_from_agent_event(AgentEvent {
+            agent_id: AgentId::MAIN,
+            turn_id: AgentTurnId::new(1),
+            target: RuntimeTarget::provider("openai", "gpt-4o-mini"),
+            kind: AgentEventKind::TurnFinished {
                 response: ConversationResponse::assistant_text("done"),
                 metrics: None,
+                context_usage: None,
             },
-            None,
-        );
+        });
 
         let RuntimeEvent::MessageFinished { context_usage, .. } = event else {
             panic!("finished conversation event should map to MessageFinished, got {event:?}");

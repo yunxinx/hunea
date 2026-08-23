@@ -64,32 +64,26 @@ fn reset_discards_a_turn_waiting_for_dynamic_environment() {
         None,
         ConversationItem::text(Role::User, "stale turn"),
     );
-    coordinator.pending_conversation_turn = Some(super::super::PendingConversationTurn {
-        target: request.target(),
-        activity_label: "gpt-4o-mini".to_string(),
-        provider_request: request,
-        transcript_user_message: runtime_domain::session::TranscriptUserMessage {
-            content: "stale turn".to_string(),
-            attachments: Vec::new(),
-            skill_bindings: Vec::new(),
-            custom_prompt_bindings: Vec::new(),
-        },
-        manual_skill_activities: Vec::new(),
-    });
+    coordinator
+        .components
+        .agent_runtime
+        .set_pending_turn_for_test(request);
 
     coordinator
         .handle_runtime_command(RuntimeCommand::Reset)
         .expect("reset should be accepted");
 
-    assert!(coordinator.pending_conversation_turn.is_none());
+    assert!(!coordinator.components.agent_runtime.is_preparing());
 }
 
 #[test]
 fn shutdown_cancels_the_previous_approval_context_turn() {
     let mut coordinator = runtime_coordinator(AppRuntimeOptions::default());
     let previous_context_cancellation = tokio_util::sync::CancellationToken::new();
-    coordinator.components.conversation_worker.cancellation =
-        Some(previous_context_cancellation.clone());
+    coordinator
+        .components
+        .agent_runtime
+        .set_worker_cancellation_for_test(previous_context_cancellation.clone());
 
     coordinator
         .shutdown()
@@ -203,7 +197,8 @@ fn conversation_failure_before_provider_request_rolls_back_pending_user() {
     assert!(
         coordinator
             .components
-            .provider_conversation
+            .agent_runtime
+            .provider_conversation_for_test()
             .is_history_empty()
     );
 
@@ -218,7 +213,8 @@ fn conversation_failure_before_provider_request_rolls_back_pending_user() {
     );
     coordinator
         .components
-        .provider_conversation
+        .agent_runtime
+        .provider_conversation_mut_for_test()
         .prepare_turn(&next_request)
         .expect("failed preflight turn should not leave stale pending state");
 }
@@ -467,6 +463,15 @@ fn conversation_submit_dispatches_without_waiting_for_dynamic_environment_observ
     started_rx
         .recv_timeout(Duration::from_secs(1))
         .expect("dynamic environment observation should run in background");
+    let mutation_error = coordinator
+        .handle_runtime_command(RuntimeCommand::ResumeSession {
+            session_id: SessionId::new().to_string(),
+        })
+        .expect_err("session replacement must wait for Agent preparation to quiesce");
+    assert_eq!(
+        mutation_error,
+        "Cannot resume session while a request is running"
+    );
 
     release_tx
         .send(())
@@ -652,6 +657,73 @@ fn manual_skill_mentions_emit_synthetic_skill_usage_events_before_worker_failure
         failure.contains("requires API key"),
         "worker should still fail through the normal runtime path: {failure}"
     );
+    cleanup(&root);
+}
+
+#[test]
+fn reset_remount_discards_undelivered_agent_events_from_the_old_generation() {
+    let root = temp_test_dir("reset-stale-agent-events");
+    let work_dir = root.join("repo");
+    let skill_dir = work_dir.join(".agents/skills/reset-probe");
+    fs::create_dir_all(&skill_dir).expect("skill dir should exist");
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: reset-probe\ndescription: Reset probe\n---\n# Reset Probe\n",
+    )
+    .expect("skill file should exist");
+
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        runtime_request_policy: runtime_domain::request_policy::RuntimeRequestPolicy::new(
+            0,
+            Vec::new(),
+            1,
+        ),
+        session_header_template: Some(SessionHeader {
+            session_id: SessionId::new(),
+            work_dir: work_dir.clone(),
+            session_name: None,
+            initial_model: "gpt-4o-mini".to_string(),
+            git_head: None,
+            cli_version: None,
+        }),
+        ..AppRuntimeOptions::default()
+    });
+    let request = ConversationTurnRequest::new_user_source_message(
+        "openai",
+        ProviderKind::OpenAi,
+        "gpt-4o-mini",
+        None,
+        None,
+        None,
+        runtime_domain::session::TranscriptUserMessage {
+            content: "Use @reset-probe".to_string(),
+            attachments: Vec::new(),
+            skill_bindings: vec![runtime_domain::session::TranscriptSkillBinding {
+                skill_name: "reset-probe".to_string(),
+                origin: runtime_domain::prompt_assembly::PromptSourceOrigin::Project,
+                skill_path: skill_dir.join("SKILL.md").display().to_string(),
+                start_char: 4,
+                end_char: 16,
+            }],
+            custom_prompt_bindings: Vec::new(),
+        },
+    );
+
+    coordinator
+        .handle_runtime_command(RuntimeCommand::SubmitConversationTurn {
+            target: request.target(),
+            request: Box::new(request),
+        })
+        .expect("conversation should queue a synthetic Agent event");
+    coordinator
+        .handle_runtime_command(RuntimeCommand::Reset)
+        .expect("reset should dispose the old Agent generation before remounting");
+
+    assert_no_runtime_events(
+        &mut coordinator,
+        "reset must make undelivered old-generation Agent events unreachable",
+    );
+    assert!(!coordinator.components.agent_runtime.has_pending_work());
     cleanup(&root);
 }
 

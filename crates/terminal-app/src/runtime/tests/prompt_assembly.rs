@@ -486,7 +486,8 @@ fn prompt_assembly_changes_sync_current_empty_session_prelude_immediately() {
     assert_eq!(
         coordinator
             .components
-            .provider_conversation
+            .agent_runtime
+            .provider_conversation_for_test()
             .prompt_prelude(),
         Some(&initial_prelude)
     );
@@ -520,7 +521,8 @@ fn prompt_assembly_changes_sync_current_empty_session_prelude_immediately() {
     assert_eq!(
         coordinator
             .components
-            .provider_conversation
+            .agent_runtime
+            .provider_conversation_for_test()
             .prompt_prelude(),
         Some(&updated_manager.resolution.prelude)
     );
@@ -595,7 +597,8 @@ fn prompt_assembly_changes_on_started_session_apply_only_after_next_new_session_
     });
     coordinator
         .components
-        .provider_conversation
+        .agent_runtime
+        .provider_conversation_mut_for_test()
         .append_items(vec![ConversationItem::text(Role::User, "already started")])
         .expect("seed history should succeed");
 
@@ -627,7 +630,8 @@ fn prompt_assembly_changes_on_started_session_apply_only_after_next_new_session_
     assert_eq!(
         coordinator
             .components
-            .provider_conversation
+            .agent_runtime
+            .provider_conversation_for_test()
             .prompt_prelude(),
         Some(&initial_prelude)
     );
@@ -647,7 +651,8 @@ fn prompt_assembly_changes_on_started_session_apply_only_after_next_new_session_
     assert_eq!(
         coordinator
             .components
-            .provider_conversation
+            .agent_runtime
+            .provider_conversation_for_test()
             .prompt_prelude(),
         coordinator.options.initial_prompt_prelude.as_ref()
     );
@@ -786,7 +791,8 @@ fn disabling_dynamic_environment_changes_waits_for_next_new_session() {
     });
     coordinator
         .components
-        .provider_conversation
+        .agent_runtime
+        .provider_conversation_mut_for_test()
         .append_items(vec![ConversationItem::text(Role::User, "already started")])
         .expect("seed history should succeed");
 
@@ -832,7 +838,8 @@ fn disabling_dynamic_environment_changes_waits_for_next_new_session() {
         .expect("reset should succeed");
     coordinator
         .components
-        .provider_conversation
+        .agent_runtime
+        .provider_conversation_mut_for_test()
         .append_items(vec![ConversationItem::text(Role::User, "fresh session")])
         .expect("fresh session history should seed");
     let next_session_injection = coordinator
@@ -1015,7 +1022,8 @@ fn disabling_tool_on_started_session_waits_for_next_new_session_reset() {
     });
     coordinator
         .components
-        .provider_conversation
+        .agent_runtime
+        .provider_conversation_mut_for_test()
         .append_items(vec![ConversationItem::text(Role::User, "already started")])
         .expect("seed history should succeed");
     let disabled_tool_name = coordinator.prompt_assembly_tool_definitions()[0]

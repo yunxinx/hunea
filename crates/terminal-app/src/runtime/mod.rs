@@ -1,3 +1,4 @@
+mod agent;
 mod components;
 mod context_budget_command;
 mod context_budget_worker;
@@ -17,18 +18,16 @@ use std::{
     sync::Arc,
 };
 
-use conversation_runtime::{ProviderConversation, models as provider_models};
+use conversation_runtime::models as provider_models;
 use runtime_domain::{
-    context_budget::ContextWindowUsage,
     dynamic_environment::DynamicEnvironmentSessionConfig,
     model_catalog::{ModelProviderRefreshEvent, ModelSelection, ProviderSyncRequest},
     prompt_assembly::{PromptAssemblyManagerSnapshot, PromptPreludeSnapshot},
     request_policy::RuntimeRequestPolicy,
     session::{
-        ConversationEvent, ConversationTurnRequest, RuntimeCommand, RuntimeCommandReceipt,
-        RuntimeEvent, RuntimeTarget, RuntimeToolActivity, SessionBranchTreePayload,
+        RuntimeCommand, RuntimeCommandReceipt, RuntimeEvent, SessionBranchTreePayload,
         SessionPickerRow, SessionPreviewPayload, SessionResumePayload, SessionTreePayload,
-        SessionTreeRow, TranscriptUserMessage,
+        SessionTreeRow,
     },
 };
 use session_store::{
@@ -39,9 +38,10 @@ use terminal_ui::{RuntimeWake, UiRuntimePort};
 use tool_runtime::{ToolDefinition, ToolExecutorRegistry, builtin::ManagedRipgrepConfig};
 
 use self::{
+    agent::AgentRuntime,
     components::RuntimeComponents,
     event_mapping::{
-        runtime_event_from_conversation_event, should_defer_runtime_event_for_render_barrier,
+        runtime_event_from_agent_event, should_defer_runtime_event_for_render_barrier,
     },
     session_worker::SessionStoreWorkerEvent,
     workspace_tools::conversation_workspace_tools,
@@ -119,18 +119,9 @@ pub(crate) struct AppRuntimeOptions {
 pub(crate) struct AppRuntimeCoordinator {
     options: AppRuntimeOptions,
     components: RuntimeComponents,
-    pending_conversation_turn: Option<PendingConversationTurn>,
     pending_runtime_events: Vec<RuntimeEvent>,
-    manual_skill_activity_sequence: usize,
+    next_agent_turn_id: u64,
     prompt_assembly_edit_session: Option<PromptAssemblyEditSession>,
-}
-
-struct PendingConversationTurn {
-    target: RuntimeTarget,
-    activity_label: String,
-    provider_request: ConversationTurnRequest,
-    transcript_user_message: TranscriptUserMessage,
-    manual_skill_activities: Vec<RuntimeToolActivity>,
 }
 
 impl Default for AppRuntimeOptions {
@@ -157,9 +148,8 @@ impl AppRuntimeCoordinator {
         let coordinator = Self {
             options,
             components,
-            pending_conversation_turn: None,
             pending_runtime_events: Vec::new(),
-            manual_skill_activity_sequence: 0,
+            next_agent_turn_id: 1,
             prompt_assembly_edit_session: None,
         };
         coordinator
@@ -232,9 +222,7 @@ impl AppRuntimeCoordinator {
             } => self.record_message_history(entry_id, text, limit),
             RuntimeCommand::Reset => {
                 self.components.reset_after_clear(&self.options)?;
-                self.pending_conversation_turn = None;
                 self.pending_runtime_events.clear();
-                self.manual_skill_activity_sequence = 0;
                 self.prompt_assembly_edit_session = None;
                 Ok(RuntimeCommandReceipt::Accepted)
             }
@@ -270,13 +258,22 @@ impl AppRuntimeCoordinator {
         &self.components.prompt_assembly_tool_definitions
     }
 
+    #[cfg(test)]
     fn defer_runtime_event_until_next_render(&mut self, event: RuntimeEvent) {
+        self.defer_runtime_events_until_next_render(event, std::iter::empty());
+    }
+
+    fn defer_runtime_events_until_next_render(
+        &mut self,
+        event: RuntimeEvent,
+        remaining: impl IntoIterator<Item = RuntimeEvent>,
+    ) {
         self.pending_runtime_events.push(event);
+        self.pending_runtime_events.extend(remaining);
         self.components.runtime_event_notifier.notify();
     }
 
     pub(crate) fn shutdown(&mut self) -> Result<(), String> {
-        self.pending_conversation_turn = None;
         self.pending_runtime_events.clear();
         self.components
             .shutdown(self.options.session_store.as_ref())
@@ -284,15 +281,10 @@ impl AppRuntimeCoordinator {
 
     #[cfg(test)]
     pub(crate) fn has_pending_work_for_test(&self) -> bool {
-        self.components.conversation_worker.is_running()
+        self.components.agent_runtime.has_pending_work()
             || self.components.model_refresh.is_running()
             || self.components.session_store_worker.has_pending_work()
             || self.components.context_budget_worker.has_pending_work()
-            || self
-                .components
-                .dynamic_environment_worker
-                .has_pending_work()
-            || self.pending_conversation_turn.is_some()
     }
 }
 
@@ -419,42 +411,12 @@ impl UiRuntimePort for AppRuntimeCoordinator {
         let mut events = std::mem::take(&mut self.pending_runtime_events);
         self.drain_context_budget_events_into(&mut events);
         self.drain_session_store_events_into(&mut events);
-        self.drain_dynamic_environment_events_into(&mut events);
-        loop {
-            let target = self
-                .components
-                .conversation_worker
-                .current_target()
-                .cloned();
-            let Some(event) = self.components.conversation_worker.try_recv_event() else {
-                self.reconcile_conversation_updates();
-                break;
-            };
-            let upstream_context_tokens = if matches!(event, ConversationEvent::Finished { .. }) {
-                self.components
-                    .conversation_worker
-                    .take_upstream_context_tokens()
-            } else {
-                None
-            };
-            self.reconcile_conversation_updates();
-            if upstream_context_tokens.is_some() {
-                self.components
-                    .provider_conversation
-                    .set_upstream_context_tokens(upstream_context_tokens);
-            }
-            if event.is_terminal() {
-                let _ = self
-                    .components
-                    .provider_conversation
-                    .rollback_pending_user();
-            }
-            let context_usage =
-                self.context_usage_for_finished_turn(target.as_ref(), upstream_context_tokens);
-            let runtime_event = runtime_event_from_conversation_event(target, event, context_usage);
+        let agent_events = self.components.agent_runtime.drain_events();
+        let mut agent_events = agent_events.into_iter().map(runtime_event_from_agent_event);
+        while let Some(runtime_event) = agent_events.next() {
             if should_defer_runtime_event_for_render_barrier(&events, &runtime_event) {
-                self.defer_runtime_event_until_next_render(runtime_event);
-                break;
+                self.defer_runtime_events_until_next_render(runtime_event, agent_events);
+                return events;
             }
             events.push(runtime_event);
         }
@@ -513,28 +475,6 @@ impl UiRuntimePort for AppRuntimeCoordinator {
 }
 
 impl AppRuntimeCoordinator {
-    /// `context_usage_for_finished_turn` 把 provider 报告的 usage 与按事件 target
-    /// 解析的 context limit 组装为下发 UI 的上下文占用摘要。
-    ///
-    /// limit 按"实际服务该请求的模型"解析(与 `/context` 同一解析链),
-    /// 请求进行中切换选中模型也不会算错。
-    fn context_usage_for_finished_turn(
-        &self,
-        target: Option<&RuntimeTarget>,
-        upstream_context_tokens: Option<usize>,
-    ) -> Option<ContextWindowUsage> {
-        let used = upstream_context_tokens?;
-        let RuntimeTarget::Provider(provider_target) = target?;
-        let selection = ModelSelection::new(
-            provider_target.provider_id.clone(),
-            provider_target.model_id.clone(),
-        );
-        Some(ContextWindowUsage {
-            limit: self.options.loaded_models.context_limit_for(&selection),
-            used,
-        })
-    }
-
     fn drain_session_store_events_into(&mut self, events: &mut Vec<RuntimeEvent>) {
         for event in self.components.session_store_worker.drain_events() {
             match event {
@@ -543,18 +483,18 @@ impl AppRuntimeCoordinator {
                     conversation,
                     payload,
                 } => {
-                    self.components.provider_conversation = conversation;
                     if let Err(message) = self
                         .components
-                        .conversation_worker
-                        .reset_for_context_change()
+                        .agent_runtime
+                        .replace_conversation(conversation)
                     {
                         events.push(RuntimeEvent::Failed {
                             target: None,
                             message,
                         });
+                    } else {
+                        events.push(RuntimeEvent::SessionResumed { payload });
                     }
-                    events.push(RuntimeEvent::SessionResumed { payload });
                 }
                 SessionStoreWorkerEvent::RestoredWithTree {
                     conversation,
@@ -562,24 +502,24 @@ impl AppRuntimeCoordinator {
                     tree_request_id,
                     tree_payload,
                 } => {
-                    self.components.provider_conversation = conversation;
                     if let Err(message) = self
                         .components
-                        .conversation_worker
-                        .reset_for_context_change()
+                        .agent_runtime
+                        .replace_conversation(conversation)
                     {
                         events.push(RuntimeEvent::Failed {
                             target: None,
                             message,
                         });
+                    } else {
+                        events.push(RuntimeEvent::SessionResumed {
+                            payload: resume_payload,
+                        });
+                        events.push(RuntimeEvent::SessionTreeLoaded {
+                            request_id: tree_request_id,
+                            payload: tree_payload,
+                        });
                     }
-                    events.push(RuntimeEvent::SessionResumed {
-                        payload: resume_payload,
-                    });
-                    events.push(RuntimeEvent::SessionTreeLoaded {
-                        request_id: tree_request_id,
-                        payload: tree_payload,
-                    });
                 }
                 SessionStoreWorkerEvent::Noop => {}
                 SessionStoreWorkerEvent::Failed { message, .. } => {
@@ -594,76 +534,6 @@ impl AppRuntimeCoordinator {
 
     fn drain_context_budget_events_into(&mut self, events: &mut Vec<RuntimeEvent>) {
         events.extend(self.components.context_budget_worker.drain_events());
-    }
-
-    fn reconcile_conversation_updates(&mut self) {
-        let session_id = self
-            .components
-            .conversation_worker
-            .take_pending_session_id();
-        if let Some(entry_id) = self
-            .components
-            .conversation_worker
-            .take_pending_user_entry_id()
-        {
-            let _ = self
-                .components
-                .provider_conversation
-                .commit_pending_user(Some(entry_id), session_id);
-        } else if let Some(session_id) = session_id {
-            self.components
-                .provider_conversation
-                .set_session_id(session_id);
-        }
-
-        let items = self.components.conversation_worker.take_session_items();
-        if items.is_empty() {
-            return;
-        }
-
-        self.components
-            .provider_conversation
-            .commit_turn_items(items);
-    }
-}
-
-fn fresh_provider_conversation(
-    options: &AppRuntimeOptions,
-) -> Result<ProviderConversation, String> {
-    let mut provider_conversation = match (
-        options.session_store.clone(),
-        options.session_header_template.clone(),
-    ) {
-        (Some(store), Some(header_template)) => {
-            ProviderConversation::with_session_store(store, header_template)
-                .map_err(|error| error.to_string())?
-        }
-        _ => ProviderConversation::default(),
-    };
-    provider_conversation.set_prompt_prelude(options.initial_prompt_prelude.clone());
-    provider_conversation.set_dynamic_environment_session_config(
-        options.initial_dynamic_environment_session_config.clone(),
-    );
-    Ok(provider_conversation)
-}
-
-fn ensure_conversation_target(
-    active_target: Option<&RuntimeTarget>,
-    command_target: Option<&RuntimeTarget>,
-) -> Result<(), String> {
-    match command_target {
-        Some(target @ RuntimeTarget::Provider(_)) => match active_target {
-            Some(active_target) if active_target == target => Ok(()),
-            Some(_) => Err(format!(
-                "Conversation is not active: {}",
-                target.display_label()
-            )),
-            None => Err(format!(
-                "Conversation is not running: {}",
-                target.display_label()
-            )),
-        },
-        None => Ok(()),
     }
 }
 

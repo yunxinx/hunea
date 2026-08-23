@@ -243,7 +243,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::runtime::lifecycle::EffectScope;
+    use crate::runtime::effect_scope::EffectScope;
 
     struct StubTool {
         name: &'static str,

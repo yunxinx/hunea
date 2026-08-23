@@ -5,6 +5,7 @@ mod context_budget_command;
 mod context_budget_worker;
 mod conversation_commands;
 mod dynamic_environment_worker;
+mod effect_scope;
 mod event_mapping;
 mod inspection;
 mod lifecycle;

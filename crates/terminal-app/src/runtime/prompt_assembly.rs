@@ -584,7 +584,7 @@ const fn prompt_scope_from_origin(origin: PromptSourceOrigin) -> Option<PromptAs
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::lifecycle::EffectScope;
+    use crate::runtime::effect_scope::EffectScope;
 
     fn manager(section: &str) -> PromptAssemblyManagerSnapshot {
         let mut manager = PromptAssemblyManagerSnapshot::default();

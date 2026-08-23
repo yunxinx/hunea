@@ -172,11 +172,13 @@ fn composition_snapshot_is_deterministic_and_redacted() {
     );
     assert!(!json.contains("runtime-private-owner"));
     assert!(!json.contains("terminal-runtime"));
+    assert!(!json.contains("runtime_composition"));
     assert!(!json.contains("registration_id"));
+    assert!(!json.contains("entry_id"));
 
     let snapshot: serde_json::Value =
         serde_json::from_str(&json).expect("snapshot JSON should decode");
-    assert_eq!(snapshot["schema_version"], 6);
+    assert_eq!(snapshot["schema_version"], 7);
     assert_eq!(snapshot["failures"], serde_json::json!([]));
     assert_eq!(
         snapshot["pending"],
@@ -217,6 +219,36 @@ fn composition_snapshot_is_deterministic_and_redacted() {
             "adapter_kind": "terminal-interactive",
             "mounted": true,
         }])
+    );
+    assert_eq!(
+        snapshot["effect_scopes"],
+        serde_json::json!([
+            {
+                "owner": "llm_port",
+                "effects": ["provider_registrations"],
+                "children": [],
+            },
+            {
+                "owner": "permission_policy",
+                "effects": ["approval_provider_registration"],
+                "children": [],
+            },
+            {
+                "owner": "prompt_assembly",
+                "effects": ["prompt_registration"],
+                "children": [],
+            },
+            {
+                "owner": "session_persistence",
+                "effects": ["backend_registration"],
+                "children": [],
+            },
+            {
+                "owner": "tool_catalog",
+                "effects": ["tool_registrations"],
+                "children": [],
+            },
+        ])
     );
 
     let workspace_names = names(&snapshot["workspace_tools"]);
@@ -357,6 +389,15 @@ fn ui_runtime_bridge_reacts_to_wake_binding_lifecycle() {
 
     assert_eq!(component_state(&coordinator, "ui_runtime_bridge"), "active");
     assert_eq!(
+        composition_snapshot(&coordinator)["effect_scopes"]
+            .as_array()
+            .expect("effect scopes should be an array")
+            .iter()
+            .find(|scope| scope["owner"] == "ui_runtime_bridge")
+            .expect("bound wake should own a UI bridge scope")["effects"],
+        serde_json::json!(["runtime_wake_binding"])
+    );
+    assert_eq!(
         names(&composition_snapshot(&coordinator)["providers"]),
         vec!["local"]
     );
@@ -397,6 +438,7 @@ fn ui_runtime_bridge_reacts_to_wake_binding_lifecycle() {
     assert_eq!(snapshot["prompt_sources"], serde_json::json!([]));
     assert_eq!(snapshot["providers"], serde_json::json!([]));
     assert_eq!(snapshot["approval_providers"], serde_json::json!([]));
+    assert_eq!(snapshot["effect_scopes"], serde_json::json!([]));
     assert_eq!(
         component_state(&coordinator, "native_agent_runtime"),
         "pending"
@@ -473,6 +515,7 @@ fn reset_replaces_session_component_generations_without_rebuilding_the_ui_bridge
     assert_eq!(component_state(&coordinator, "ui_runtime_bridge"), "active");
     assert_eq!(after["workspace_tools"], workspace_tools_before);
     assert_eq!(after["session_tools"], session_tools_before);
+    assert_eq!(after["effect_scopes"], before["effect_scopes"]);
     assert!(component_required(&after, "native_agent_runtime").contains(&"llm_port".to_string()));
     assert_eq!(
         component_required(&after, "model_refresh"),

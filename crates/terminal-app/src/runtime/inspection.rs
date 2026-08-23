@@ -5,6 +5,7 @@ use tool_runtime::{ToolDefinition, ToolKind, ToolPermissionPolicy};
 
 use super::{
     AppRuntimeCoordinator,
+    effect_scope::EffectScopeSnapshot,
     lifecycle::{
         CapabilityKey, ComponentFailureSnapshot, ComponentSnapshot, OptionalCapabilitySnapshot,
         PendingComponentSnapshot,
@@ -12,7 +13,7 @@ use super::{
     prompt_assembly::PromptContributionSnapshot,
 };
 
-const COMPOSITION_SNAPSHOT_VERSION: u32 = 6;
+const COMPOSITION_SNAPSHOT_VERSION: u32 = 7;
 
 /// `RuntimeCompositionSnapshot` 是默认 runtime composition 的只读诊断投影。
 ///
@@ -25,6 +26,7 @@ pub(super) struct RuntimeCompositionSnapshot {
     components: Vec<RuntimeComponentSnapshot>,
     pending: Vec<PendingSnapshot>,
     failures: Vec<FailureSnapshot>,
+    effect_scopes: Vec<EffectScopeOwnershipSnapshot>,
     approval_providers: Vec<ApprovalProviderSnapshot>,
     providers: Vec<ProviderSnapshot>,
     selected_model: Option<ModelSelectionSnapshot>,
@@ -53,6 +55,7 @@ impl RuntimeCompositionSnapshot {
             self.failures.iter().map(|failure| &failure.component_id),
             "failed component",
         )?;
+        validate_effect_scopes(&self.effect_scopes)?;
         ensure_sorted_unique(
             self.approval_providers
                 .iter()
@@ -201,6 +204,13 @@ struct FailureSnapshot {
     message: String,
     recoverable: bool,
     epoch: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct EffectScopeOwnershipSnapshot {
+    owner: String,
+    effects: Vec<String>,
+    children: Vec<EffectScopeOwnershipSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -374,6 +384,12 @@ impl AppRuntimeCoordinator {
             components,
             pending,
             failures,
+            effect_scopes: self
+                .components
+                .effect_scope_snapshots()
+                .into_iter()
+                .map(effect_scope_snapshot)
+                .collect(),
             approval_providers,
             providers,
             selected_model,
@@ -454,6 +470,30 @@ impl AppRuntimeCoordinator {
         }
         tools.into_values().collect()
     }
+}
+
+fn effect_scope_snapshot(snapshot: EffectScopeSnapshot) -> EffectScopeOwnershipSnapshot {
+    EffectScopeOwnershipSnapshot {
+        owner: snapshot.owner,
+        effects: snapshot.effects,
+        children: snapshot
+            .children
+            .into_iter()
+            .map(effect_scope_snapshot)
+            .collect(),
+    }
+}
+
+fn validate_effect_scopes(scopes: &[EffectScopeOwnershipSnapshot]) -> Result<(), String> {
+    ensure_sorted_unique(
+        scopes.iter().map(|scope| &scope.owner),
+        "effect scope owner",
+    )?;
+    for scope in scopes {
+        ensure_sorted_unique(scope.effects.iter(), "effect label")?;
+        validate_effect_scopes(&scope.children)?;
+    }
+    Ok(())
 }
 
 fn runtime_component_snapshot(component: ComponentSnapshot) -> RuntimeComponentSnapshot {

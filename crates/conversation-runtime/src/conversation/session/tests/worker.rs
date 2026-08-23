@@ -1,5 +1,8 @@
 use super::support::*;
-use std::thread;
+use std::{
+    sync::atomic::{AtomicUsize, Ordering},
+    thread,
+};
 
 #[test]
 fn conversation_worker_reset_waits_until_the_owned_thread_exits() {
@@ -59,11 +62,7 @@ fn conversation_worker_reset_waits_until_the_owned_thread_exits() {
 async fn conversation_worker_reports_interrupted_when_pre_cancelled() {
     let turn = runtime_domain::session::ConversationTurnRequest::new(
         "local",
-        ProviderKind::OpenAiCompatible,
         "qwen3",
-        Some("http://127.0.0.1:1234/v1".to_string()),
-        None,
-        None,
         ConversationItem::text(Role::User, "hello"),
     );
     let request = PreparedConversationRequest::from_turn(
@@ -86,6 +85,7 @@ async fn conversation_worker_reports_interrupted_when_pre_cancelled() {
 
     run_conversation_worker(
         request,
+        fake_provider_lease(),
         executor,
         RuntimeRequestPolicy::default(),
         cancellation,
@@ -101,4 +101,90 @@ async fn conversation_worker_reports_interrupted_when_pre_cancelled() {
     wake_receiver
         .recv_timeout(Duration::from_secs(1))
         .expect("worker payload should wake its consumer");
+}
+
+#[tokio::test]
+async fn conversation_retry_reuses_the_same_provider_client_lease() {
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let provider = RetryThenSuccessProvider {
+        call_count: Arc::clone(&call_count),
+    };
+    let lease = ProviderClientLease::new(
+        "local",
+        ProviderKind::OpenAiCompatible,
+        Arc::new(provider),
+        ProviderPromptCachePolicy::Disabled,
+    );
+    let turn = runtime_domain::session::ConversationTurnRequest::new(
+        "local",
+        "qwen3",
+        ConversationItem::text(Role::User, "hello"),
+    );
+    let request = PreparedConversationRequest::from_turn(
+        &turn,
+        vec![ConversationItem::text(Role::User, "hello")],
+        None,
+        None,
+        None,
+    );
+    let (sender, receiver) = conversation_worker_event_channel();
+
+    run_conversation_worker(
+        request,
+        lease,
+        ToolExecutorRegistry::new(),
+        RuntimeRequestPolicy::new(1, vec![0], 1),
+        CancellationToken::new(),
+        ConversationPermissionBroker::default(),
+        sender,
+    )
+    .await;
+
+    let events = receiver.into_iter().collect::<Vec<_>>();
+    assert_eq!(call_count.load(Ordering::SeqCst), 2);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ConversationWorkerEvent::Progress(ConversationEvent::Retrying { .. })
+    )));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, ConversationWorkerEvent::Finished { .. }))
+    );
+}
+
+struct RetryThenSuccessProvider {
+    call_count: Arc<AtomicUsize>,
+}
+
+impl ProviderClient for RetryThenSuccessProvider {
+    fn stream_prompt<'a>(
+        &'a self,
+        _request: &'a PromptRequest,
+        _sink: &'a mut (dyn StreamEventSink + Send),
+    ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
+        Box::pin(async move {
+            let attempt = self.call_count.fetch_add(1, Ordering::SeqCst);
+            if attempt == 0 {
+                return Err(ProviderError::Transport(
+                    "retryable fixture failure".to_string(),
+                ));
+            }
+            Ok(PromptCompletion::new(
+                vec![ConversationItem::text(Role::Assistant, "done")],
+                provider_protocol::FinishReason::Stop,
+                None,
+            ))
+        })
+    }
+
+    fn list_models<'a>(
+        &'a self,
+    ) -> ProviderFuture<'a, Result<Vec<ModelDescriptor>, ProviderError>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::chat_completions()
+    }
 }

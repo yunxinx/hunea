@@ -118,7 +118,7 @@ fn status_line_uses_provider_display_name_for_current_model() {
                 "local",
                 ProviderKind::OpenAiCompatible,
                 "LM Studio",
-                Some("http://localhost:1234/v1".to_string()),
+                true,
                 ModelSource::Configured,
                 vec![ModelEntry::new(
                     "qwen/qwen3-4b-2507",

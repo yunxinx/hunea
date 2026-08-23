@@ -25,7 +25,6 @@ use crossterm::event::{
 use ratatui::style::Color;
 use runtime_domain::context_budget::ContextTokenLimit;
 use runtime_domain::model_catalog::ProviderSyncRequest;
-use runtime_domain::provider::ProviderKind;
 use runtime_domain::request_policy::RuntimeRequestPolicy;
 use runtime_domain::session::{
     ConversationEvent, ConversationResponse, ConversationTurnRequest, ProviderRequestMetrics,
@@ -273,15 +272,7 @@ fn replay_runtime_port_drains_all_ready_events_in_publication_order() {
 #[test]
 fn replay_runtime_port_exposes_sync_receipts_for_accept_reject_and_interrupt() {
     let mut runtime = TestUiRuntimePort::default();
-    let request = ConversationTurnRequest::new_user_text(
-        "local",
-        ProviderKind::OpenAiCompatible,
-        "qwen3",
-        None,
-        None,
-        None,
-        "hello",
-    );
+    let request = ConversationTurnRequest::new_user_text("local", "qwen3", "hello");
     let target = request.target();
 
     assert_eq!(
@@ -296,15 +287,7 @@ fn replay_runtime_port_exposes_sync_receipts_for_accept_reject_and_interrupt() {
         }
     );
 
-    let duplicate_request = ConversationTurnRequest::new_user_text(
-        "local",
-        ProviderKind::OpenAiCompatible,
-        "qwen3",
-        None,
-        None,
-        None,
-        "duplicate",
-    );
+    let duplicate_request = ConversationTurnRequest::new_user_text("local", "qwen3", "duplicate");
     assert_eq!(
         runtime.dispatch_runtime_command(RuntimeCommand::SubmitConversationTurn {
             target: duplicate_request.target(),
@@ -1937,15 +1920,7 @@ fn conversation_tool_finished_updates_runtime_tool_activity() {
 fn conversation_send_effect_starts_conversation_target() {
     let mut model = Model::new(StartupBannerOptions::default());
     let mut runtime_coordinator = TestUiRuntimePort::default();
-    let request = ConversationTurnRequest::new_user_text(
-        "local",
-        ProviderKind::OpenAiCompatible,
-        "qwen3",
-        None,
-        None,
-        None,
-        "hello",
-    );
+    let request = ConversationTurnRequest::new_user_text("local", "qwen3", "hello");
 
     run_send_conversation_turn_effect(&mut model, &mut runtime_coordinator, request);
 
@@ -1963,15 +1938,7 @@ fn conversation_send_effect_starts_conversation_target() {
 fn conversation_send_effect_records_history_after_conversation_start() {
     let mut model = Model::new(StartupBannerOptions::default());
     let mut runtime_coordinator = TestUiRuntimePort::default();
-    let request = ConversationTurnRequest::new_user_text(
-        "local",
-        ProviderKind::OpenAiCompatible,
-        "qwen3",
-        None,
-        None,
-        None,
-        "hello history",
-    );
+    let request = ConversationTurnRequest::new_user_text("local", "qwen3", "hello history");
 
     apply_send_conversation_turn_effect_for_test(
         &mut model,
@@ -2006,15 +1973,7 @@ fn conversation_send_effect_failure_uses_toast_not_status_notice() {
         next_runtime_error: Some("runtime unavailable".to_string()),
         ..TestUiRuntimePort::default()
     };
-    let request = ConversationTurnRequest::new_user_text(
-        "local",
-        ProviderKind::OpenAiCompatible,
-        "qwen3",
-        None,
-        None,
-        None,
-        "hello",
-    );
+    let request = ConversationTurnRequest::new_user_text("local", "qwen3", "hello");
 
     apply_send_conversation_turn_effect_for_test(
         &mut model,
@@ -2098,15 +2057,7 @@ fn truncate_conversation_command_records_retained_turns() {
 
 #[test]
 fn conversation_turn_request_keeps_runtime_target_in_core_dto() {
-    let request = ConversationTurnRequest::new_user_text(
-        "local",
-        ProviderKind::OpenAiCompatible,
-        "qwen3",
-        None,
-        None,
-        None,
-        "hello",
-    );
+    let request = ConversationTurnRequest::new_user_text("local", "qwen3", "hello");
 
     assert_eq!(request.target(), RuntimeTarget::provider("local", "qwen3"));
 }

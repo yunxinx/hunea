@@ -19,7 +19,6 @@ use session_store::{
 use super::{
     PersistedConversationItem, PreparedTurnOptions, ProviderConversation, ProviderConversationError,
 };
-use crate::ProviderKind;
 use runtime_domain::session::{
     ConversationTurnRequest, TranscriptReplayItem, TranscriptReplayRole, TranscriptUserMessage,
 };
@@ -35,11 +34,7 @@ fn prepare_turn_uses_session_history_and_current_user_message() {
     let request = session
         .prepare_turn(&ConversationTurnRequest::new(
             "local",
-            ProviderKind::OpenAiCompatible,
             "qwen3",
-            Some("http://127.0.0.1:1234/v1".to_string()),
-            None,
-            None,
             ConversationItem::text(Role::User, "follow up"),
         ))
         .expect("turn should prepare");
@@ -76,11 +71,7 @@ fn prepare_turn_prepends_system_prompt_without_persisting_it_in_history() {
     let request = session
         .prepare_turn(&ConversationTurnRequest::new(
             "local",
-            ProviderKind::OpenAiCompatible,
             "qwen3",
-            Some("http://127.0.0.1:1234/v1".to_string()),
-            None,
-            None,
             ConversationItem::text(Role::User, "hello"),
         ))
         .expect("turn should prepare");
@@ -115,11 +106,7 @@ fn prepare_turn_uses_prompt_prelude_effective_system_prompt() {
     let request = session
         .prepare_turn(&ConversationTurnRequest::new(
             "local",
-            ProviderKind::OpenAiCompatible,
             "qwen3",
-            Some("http://127.0.0.1:1234/v1".to_string()),
-            None,
-            None,
             ConversationItem::text(Role::User, "hello"),
         ))
         .expect("turn should prepare");
@@ -138,11 +125,7 @@ fn prepare_turn_rejects_non_user_message() {
     let error = session
         .prepare_turn(&ConversationTurnRequest::new(
             "local",
-            ProviderKind::OpenAiCompatible,
             "qwen3",
-            Some("http://127.0.0.1:1234/v1".to_string()),
-            None,
-            None,
             ConversationItem::text(Role::Assistant, "not a user turn"),
         ))
         .expect_err("assistant turn should be rejected");
@@ -159,11 +142,7 @@ fn truncate_after_user_turns_keeps_provider_context_before_selected_turn() {
     session
         .prepare_turn(&ConversationTurnRequest::new(
             "local",
-            ProviderKind::OpenAiCompatible,
             "qwen3",
-            Some("http://127.0.0.1:1234/v1".to_string()),
-            None,
-            None,
             ConversationItem::text(Role::User, "first question"),
         ))
         .expect("first turn should prepare");
@@ -175,11 +154,7 @@ fn truncate_after_user_turns_keeps_provider_context_before_selected_turn() {
     session
         .prepare_turn(&ConversationTurnRequest::new(
             "local",
-            ProviderKind::OpenAiCompatible,
             "qwen3",
-            Some("http://127.0.0.1:1234/v1".to_string()),
-            None,
-            None,
             ConversationItem::text(Role::User, "second question"),
         ))
         .expect("second turn should prepare");
@@ -206,11 +181,7 @@ fn rollback_pending_user_discards_unstarted_turn() {
     session
         .prepare_turn(&ConversationTurnRequest::new(
             "local",
-            ProviderKind::OpenAiCompatible,
             "qwen3",
-            Some("http://127.0.0.1:1234/v1".to_string()),
-            None,
-            None,
             ConversationItem::text(Role::User, "never sent"),
         ))
         .expect("turn should prepare");
@@ -225,11 +196,7 @@ fn commit_pending_user_persists_started_turn_once() {
     session
         .prepare_turn(&ConversationTurnRequest::new(
             "local",
-            ProviderKind::OpenAiCompatible,
             "qwen3",
-            Some("http://127.0.0.1:1234/v1".to_string()),
-            None,
-            None,
             ConversationItem::text(Role::User, "sent"),
         ))
         .expect("turn should prepare");
@@ -266,11 +233,7 @@ fn commit_turn_items_keeps_tool_items_for_future_turns() {
     let request = session
         .prepare_turn(&ConversationTurnRequest::new(
             "local",
-            ProviderKind::OpenAiCompatible,
             "qwen3",
-            Some("http://127.0.0.1:1234/v1".to_string()),
-            None,
-            None,
             ConversationItem::text(Role::User, "next"),
         ))
         .expect("turn should prepare");
@@ -295,11 +258,7 @@ fn prepare_turn_with_transcript_keeps_provider_and_transcript_user_messages_sepa
             .expect("persisted conversation should initialize");
     let turn = ConversationTurnRequest::new(
         "local",
-        ProviderKind::OpenAiCompatible,
         "qwen3",
-        Some("http://127.0.0.1:1234/v1".to_string()),
-        None,
-        None,
         ConversationItem::text(
             Role::User,
             "<skill>\n<name>code-review</name>\nbody\n</skill>\n\nraw user message",
@@ -372,15 +331,8 @@ fn prepare_turn_with_transcript_appends_dynamic_environment_block_to_same_user_m
         skill_bindings: Vec::new(),
         custom_prompt_bindings: Vec::new(),
     };
-    let turn = ConversationTurnRequest::new(
-        "local",
-        ProviderKind::OpenAiCompatible,
-        "qwen3",
-        Some("http://127.0.0.1:1234/v1".to_string()),
-        None,
-        None,
-        transcript_user_message.provider_message(),
-    );
+    let turn =
+        ConversationTurnRequest::new("local", "qwen3", transcript_user_message.provider_message());
 
     let request = conversation
         .prepare_turn_with_options(
@@ -429,11 +381,7 @@ fn prepare_turn_options_bind_transcript_append_and_dynamic_environment() {
             .expect("persisted conversation should initialize");
     let turn = ConversationTurnRequest::new(
         "local",
-        ProviderKind::OpenAiCompatible,
         "qwen3",
-        Some("http://127.0.0.1:1234/v1".to_string()),
-        None,
-        None,
         ConversationItem::text(Role::User, "actual user message"),
     );
     let transcript_user_message = TranscriptUserMessage {
@@ -513,11 +461,7 @@ fn persisted_conversation_loads_resolved_history_for_prepare_turn() {
     let request = session
         .prepare_turn(&ConversationTurnRequest::new(
             "local",
-            ProviderKind::OpenAiCompatible,
             "qwen3",
-            Some("http://127.0.0.1:1234/v1".to_string()),
-            None,
-            None,
             ConversationItem::text(Role::User, "follow up"),
         ))
         .expect("turn should prepare from resolved history");

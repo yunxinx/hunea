@@ -268,22 +268,11 @@ fn switch_branch_is_blocked_while_provider_turn_is_running() {
         })
         .expect("resume session should succeed");
     wait_for_session_resumed(&mut coordinator);
-    let request = ConversationTurnRequest::new_user_text(
-        "local",
-        ProviderKind::OpenAiCompatible,
-        "qwen3",
-        Some("http://127.0.0.1:9/v1".to_string()),
-        None,
-        None,
-        "pending user",
-    );
-    let target = request.target();
+    let request = ConversationTurnRequest::new_user_text("local", "qwen3", "pending user");
     coordinator
-        .handle_runtime_command(RuntimeCommand::SubmitConversationTurn {
-            target,
-            request: Box::new(request),
-        })
-        .expect("conversation should start");
+        .components
+        .agent_runtime
+        .set_pending_turn_for_test(request);
 
     let error = coordinator
         .handle_runtime_command(RuntimeCommand::SwitchBranch {

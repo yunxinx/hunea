@@ -1,4 +1,4 @@
-//! Builds context budget snapshot for the `/context` overlay.
+//! 为 `/context` overlay 构建 context budget snapshot。
 
 use runtime_domain::{
     model_catalog::ModelSelection,
@@ -30,7 +30,7 @@ impl AppRuntimeCoordinator {
                 .context_budget_worker
                 .load_snapshot(ContextBudgetSnapshotRequest {
                     request_id,
-                    provider_kind: provider.connection().kind,
+                    provider_kind: provider.kind,
                     model_id: selection.model_id.clone(),
                     items: snapshot.items,
                     prompt_prelude: snapshot.prompt_prelude,

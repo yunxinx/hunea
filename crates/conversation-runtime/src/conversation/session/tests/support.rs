@@ -10,6 +10,10 @@ pub(super) use std::{
 };
 
 pub(super) use provider_protocol::{ContentBlock, ConversationItem, Role, ToolCall};
+pub(super) use provider_protocol::{
+    ModelDescriptor, PromptCompletion, PromptRequest, ProviderCapabilities, ProviderClient,
+    ProviderError, ProviderFuture, StreamEventSink,
+};
 pub(super) use runtime_domain::{
     request_policy::RuntimeRequestPolicy,
     session::{
@@ -36,9 +40,45 @@ pub(super) use super::super::{
     run_conversation_worker, run_session_persistence_actor, run_with_cancellation_grace,
 };
 pub(super) use crate::{
-    ConversationResponse, PreparedConversationRequest, PreparedTurnOptions, ProviderConversation,
-    ProviderKind, RuntimeEventNotifier, conversation::PersistedConversationItem,
+    ConversationResponse, PreparedConversationRequest, PreparedTurnOptions, ProviderClientLease,
+    ProviderConversation, ProviderKind, ProviderPromptCachePolicy, RuntimeEventNotifier,
+    conversation::PersistedConversationItem,
 };
+
+pub(super) fn fake_provider_lease() -> ProviderClientLease {
+    ProviderClientLease::new(
+        "fixture",
+        ProviderKind::OpenAiCompatible,
+        Arc::new(FakeProvider),
+        ProviderPromptCachePolicy::Disabled,
+    )
+}
+
+pub(super) struct FakeProvider;
+
+impl ProviderClient for FakeProvider {
+    fn stream_prompt<'a>(
+        &'a self,
+        _request: &'a PromptRequest,
+        _sink: &'a mut (dyn StreamEventSink + Send),
+    ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
+        Box::pin(async {
+            Err(ProviderError::Transport(
+                "fixture provider failure".to_string(),
+            ))
+        })
+    }
+
+    fn list_models<'a>(
+        &'a self,
+    ) -> ProviderFuture<'a, Result<Vec<ModelDescriptor>, ProviderError>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::chat_completions()
+    }
+}
 
 pub(super) fn conversation_worker_event_channel() -> (
     ConversationWorkerEventSender,

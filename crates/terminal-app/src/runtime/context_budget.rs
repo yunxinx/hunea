@@ -1,6 +1,6 @@
-//! Context budget helpers for prepared turns.
+//! 已准备 turn 的 context budget 投影辅助逻辑。
 
-use std::cmp::Reverse;
+use std::{cmp::Reverse, fmt};
 
 use openai_compat_provider::{
     OpenAiRequestFormat, prompt_request_projection_from_parts_for_format,
@@ -19,19 +19,56 @@ use runtime_domain::{
 use tool_loop_runtime::provider_tool_definitions_from_registry;
 use tool_runtime::ToolExecutorRegistry;
 
-use crate::PreparedConversationRequest;
+#[cfg(test)]
+use conversation_runtime::PreparedConversationRequest;
 
 /// `ContextBudgetError` 描述 context budget 投影失败。
-#[derive(Debug, thiserror::Error)]
 pub enum ContextBudgetError {
-    #[error("context budget does not support provider kind {provider_kind}")]
-    UnsupportedProvider { provider_kind: ProviderKind },
-    #[error("context budget projection failed: {source}")]
+    UnsupportedProvider {
+        provider_kind: ProviderKind,
+    },
     Projection {
         failure: ContextBudgetProjectionFailure,
-        #[source]
         source: provider_protocol::ProviderError,
     },
+}
+
+impl fmt::Debug for ContextBudgetError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedProvider { provider_kind } => formatter
+                .debug_struct("UnsupportedProvider")
+                .field("provider_kind", provider_kind)
+                .finish(),
+            Self::Projection { failure, .. } => formatter
+                .debug_struct("Projection")
+                .field("failure", failure)
+                .finish(),
+        }
+    }
+}
+
+impl fmt::Display for ContextBudgetError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedProvider { provider_kind } => {
+                write!(
+                    formatter,
+                    "context budget does not support provider kind {provider_kind}"
+                )
+            }
+            Self::Projection { .. } => formatter.write_str("context budget projection failed"),
+        }
+    }
+}
+
+impl std::error::Error for ContextBudgetError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Projection { source, .. } => Some(source),
+            Self::UnsupportedProvider { .. } => None,
+        }
+    }
 }
 
 /// `ContextBudgetProjectionFailure` 提供可序列化、可分类的 projection 失败信息。
@@ -43,7 +80,6 @@ pub struct ContextBudgetProjectionFailure {
 }
 
 /// `ContextBudgetProbe` 描述一次 context budget 估算所需的 provider 输入。
-#[derive(Debug)]
 pub struct ContextBudgetProbe<'a> {
     provider_kind: ProviderKind,
     model_id: &'a str,
@@ -52,6 +88,24 @@ pub struct ContextBudgetProbe<'a> {
     tool_definitions: &'a [ToolDefinition],
     context_limit: ContextTokenLimit,
     upstream_context_tokens: Option<usize>,
+}
+
+impl std::fmt::Debug for ContextBudgetProbe<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ContextBudgetProbe")
+            .field("provider_kind", &self.provider_kind)
+            .field("model_id", &self.model_id)
+            .field("item_count", &self.items.len())
+            .field("has_prompt_prelude", &self.prompt_prelude.is_some())
+            .field("tool_definition_count", &self.tool_definitions.len())
+            .field("context_limit", &self.context_limit)
+            .field(
+                "has_upstream_context_tokens",
+                &self.upstream_context_tokens.is_some(),
+            )
+            .finish()
+    }
 }
 
 impl<'a> ContextBudgetProbe<'a> {
@@ -94,13 +148,15 @@ impl<'a> ContextBudgetProbe<'a> {
 
     /// `from_prepared_request` 使用已准备好的 turn request 构造估算请求。
     #[must_use]
+    #[cfg(test)]
     pub fn from_prepared_request(
+        provider_kind: ProviderKind,
         request: &'a PreparedConversationRequest,
         tool_definitions: &'a [ToolDefinition],
         context_limit: ContextTokenLimit,
     ) -> Self {
         Self::new(
-            request.provider_kind(),
+            provider_kind,
             request.model_id(),
             request.items(),
             tool_definitions,
@@ -110,8 +166,7 @@ impl<'a> ContextBudgetProbe<'a> {
     }
 }
 
-/// Uses the same provider-specific projection path as the real provider request and allows
-/// cooperative cancellation between the expensive projection phases.
+/// 复用真实 provider request 的投影路径，并允许在高成本阶段之间协作式取消。
 #[must_use = "building a snapshot can fail and the result must be handled"]
 pub fn build_context_budget_snapshot_with_cancellation(
     probe: ContextBudgetProbe<'_>,
@@ -265,21 +320,21 @@ impl ContextBudgetError {
 
 fn projection_failure(source: &provider_protocol::ProviderError) -> ContextBudgetProjectionFailure {
     match source {
-        provider_protocol::ProviderError::Protocol(detail) => ContextBudgetProjectionFailure {
+        provider_protocol::ProviderError::Protocol(_) => ContextBudgetProjectionFailure {
             kind: ContextBudgetProjectionErrorKind::Protocol,
             status: None,
-            detail: Some(detail.clone()),
+            detail: None,
         },
-        provider_protocol::ProviderError::Transport(detail) => ContextBudgetProjectionFailure {
+        provider_protocol::ProviderError::Transport(_) => ContextBudgetProjectionFailure {
             kind: ContextBudgetProjectionErrorKind::Transport,
             status: None,
-            detail: Some(detail.clone()),
+            detail: None,
         },
-        provider_protocol::ProviderError::Provider { status, message } => {
+        provider_protocol::ProviderError::Provider { status, .. } => {
             ContextBudgetProjectionFailure {
                 kind: ContextBudgetProjectionErrorKind::Provider,
                 status: *status,
-                detail: Some(message.clone()),
+                detail: None,
             }
         }
     }
@@ -514,36 +569,86 @@ mod tests {
         Tool, ToolDefinition as RuntimeToolDefinition, ToolExecutionFuture, ToolExecutorRegistry,
     };
 
-    use crate::conversation::PersistedConversationItem;
-    use crate::{ProviderConversation, ProviderKind};
+    use conversation_runtime::{ProviderConversation, ProviderKind};
+
+    #[test]
+    fn probe_debug_does_not_expose_delivery_instruction_or_tool_schema() {
+        let delivery_sentinel = "private-user-delivery-sentinel";
+        let instruction_sentinel = "private-instruction-body-sentinel";
+        let tool_sentinel = "private-tool-schema-sentinel";
+        let items = [ConversationItem::text(Role::User, delivery_sentinel)];
+        let prompt_prelude = PromptPreludeSnapshot {
+            sections: vec![PromptPreludeSection {
+                reference_id: "private-reference".to_string(),
+                kind: PromptSourceKind::ExtraPrompt,
+                title: "private title".to_string(),
+                origin: Some(PromptSourceOrigin::Project),
+                body: instruction_sentinel.to_string(),
+            }],
+        };
+        let tool_definitions = [ProviderToolDefinition::new(
+            "private_tool",
+            "private tool",
+            json!({"description": tool_sentinel}),
+        )];
+        let probe = ContextBudgetProbe::new(
+            ProviderKind::OpenAiCompatible,
+            "fixture-model",
+            &items,
+            &tool_definitions,
+            ContextTokenLimit::try_from(1_000).expect("fixture limit should be valid"),
+        )
+        .with_prompt_prelude(Some(&prompt_prelude));
+
+        let debug = format!("{probe:?}");
+        for sentinel in [delivery_sentinel, instruction_sentinel, tool_sentinel] {
+            assert!(!debug.contains(sentinel), "probe debug leaked {sentinel}");
+        }
+        assert!(debug.contains("item_count"));
+        assert!(debug.contains("tool_definition_count"));
+    }
+
+    #[test]
+    fn projection_failure_keeps_category_but_drops_upstream_detail() {
+        let sentinel = "https://private.invalid/instruction-body-sentinel";
+        let source = provider_protocol::ProviderError::Provider {
+            status: Some(400),
+            message: sentinel.to_string(),
+        };
+        let failure = projection_failure(&source);
+
+        assert_eq!(failure.kind, ContextBudgetProjectionErrorKind::Provider);
+        assert_eq!(failure.status, Some(400));
+        assert_eq!(failure.detail, None);
+        assert!(!format!("{failure:?}").contains(sentinel));
+        let error = ContextBudgetError::projection(source);
+        assert_eq!(error.to_string(), "context budget projection failed");
+        assert!(!format!("{error:?}").contains(sentinel));
+        assert!(std::error::Error::source(&error).is_some());
+    }
 
     #[test]
     fn prepare_turn_items_match_snapshot_segment_kinds_and_order() {
         let mut session = ProviderConversation::new();
         session.set_system_prompt(Some("You are helpful".to_string()));
-        session.commit_turn_items([PersistedConversationItem {
-            entry_id: None,
-            item: ConversationItem::text(Role::User, "first"),
-        }]);
-        session.commit_turn_items([PersistedConversationItem {
-            entry_id: None,
-            item: ConversationItem::text(Role::Assistant, "answer"),
-        }]);
+        session
+            .append_items(vec![ConversationItem::text(Role::User, "first")])
+            .expect("first item should append");
+        session
+            .append_items(vec![ConversationItem::text(Role::Assistant, "answer")])
+            .expect("assistant item should append");
 
         let request = session
             .prepare_turn(&ConversationTurnRequest::new(
                 "local",
-                ProviderKind::OpenAiCompatible,
                 "gpt-4o",
-                Some("http://127.0.0.1:1234/v1".to_string()),
-                None,
-                None,
                 ConversationItem::text(Role::User, "follow up"),
             ))
             .expect("turn should prepare");
 
         let snapshot = build_context_budget_snapshot_with_cancellation(
             ContextBudgetProbe::from_prepared_request(
+                ProviderKind::OpenAiCompatible,
                 &request,
                 &[ProviderToolDefinition::new(
                     "read",
@@ -595,17 +700,14 @@ mod tests {
         let request = session
             .prepare_turn(&ConversationTurnRequest::new(
                 "local",
-                ProviderKind::OpenAiCompatible,
                 "gpt-4o",
-                Some("http://127.0.0.1:1234/v1".to_string()),
-                None,
-                None,
                 ConversationItem::text(Role::User, "follow up"),
             ))
             .expect("turn should prepare");
 
         let snapshot = build_context_budget_snapshot_with_cancellation(
             ContextBudgetProbe::from_prepared_request(
+                ProviderKind::OpenAiCompatible,
                 &request,
                 &[ProviderToolDefinition::new(
                     "read",

@@ -24,8 +24,8 @@ use super::{
     ConversationPermissionBroker, PersistedConversationItem, TurnExecutionError,
     turn::run_prepared_conversation_with_progress,
 };
-use crate::PreparedConversationRequest;
 use crate::{NotifyingSender, RuntimeEventNotifier};
+use crate::{PreparedConversationRequest, ProviderClientLease};
 
 mod cancellation;
 mod context_repair;
@@ -105,6 +105,7 @@ impl ConversationWorker {
     pub fn start(
         &mut self,
         request: PreparedConversationRequest,
+        provider_lease: ProviderClientLease,
         executor: ToolExecutorRegistry,
         request_policy: RuntimeRequestPolicy,
     ) {
@@ -124,6 +125,7 @@ impl ConversationWorker {
                 Ok(runtime) => {
                     runtime.block_on(run_conversation_worker(
                         request,
+                        provider_lease,
                         executor,
                         request_policy,
                         thread_cancellation,
@@ -244,6 +246,7 @@ impl Default for ConversationWorker {
 
 async fn run_conversation_worker(
     request: PreparedConversationRequest,
+    provider_lease: ProviderClientLease,
     executor: ToolExecutorRegistry,
     request_policy: RuntimeRequestPolicy,
     cancellation: CancellationToken,
@@ -288,12 +291,12 @@ async fn run_conversation_worker(
             &attempt_cancellation,
             CANCEL_REPAIR_GRACE,
             run_prepared_conversation_with_progress(
+                &provider_lease,
                 &request,
                 executor.clone(),
                 &attempt_cancellation,
                 request_policy.tool_max_turns(),
                 Some(permission_handler),
-                request_policy.timeout(),
                 move |progress| match progress {
                     crate::conversation::ConversationProgress::ProviderTurnStarted => {}
                     crate::conversation::ConversationProgress::ProviderContextItem { item } => {

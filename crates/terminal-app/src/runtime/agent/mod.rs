@@ -79,11 +79,10 @@ impl fmt::Debug for AgentTurnControls {
     }
 }
 
-/// `AgentTurnRequest` 把用户 delivery/control 与当前 native execution envelope 分开。
+/// `AgentTurnRequest` 把用户 delivery/control 与 provider target envelope 分开。
 ///
-/// `ConversationTurnRequest` 仅作为迁移期的私有 native envelope；它不会出现在 Debug、
-/// inspection 或 contract 的公开字段中。第二个 adapter 出现后应由 capability resolution
-/// 取代该私有字段。
+/// provider target envelope 只保存 provider/model identity 与 provider-visible message，
+/// 不携带 credential、endpoint 或 instruction body。
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct AgentTurnRequest {
     delivery: AgentUserDelivery,

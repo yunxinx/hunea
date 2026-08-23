@@ -1,72 +1,42 @@
 use std::fmt;
 
 use provider_protocol::ProviderError;
-use runtime_domain::provider::ProviderKind;
 
 /// `ProviderRequestError` 描述 provider 请求失败。
-#[derive(Debug)]
 pub enum ProviderRequestError {
-    MissingBaseUrl {
-        provider_id: String,
-    },
-    EmptyPrompt {
-        provider_id: String,
-    },
-    MissingApiKey {
-        provider_id: String,
-        provider_kind: ProviderKind,
-        api_key_env: Option<String>,
-    },
-    InvalidBaseUrl {
-        provider_id: String,
-        base_url: String,
-    },
-    UnsupportedProvider {
-        provider_id: String,
-        provider_kind: ProviderKind,
-    },
-    Provider(String),
+    EmptyPrompt { provider_id: String },
+    Provider { source: ProviderError },
+    ToolTurnLimit { max_turns: usize },
     Cancelled,
+}
+
+impl fmt::Debug for ProviderRequestError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyPrompt { provider_id } => formatter
+                .debug_struct("EmptyPrompt")
+                .field("provider_id", provider_id)
+                .finish(),
+            Self::Provider { .. } => formatter.write_str("Provider(REDACTED)"),
+            Self::ToolTurnLimit { max_turns } => formatter
+                .debug_struct("ToolTurnLimit")
+                .field("max_turns", max_turns)
+                .finish(),
+            Self::Cancelled => formatter.write_str("Cancelled"),
+        }
+    }
 }
 
 impl fmt::Display for ProviderRequestError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MissingBaseUrl { provider_id } => {
-                write!(f, "provider {provider_id} requires base_url")
-            }
             Self::EmptyPrompt { provider_id } => {
                 write!(f, "provider {provider_id} received no prompt items")
             }
-            Self::MissingApiKey {
-                provider_id,
-                provider_kind,
-                api_key_env,
-            } => match api_key_env {
-                Some(api_key_env) => write!(
-                    f,
-                    "provider {provider_id} ({provider_kind}) requires API key from {api_key_env}"
-                ),
-                None => write!(
-                    f,
-                    "provider {provider_id} ({provider_kind}) requires API key"
-                ),
-            },
-            Self::InvalidBaseUrl {
-                provider_id,
-                base_url,
-            } => write!(
-                f,
-                "provider {provider_id} has invalid base_url {base_url:?}"
-            ),
-            Self::UnsupportedProvider {
-                provider_id,
-                provider_kind,
-            } => write!(
-                f,
-                "provider {provider_id} uses unsupported provider kind {provider_kind}"
-            ),
-            Self::Provider(message) => write!(f, "{message}"),
+            Self::Provider { .. } => write!(f, "provider request failed"),
+            Self::ToolTurnLimit { max_turns } => {
+                write!(f, "tool turn limit reached ({max_turns})")
+            }
             Self::Cancelled => write!(f, "provider request cancelled"),
         }
     }
@@ -74,12 +44,35 @@ impl fmt::Display for ProviderRequestError {
 
 impl std::error::Error for ProviderRequestError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        None
+        match self {
+            Self::Provider { source } => Some(source),
+            Self::EmptyPrompt { .. } | Self::ToolTurnLimit { .. } | Self::Cancelled => None,
+        }
     }
 }
 
 impl From<ProviderError> for ProviderRequestError {
     fn from(source: ProviderError) -> Self {
-        Self::Provider(source.to_string())
+        Self::Provider { source }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error as _;
+
+    use super::*;
+
+    #[test]
+    fn provider_error_keeps_structured_source_but_redacts_user_facing_output() {
+        let sentinel = "https://credential.example/private instruction sentinel";
+        let error = ProviderRequestError::from(ProviderError::Transport(sentinel.to_string()));
+
+        assert_eq!(error.to_string(), "provider request failed");
+        assert!(!format!("{error:?}").contains(sentinel));
+        assert!(matches!(
+            error.source().and_then(|source| source.downcast_ref::<ProviderError>()),
+            Some(ProviderError::Transport(message)) if message == sentinel
+        ));
     }
 }

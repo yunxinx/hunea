@@ -8,6 +8,7 @@ use super::{
     agent::{AgentRuntime, NativeAgentRuntime},
     context_budget_worker::ContextBudgetWorker,
     lifecycle::{CapabilityKey, ComponentDefinition, ComponentGraph, EffectId, EffectScope},
+    llm_port::{LlmPort, ProviderRegistrations},
     prompt_assembly::{PromptAssembly, PromptRegistration},
     session_tools_for_manager,
     session_worker::SessionStoreWorker,
@@ -24,6 +25,7 @@ use terminal_ui::RuntimeWake;
 pub(super) struct RuntimeComponents {
     pub(super) agent_runtime: NativeAgentRuntime,
     pub(super) model_refresh: ModelRefreshWorker,
+    pub(super) llm_port: LlmPort,
     pub(super) tool_catalog: ToolCatalog,
     pub(super) prompt_assembly: PromptAssembly,
     pub(super) session_workspace_tools: ToolExecutorRegistry,
@@ -32,6 +34,7 @@ pub(super) struct RuntimeComponents {
     pub(super) runtime_event_notifier: RuntimeEventNotifier,
     effect_scope: EffectScope,
     runtime_wake_effect: Option<EffectId>,
+    llm_port_effect: Option<EffectId>,
     tool_catalog_effect: Option<EffectId>,
     prompt_assembly_effect: Option<EffectId>,
     pub(super) lifecycle: ComponentGraph,
@@ -40,12 +43,17 @@ pub(super) struct RuntimeComponents {
 
 impl RuntimeComponents {
     pub(super) fn new(options: &AppRuntimeOptions) -> Result<Self, String> {
+        let effect_scope = EffectScope::default();
+        let llm_port = LlmPort::new();
+        let provider_registrations = llm_port
+            .mount_builtin_providers("models-config", &options.loaded_models.provider_configs)
+            .map_err(|error| error.to_string())?;
+        let llm_port_effect = register_llm_port_effect(&effect_scope, provider_registrations)?;
         let (tool_catalog, tool_registration) = conversation_workspace_tool_catalog(
             &options.managed_ripgrep,
             &options.hunea_config_dir,
         )
         .map_err(|error| error.to_string())?;
-        let effect_scope = EffectScope::default();
         // initial composition 先安装 inverse，再把任何 catalog snapshot 交给 consumer；
         // 后续构造失败时 local scope Drop 会完整回滚 registration。
         let tool_catalog_effect = register_tool_catalog_effect(&effect_scope, tool_registration)?;
@@ -67,14 +75,21 @@ impl RuntimeComponents {
             prompt_assembly_tool_definitions,
             prompt_assembly_snapshot,
             runtime_event_notifier.clone(),
+            llm_port.clone(),
         )?;
         let mut lifecycle = ComponentGraph::default();
         lifecycle.declare(
             ComponentDefinition::new("native_agent_runtime")
+                .requires("llm_port")
                 .requires("model_catalog")
                 .requires("prompt_assembly")
                 .requires("tool_catalog")
                 .observes("session_persistence"),
+        );
+        lifecycle.declare(
+            ComponentDefinition::new("model_refresh")
+                .requires("llm_port")
+                .requires("model_catalog"),
         );
         lifecycle.declare(
             ComponentDefinition::new("prompt_assembly")
@@ -87,6 +102,7 @@ impl RuntimeComponents {
                 .requires("runtime_wake"),
         );
         for capability in [
+            "llm_port",
             "model_catalog",
             "prompt_assembly",
             "runtime_event_stream",
@@ -101,6 +117,7 @@ impl RuntimeComponents {
         Ok(Self {
             agent_runtime,
             model_refresh: ModelRefreshWorker::new(runtime_event_notifier.clone()),
+            llm_port,
             tool_catalog,
             prompt_assembly,
             session_workspace_tools,
@@ -110,6 +127,7 @@ impl RuntimeComponents {
             runtime_event_notifier,
             effect_scope,
             runtime_wake_effect: None,
+            llm_port_effect: Some(llm_port_effect),
             tool_catalog_effect: Some(tool_catalog_effect),
             prompt_assembly_effect: Some(prompt_assembly_effect),
             lifecycle,
@@ -163,6 +181,7 @@ impl RuntimeComponents {
             return Err("Runtime components are shut down".to_string());
         }
         let replaced = [
+            CapabilityKey::from("llm_port"),
             CapabilityKey::from("model_catalog"),
             CapabilityKey::from("prompt_assembly"),
             CapabilityKey::from("tool_catalog"),
@@ -183,6 +202,7 @@ impl RuntimeComponents {
         self.session_workspace_tools = ToolExecutorRegistry::new();
         let current_prompt_assembly = self.prompt_assembly.manager_snapshot();
         self.prompt_assembly.deactivate();
+        self.llm_port.deactivate();
         if let Some(effect_id) = self.prompt_assembly_effect.take()
             && let Some(error) = self.effect_scope.dispose_effect(effect_id).error_message()
         {
@@ -193,23 +213,44 @@ impl RuntimeComponents {
         {
             failures.push(error);
         }
+        if let Some(effect_id) = self.llm_port_effect.take()
+            && let Some(error) = self.effect_scope.dispose_effect(effect_id).error_message()
+        {
+            failures.push(error);
+        }
         if !failures.is_empty() {
             return Err(failures.join("; "));
         }
 
+        let fresh_llm_port = LlmPort::new();
+        let fresh_provider_registrations = fresh_llm_port
+            .mount_builtin_providers("models-config", &options.loaded_models.provider_configs)
+            .map_err(|error| error.to_string())?;
+        let fresh_llm_port_effect =
+            register_llm_port_effect(&self.effect_scope, fresh_provider_registrations)?;
         let (fresh_tool_catalog, fresh_tool_registration) = conversation_workspace_tool_catalog(
             &options.managed_ripgrep,
             &options.hunea_config_dir,
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| {
+            let _ = self.effect_scope.dispose_effect(fresh_llm_port_effect);
+            error.to_string()
+        })?;
         let fresh_tool_catalog_effect =
-            register_tool_catalog_effect(&self.effect_scope, fresh_tool_registration)?;
+            match register_tool_catalog_effect(&self.effect_scope, fresh_tool_registration) {
+                Ok(effect_id) => effect_id,
+                Err(error) => {
+                    let _ = self.effect_scope.dispose_effect(fresh_llm_port_effect);
+                    return Err(error);
+                }
+            };
         let prompt_assembly_tool_definitions = fresh_tool_catalog.definitions();
         let (fresh_prompt_assembly, fresh_prompt_registration) =
             match PromptAssembly::adopt_manager("workspace-prompt", current_prompt_assembly) {
                 Ok(prompt_assembly) => prompt_assembly,
                 Err(error) => {
                     let _ = self.effect_scope.dispose_effect(fresh_tool_catalog_effect);
+                    let _ = self.effect_scope.dispose_effect(fresh_llm_port_effect);
                     return Err(error.to_string());
                 }
             };
@@ -218,6 +259,7 @@ impl RuntimeComponents {
                 Ok(effect_id) => effect_id,
                 Err(error) => {
                     let _ = self.effect_scope.dispose_effect(fresh_tool_catalog_effect);
+                    let _ = self.effect_scope.dispose_effect(fresh_llm_port_effect);
                     return Err(error);
                 }
             };
@@ -235,6 +277,7 @@ impl RuntimeComponents {
                 prompt_assembly_tool_definitions,
                 fresh_prompt_assembly_snapshot,
                 self.runtime_event_notifier.clone(),
+                fresh_llm_port.clone(),
             )
         }) {
             Ok(runtime) => runtime,
@@ -243,13 +286,16 @@ impl RuntimeComponents {
                     .effect_scope
                     .dispose_effect(fresh_prompt_assembly_effect);
                 let _ = self.effect_scope.dispose_effect(fresh_tool_catalog_effect);
+                let _ = self.effect_scope.dispose_effect(fresh_llm_port_effect);
                 return Err(error);
             }
         };
         self.agent_runtime = fresh_agent_runtime;
+        self.llm_port = fresh_llm_port;
         self.tool_catalog = fresh_tool_catalog;
         self.prompt_assembly = fresh_prompt_assembly;
         self.tool_catalog_effect = Some(fresh_tool_catalog_effect);
+        self.llm_port_effect = Some(fresh_llm_port_effect);
         self.prompt_assembly_effect = Some(fresh_prompt_assembly_effect);
         self.session_workspace_tools = session_workspace_tools;
         for key in replaced {
@@ -272,6 +318,7 @@ impl RuntimeComponents {
             failures.push(error);
         }
         for key in [
+            "llm_port",
             "model_catalog",
             "prompt_assembly",
             "runtime_event_stream",
@@ -284,8 +331,12 @@ impl RuntimeComponents {
         if let Err(error) = self.agent_runtime.shutdown() {
             failures.push(error.to_string());
         }
+        if let Err(error) = self.model_refresh.shutdown() {
+            failures.push(error);
+        }
         self.session_workspace_tools = ToolExecutorRegistry::new();
         self.prompt_assembly.deactivate();
+        self.llm_port.deactivate();
         if let Some(effect_id) = self.prompt_assembly_effect.take()
             && let Some(error) = self.effect_scope.dispose_effect(effect_id).error_message()
         {
@@ -296,13 +347,15 @@ impl RuntimeComponents {
         {
             failures.push(error);
         }
+        if let Some(effect_id) = self.llm_port_effect.take()
+            && let Some(error) = self.effect_scope.dispose_effect(effect_id).error_message()
+        {
+            failures.push(error);
+        }
         if let Some(error) = self.effect_scope.dispose().error_message() {
             failures.push(error);
         }
         if let Err(error) = self.context_budget_worker.shutdown() {
-            failures.push(error);
-        }
-        if let Err(error) = self.model_refresh.shutdown() {
             failures.push(error);
         }
         if self.session_store_worker.is_running()
@@ -333,6 +386,18 @@ fn register_tool_catalog_effect(
     effect_scope
         .register("workspace-tools", move || {
             registration.dispose();
+            Ok(())
+        })
+        .map_err(|error| error.to_string())
+}
+
+fn register_llm_port_effect(
+    effect_scope: &EffectScope,
+    mut registrations: ProviderRegistrations,
+) -> Result<EffectId, String> {
+    effect_scope
+        .register("llm-providers", move || {
+            registrations.dispose();
             Ok(())
         })
         .map_err(|error| error.to_string())
@@ -383,16 +448,35 @@ mod tests {
         manager
     }
 
+    fn options_with_provider() -> AppRuntimeOptions {
+        AppRuntimeOptions {
+            loaded_models: conversation_runtime::models::LoadedModelCatalog {
+                provider_configs: vec![conversation_runtime::models::LoadedProviderConfig::new(
+                    "local",
+                    runtime_domain::provider::ProviderKind::OpenAiCompatible,
+                    Some("http://localhost:11434/v1".to_string()),
+                    None,
+                    None,
+                    true,
+                )],
+                ..conversation_runtime::models::LoadedModelCatalog::default()
+            },
+            ..AppRuntimeOptions::default()
+        }
+    }
+
     #[test]
     fn failed_tool_catalog_remount_keeps_capabilities_removed_and_effects_reverted() {
-        let options = AppRuntimeOptions::default();
+        let options = options_with_provider();
         let mut components =
             RuntimeComponents::new(&options).expect("runtime components should initialize");
         assert!(!components.tool_catalog.definitions().is_empty());
+        assert_eq!(components.llm_port.inspection_snapshot().len(), 1);
 
         let report = components.effect_scope.dispose();
         assert!(report.failures.is_empty());
         assert!(components.tool_catalog.definitions().is_empty());
+        assert!(components.llm_port.inspection_snapshot().is_empty());
 
         let error = components
             .reset_after_clear(&options)
@@ -423,11 +507,17 @@ mod tests {
         );
         assert!(components.prompt_assembly.manager_snapshot().is_none());
         assert!(components.prompt_assembly.inspection_snapshot().is_empty());
+        assert!(
+            !components
+                .lifecycle
+                .has_capability(&CapabilityKey::from("llm_port"))
+        );
     }
 
     #[test]
     fn shutdown_clears_prompt_and_tool_generations() {
         let options = AppRuntimeOptions {
+            loaded_models: options_with_provider().loaded_models,
             initial_prompt_assembly: Some(manager_with_section("initial", "initial body")),
             ..AppRuntimeOptions::default()
         };
@@ -441,6 +531,7 @@ mod tests {
         assert!(components.prompt_assembly.manager_snapshot().is_none());
         assert!(components.prompt_assembly.inspection_snapshot().is_empty());
         assert!(components.tool_catalog.definitions().is_empty());
+        assert!(components.llm_port.inspection_snapshot().is_empty());
         assert_eq!(
             components.lifecycle.state("native_agent_runtime"),
             Some(ComponentState::Pending)
@@ -454,6 +545,7 @@ mod tests {
     #[test]
     fn reset_rebinds_the_current_live_prompt_manager() {
         let options = AppRuntimeOptions {
+            loaded_models: options_with_provider().loaded_models,
             initial_prompt_assembly: Some(manager_with_section("initial", "initial body")),
             ..AppRuntimeOptions::default()
         };
@@ -478,8 +570,9 @@ mod tests {
     }
 
     #[test]
-    fn failed_native_mount_reverts_fresh_prompt_and_tool_effects() {
+    fn failed_native_mount_reverts_fresh_provider_prompt_and_tool_effects() {
         let options = AppRuntimeOptions {
+            loaded_models: options_with_provider().loaded_models,
             initial_prompt_assembly: Some(manager_with_section("initial", "initial body")),
             ..AppRuntimeOptions::default()
         };
@@ -496,6 +589,7 @@ mod tests {
         assert!(components.tool_catalog.definitions().is_empty());
         assert!(components.prompt_assembly.manager_snapshot().is_none());
         assert!(components.prompt_assembly.inspection_snapshot().is_empty());
+        assert!(components.llm_port.inspection_snapshot().is_empty());
         assert_eq!(
             components
                 .session_workspace_tools
@@ -504,7 +598,12 @@ mod tests {
                 .count(),
             0
         );
-        for capability in ["model_catalog", "prompt_assembly", "tool_catalog"] {
+        for capability in [
+            "llm_port",
+            "model_catalog",
+            "prompt_assembly",
+            "tool_catalog",
+        ] {
             assert!(
                 !components
                     .lifecycle
@@ -517,6 +616,64 @@ mod tests {
         );
         assert_eq!(
             components.lifecycle.state("prompt_assembly"),
+            Some(ComponentState::Pending)
+        );
+    }
+
+    #[test]
+    fn failed_provider_remount_keeps_old_generation_removed_and_dependents_pending() {
+        let options = options_with_provider();
+        let mut components =
+            RuntimeComponents::new(&options).expect("runtime components should initialize");
+        let duplicate_options = AppRuntimeOptions {
+            loaded_models: conversation_runtime::models::LoadedModelCatalog {
+                provider_configs: vec![
+                    conversation_runtime::models::LoadedProviderConfig::new(
+                        "duplicate",
+                        runtime_domain::provider::ProviderKind::OpenAiCompatible,
+                        Some("http://localhost:11434/v1".to_string()),
+                        None,
+                        None,
+                        true,
+                    ),
+                    conversation_runtime::models::LoadedProviderConfig::new(
+                        "duplicate",
+                        runtime_domain::provider::ProviderKind::OpenAiCompatible,
+                        Some("http://localhost:11435/v1".to_string()),
+                        None,
+                        None,
+                        true,
+                    ),
+                ],
+                ..conversation_runtime::models::LoadedModelCatalog::default()
+            },
+            ..AppRuntimeOptions::default()
+        };
+
+        let error = components
+            .reset_after_clear(&duplicate_options)
+            .expect_err("duplicate provider remount should fail transactionally");
+
+        assert!(error.contains("provider duplicate is already registered"));
+        assert!(components.llm_port.inspection_snapshot().is_empty());
+        for capability in [
+            "llm_port",
+            "model_catalog",
+            "prompt_assembly",
+            "tool_catalog",
+        ] {
+            assert!(
+                !components
+                    .lifecycle
+                    .has_capability(&CapabilityKey::from(capability))
+            );
+        }
+        assert_eq!(
+            components.lifecycle.state("native_agent_runtime"),
+            Some(ComponentState::Pending)
+        );
+        assert_eq!(
+            components.lifecycle.state("model_refresh"),
             Some(ComponentState::Pending)
         );
     }

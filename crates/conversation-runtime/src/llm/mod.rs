@@ -1,17 +1,15 @@
 mod client;
 mod error;
+mod lease;
 mod prompt_cache;
-mod provider;
 mod request;
 mod tool_errors;
 
 pub use error::ProviderRequestError;
+pub use lease::{ProviderClientLease, ProviderPromptCachePolicy};
 pub use runtime_domain::session::ProviderRequestMetrics;
 
 pub(crate) use client::{execute_conversation_request, execute_prepared_conversation_request};
-pub(crate) use provider::{
-    list_provider_models, openai_client_for_prepared_request, openai_client_for_request,
-};
 pub(crate) use request::{
     prompt_request_from_prepared_request, prompt_request_from_provider_request,
 };

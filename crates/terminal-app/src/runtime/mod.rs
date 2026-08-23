@@ -1,5 +1,6 @@
 mod agent;
 mod components;
+mod context_budget;
 mod context_budget_command;
 mod context_budget_worker;
 mod conversation_commands;
@@ -7,6 +8,7 @@ mod dynamic_environment_worker;
 mod event_mapping;
 mod inspection;
 mod lifecycle;
+mod llm_port;
 mod prompt_assembly;
 mod prompt_assembly_commands;
 mod session_commands;
@@ -445,8 +447,12 @@ impl UiRuntimePort for AppRuntimeCoordinator {
             return Err("Model refresh is already running".to_string());
         }
 
-        self.components.model_refresh.start(request);
-        Ok(())
+        let provider_lease = self
+            .components
+            .llm_port
+            .resolve_model_listing(&request.provider_id)
+            .map_err(|error| error.to_string())?;
+        self.components.model_refresh.start(request, provider_lease)
     }
 
     fn begin_prompt_assembly_edit(

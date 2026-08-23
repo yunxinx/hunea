@@ -9,7 +9,7 @@ use super::{
     prompt_assembly::PromptContributionSnapshot,
 };
 
-const COMPOSITION_SNAPSHOT_VERSION: u32 = 2;
+const COMPOSITION_SNAPSHOT_VERSION: u32 = 3;
 
 /// `RuntimeCompositionSnapshot` 是默认 runtime composition 的只读诊断投影。
 ///
@@ -108,7 +108,8 @@ struct OptionalDependencySnapshot {
 struct ProviderSnapshot {
     id: String,
     kind: String,
-    enabled: bool,
+    adapter_kind: String,
+    mounted: bool,
     model_ids: Vec<String>,
 }
 
@@ -173,21 +174,26 @@ impl AppRuntimeCoordinator {
             .collect();
 
         let mut providers = self
-            .options
-            .loaded_models
-            .catalog
-            .providers()
-            .map(|provider| {
-                let mut model_ids = provider
-                    .models
-                    .iter()
+            .components
+            .llm_port
+            .inspection_snapshot()
+            .into_iter()
+            .map(|registration| {
+                let mut model_ids = self
+                    .options
+                    .loaded_models
+                    .catalog
+                    .enabled_provider_by_id(&registration.provider_id)
+                    .into_iter()
+                    .flat_map(|provider| provider.models.iter())
                     .map(|model| model.id.clone())
                     .collect::<Vec<_>>();
                 model_ids.sort();
                 ProviderSnapshot {
-                    id: provider.id.clone(),
-                    kind: provider.connection.kind.as_config_value().to_string(),
-                    enabled: provider.enabled,
+                    id: registration.provider_id,
+                    kind: registration.provider_kind.as_config_value().to_string(),
+                    adapter_kind: registration.adapter_kind,
+                    mounted: true,
                     model_ids,
                 }
             })

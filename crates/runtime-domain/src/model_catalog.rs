@@ -1,4 +1,4 @@
-use crate::provider::{ProviderApiKey, ProviderKind};
+use crate::provider::ProviderKind;
 
 /// `ModelCatalog` 保存 TUI 可展示与可选择的模型目录。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -112,31 +112,22 @@ impl ModelCatalog {
 pub struct ModelProvider {
     pub id: String,
     pub display_name: String,
-    pub connection: ProviderConnection,
+    /// Provider 使用的上游协议；只用于展示与 host-side projection 选择。
+    pub kind: ProviderKind,
+    /// 是否配置了非空 base URL；不携带 URL 原文。
+    pub has_base_url: bool,
     pub source: ModelSource,
     pub models: Vec<ModelEntry>,
     pub enabled: bool,
     pub sync_error: Option<String>,
 }
 
-/// `ProviderConnection` 保存 provider 发起请求所需的连接配置。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProviderConnection {
-    pub kind: ProviderKind,
-    pub base_url: Option<String>,
-    pub api_key: Option<ProviderApiKey>,
-    pub api_key_env: Option<String>,
-}
-
 /// `ProviderSyncRequest` 描述一次 provider 模型列表同步请求。
+///
+/// provider connection 由 runtime host 的 `LlmPort` 根据 id 解析。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderSyncRequest {
     pub provider_id: String,
-    pub kind: ProviderKind,
-    pub display_name: String,
-    pub base_url: Option<String>,
-    pub api_key: Option<ProviderApiKey>,
-    pub api_key_env: Option<String>,
 }
 
 /// `ModelProviderRefreshEvent` 是 provider 模型列表刷新后的消费层事件。
@@ -158,34 +149,20 @@ impl ModelProvider {
         id: impl Into<String>,
         kind: ProviderKind,
         display_name: impl Into<String>,
-        base_url: Option<String>,
+        has_base_url: bool,
         source: ModelSource,
         models: Vec<ModelEntry>,
     ) -> Self {
         Self {
             id: id.into(),
             display_name: display_name.into(),
-            connection: ProviderConnection {
-                kind,
-                base_url,
-                api_key: None,
-                api_key_env: None,
-            },
+            kind,
+            has_base_url,
             source,
             models,
             enabled: true,
             sync_error: None,
         }
-    }
-
-    /// `connection` 返回 provider 的连接配置。
-    pub const fn connection(&self) -> &ProviderConnection {
-        &self.connection
-    }
-
-    /// `connection_mut` 返回 provider 的可变连接配置。
-    pub fn connection_mut(&mut self) -> &mut ProviderConnection {
-        &mut self.connection
     }
 
     /// `with_sync_error` 附加模型同步失败原因。
@@ -194,30 +171,18 @@ impl ModelProvider {
         self
     }
 
-    /// `with_api_key_env` 附加用于读取 Bearer token 的环境变量名。
-    pub fn with_api_key_env(mut self, api_key_env: Option<String>) -> Self {
-        self.connection_mut().api_key_env = api_key_env;
-        self
-    }
-
-    /// `with_api_key` 附加配置文件中直接提供的 Bearer token。
-    pub fn with_api_key(mut self, api_key: Option<ProviderApiKey>) -> Self {
-        self.connection_mut().api_key = api_key;
-        self
-    }
-
     /// `disabled` 创建禁用的 provider，保留配置但不参与展示。
     pub fn disabled(
         id: impl Into<String>,
         kind: ProviderKind,
         display_name: impl Into<String>,
-        base_url: Option<String>,
+        has_base_url: bool,
         source: ModelSource,
         models: Vec<ModelEntry>,
     ) -> Self {
         Self {
             enabled: false,
-            ..Self::new(id, kind, display_name, base_url, source, models)
+            ..Self::new(id, kind, display_name, has_base_url, source, models)
         }
     }
 }
@@ -295,7 +260,7 @@ mod tests {
                 "disabled",
                 ProviderKind::OpenAiCompatible,
                 "Disabled",
-                None,
+                false,
                 ModelSource::Configured,
                 vec![ModelEntry::new("hidden", None, ModelSource::Configured)],
             ),
@@ -303,7 +268,7 @@ mod tests {
                 "enabled",
                 ProviderKind::OpenAiCompatible,
                 "Enabled",
-                None,
+                false,
                 ModelSource::Configured,
                 vec![ModelEntry::new("visible", None, ModelSource::Configured)],
             ),
@@ -325,7 +290,7 @@ mod tests {
             "local",
             ProviderKind::OpenAiCompatible,
             "Local",
-            None,
+            false,
             ModelSource::NotLoaded,
             Vec::new(),
         )]);
@@ -340,7 +305,7 @@ mod tests {
             "local",
             ProviderKind::OpenAiCompatible,
             "Local",
-            None,
+            false,
             ModelSource::Configured,
             vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
         )]);
@@ -355,7 +320,7 @@ mod tests {
             "local",
             ProviderKind::OpenAiCompatible,
             "Local",
-            None,
+            false,
             ModelSource::Configured,
             vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
         )]);
@@ -374,7 +339,7 @@ mod tests {
                 "first",
                 ProviderKind::OpenAiCompatible,
                 "First",
-                None,
+                false,
                 ModelSource::Configured,
                 vec![ModelEntry::new("shared", None, ModelSource::Configured)],
             ),
@@ -382,7 +347,7 @@ mod tests {
                 "second",
                 ProviderKind::OpenAiCompatible,
                 "Second",
-                None,
+                false,
                 ModelSource::Configured,
                 vec![ModelEntry::new("shared", None, ModelSource::Configured)],
             ),
@@ -397,7 +362,7 @@ mod tests {
             "local",
             ProviderKind::OpenAiCompatible,
             "Local",
-            None,
+            false,
             ModelSource::Configured,
             vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
         )]);
@@ -413,7 +378,7 @@ mod tests {
                 "first",
                 ProviderKind::OpenAiCompatible,
                 "First",
-                None,
+                false,
                 ModelSource::Configured,
                 vec![ModelEntry::new("shared", None, ModelSource::Configured)],
             ),
@@ -421,7 +386,7 @@ mod tests {
                 "second",
                 ProviderKind::OpenAiCompatible,
                 "Second",
-                None,
+                false,
                 ModelSource::Configured,
                 vec![ModelEntry::new("shared", None, ModelSource::Configured)],
             ),

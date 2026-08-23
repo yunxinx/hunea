@@ -1,27 +1,24 @@
-use std::time::Duration;
-
 use tokio_util::sync::CancellationToken;
 use tool_loop_runtime::{ToolLoopOptions, run_tool_loop};
 use tool_runtime::{SharedToolPermissionHandler, ToolExecutorRegistry};
 
 use crate::{
-    ConversationRequest, PreparedConversationRequest, TurnExecutionError,
+    ConversationRequest, PreparedConversationRequest, ProviderClientLease, TurnExecutionError,
     conversation::{ConversationCompletion, ConversationProgress},
     llm::{
-        ConversationToolErrorFormatter, ProviderRequestError, openai_client_for_prepared_request,
-        openai_client_for_request, prompt_request_from_prepared_request,
+        ConversationToolErrorFormatter, ProviderRequestError, prompt_request_from_prepared_request,
         prompt_request_from_provider_request,
     },
 };
 
 /// `execute_conversation_request` runs one conversation turn through the provider/tool runtime.
 pub(crate) async fn execute_conversation_request<F>(
+    lease: &ProviderClientLease,
     request: &ConversationRequest,
     executor: ToolExecutorRegistry,
     cancellation: &CancellationToken,
     tool_max_turns: Option<usize>,
     permission_handler: Option<SharedToolPermissionHandler>,
-    idle_timeout: Duration,
     on_progress: &mut F,
 ) -> Result<ConversationCompletion, TurnExecutionError>
 where
@@ -31,10 +28,9 @@ where
         return Err(TurnExecutionError::Cancelled);
     }
 
-    let client = openai_client_for_request(request.provider_request(), idle_timeout)?;
     let prompt_request = prompt_request_from_provider_request(request.provider_request())?;
     let completion = run_tool_loop(
-        &client,
+        lease.client(),
         prompt_request,
         executor,
         cancellation,
@@ -57,21 +53,21 @@ where
                 provider_id: request.provider_request().provider_id.clone(),
             })
         }
-        tool_loop_runtime::ToolLoopError::ToolTurnLimit { max_turns } => TurnExecutionError::from(
-            ProviderRequestError::Provider(format!("tool turn limit reached ({max_turns})")),
-        ),
+        tool_loop_runtime::ToolLoopError::ToolTurnLimit { max_turns } => {
+            TurnExecutionError::from(ProviderRequestError::ToolTurnLimit { max_turns })
+        }
     })?;
 
     Ok(ConversationCompletion::from_runtime_completion(completion))
 }
 
 pub(crate) async fn execute_prepared_conversation_request<F>(
+    lease: &ProviderClientLease,
     request: &PreparedConversationRequest,
     executor: ToolExecutorRegistry,
     cancellation: &CancellationToken,
     tool_max_turns: Option<usize>,
     permission_handler: Option<SharedToolPermissionHandler>,
-    idle_timeout: Duration,
     on_progress: &mut F,
 ) -> Result<ConversationCompletion, TurnExecutionError>
 where
@@ -81,10 +77,9 @@ where
         return Err(TurnExecutionError::Cancelled);
     }
 
-    let client = openai_client_for_prepared_request(request, idle_timeout)?;
-    let prompt_request = prompt_request_from_prepared_request(request)?;
+    let prompt_request = prompt_request_from_prepared_request(lease, request)?;
     let completion = run_tool_loop(
-        &client,
+        lease.client(),
         prompt_request,
         executor,
         cancellation,
@@ -107,9 +102,9 @@ where
                 provider_id: request.provider_id().to_string(),
             })
         }
-        tool_loop_runtime::ToolLoopError::ToolTurnLimit { max_turns } => TurnExecutionError::from(
-            ProviderRequestError::Provider(format!("tool turn limit reached ({max_turns})")),
-        ),
+        tool_loop_runtime::ToolLoopError::ToolTurnLimit { max_turns } => {
+            TurnExecutionError::from(ProviderRequestError::ToolTurnLimit { max_turns })
+        }
     })?;
 
     Ok(ConversationCompletion::from_runtime_completion(completion))

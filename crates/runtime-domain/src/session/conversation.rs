@@ -1,8 +1,6 @@
-use crate::provider::{ProviderApiKey, ProviderKind};
-
 use provider_protocol::{ContentBlock, ConversationItem, Role};
 
-use std::time::Duration;
+use std::{fmt, time::Duration};
 
 use super::{
     RuntimePermissionRequest, RuntimeTarget, RuntimeTerminalSnapshot, RuntimeToolActivity,
@@ -10,32 +8,30 @@ use super::{
 };
 
 /// `ConversationRequest` 描述一次完整的对话执行请求。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ConversationRequest {
     provider_request: ProviderRequest,
+}
+
+impl fmt::Debug for ConversationRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ConversationRequest")
+            .field("target", &self.target())
+            .field("item_count", &self.provider_request.items.len())
+            .finish()
+    }
 }
 
 impl ConversationRequest {
     /// `new` 创建一个还未附加工具的对话请求。
     pub fn new(
         provider_id: impl Into<String>,
-        provider_kind: ProviderKind,
         model_id: impl Into<String>,
-        base_url: Option<String>,
-        api_key: Option<ProviderApiKey>,
-        api_key_env: Option<String>,
         items: Vec<ConversationItem>,
     ) -> Self {
         Self {
-            provider_request: ProviderRequest::new(
-                provider_id,
-                provider_kind,
-                model_id,
-                base_url,
-                api_key,
-                api_key_env,
-                items,
-            ),
+            provider_request: ProviderRequest::new(provider_id, model_id, items),
         }
     }
 
@@ -54,36 +50,38 @@ impl ConversationRequest {
 }
 
 /// `ConversationTurnRequest` 描述 TUI 向 provider-visible 对话提交的一次用户 turn。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ConversationTurnRequest {
     provider_id: String,
-    provider_kind: ProviderKind,
     model_id: String,
-    base_url: Option<String>,
-    api_key: Option<ProviderApiKey>,
-    api_key_env: Option<String>,
     message: ConversationItem,
     transcript_user_message: Option<TranscriptUserMessage>,
+}
+
+impl fmt::Debug for ConversationTurnRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ConversationTurnRequest")
+            .field("target", &self.target())
+            .field("message_role", &self.message.role())
+            .field(
+                "has_transcript_user_message",
+                &self.transcript_user_message.is_some(),
+            )
+            .finish()
+    }
 }
 
 impl ConversationTurnRequest {
     /// `new` 创建一次对话轮次提交请求。
     pub fn new(
         provider_id: impl Into<String>,
-        provider_kind: ProviderKind,
         model_id: impl Into<String>,
-        base_url: Option<String>,
-        api_key: Option<ProviderApiKey>,
-        api_key_env: Option<String>,
         message: ConversationItem,
     ) -> Self {
         Self {
             provider_id: provider_id.into(),
-            provider_kind,
             model_id: model_id.into(),
-            base_url,
-            api_key,
-            api_key_env,
             message,
             transcript_user_message: None,
         }
@@ -92,11 +90,7 @@ impl ConversationTurnRequest {
     /// `new_user_text` 从 UI 原始用户输入创建一次对话轮次提交请求。
     pub fn new_user_text(
         provider_id: impl Into<String>,
-        provider_kind: ProviderKind,
         model_id: impl Into<String>,
-        base_url: Option<String>,
-        api_key: Option<ProviderApiKey>,
-        api_key_env: Option<String>,
         text: impl Into<String>,
     ) -> Self {
         let text = text.into();
@@ -105,57 +99,25 @@ impl ConversationTurnRequest {
         } else {
             vec![ContentBlock::Text(text)]
         };
-        Self::new_user_content(
-            provider_id,
-            provider_kind,
-            model_id,
-            base_url,
-            api_key,
-            api_key_env,
-            content,
-        )
+        Self::new_user_content(provider_id, model_id, content)
     }
 
     /// `new_user_content` 从结构化用户内容创建一次对话轮次提交请求。
     pub fn new_user_content(
         provider_id: impl Into<String>,
-        provider_kind: ProviderKind,
         model_id: impl Into<String>,
-        base_url: Option<String>,
-        api_key: Option<ProviderApiKey>,
-        api_key_env: Option<String>,
         content: Vec<ContentBlock>,
     ) -> Self {
-        Self::new(
-            provider_id,
-            provider_kind,
-            model_id,
-            base_url,
-            api_key,
-            api_key_env,
-            ConversationItem::user(content),
-        )
+        Self::new(provider_id, model_id, ConversationItem::user(content))
     }
 
     /// `new_user_source_message` 从 transcript-visible 用户消息创建一次对话轮次提交请求。
     pub fn new_user_source_message(
         provider_id: impl Into<String>,
-        provider_kind: ProviderKind,
         model_id: impl Into<String>,
-        base_url: Option<String>,
-        api_key: Option<ProviderApiKey>,
-        api_key_env: Option<String>,
         message: TranscriptUserMessage,
     ) -> Self {
-        let mut request = Self::new(
-            provider_id,
-            provider_kind,
-            model_id,
-            base_url,
-            api_key,
-            api_key_env,
-            message.provider_message(),
-        );
+        let mut request = Self::new(provider_id, model_id, message.provider_message());
         request.transcript_user_message = Some(message);
         request
     }
@@ -170,29 +132,9 @@ impl ConversationTurnRequest {
         &self.provider_id
     }
 
-    /// `provider_kind` 返回 provider 类型。
-    pub const fn provider_kind(&self) -> ProviderKind {
-        self.provider_kind
-    }
-
     /// `model_id` 返回当前模型标识。
     pub fn model_id(&self) -> &str {
         &self.model_id
-    }
-
-    /// `base_url` 返回当前 provider base_url。
-    pub fn base_url(&self) -> Option<&str> {
-        self.base_url.as_deref()
-    }
-
-    /// `api_key` 返回直接配置的 API key。
-    pub fn api_key(&self) -> Option<&ProviderApiKey> {
-        self.api_key.as_ref()
-    }
-
-    /// `api_key_env` 返回 API key 环境变量名。
-    pub fn api_key_env(&self) -> Option<&str> {
-        self.api_key_env.as_deref()
     }
 
     /// `message` 返回本轮提交的用户消息。
@@ -217,35 +159,34 @@ impl ConversationTurnRequest {
 }
 
 /// `ProviderRequest` 保存向上游 provider 发起请求所需的模型参数。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ProviderRequest {
     pub provider_id: String,
-    pub provider_kind: ProviderKind,
     pub model_id: String,
-    pub base_url: Option<String>,
-    pub api_key: Option<ProviderApiKey>,
-    pub api_key_env: Option<String>,
     pub items: Vec<ConversationItem>,
+}
+
+impl fmt::Debug for ProviderRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderRequest")
+            .field("provider_id", &self.provider_id)
+            .field("model_id", &self.model_id)
+            .field("item_count", &self.items.len())
+            .finish()
+    }
 }
 
 impl ProviderRequest {
     /// `new` 创建一次 provider backend 请求参数。
     pub fn new(
         provider_id: impl Into<String>,
-        provider_kind: ProviderKind,
         model_id: impl Into<String>,
-        base_url: Option<String>,
-        api_key: Option<ProviderApiKey>,
-        api_key_env: Option<String>,
         items: Vec<ConversationItem>,
     ) -> Self {
         Self {
             provider_id: provider_id.into(),
-            provider_kind,
             model_id: model_id.into(),
-            base_url,
-            api_key,
-            api_key_env,
             items,
         }
     }
@@ -255,8 +196,6 @@ impl ProviderRequest {
 mod tests {
     use provider_protocol::ContentBlock;
 
-    use crate::provider::ProviderKind;
-
     use crate::session::TranscriptUserAttachment;
 
     use super::{ConversationTurnRequest, TranscriptUserMessage};
@@ -265,11 +204,7 @@ mod tests {
     fn user_source_message_builds_structured_provider_content() {
         let request = ConversationTurnRequest::new_user_source_message(
             "openai",
-            ProviderKind::OpenAi,
             "gpt-4o",
-            None,
-            None,
-            None,
             TranscriptUserMessage {
                 content: "inspect this".to_string(),
                 attachments: vec![TranscriptUserAttachment::Image {
@@ -299,6 +234,24 @@ mod tests {
                     && uri.as_deref() == Some("assets/a.png")
                     && detail.is_none()
         ));
+    }
+
+    #[test]
+    fn request_debug_does_not_include_provider_visible_content() {
+        let sentinel = "delivery-sentinel-that-must-not-leak";
+        let turn = ConversationTurnRequest::new_user_text("openai", "gpt-4o", sentinel);
+        let request = super::ConversationRequest::new(
+            "openai",
+            "gpt-4o",
+            vec![provider_protocol::ConversationItem::text(
+                provider_protocol::Role::User,
+                sentinel,
+            )],
+        );
+
+        assert!(!format!("{turn:?}").contains(sentinel));
+        assert!(!format!("{request:?}").contains(sentinel));
+        assert!(!format!("{:?}", request.provider_request()).contains(sentinel));
     }
 }
 

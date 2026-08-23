@@ -181,7 +181,7 @@ fn model_panel_highlights_matched_description_text() {
                 "local",
                 ProviderKind::OpenAiCompatible,
                 "Local",
-                Some("http://127.0.0.1:1234/v1".to_string()),
+                true,
                 ModelSource::Configured,
                 vec![ModelEntry::new(
                     "qwen3",
@@ -230,7 +230,7 @@ fn model_with_single_provider() -> Model {
                 "local",
                 ProviderKind::OpenAiCompatible,
                 "Local",
-                Some("http://127.0.0.1:1234/v1".to_string()),
+                true,
                 ModelSource::Configured,
                 vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
             )]),

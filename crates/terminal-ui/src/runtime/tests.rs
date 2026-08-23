@@ -375,7 +375,7 @@ fn model_catalog() -> ModelCatalog {
         "local",
         ProviderKind::OpenAiCompatible,
         "Local",
-        Some("http://127.0.0.1:1234/v1".to_string()),
+        true,
         ModelSource::Configured,
         vec![
             ModelEntry::new("qwen2", None, ModelSource::Configured),

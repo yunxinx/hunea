@@ -1,7 +1,7 @@
 use std::fs;
 
 use conversation_runtime::{
-    ProviderApiKey, ProviderKind,
+    ProviderKind,
     models::{load_from_paths, write_default_model},
 };
 use runtime_domain::model_catalog::{ModelSelection, ModelSource};
@@ -65,12 +65,22 @@ api_key = "sk-test-direct"
         .catalog
         .enabled_provider_by_id("remote")
         .expect("enabled provider should be visible");
-    let connection = provider.connection();
+    assert!(provider.has_base_url);
+    let config = loaded
+        .provider_configs
+        .iter()
+        .find(|config| config.provider_id() == "remote")
+        .expect("bootstrap config should exist");
     assert_eq!(
-        connection.api_key.as_ref().map(ProviderApiKey::as_str),
+        config
+            .api_key()
+            .map(runtime_domain::provider::ProviderApiKey::as_str),
         Some("sk-test-direct")
     );
-    assert_eq!(connection.api_key_env, None);
+    assert_eq!(config.api_key_env(), None);
+    let debug = format!("{loaded:?}");
+    assert!(!debug.contains("sk-test-direct"));
+    assert!(!debug.contains("https://api.example.com/v1"));
 }
 
 #[test]
@@ -121,7 +131,7 @@ models = ["gemini-2.5-pro"]
     let kinds = loaded
         .catalog
         .enabled_providers()
-        .map(|provider| (provider.id.as_str(), provider.connection().kind))
+        .map(|provider| (provider.id.as_str(), provider.kind))
         .collect::<Vec<_>>();
     assert_eq!(
         kinds,
@@ -192,14 +202,12 @@ models = ["qwen3"]
         Some(ModelSelection::new("local", "qwen3"))
     );
 
-    let provider = loaded
-        .catalog
-        .enabled_provider_at(0)
-        .expect("enabled provider should be visible");
-    assert_eq!(
-        provider.connection().api_key_env.as_deref(),
-        Some("DEEPSEEK_API_KEY")
-    );
+    let config = loaded
+        .provider_configs
+        .iter()
+        .find(|config| config.provider_id() == "local")
+        .expect("bootstrap config should exist");
+    assert_eq!(config.api_key_env(), Some("DEEPSEEK_API_KEY"));
 }
 
 #[test]

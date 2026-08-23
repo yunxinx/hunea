@@ -8,26 +8,112 @@ use runtime_domain::paths::{DataDirResolution, MODELS_FILE_NAME, WORKSPACE_HUNEA
 use serde::Deserialize;
 use toml_edit::DocumentMut;
 
-use crate::list_provider_models;
 use runtime_domain::{
     context_budget::ContextTokenLimit,
-    model_catalog::{
-        ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource, ProviderSyncRequest,
-    },
+    model_catalog::{ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource},
     model_context_limit::ModelContextLimits,
     provider::{ProviderApiKey, ProviderKind},
-    session::ProviderRequest,
 };
-
-type ModelSyncResult = Result<Vec<String>, String>;
 
 /// `LoadedModelCatalog` 是从 `models.toml` 得到的 TUI 模型目录与默认选择。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LoadedModelCatalog {
     pub catalog: ModelCatalog,
+    /// composition root 专用的 provider bootstrap authority。
+    pub provider_configs: Vec<LoadedProviderConfig>,
     pub context_limits: ModelContextLimits,
     pub selected_model: Option<ModelSelection>,
     pub source_path: Option<PathBuf>,
+}
+
+/// `LoadedProviderConfig` 是 provider adapter 挂载所需的 bootstrap 输入。
+///
+/// 它不进入 TUI model catalog、runtime command 或 composition inspection；`Debug` 只显示
+/// 脱敏的可用性元数据。
+#[derive(Clone, PartialEq, Eq)]
+pub struct LoadedProviderConfig {
+    provider_id: String,
+    kind: ProviderKind,
+    base_url: Option<String>,
+    api_key: Option<ProviderApiKey>,
+    api_key_env: Option<String>,
+    enabled: bool,
+}
+
+impl LoadedProviderConfig {
+    /// 创建 composition root 使用的 provider bootstrap config。
+    pub fn new(
+        provider_id: impl Into<String>,
+        kind: ProviderKind,
+        base_url: Option<String>,
+        api_key: Option<ProviderApiKey>,
+        api_key_env: Option<String>,
+        enabled: bool,
+    ) -> Self {
+        Self {
+            provider_id: provider_id.into(),
+            kind,
+            base_url,
+            api_key,
+            api_key_env,
+            enabled,
+        }
+    }
+
+    /// 返回配置实例的稳定 provider id。
+    pub fn provider_id(&self) -> &str {
+        &self.provider_id
+    }
+
+    /// 返回 provider protocol kind。
+    pub const fn kind(&self) -> ProviderKind {
+        self.kind
+    }
+
+    /// 返回 composition root 专用的 base URL 原文。
+    pub fn base_url(&self) -> Option<&str> {
+        self.base_url.as_deref()
+    }
+
+    /// 返回 composition root 专用的 inline credential。
+    pub fn api_key(&self) -> Option<&ProviderApiKey> {
+        self.api_key.as_ref()
+    }
+
+    /// 返回 composition root 专用的 credential env 名称。
+    pub fn api_key_env(&self) -> Option<&str> {
+        self.api_key_env.as_deref()
+    }
+
+    /// 返回该 provider 是否参与 runtime composition。
+    pub const fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+}
+
+impl std::fmt::Debug for LoadedProviderConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoadedProviderConfig")
+            .field("provider_id", &self.provider_id)
+            .field("kind", &self.kind)
+            .field(
+                "has_base_url",
+                &self
+                    .base_url
+                    .as_ref()
+                    .is_some_and(|value| !value.trim().is_empty()),
+            )
+            .field("has_inline_api_key", &self.api_key.is_some())
+            .field(
+                "has_api_key_env",
+                &self
+                    .api_key_env
+                    .as_ref()
+                    .is_some_and(|value| !value.trim().is_empty()),
+            )
+            .field("enabled", &self.enabled)
+            .finish()
+    }
 }
 
 impl LoadedModelCatalog {
@@ -220,12 +306,18 @@ fn load_from_explicit_paths(
     }
 
     let catalog = catalog_from_config(&merged, source_path.as_deref())?;
+    let provider_configs = merged
+        .providers
+        .iter()
+        .map(|(provider_id, sourced)| provider_config_from_config(provider_id, &sourced.config))
+        .collect();
     let context_limits = context_limits_from_merged(&merged, source_path.as_deref())?;
     let selected_model = selection_from_default(merged.default.as_deref(), &catalog);
 
     Ok((
         LoadedModelCatalog {
             catalog,
+            provider_configs,
             context_limits,
             selected_model,
             source_path,
@@ -273,11 +365,6 @@ pub fn write_default_model(
     })?;
 
     Ok(path)
-}
-
-/// `sync_provider_models_once` 立即刷新指定 provider 的模型列表。
-pub fn sync_provider_models_once(request: &ProviderSyncRequest) -> Result<Vec<String>, String> {
-    sync_provider_models(request)
 }
 
 /// 测试 / 显式路径入口用的搜索列表；生产路径走 `DataDirResolution::layered_config_file_paths`。
@@ -426,8 +513,10 @@ fn provider_from_config(provider_id: &str, provider: &FileModelProviderConfig) -
         .display_name
         .clone()
         .unwrap_or_else(|| provider_id.to_string());
-    let base_url = provider.base_url.clone();
-    let api_key = ProviderApiKey::from_optional_config(provider.api_key.clone());
+    let has_base_url = provider
+        .base_url
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty());
     let enabled = provider.enabled.unwrap_or(true);
     let (source, models) = match provider.models.as_ref() {
         Some(models) => (
@@ -440,12 +529,34 @@ fn provider_from_config(provider_id: &str, provider: &FileModelProviderConfig) -
         None => (ModelSource::NotLoaded, Vec::new()),
     };
 
-    let mut model_provider =
-        ModelProvider::new(provider_id, kind, display_name, base_url, source, models)
-            .with_api_key(api_key)
-            .with_api_key_env(provider.api_key_env.clone());
+    let mut model_provider = ModelProvider::new(
+        provider_id,
+        kind,
+        display_name,
+        has_base_url,
+        source,
+        models,
+    );
     model_provider.enabled = enabled;
     model_provider
+}
+
+fn provider_config_from_config(
+    provider_id: &str,
+    provider: &FileModelProviderConfig,
+) -> LoadedProviderConfig {
+    LoadedProviderConfig::new(
+        provider_id,
+        provider
+            .kind
+            .as_deref()
+            .and_then(ProviderKind::from_config_value)
+            .unwrap_or_default(),
+        provider.base_url.clone(),
+        ProviderApiKey::from_optional_config(provider.api_key.clone()),
+        provider.api_key_env.clone(),
+        provider.enabled.unwrap_or(true),
+    )
 }
 
 fn selection_from_default(default: Option<&str>, catalog: &ModelCatalog) -> Option<ModelSelection> {
@@ -488,26 +599,6 @@ fn selection_from_default(default: Option<&str>, catalog: &ModelCatalog) -> Opti
     }
 }
 
-fn sync_provider_models(request: &ProviderSyncRequest) -> ModelSyncResult {
-    if !request.kind.uses_openai_compatible_endpoint() && request.kind != ProviderKind::OpenAi {
-        return Err(format!(
-            "model sync for {} is not supported; configure models = [...]",
-            request.kind
-        ));
-    }
-
-    let request = ProviderRequest::new(
-        request.provider_id.clone(),
-        request.kind,
-        "__model_sync__",
-        request.base_url.clone(),
-        request.api_key.clone(),
-        request.api_key_env.clone(),
-        Vec::new(),
-    );
-    list_provider_models(&request).map_err(|error| error.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -518,26 +609,6 @@ mod tests {
         unsafe { libc::geteuid() == 0 }
     }
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    #[test]
-    fn non_openai_provider_requires_configured_model_allowlist_for_sync() {
-        let request = ProviderSyncRequest {
-            provider_id: "anthropic_proxy".to_string(),
-            kind: ProviderKind::Anthropic,
-            display_name: "Anthropic Proxy".to_string(),
-            base_url: Some("http://127.0.0.1:9/v1".to_string()),
-            api_key: None,
-            api_key_env: Some("ANTHROPIC_API_KEY".to_string()),
-        };
-
-        let error = sync_provider_models(&request)
-            .expect_err("custom endpoint model sync should be explicit");
-
-        assert_eq!(
-            error,
-            "model sync for anthropic is not supported; configure models = [...]"
-        );
-    }
 
     #[test]
     fn config_accepts_openai_responses_provider_kind() {
@@ -564,7 +635,7 @@ models = ["fast-responses-model"]
             .enabled_provider_by_id("responses")
             .expect("provider should exist");
 
-        assert_eq!(provider.connection.kind, ProviderKind::OpenAiResponses);
+        assert_eq!(provider.kind, ProviderKind::OpenAiResponses);
         assert_eq!(
             loaded.selected_model,
             Some(runtime_domain::model_catalog::ModelSelection::new(
@@ -572,23 +643,6 @@ models = ["fast-responses-model"]
                 "fast-responses-model"
             ))
         );
-    }
-
-    #[test]
-    fn openai_custom_base_url_syncs_through_models_endpoint() {
-        let request = ProviderSyncRequest {
-            provider_id: "openai_proxy".to_string(),
-            kind: ProviderKind::OpenAi,
-            display_name: "OpenAI Proxy".to_string(),
-            base_url: Some("http://127.0.0.1:9/v1".to_string()),
-            api_key: Some(ProviderApiKey::new("test-key")),
-            api_key_env: Some("OPENAI_API_KEY".to_string()),
-        };
-
-        let error = sync_provider_models(&request)
-            .expect_err("unreachable endpoint should fail after choosing /models sync");
-
-        assert!(error.contains("transport error"));
     }
 
     #[test]

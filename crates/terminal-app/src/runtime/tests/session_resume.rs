@@ -396,11 +396,7 @@ fn reset_after_resume_restores_fresh_prompt_prelude_for_next_new_session() {
         .provider_conversation_mut_for_test()
         .prepare_turn(&ConversationTurnRequest::new(
             "local",
-            ProviderKind::OpenAiCompatible,
             "qwen3",
-            Some("http://127.0.0.1:1234/v1".to_string()),
-            None,
-            None,
             ConversationItem::text(Role::User, "new session"),
         ))
         .expect("fresh new session turn should prepare");

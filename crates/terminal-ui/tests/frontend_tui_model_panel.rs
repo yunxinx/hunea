@@ -347,11 +347,6 @@ fn model_panel_u_requests_refresh_for_current_provider() {
         Some(AppEffect::RefreshModelProvider {
             request: ProviderSyncRequest {
                 provider_id: "local".to_string(),
-                kind: ProviderKind::OpenAiCompatible,
-                display_name: "Local".to_string(),
-                base_url: Some("http://127.0.0.1:1234/v1".to_string()),
-                api_key: None,
-                api_key_env: None,
             }
         })
     );
@@ -418,7 +413,7 @@ fn model_panel_shows_sync_error_for_auto_synced_provider() {
                     "local",
                     ProviderKind::OpenAiCompatible,
                     "Local",
-                    Some("http://127.0.0.1:1234/v1".to_string()),
+                    true,
                     ModelSource::Synced,
                     Vec::new(),
                 )
@@ -452,7 +447,7 @@ fn model_options_with_catalog() -> ModelOptions {
                 "local",
                 ProviderKind::OpenAiCompatible,
                 "Local",
-                Some("http://127.0.0.1:1234/v1".to_string()),
+                true,
                 ModelSource::Configured,
                 vec![
                     ModelEntry::new(
@@ -471,7 +466,7 @@ fn model_options_with_catalog() -> ModelOptions {
                 "deepseek",
                 ProviderKind::OpenAiCompatible,
                 "DeepSeek",
-                Some("https://api.example.com/v1".to_string()),
+                true,
                 ModelSource::Configured,
                 vec![
                     ModelEntry::new(
@@ -590,7 +585,7 @@ fn model_panel_footer_hint_is_italic() {
                 "local",
                 ProviderKind::OpenAiCompatible,
                 "Local",
-                None,
+                false,
                 ModelSource::Configured,
                 vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
             )]),
@@ -773,7 +768,7 @@ fn model_options_with_many_models(count: usize) -> ModelOptions {
             "many",
             ProviderKind::OpenAiCompatible,
             "Many",
-            Some("https://api.example.com/v1".to_string()),
+            true,
             ModelSource::Configured,
             models,
         )]),

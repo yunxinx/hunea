@@ -46,7 +46,7 @@ fn context_budget_snapshot_dispatches_to_background_worker() {
                     "local",
                     ProviderKind::OpenAiCompatible,
                     "Local",
-                    Some("http://127.0.0.1:1234/v1".to_string()),
+                    true,
                     runtime_domain::model_catalog::ModelSource::Configured,
                     vec![runtime_domain::model_catalog::ModelEntry::new(
                         "qwen3",
@@ -102,7 +102,7 @@ fn context_budget_snapshot_includes_provider_visible_tool_definitions() {
                     "local",
                     ProviderKind::OpenAiCompatible,
                     "Local",
-                    Some("http://127.0.0.1:1234/v1".to_string()),
+                    true,
                     runtime_domain::model_catalog::ModelSource::Configured,
                     vec![runtime_domain::model_catalog::ModelEntry::new(
                         "qwen3",
@@ -155,7 +155,7 @@ fn context_budget_snapshot_uses_upstream_context_tokens_for_total() {
                     "local",
                     ProviderKind::OpenAiCompatible,
                     "Local",
-                    Some("http://127.0.0.1:1234/v1".to_string()),
+                    true,
                     runtime_domain::model_catalog::ModelSource::Configured,
                     vec![runtime_domain::model_catalog::ModelEntry::new(
                         "qwen3",
@@ -216,7 +216,7 @@ fn context_budget_snapshot_separates_skill_discovery_from_system_prompt() {
                     "local",
                     ProviderKind::OpenAiCompatible,
                     "Local",
-                    Some("http://127.0.0.1:1234/v1".to_string()),
+                    true,
                     runtime_domain::model_catalog::ModelSource::Configured,
                     vec![runtime_domain::model_catalog::ModelEntry::new(
                         "qwen3",
@@ -305,7 +305,7 @@ fn context_budget_snapshot_failure_is_reported_as_runtime_event() {
                     "anthropic",
                     ProviderKind::Anthropic,
                     "Anthropic",
-                    None,
+                    false,
                     runtime_domain::model_catalog::ModelSource::Configured,
                     vec![runtime_domain::model_catalog::ModelEntry::new(
                         "claude-sonnet-4",
@@ -360,7 +360,7 @@ fn context_budget_projection_failure_keeps_structured_error_kind() {
                     "local",
                     ProviderKind::OpenAiCompatible,
                     "Local",
-                    Some("http://127.0.0.1:1234/v1".to_string()),
+                    true,
                     runtime_domain::model_catalog::ModelSource::Configured,
                     vec![runtime_domain::model_catalog::ModelEntry::new(
                         "qwen3",
@@ -396,7 +396,7 @@ fn context_budget_projection_failure_keeps_structured_error_kind() {
 
     assert_eq!(receipt, RuntimeCommandReceipt::Accepted);
 
-    let error_kind = wait_for_runtime_event(
+    let (error_kind, status, detail) = wait_for_runtime_event(
         &mut coordinator,
         |event| match event {
             RuntimeEvent::ContextBudgetSnapshotLoadFailed {
@@ -404,9 +404,10 @@ fn context_budget_projection_failure_keeps_structured_error_kind() {
                 error:
                     runtime_domain::session::ContextBudgetLoadErrorPayload::ProjectionFailed {
                         kind,
-                        ..
+                        status,
+                        detail,
                     },
-            } if actual_request_id == request_id => Some(kind),
+            } if actual_request_id == request_id => Some((kind, status, detail)),
             _ => None,
         },
         "context budget projection failure event",
@@ -416,6 +417,8 @@ fn context_budget_projection_failure_keeps_structured_error_kind() {
         error_kind,
         runtime_domain::session::ContextBudgetProjectionErrorKind::Protocol
     );
+    assert_eq!(status, None);
+    assert_eq!(detail, None);
 }
 
 #[test]
@@ -427,7 +430,7 @@ fn cancel_context_budget_snapshot_stops_background_tracking_and_drops_stale_even
                     "local",
                     ProviderKind::OpenAiCompatible,
                     "Local",
-                    Some("http://127.0.0.1:1234/v1".to_string()),
+                    true,
                     runtime_domain::model_catalog::ModelSource::Configured,
                     vec![runtime_domain::model_catalog::ModelEntry::new(
                         "qwen3",
@@ -478,7 +481,7 @@ fn latest_context_budget_request_supersedes_stale_work() {
                     "local",
                     ProviderKind::OpenAiCompatible,
                     "Local",
-                    Some("http://127.0.0.1:1234/v1".to_string()),
+                    true,
                     runtime_domain::model_catalog::ModelSource::Configured,
                     vec![runtime_domain::model_catalog::ModelEntry::new(
                         "qwen3",

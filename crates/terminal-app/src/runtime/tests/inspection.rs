@@ -7,7 +7,7 @@ use runtime_domain::{
         PromptPreludeSection, PromptPreludeSnapshot, PromptSourceKind, PromptSourceOrigin,
         persistence::PromptAssemblyScope,
     },
-    provider::{ProviderApiKey, ProviderKind},
+    provider::ProviderKind,
 };
 use terminal_ui::{RuntimeWake, UiRuntimePort};
 
@@ -23,20 +23,18 @@ fn composition_snapshot_is_deterministic_and_redacted() {
         "z-provider",
         ProviderKind::OpenAiCompatible,
         "Z Provider",
-        Some(format!("https://{SECRET_SENTINEL}@example.test/v1")),
+        true,
         ModelSource::Configured,
         vec![
             ModelEntry::new("z-model", None, ModelSource::Configured),
             ModelEntry::new("a-model", None, ModelSource::Configured),
         ],
-    )
-    .with_api_key(Some(ProviderApiKey::new(SECRET_SENTINEL)))
-    .with_api_key_env(Some(SECRET_SENTINEL.to_string()));
+    );
     let disabled_provider = ModelProvider::disabled(
         "a-provider",
         ProviderKind::Anthropic,
         "A Provider",
-        None,
+        false,
         ModelSource::Configured,
         vec![ModelEntry::new(
             "disabled-model",
@@ -44,9 +42,41 @@ fn composition_snapshot_is_deterministic_and_redacted() {
             ModelSource::Configured,
         )],
     );
+    let unsupported_provider = ModelProvider::new(
+        "unsupported-provider",
+        ProviderKind::Anthropic,
+        "Unsupported Provider",
+        true,
+        ModelSource::Configured,
+        vec![ModelEntry::new(
+            "unsupported-model",
+            None,
+            ModelSource::Configured,
+        )],
+    );
     let mut coordinator = runtime_coordinator(AppRuntimeOptions {
         loaded_models: conversation_runtime::models::LoadedModelCatalog {
-            catalog: ModelCatalog::new(vec![provider, disabled_provider]),
+            catalog: ModelCatalog::new(vec![provider, disabled_provider, unsupported_provider]),
+            provider_configs: vec![
+                conversation_runtime::models::LoadedProviderConfig::new(
+                    "z-provider",
+                    ProviderKind::OpenAiCompatible,
+                    Some(format!("https://{SECRET_SENTINEL}@example.test/v1")),
+                    Some(runtime_domain::provider::ProviderApiKey::new(
+                        SECRET_SENTINEL,
+                    )),
+                    Some(SECRET_SENTINEL.to_string()),
+                    true,
+                ),
+                conversation_runtime::models::LoadedProviderConfig::new(
+                    "unsupported-provider",
+                    ProviderKind::Anthropic,
+                    Some(format!("https://{SECRET_SENTINEL}.unsupported.test/v1")),
+                    None,
+                    None,
+                    true,
+                ),
+            ],
             selected_model: Some(ModelSelection::new("z-provider", "z-model")),
             ..conversation_runtime::models::LoadedModelCatalog::default()
         },
@@ -142,18 +172,21 @@ fn composition_snapshot_is_deterministic_and_redacted() {
 
     let snapshot: serde_json::Value =
         serde_json::from_str(&json).expect("snapshot JSON should decode");
-    assert_eq!(snapshot["schema_version"], 2);
+    assert_eq!(snapshot["schema_version"], 3);
     assert_eq!(snapshot["session_persistence"]["available"], true);
     assert_eq!(
         snapshot["selected_model"],
         serde_json::json!({"provider_id": "z-provider", "model_id": "z-model"})
     );
+    assert_eq!(names(&snapshot["providers"]), vec!["z-provider"]);
+    assert_eq!(snapshot["providers"][0]["kind"], "openai_compatible");
     assert_eq!(
-        names(&snapshot["providers"]),
-        vec!["a-provider", "z-provider"]
+        snapshot["providers"][0]["adapter_kind"],
+        "openai-compatible"
     );
+    assert_eq!(snapshot["providers"][0]["mounted"], true);
     assert_eq!(
-        snapshot["providers"][1]["model_ids"],
+        snapshot["providers"][0]["model_ids"],
         serde_json::json!(["a-model", "z-model"])
     );
 
@@ -217,6 +250,17 @@ fn ui_runtime_bridge_reacts_to_wake_binding_lifecycle() {
         selection: PromptAssemblySelectionState::Selected { order: None },
     }];
     let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        loaded_models: conversation_runtime::models::LoadedModelCatalog {
+            provider_configs: vec![conversation_runtime::models::LoadedProviderConfig::new(
+                "local",
+                ProviderKind::OpenAiCompatible,
+                Some("http://localhost:11434/v1".to_string()),
+                None,
+                None,
+                true,
+            )],
+            ..conversation_runtime::models::LoadedModelCatalog::default()
+        },
         session_store: Some(Arc::new(InMemorySessionStore::new())),
         initial_prompt_assembly: Some(prompt_assembly_manager),
         ..AppRuntimeOptions::default()
@@ -237,6 +281,10 @@ fn ui_runtime_bridge_reacts_to_wake_binding_lifecycle() {
     .expect("runtime wake should bind");
 
     assert_eq!(component_state(&coordinator, "ui_runtime_bridge"), "active");
+    assert_eq!(
+        names(&composition_snapshot(&coordinator)["providers"]),
+        vec!["local"]
+    );
     assert_eq!(
         composition_snapshot(&coordinator)["prompt_tools"],
         serde_json::json!([{
@@ -267,6 +315,7 @@ fn ui_runtime_bridge_reacts_to_wake_binding_lifecycle() {
     assert_eq!(snapshot["session_tools"], serde_json::json!([]));
     assert_eq!(snapshot["prompt_tools"], serde_json::json!([]));
     assert_eq!(snapshot["prompt_sources"], serde_json::json!([]));
+    assert_eq!(snapshot["providers"], serde_json::json!([]));
     assert_eq!(
         component_state(&coordinator, "native_agent_runtime"),
         "pending"
@@ -316,7 +365,12 @@ fn reset_replaces_session_component_generations_without_rebuilding_the_ui_bridge
         .expect("runtime reset should succeed");
     let after = composition_snapshot(&coordinator);
 
-    for capability in ["model_catalog", "prompt_assembly", "tool_catalog"] {
+    for capability in [
+        "llm_port",
+        "model_catalog",
+        "prompt_assembly",
+        "tool_catalog",
+    ] {
         assert_eq!(
             capability_generation(&after, capability),
             capability_generation(&before, capability) + 1,
@@ -338,6 +392,11 @@ fn reset_replaces_session_component_generations_without_rebuilding_the_ui_bridge
     assert_eq!(component_state(&coordinator, "ui_runtime_bridge"), "active");
     assert_eq!(after["workspace_tools"], workspace_tools_before);
     assert_eq!(after["session_tools"], session_tools_before);
+    assert!(component_required(&after, "native_agent_runtime").contains(&"llm_port".to_string()));
+    assert_eq!(
+        component_required(&after, "model_refresh"),
+        vec!["llm_port".to_string(), "model_catalog".to_string()]
+    );
 }
 
 fn names(value: &serde_json::Value) -> Vec<&str> {
@@ -364,6 +423,23 @@ fn component_state(coordinator: &AppRuntimeCoordinator, component_id: &str) -> S
         .and_then(|component| component["state"].as_str())
         .expect("component should have a lifecycle state")
         .to_string()
+}
+
+fn component_required(snapshot: &serde_json::Value, component_id: &str) -> Vec<String> {
+    snapshot["components"]
+        .as_array()
+        .expect("components should be an array")
+        .iter()
+        .find(|component| component["id"] == component_id)
+        .and_then(|component| component["required"].as_array())
+        .expect("component should expose required capabilities")
+        .iter()
+        .map(|key| {
+            key.as_str()
+                .expect("required capability should be a string")
+                .to_string()
+        })
+        .collect()
 }
 
 fn composition_snapshot(coordinator: &AppRuntimeCoordinator) -> serde_json::Value {

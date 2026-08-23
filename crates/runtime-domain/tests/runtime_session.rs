@@ -1,14 +1,11 @@
 use provider_protocol::{ContentBlock, ConversationItem, Role, ToolCall};
-use runtime_domain::{
-    provider::ProviderKind,
-    session::{
-        ConversationResponse, ConversationTurnRequest, RuntimeCapability, RuntimeCommand,
-        RuntimeEvent, RuntimeIdentity, RuntimePermissionOption, RuntimePermissionOptionKind,
-        RuntimePermissionRequest, RuntimeTarget, RuntimeTerminalExitStatus,
-        RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityContent,
-        RuntimeToolActivityLocation, RuntimeToolActivityRawValue, RuntimeToolActivityStatus,
-        RuntimeToolActivityUpdate, RuntimeToolKind,
-    },
+use runtime_domain::session::{
+    ConversationResponse, ConversationTurnRequest, RuntimeCapability, RuntimeCommand, RuntimeEvent,
+    RuntimeIdentity, RuntimePermissionOption, RuntimePermissionOptionKind,
+    RuntimePermissionRequest, RuntimeTarget, RuntimeTerminalExitStatus, RuntimeTerminalSnapshot,
+    RuntimeToolActivity, RuntimeToolActivityContent, RuntimeToolActivityLocation,
+    RuntimeToolActivityRawValue, RuntimeToolActivityStatus, RuntimeToolActivityUpdate,
+    RuntimeToolKind,
 };
 use std::time::Duration;
 
@@ -36,11 +33,7 @@ fn runtime_command_and_event_carry_target_identity() {
     let conversation_command =
         RuntimeCommand::submit_conversation_turn(ConversationTurnRequest::new(
             "openai",
-            ProviderKind::OpenAi,
             "gpt-4o-mini",
-            None,
-            None,
-            None,
             ConversationItem::text(Role::User, "hello"),
         ));
     let truncate_command = RuntimeCommand::truncate_conversation(1);

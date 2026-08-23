@@ -467,9 +467,7 @@ name = "conversation-runtime"
 version = "0.12.1-alpha.4"
 dependencies = [
  "libc",
- "openai-compat-provider",
  "provider-protocol",
- "reqwest",
  "runtime-domain",
  "serde",
  "serde_json",
@@ -3344,6 +3342,7 @@ dependencies = [
  "crossterm",
  "futures-util",
  "libc",
+ "openai-compat-provider",
  "provider-protocol",
  "ratatui",
  "runtime-domain",
@@ -3354,7 +3353,9 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
+ "tool-loop-runtime",
  "tool-runtime",
+ "url",
  "yaml_serde",
 ]
 

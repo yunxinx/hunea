@@ -33,6 +33,7 @@ use crate::runtime::{
         DynamicEnvironmentInjection, DynamicEnvironmentRequest, DynamicEnvironmentWorker,
         dynamic_environment_snapshot_for_turn,
     },
+    llm_port::LlmPort,
     prompt_assembly::PromptAssemblySessionSnapshot,
 };
 
@@ -63,6 +64,7 @@ pub struct NativeContextBudgetSnapshot {
 /// `NativeAgentRuntime` 封装当前 conversation worker 的完整 turn choreography。
 pub struct NativeAgentRuntime {
     worker: ConversationWorker,
+    llm_port: LlmPort,
     provider_conversation: ProviderConversation,
     dynamic_environment_worker: DynamicEnvironmentWorker,
     event_notifier: RuntimeEventNotifier,
@@ -88,10 +90,12 @@ impl NativeAgentRuntime {
         prompt_assembly_tool_definitions: Vec<ToolDefinition>,
         prompt_assembly: PromptAssemblySessionSnapshot,
         event_notifier: RuntimeEventNotifier,
+        llm_port: LlmPort,
     ) -> Result<Self, String> {
         let provider_conversation = fresh_provider_conversation(options, &prompt_assembly)?;
         Ok(Self {
             worker: ConversationWorker::new(event_notifier.clone()),
+            llm_port,
             provider_conversation,
             dynamic_environment_worker: DynamicEnvironmentWorker::new(
                 Arc::clone(&options.dynamic_environment_observer),
@@ -164,7 +168,7 @@ impl NativeAgentRuntime {
             items: self.provider_conversation.context_budget_probe_items(),
             prompt_prelude: self.provider_conversation.prompt_prelude().cloned(),
             upstream_context_tokens: self.provider_conversation.upstream_context_tokens(),
-            tool_definitions: conversation_runtime::context_budget_tool_definitions(
+            tool_definitions: crate::runtime::context_budget::context_budget_tool_definitions(
                 &self.session_workspace_tools,
             ),
         }
@@ -290,11 +294,7 @@ impl NativeAgentRuntime {
         } else {
             ConversationTurnRequest::new_user_content(
                 request.provider_id(),
-                request.provider_kind(),
                 request.model_id(),
-                request.base_url().map(str::to_string),
-                request.api_key().cloned(),
-                request.api_key_env().map(str::to_string),
                 transcript_user_message.provider_content_with_text(
                     attached_prompt_assembly.provider_visible_user_text.clone(),
                 ),
@@ -317,7 +317,25 @@ impl NativeAgentRuntime {
                 .map_err(AgentRuntimeError::CommandRejected)?;
             self.pending_turn = Some(pending_turn);
         } else {
-            self.start_pending_turn(pending_turn, DynamicEnvironmentInjection::default())?;
+            let failure_identity = (
+                pending_turn.agent_id,
+                pending_turn.turn_id,
+                pending_turn.target.clone(),
+            );
+            if let Err(error) =
+                self.start_pending_turn(pending_turn, DynamicEnvironmentInjection::default())
+            {
+                let (agent_id, turn_id, target) = failure_identity;
+                self.pending_events.push_back(AgentEvent {
+                    agent_id,
+                    turn_id,
+                    target,
+                    kind: AgentEventKind::TurnFailed {
+                        message: error.to_string(),
+                    },
+                });
+                self.event_notifier.notify();
+            }
         }
         Ok(AgentCommandReceipt::TurnStarted {
             turn_id,
@@ -412,11 +430,6 @@ impl NativeAgentRuntime {
         if let Some(observations) = dynamic_environment.next_observations {
             turn_options = turn_options.with_dynamic_environment_observations(observations);
         }
-        let prepared_request = self
-            .provider_conversation
-            .prepare_turn_with_options(&provider_request, turn_options)
-            .map_err(|error| AgentRuntimeError::CommandRejected(error.to_string()))?;
-
         for activity in manual_skill_activities {
             self.pending_events.push_back(AgentEvent {
                 agent_id,
@@ -425,6 +438,20 @@ impl NativeAgentRuntime {
                 kind: AgentEventKind::ToolActivityStarted { activity },
             });
         }
+        // provider 解析必须先于 conversation mutation；配置或 client 初始化失败时，turn
+        // 必须保持为从未准备或持久化过的状态。
+        let provider_lease = self
+            .llm_port
+            .resolve(
+                &ModelSelection::new(provider_request.provider_id(), provider_request.model_id()),
+                self.request_policy.timeout(),
+            )
+            .map_err(|error| AgentRuntimeError::CommandRejected(error.to_string()))?;
+        let prepared_request = self
+            .provider_conversation
+            .prepare_turn_with_options(&provider_request, turn_options)
+            .map_err(|error| AgentRuntimeError::CommandRejected(error.to_string()))?;
+
         self.active_turn = Some(ActiveNativeTurn {
             agent_id,
             turn_id,
@@ -432,6 +459,7 @@ impl NativeAgentRuntime {
         });
         self.worker.start(
             prepared_request,
+            provider_lease,
             self.session_workspace_tools.clone(),
             self.request_policy.clone(),
         );
@@ -464,6 +492,7 @@ impl NativeAgentRuntime {
         match self.start_pending_turn(pending, dynamic_environment) {
             Ok(()) => events.extend(self.pending_events.drain(..)),
             Err(error) => {
+                events.extend(self.pending_events.drain(..));
                 let (agent_id, turn_id, target) = failure_identity;
                 events.push(AgentEvent {
                     agent_id,

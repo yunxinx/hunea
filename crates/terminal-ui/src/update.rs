@@ -995,21 +995,16 @@ impl Model {
         selection: &ModelSelection,
         message: ComposerSourceMessage,
     ) -> Option<ConversationTurnRequest> {
-        let Some(provider) = self
+        let Some(_provider) = self
             .model_catalog
             .enabled_provider_by_id(&selection.provider_id)
         else {
             self.show_toast(ToastSeverity::Error, "Selected provider is not available");
             return None;
         };
-        let connection = provider.connection();
         Some(ConversationTurnRequest::new_user_source_message(
             selection.provider_id.clone(),
-            connection.kind,
             selection.model_id.clone(),
-            connection.base_url.clone(),
-            connection.api_key.clone(),
-            connection.api_key_env.clone(),
             message.into_transcript_user_message(),
         ))
     }
@@ -1023,14 +1018,7 @@ impl Model {
             return false;
         };
 
-        let connection = provider.connection();
-
-        if connection.kind.uses_openai_compatible_endpoint()
-            && connection
-                .base_url
-                .as_ref()
-                .is_none_or(|value| value.trim().is_empty())
-        {
+        if provider.kind.uses_openai_compatible_endpoint() && !provider.has_base_url {
             self.show_toast(ToastSeverity::Error, "Selected provider has no base_url");
             return false;
         }

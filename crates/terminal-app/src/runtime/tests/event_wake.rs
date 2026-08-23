@@ -10,7 +10,20 @@ use super::support::*;
 
 #[test]
 fn model_refresh_completion_notifies_the_coordinator_consumer() {
-    let mut coordinator = runtime_coordinator(AppRuntimeOptions::default());
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        loaded_models: conversation_runtime::models::LoadedModelCatalog {
+            provider_configs: vec![conversation_runtime::models::LoadedProviderConfig::new(
+                "local",
+                ProviderKind::OpenAiCompatible,
+                Some("http://127.0.0.1:9/v1".to_string()),
+                None,
+                None,
+                true,
+            )],
+            ..conversation_runtime::models::LoadedModelCatalog::default()
+        },
+        ..AppRuntimeOptions::default()
+    });
     let (wake_sender, wake_receiver) = mpsc::channel();
     let _wake_binding = coordinator
         .components
@@ -22,12 +35,7 @@ fn model_refresh_completion_notifies_the_coordinator_consumer() {
     RuntimePort::refresh_model_provider(
         &mut coordinator,
         ProviderSyncRequest {
-            provider_id: "anthropic".to_string(),
-            kind: ProviderKind::Anthropic,
-            display_name: "Anthropic".to_string(),
-            base_url: None,
-            api_key: None,
-            api_key_env: None,
+            provider_id: "local".to_string(),
         },
     )
     .expect("model refresh should start");
@@ -73,7 +81,7 @@ fn deferred_event_does_not_skip_ready_worker_payloads() {
                     "local",
                     ProviderKind::OpenAiCompatible,
                     "Local",
-                    Some("http://127.0.0.1:1234/v1".to_string()),
+                    true,
                     runtime_domain::model_catalog::ModelSource::Configured,
                     vec![runtime_domain::model_catalog::ModelEntry::new(
                         "qwen3",

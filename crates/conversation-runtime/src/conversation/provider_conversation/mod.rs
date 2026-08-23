@@ -1,4 +1,4 @@
-//! Provider-visible conversation assembly.
+//! Provider-visible conversation assembly 逻辑。
 
 use std::sync::Arc;
 
@@ -13,8 +13,6 @@ use runtime_domain::{
 use session_store::{
     ConfigSnapshot, ResolvedSessionState, SessionHeader, SessionId, SessionStore, SessionStoreError,
 };
-
-use crate::{ProviderApiKey, ProviderKind};
 
 mod history;
 mod persistence;
@@ -42,11 +40,7 @@ pub enum ProviderConversationError {
 /// `PreparedConversationRequest` 是运行时实际执行时使用的完整请求。
 pub struct PreparedConversationRequest {
     provider_id: String,
-    provider_kind: ProviderKind,
     model_id: String,
-    base_url: Option<String>,
-    api_key: Option<ProviderApiKey>,
-    api_key_env: Option<String>,
     items: Vec<ConversationItem>,
     session_prompt_cache_key: Option<String>,
     prompt_prelude: Option<PromptPreludeSnapshot>,
@@ -57,12 +51,8 @@ impl std::fmt::Debug for PreparedConversationRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PreparedConversationRequest")
             .field("provider_id", &self.provider_id)
-            .field("provider_kind", &self.provider_kind)
             .field("model_id", &self.model_id)
-            .field("base_url", &self.base_url)
-            .field("api_key", &self.api_key)
-            .field("api_key_env", &self.api_key_env)
-            .field("items", &self.items)
+            .field("item_count", &self.items.len())
             .field(
                 "has_session_prompt_cache_key",
                 &self.session_prompt_cache_key.is_some(),
@@ -84,11 +74,7 @@ impl PreparedConversationRequest {
     ) -> Self {
         Self {
             provider_id: turn.provider_id().to_string(),
-            provider_kind: turn.provider_kind(),
             model_id: turn.model_id().to_string(),
-            base_url: turn.base_url().map(str::to_string),
-            api_key: turn.api_key().cloned(),
-            api_key_env: turn.api_key_env().map(str::to_string),
             items,
             session_prompt_cache_key,
             prompt_prelude,
@@ -106,29 +92,9 @@ impl PreparedConversationRequest {
         &self.provider_id
     }
 
-    /// `provider_kind` 返回 provider 类型。
-    pub const fn provider_kind(&self) -> ProviderKind {
-        self.provider_kind
-    }
-
     /// `model_id` 返回模型标识。
     pub fn model_id(&self) -> &str {
         &self.model_id
-    }
-
-    /// `base_url` 返回 provider base_url。
-    pub fn base_url(&self) -> Option<&str> {
-        self.base_url.as_deref()
-    }
-
-    /// `api_key` 返回直接配置的 API key。
-    pub fn api_key(&self) -> Option<&ProviderApiKey> {
-        self.api_key.as_ref()
-    }
-
-    /// `api_key_env` 返回 API key 环境变量名。
-    pub fn api_key_env(&self) -> Option<&str> {
-        self.api_key_env.as_deref()
     }
 
     /// `items` 返回 provider-visible 完整对话项。

@@ -57,11 +57,7 @@ fn reset_discards_a_turn_waiting_for_dynamic_environment() {
     let mut coordinator = runtime_coordinator(AppRuntimeOptions::default());
     let request = ConversationTurnRequest::new(
         "openai",
-        ProviderKind::OpenAi,
         "gpt-4o-mini",
-        None,
-        None,
-        None,
         ConversationItem::text(Role::User, "stale turn"),
     );
     coordinator
@@ -149,7 +145,7 @@ fn token_estimate_creates_render_barrier_before_permission_request() {
 }
 
 #[test]
-fn conversation_failure_before_provider_request_rolls_back_pending_user() {
+fn unknown_provider_failure_rolls_back_pending_user() {
     let mut coordinator = runtime_coordinator(AppRuntimeOptions {
         runtime_request_policy: runtime_domain::request_policy::RuntimeRequestPolicy::new(
             0,
@@ -160,11 +156,7 @@ fn conversation_failure_before_provider_request_rolls_back_pending_user() {
     });
     let request = ConversationTurnRequest::new(
         "openai",
-        ProviderKind::OpenAi,
         "gpt-4o-mini",
-        None,
-        None,
-        None,
         ConversationItem::text(Role::User, "hello"),
     );
     let target = request.target();
@@ -202,15 +194,8 @@ fn conversation_failure_before_provider_request_rolls_back_pending_user() {
             .is_history_empty()
     );
 
-    let next_request = ConversationTurnRequest::new(
-        "local",
-        ProviderKind::OpenAiCompatible,
-        "qwen3",
-        Some("http://127.0.0.1:1234/v1".to_string()),
-        None,
-        None,
-        ConversationItem::text(Role::User, "next"),
-    );
+    let next_request =
+        ConversationTurnRequest::new("local", "qwen3", ConversationItem::text(Role::User, "next"));
     coordinator
         .components
         .agent_runtime
@@ -433,11 +418,7 @@ fn conversation_submit_dispatches_without_waiting_for_dynamic_environment_observ
     });
     let request = ConversationTurnRequest::new(
         "openai",
-        ProviderKind::OpenAi,
         "gpt-4o-mini",
-        None,
-        None,
-        None,
         ConversationItem::text(Role::User, "hello"),
     );
     let target = request.target();
@@ -485,7 +466,7 @@ fn conversation_submit_dispatches_without_waiting_for_dynamic_environment_observ
         "provider failure after dynamic environment observation",
     );
     assert!(
-        failure.contains("requires API key"),
+        failure.contains("unknown provider openai"),
         "conversation should continue through the normal provider path: {failure}"
     );
     cleanup(&root);
@@ -534,11 +515,7 @@ fn interrupting_pending_dynamic_environment_cancels_observation() {
     });
     let request = ConversationTurnRequest::new(
         "openai",
-        ProviderKind::OpenAi,
         "gpt-4o-mini",
-        None,
-        None,
-        None,
         ConversationItem::text(Role::User, "hello"),
     );
     let target = request.target();
@@ -599,11 +576,7 @@ fn manual_skill_mentions_emit_synthetic_skill_usage_events_before_worker_failure
     });
     let request = ConversationTurnRequest::new_user_source_message(
         "openai",
-        ProviderKind::OpenAi,
         "gpt-4o-mini",
-        None,
-        None,
-        None,
         runtime_domain::session::TranscriptUserMessage {
             content: "Please audit this diff with @code-review".to_string(),
             attachments: Vec::new(),
@@ -654,7 +627,7 @@ fn manual_skill_mentions_emit_synthetic_skill_usage_events_before_worker_failure
             )
         });
     assert!(
-        failure.contains("requires API key"),
+        failure.contains("unknown provider openai"),
         "worker should still fail through the normal runtime path: {failure}"
     );
     cleanup(&root);
@@ -690,11 +663,7 @@ fn reset_remount_discards_undelivered_agent_events_from_the_old_generation() {
     });
     let request = ConversationTurnRequest::new_user_source_message(
         "openai",
-        ProviderKind::OpenAi,
         "gpt-4o-mini",
-        None,
-        None,
-        None,
         runtime_domain::session::TranscriptUserMessage {
             content: "Use @reset-probe".to_string(),
             attachments: Vec::new(),

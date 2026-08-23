@@ -15,11 +15,7 @@ fn conversation_worker_persists_config_change_and_flushes_finished_turn() {
     let request = conversation
         .prepare_turn(&runtime_domain::session::ConversationTurnRequest::new(
             "local",
-            ProviderKind::OpenAiCompatible,
             "qwen3",
-            Some("http://127.0.0.1:1234/v1".to_string()),
-            None,
-            None,
             user.clone(),
         ))
         .expect("turn should prepare");
@@ -97,11 +93,7 @@ fn conversation_worker_persists_user_turn_when_request_fails_before_streaming() 
     let request = conversation
         .prepare_turn(&runtime_domain::session::ConversationTurnRequest::new(
             "openai",
-            ProviderKind::OpenAi,
             "gpt-5-mini",
-            None,
-            None,
-            None,
             user.clone(),
         ))
         .expect("turn should prepare");
@@ -113,6 +105,7 @@ fn conversation_worker_persists_user_turn_when_request_fails_before_streaming() 
         .expect("test runtime should build")
         .block_on(run_conversation_worker(
             request,
+            fake_provider_lease(),
             ToolExecutorRegistry::new(),
             RuntimeRequestPolicy::default(),
             CancellationToken::new(),
@@ -125,9 +118,14 @@ fn conversation_worker_persists_user_turn_when_request_fails_before_streaming() 
         matches!(
             event,
             ConversationWorkerEvent::Progress(ConversationEvent::Failed { message })
-                if message.contains("requires API key")
+                if message == "provider request failed"
         )
     }));
+    assert!(
+        events
+            .iter()
+            .all(|event| { !format!("{event:?}").contains("fixture provider failure") })
+    );
 
     let metas = run_store(store.list_sessions(
         &ProjectDir::from_work_dir(&work_dir),
@@ -164,11 +162,7 @@ fn flush_session_persistence_preserves_store_error_source() {
     let request = conversation
         .prepare_turn(&runtime_domain::session::ConversationTurnRequest::new(
             "local",
-            ProviderKind::OpenAiCompatible,
             "qwen3",
-            Some("http://127.0.0.1:1234/v1".to_string()),
-            None,
-            None,
             ConversationItem::text(Role::User, "hello"),
         ))
         .expect("turn should prepare");
@@ -216,11 +210,7 @@ fn session_persistence_actor_replies_to_pending_flush_when_error_stops_actor() {
     let request = conversation
         .prepare_turn(&runtime_domain::session::ConversationTurnRequest::new(
             "local",
-            ProviderKind::OpenAiCompatible,
             "qwen3",
-            Some("http://127.0.0.1:1234/v1".to_string()),
-            None,
-            None,
             ConversationItem::text(Role::User, "hello"),
         ))
         .expect("turn should prepare");
@@ -280,11 +270,7 @@ fn session_persistence_actor_flushes_finish_work_after_conversation_cancellation
     let request = conversation
         .prepare_turn(&runtime_domain::session::ConversationTurnRequest::new(
             "local",
-            ProviderKind::OpenAiCompatible,
             "qwen3",
-            Some("http://127.0.0.1:1234/v1".to_string()),
-            None,
-            None,
             user.clone(),
         ))
         .expect("turn should prepare");
@@ -353,11 +339,7 @@ fn persistence_helpers_store_rich_tool_replay_without_duplicate_tool_result() {
     let request = conversation
         .prepare_turn(&runtime_domain::session::ConversationTurnRequest::new(
             "local",
-            ProviderKind::OpenAiCompatible,
             "qwen3",
-            Some("http://127.0.0.1:1234/v1".to_string()),
-            None,
-            None,
             ConversationItem::text(Role::User, "edit file"),
         ))
         .expect("turn should prepare");
@@ -513,11 +495,7 @@ fn persist_turn_start_keeps_provider_message_in_items_and_transcript_projection_
         .prepare_turn_with_options(
             &runtime_domain::session::ConversationTurnRequest::new(
                 "local",
-                ProviderKind::OpenAiCompatible,
                 "qwen3",
-                Some("http://127.0.0.1:1234/v1".to_string()),
-                None,
-                None,
                 provider_user.clone(),
             ),
             PreparedTurnOptions::default()
@@ -607,11 +585,7 @@ fn persist_turn_start_replays_image_only_user_message_as_bound_message() {
         .prepare_turn(
             &runtime_domain::session::ConversationTurnRequest::new_user_source_message(
                 "local",
-                ProviderKind::OpenAiCompatible,
                 "gpt-4o",
-                Some("http://127.0.0.1:1234/v1".to_string()),
-                None,
-                None,
                 transcript_user.clone(),
             ),
         )
@@ -659,13 +633,7 @@ fn persist_context_item_replays_image_only_tool_result_with_visible_summary() {
     let user = ConversationItem::text(Role::User, "inspect image");
     let request = conversation
         .prepare_turn(&runtime_domain::session::ConversationTurnRequest::new(
-            "local",
-            ProviderKind::OpenAiCompatible,
-            "gpt-4o",
-            Some("http://127.0.0.1:1234/v1".to_string()),
-            None,
-            None,
-            user,
+            "local", "gpt-4o", user,
         ))
         .expect("turn should prepare");
     let tool_result = ConversationItem::tool_result(

@@ -1,7 +1,7 @@
 use std::{fs, path::Path};
 
 #[test]
-fn conversation_runtime_uses_provider_runtime_crates() {
+fn conversation_runtime_uses_provider_neutral_runtime_crates() {
     let workspace = workspace_root();
     let root_manifest = fs::read_to_string(workspace.join("Cargo.toml"))
         .expect("workspace manifest should be readable");
@@ -15,14 +15,18 @@ fn conversation_runtime_uses_provider_runtime_crates() {
             && root_manifest.contains("tool-loop-runtime"),
         "workspace should expose provider runtime crates"
     );
-    assert!(
-        conversation_manifest.contains("tool-loop-runtime.workspace = true"),
-        "conversation-runtime should delegate orchestration to tool-loop-runtime"
-    );
-    assert!(
-        conversation_manifest.contains("openai-compat-provider.workspace = true"),
-        "conversation-runtime should use the OpenAI-compatible adapter"
-    );
+    assert!(conversation_manifest.contains("tool-loop-runtime.workspace = true"));
+    assert!(!conversation_manifest.contains("openai-compat-provider.workspace = true"));
+    assert!(!conversation_manifest.contains("reqwest.workspace = true"));
+}
+
+#[test]
+fn terminal_app_is_the_concrete_provider_composition_root() {
+    let workspace = workspace_root();
+    let app_manifest = fs::read_to_string(workspace.join("crates/terminal-app/Cargo.toml"))
+        .expect("terminal-app manifest should be readable");
+    assert!(app_manifest.contains("provider-protocol.workspace = true"));
+    assert!(app_manifest.contains("openai-compat-provider.workspace = true"));
 }
 
 #[test]

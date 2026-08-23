@@ -374,14 +374,8 @@ impl Model {
     fn refresh_current_model_panel_provider(&mut self) -> Option<AppEffect> {
         let request = {
             let provider = self.active_model_panel_provider()?;
-            let connection = provider.connection();
             ProviderSyncRequest {
                 provider_id: provider.id.clone(),
-                kind: connection.kind,
-                display_name: provider.display_name.clone(),
-                base_url: connection.base_url.clone(),
-                api_key: connection.api_key.clone(),
-                api_key_env: connection.api_key_env.clone(),
             }
         };
         Some(AppEffect::RefreshModelProvider { request })
@@ -631,11 +625,11 @@ fn append_provider_details_lines(model: &Model, width: usize, lines: &mut Vec<Li
         lines,
         width,
         "• Endpoint          : ",
-        provider
-            .connection()
-            .base_url
-            .as_deref()
-            .unwrap_or("not configured"),
+        if provider.has_base_url {
+            "configured"
+        } else {
+            "not configured"
+        },
         tertiary_text_style(model.palette),
         secondary_text_style(model.palette),
     );

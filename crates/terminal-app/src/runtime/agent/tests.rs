@@ -5,10 +5,13 @@ use std::{
 };
 
 use conversation_runtime::RuntimeEventNotifier;
-use provider_protocol::{ConversationItem, Role};
+use provider_protocol::{
+    ConversationItem, FinishReason, ModelDescriptor, PromptCompletion, PromptRequest,
+    ProviderCapabilities, ProviderClient, ProviderError, ProviderFuture, Role, StreamEvent,
+    StreamEventSink,
+};
 use runtime_domain::{
     prompt_assembly::PromptSourceOrigin,
-    provider::ProviderKind,
     session::{
         ConversationResponse, ConversationTurnRequest, RuntimePermissionOption,
         RuntimePermissionOptionKind, RuntimePermissionRequest, RuntimeTarget, RuntimeToolActivity,
@@ -37,18 +40,124 @@ fn native_runtime(event_notifier: RuntimeEventNotifier) -> NativeAgentRuntime {
         Vec::new(),
         PromptAssemblySessionSnapshot::default(),
         event_notifier,
+        crate::runtime::llm_port::LlmPort::new(),
     )
     .expect("native Agent runtime should initialize")
+}
+
+struct NativeStreamProvider;
+
+impl ProviderClient for NativeStreamProvider {
+    fn stream_prompt<'a>(
+        &'a self,
+        _request: &'a PromptRequest,
+        sink: &'a mut (dyn StreamEventSink + Send),
+    ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
+        Box::pin(async move {
+            let completion = PromptCompletion::new(
+                vec![ConversationItem::text(
+                    Role::Assistant,
+                    "native stream complete",
+                )],
+                FinishReason::Stop,
+                None,
+            );
+            sink.emit(StreamEvent::TurnStarted);
+            sink.emit(StreamEvent::TextDelta("native stream ".to_string()));
+            sink.emit(StreamEvent::TextDelta("complete".to_string()));
+            sink.emit(StreamEvent::TurnCompleted(completion.clone()));
+            Ok(completion)
+        })
+    }
+
+    fn list_models<'a>(
+        &'a self,
+    ) -> ProviderFuture<'a, Result<Vec<ModelDescriptor>, ProviderError>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::chat_completions()
+    }
+}
+
+struct NativeStreamFactory;
+
+impl crate::runtime::llm_port::ProviderClientFactory for NativeStreamFactory {
+    fn create_client(
+        &self,
+        _idle_timeout: Duration,
+    ) -> Result<std::sync::Arc<dyn ProviderClient>, crate::runtime::llm_port::LlmPortError> {
+        Ok(std::sync::Arc::new(NativeStreamProvider))
+    }
+
+    fn provider_kind(&self) -> runtime_domain::provider::ProviderKind {
+        runtime_domain::provider::ProviderKind::OpenAiCompatible
+    }
+
+    fn prompt_cache_policy(&self) -> conversation_runtime::ProviderPromptCachePolicy {
+        conversation_runtime::ProviderPromptCachePolicy::Disabled
+    }
+
+    fn adapter_kind(&self) -> &'static str {
+        "native-stream-fixture"
+    }
+}
+
+struct NativeFailureProvider;
+
+impl ProviderClient for NativeFailureProvider {
+    fn stream_prompt<'a>(
+        &'a self,
+        _request: &'a PromptRequest,
+        _sink: &'a mut (dyn StreamEventSink + Send),
+    ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
+        Box::pin(async {
+            Err(ProviderError::Provider {
+                status: Some(400),
+                message: "https://private.invalid/private-instruction-sentinel".to_string(),
+            })
+        })
+    }
+
+    fn list_models<'a>(
+        &'a self,
+    ) -> ProviderFuture<'a, Result<Vec<ModelDescriptor>, ProviderError>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::chat_completions()
+    }
+}
+
+struct NativeFailureFactory;
+
+impl crate::runtime::llm_port::ProviderClientFactory for NativeFailureFactory {
+    fn create_client(
+        &self,
+        _idle_timeout: Duration,
+    ) -> Result<std::sync::Arc<dyn ProviderClient>, crate::runtime::llm_port::LlmPortError> {
+        Ok(std::sync::Arc::new(NativeFailureProvider))
+    }
+
+    fn provider_kind(&self) -> runtime_domain::provider::ProviderKind {
+        runtime_domain::provider::ProviderKind::OpenAiCompatible
+    }
+
+    fn prompt_cache_policy(&self) -> conversation_runtime::ProviderPromptCachePolicy {
+        conversation_runtime::ProviderPromptCachePolicy::Disabled
+    }
+
+    fn adapter_kind(&self) -> &'static str {
+        "native-failure-fixture"
+    }
 }
 
 fn failing_turn_request() -> AgentTurnRequest {
     AgentTurnRequest::from_conversation_request(ConversationTurnRequest::new(
         "openai",
-        ProviderKind::OpenAi,
         "gpt-4o-mini",
-        None,
-        None,
-        None,
         ConversationItem::text(Role::User, "hello"),
     ))
 }
@@ -56,11 +165,7 @@ fn failing_turn_request() -> AgentTurnRequest {
 fn replay_request() -> AgentTurnRequest {
     AgentTurnRequest::from_conversation_request(ConversationTurnRequest::new(
         "replay",
-        ProviderKind::OpenAiCompatible,
         "fixture-model",
-        None,
-        None,
-        None,
         ConversationItem::text(Role::User, "replay this turn"),
     ))
 }
@@ -224,11 +329,7 @@ fn request_debug_redacts_delivery_controls_and_native_credentials() {
     let request = AgentTurnRequest::from_conversation_request(
         ConversationTurnRequest::new_user_source_message(
             "provider",
-            ProviderKind::OpenAi,
             "model",
-            Some("https://credential.example/v1".to_string()),
-            Some(runtime_domain::provider::ProviderApiKey::new("secret-key")),
-            Some("SECRET_ENV".to_string()),
             TranscriptUserMessage {
                 content: "visible-sentinel".to_string(),
                 attachments: Vec::new(),
@@ -288,6 +389,127 @@ fn native_runtime_wakes_only_after_an_identified_event_is_available() {
         event.agent_id == AgentId::MAIN && event.turn_id == turn_id && event.target == target
     }));
     runtime_contract
+        .shutdown()
+        .expect("native runtime should shut down cleanly");
+}
+
+#[test]
+fn native_runtime_streams_through_the_llm_port_factory() {
+    let llm_port = crate::runtime::llm_port::LlmPort::new();
+    let _registration = llm_port
+        .register(
+            "native-stream-test",
+            "fixture",
+            std::sync::Arc::new(NativeStreamFactory),
+        )
+        .expect("fixture provider should register");
+    let mut runtime = NativeAgentRuntime::new(
+        &AppRuntimeOptions {
+            runtime_request_policy: runtime_domain::request_policy::RuntimeRequestPolicy::new(
+                0,
+                Vec::new(),
+                1,
+            ),
+            ..AppRuntimeOptions::default()
+        },
+        ToolExecutorRegistry::default(),
+        Vec::new(),
+        PromptAssemblySessionSnapshot::default(),
+        RuntimeEventNotifier::default(),
+        llm_port,
+    )
+    .expect("native Agent runtime should initialize");
+    let request = AgentTurnRequest::from_conversation_request(ConversationTurnRequest::new(
+        "fixture",
+        "fixture-model",
+        ConversationItem::text(Role::User, "hello"),
+    ));
+    assert_eq!(
+        request.target(),
+        RuntimeTarget::provider("fixture", "fixture-model")
+    );
+
+    runtime
+        .dispatch(AgentCommand::SubmitTurn {
+            agent_id: AgentId::MAIN,
+            turn_id: AgentTurnId::new(18),
+            request: Box::new(request),
+        })
+        .expect("native turn should start through LlmPort");
+    let events = collect_until_terminal(&mut runtime);
+
+    assert!(events.iter().any(|event| matches!(
+        &event.kind,
+        AgentEventKind::AssistantDelta { content } if content == "native stream " || content == "complete"
+    )));
+    assert!(events.iter().any(|event| matches!(
+        &event.kind,
+        AgentEventKind::TurnFinished { response, .. }
+            if response == &ConversationResponse::assistant_text("native stream complete")
+    )));
+    runtime
+        .shutdown()
+        .expect("native runtime should shut down cleanly");
+}
+
+#[test]
+fn provider_failure_is_redacted_before_runtime_event_projection() {
+    let sentinel = "https://private.invalid/private-instruction-sentinel";
+    let llm_port = crate::runtime::llm_port::LlmPort::new();
+    let _registration = llm_port
+        .register(
+            "native-failure-test",
+            "fixture",
+            std::sync::Arc::new(NativeFailureFactory),
+        )
+        .expect("fixture provider should register");
+    let mut runtime = NativeAgentRuntime::new(
+        &AppRuntimeOptions {
+            runtime_request_policy: runtime_domain::request_policy::RuntimeRequestPolicy::new(
+                0,
+                Vec::new(),
+                1,
+            ),
+            ..AppRuntimeOptions::default()
+        },
+        ToolExecutorRegistry::default(),
+        Vec::new(),
+        PromptAssemblySessionSnapshot::default(),
+        RuntimeEventNotifier::default(),
+        llm_port,
+    )
+    .expect("native Agent runtime should initialize");
+
+    runtime
+        .dispatch(AgentCommand::SubmitTurn {
+            agent_id: AgentId::MAIN,
+            turn_id: AgentTurnId::new(19),
+            request: Box::new(AgentTurnRequest::from_conversation_request(
+                ConversationTurnRequest::new(
+                    "fixture",
+                    "fixture-model",
+                    ConversationItem::text(Role::User, "hello"),
+                ),
+            )),
+        })
+        .expect("native turn should start through LlmPort");
+    let projected = collect_until_terminal(&mut runtime)
+        .into_iter()
+        .map(crate::runtime::event_mapping::runtime_event_from_agent_event)
+        .collect::<Vec<_>>();
+
+    assert!(projected.iter().any(|event| matches!(
+        event,
+        runtime_domain::session::RuntimeEvent::Failed { message, .. }
+            if message == "provider request failed"
+    )));
+    assert!(
+        projected
+            .iter()
+            .all(|event| !format!("{event:?}").contains(sentinel)),
+        "provider source details must not reach RuntimeEvent"
+    );
+    runtime
         .shutdown()
         .expect("native runtime should shut down cleanly");
 }

@@ -10,11 +10,14 @@ color-eyre.workspace = true
 app-config.workspace = true
 runtime-domain.workspace = true
 conversation-runtime.workspace = true
+tool-loop-runtime.workspace = true
 session-store.workspace = true
 tool-runtime.workspace = true
 terminal-ui.workspace = true
 crossterm.workspace = true
 futures-util.workspace = true
+provider-protocol.workspace = true
+openai-compat-provider.workspace = true
 ratatui.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
@@ -22,7 +25,7 @@ thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 yaml_serde.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 libc.workspace = true
-provider-protocol.workspace = true

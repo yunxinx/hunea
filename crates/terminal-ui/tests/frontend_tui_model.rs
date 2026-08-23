@@ -3,7 +3,7 @@ use ratatui::{buffer::Buffer, layout::Rect};
 use runtime_domain::model_catalog::{
     ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource,
 };
-use runtime_domain::provider::{ProviderApiKey, ProviderKind};
+use runtime_domain::provider::ProviderKind;
 use terminal_ui::{
     AppEffect, AppEvent, Model, ModelOptions, StartupBannerOptions,
     theme::{palette_from_background, terminal_default_palette},
@@ -55,7 +55,7 @@ fn configured_default_model_is_kept_when_provider_models_are_not_loaded() {
                 "local",
                 ProviderKind::OpenAiCompatible,
                 "Local",
-                Some("http://127.0.0.1:1234/v1".to_string()),
+                true,
                 ModelSource::NotLoaded,
                 Vec::new(),
             )]),
@@ -190,24 +190,21 @@ fn enter_with_selected_provider_model_returns_conversation_turn_effect() {
         panic!("expected conversation turn effect, got {effect:?}");
     };
     assert_eq!(request.provider_id(), "local");
-    assert_eq!(request.provider_kind(), ProviderKind::OpenAiCompatible);
     assert_eq!(request.model_id(), "qwen3");
-    assert_eq!(request.base_url(), Some("http://127.0.0.1:1234/v1"));
     assert!(request.is_user_message());
     assert_eq!(request.message_text(), "hello");
 }
 
 #[test]
-fn enter_with_provider_api_key_returns_conversation_turn_effect_with_direct_key() {
+fn enter_with_configured_remote_provider_returns_identity_only_turn_effect() {
     let provider = ModelProvider::new(
         "remote",
         ProviderKind::OpenAiCompatible,
         "Remote",
-        Some("https://api.example.com/v1".to_string()),
+        true,
         ModelSource::Configured,
         vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
-    )
-    .with_api_key(Some(ProviderApiKey::new("sk-test-direct")));
+    );
     let mut model = Model::new_with_options(
         StartupBannerOptions::default(),
         ModelOptions {
@@ -225,11 +222,7 @@ fn enter_with_provider_api_key_returns_conversation_turn_effect_with_direct_key(
     let Some(AppEffect::SendConversationTurn { request, .. }) = effect else {
         panic!("expected conversation turn effect, got {effect:?}");
     };
-    assert_eq!(
-        request.api_key().map(ProviderApiKey::as_str),
-        Some("sk-test-direct")
-    );
-    assert_eq!(request.api_key_env(), None);
+    assert_eq!(request.provider_id(), "remote");
 }
 
 #[test]
@@ -241,7 +234,7 @@ fn enter_with_openai_compatible_provider_without_base_url_keeps_draft_unsent() {
                 "local",
                 ProviderKind::OpenAiCompatible,
                 "Local",
-                None,
+                false,
                 ModelSource::Configured,
                 vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
             )]),

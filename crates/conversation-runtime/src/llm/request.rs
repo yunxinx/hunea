@@ -4,7 +4,7 @@ pub use runtime_domain::session::ProviderRequest;
 
 use crate::conversation::PreparedConversationRequest;
 use crate::llm::ProviderRequestError;
-use crate::llm::prompt_cache::apply_prompt_cache_options;
+use crate::llm::{ProviderClientLease, prompt_cache::apply_prompt_cache_options};
 
 pub(crate) fn prompt_request_from_provider_request(
     request: &ProviderRequest,
@@ -22,6 +22,7 @@ pub(crate) fn prompt_request_from_provider_request(
 }
 
 pub(crate) fn prompt_request_from_prepared_request(
+    lease: &ProviderClientLease,
     request: &PreparedConversationRequest,
 ) -> Result<PromptRequest, ProviderRequestError> {
     if request.items().is_empty() {
@@ -32,7 +33,7 @@ pub(crate) fn prompt_request_from_prepared_request(
 
     let mut prompt_request =
         PromptRequest::new(request.model_id().to_string(), request.items().to_vec());
-    apply_prompt_cache_options(&mut prompt_request.options, request);
+    apply_prompt_cache_options(lease, &mut prompt_request.options, request);
     Ok(prompt_request)
 }
 
@@ -40,12 +41,16 @@ pub(crate) fn prompt_request_from_prepared_request(
 mod tests {
     use std::{path::PathBuf, sync::Arc};
 
-    use provider_protocol::{ContentBlock, ConversationItem, PromptCacheRetention};
+    use provider_protocol::{
+        ContentBlock, ConversationItem, ModelDescriptor, PromptCacheRetention, PromptCompletion,
+        PromptRequest, ProviderCapabilities, ProviderClient, ProviderError, ProviderFuture,
+        StreamEventSink,
+    };
     use runtime_domain::session::ConversationTurnRequest;
     use session_store::{InMemorySessionStore, SessionHeader, SessionId};
 
     use super::ProviderRequest;
-    use crate::ProviderKind;
+    use crate::{ProviderClientLease, ProviderKind, ProviderPromptCachePolicy};
     use crate::{
         ProviderConversation,
         llm::request::{
@@ -57,11 +62,7 @@ mod tests {
     fn prompt_request_keeps_structured_user_blocks() {
         let request = ProviderRequest {
             provider_id: "local".to_string(),
-            provider_kind: ProviderKind::OpenAiCompatible,
             model_id: "qwen3".to_string(),
-            base_url: Some("http://127.0.0.1:1234/v1".to_string()),
-            api_key: None,
-            api_key_env: None,
             items: vec![ConversationItem::user(vec![
                 ContentBlock::Text("review ".to_string()),
                 ContentBlock::Image {
@@ -103,16 +104,16 @@ mod tests {
         let prepared = conversation
             .prepare_turn(&ConversationTurnRequest::new(
                 "openai",
-                ProviderKind::OpenAi,
                 "gpt-5-mini",
-                None,
-                None,
-                Some("OPENAI_API_KEY".to_string()),
                 ConversationItem::text(provider_protocol::Role::User, "hello"),
             ))
             .expect("turn should prepare");
 
-        let request = prompt_request_from_prepared_request(&prepared).expect("prompt should build");
+        let request = prompt_request_from_prepared_request(
+            &lease(ProviderPromptCachePolicy::SessionAffinity),
+            &prepared,
+        )
+        .expect("prompt should build");
 
         let expected_cache_key = header.session_id.to_string();
         assert_eq!(
@@ -131,16 +132,16 @@ mod tests {
         let prepared = conversation
             .prepare_turn(&ConversationTurnRequest::new(
                 "local",
-                ProviderKind::OpenAiCompatible,
                 "qwen3",
-                Some("http://127.0.0.1:1234/v1".to_string()),
-                None,
-                None,
                 ConversationItem::text(provider_protocol::Role::User, "hello"),
             ))
             .expect("turn should prepare");
 
-        let request = prompt_request_from_prepared_request(&prepared).expect("prompt should build");
+        let request = prompt_request_from_prepared_request(
+            &lease(ProviderPromptCachePolicy::Disabled),
+            &prepared,
+        )
+        .expect("prompt should build");
 
         assert_eq!(request.options.prompt_cache_key, None);
         assert_eq!(request.options.prompt_cache_retention, None);
@@ -157,16 +158,16 @@ mod tests {
         let prepared = conversation
             .prepare_turn(&ConversationTurnRequest::new(
                 "remote-compatible",
-                ProviderKind::OpenAiCompatible,
                 "fast-compatible-model",
-                Some("https://compatible.example.com/v1".to_string()),
-                None,
-                None,
                 ConversationItem::text(provider_protocol::Role::User, "hello"),
             ))
             .expect("turn should prepare");
 
-        let request = prompt_request_from_prepared_request(&prepared).expect("prompt should build");
+        let request = prompt_request_from_prepared_request(
+            &lease(ProviderPromptCachePolicy::SessionAffinityLong24h),
+            &prepared,
+        )
+        .expect("prompt should build");
 
         let expected_cache_key = header.session_id.to_string();
         assert_eq!(
@@ -190,16 +191,16 @@ mod tests {
         let prepared = conversation
             .prepare_turn(&ConversationTurnRequest::new(
                 "openai-compatible",
-                ProviderKind::OpenAiCompatible,
                 "gpt-5-mini",
-                Some("https://api.openai.com/v1".to_string()),
-                None,
-                Some("OPENAI_API_KEY".to_string()),
                 ConversationItem::text(provider_protocol::Role::User, "hello"),
             ))
             .expect("turn should prepare");
 
-        let request = prompt_request_from_prepared_request(&prepared).expect("prompt should build");
+        let request = prompt_request_from_prepared_request(
+            &lease(ProviderPromptCachePolicy::SessionAffinity),
+            &prepared,
+        )
+        .expect("prompt should build");
 
         let expected_cache_key = header.session_id.to_string();
         assert_eq!(
@@ -220,16 +221,16 @@ mod tests {
         let prepared = conversation
             .prepare_turn(&ConversationTurnRequest::new(
                 "responses",
-                ProviderKind::OpenAiResponses,
                 "fast-responses-model",
-                Some("https://responses.example.com/v1".to_string()),
-                None,
-                None,
                 ConversationItem::text(provider_protocol::Role::User, "hello"),
             ))
             .expect("turn should prepare");
 
-        let request = prompt_request_from_prepared_request(&prepared).expect("prompt should build");
+        let request = prompt_request_from_prepared_request(
+            &lease(ProviderPromptCachePolicy::SessionAffinityLong24h),
+            &prepared,
+        )
+        .expect("prompt should build");
 
         let expected_cache_key = header.session_id.to_string();
         assert_eq!(
@@ -255,16 +256,16 @@ mod tests {
         let prepared = conversation
             .prepare_turn(&ConversationTurnRequest::new(
                 "openai",
-                ProviderKind::OpenAi,
                 "gpt-5-mini",
-                None,
-                None,
-                Some("OPENAI_API_KEY".to_string()),
                 ConversationItem::text(provider_protocol::Role::User, "hello"),
             ))
             .expect("turn should prepare");
 
-        let request = prompt_request_from_prepared_request(&prepared).expect("prompt should build");
+        let request = prompt_request_from_prepared_request(
+            &lease(ProviderPromptCachePolicy::SessionAffinity),
+            &prepared,
+        )
+        .expect("prompt should build");
 
         assert_eq!(
             request.options.prompt_cache_key.as_deref(),
@@ -280,6 +281,37 @@ mod tests {
             initial_model: "gpt-5-mini".to_string(),
             git_head: Some("abc123".to_string()),
             cli_version: Some("test".to_string()),
+        }
+    }
+
+    fn lease(policy: ProviderPromptCachePolicy) -> ProviderClientLease {
+        ProviderClientLease::new(
+            "fixture",
+            ProviderKind::OpenAiCompatible,
+            Arc::new(FakeProvider),
+            policy,
+        )
+    }
+
+    struct FakeProvider;
+
+    impl ProviderClient for FakeProvider {
+        fn stream_prompt<'a>(
+            &'a self,
+            _request: &'a PromptRequest,
+            _sink: &'a mut (dyn StreamEventSink + Send),
+        ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
+            Box::pin(async { unreachable!("prompt construction test must not call provider") })
+        }
+
+        fn list_models<'a>(
+            &'a self,
+        ) -> ProviderFuture<'a, Result<Vec<ModelDescriptor>, ProviderError>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities::chat_completions()
         }
     }
 }

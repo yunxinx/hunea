@@ -5,9 +5,7 @@ use std::sync::{
 };
 use std::thread::{self, JoinHandle};
 
-use conversation_runtime::context_budget::{
-    ContextBudgetProbe, build_context_budget_snapshot_with_cancellation,
-};
+use super::context_budget::{ContextBudgetProbe, build_context_budget_snapshot_with_cancellation};
 use conversation_runtime::{
     ConversationItem, NotifyingSender, RuntimeEventNotifier, ToolDefinition,
 };
@@ -33,7 +31,6 @@ struct ActiveContextBudgetRequest {
     generation: u64,
 }
 
-#[derive(Debug)]
 pub(super) struct ContextBudgetSnapshotRequest {
     pub(super) request_id: SessionLoadRequestId,
     pub(super) provider_kind: ProviderKind,
@@ -45,7 +42,6 @@ pub(super) struct ContextBudgetSnapshotRequest {
     pub(super) upstream_context_tokens: Option<usize>,
 }
 
-#[derive(Debug)]
 struct ContextBudgetWorkerCommand {
     request_id: SessionLoadRequestId,
     generation: u64,
@@ -56,6 +52,45 @@ struct ContextBudgetWorkerCommand {
     tool_definitions: Vec<ToolDefinition>,
     context_limit: ContextTokenLimit,
     upstream_context_tokens: Option<usize>,
+}
+
+impl std::fmt::Debug for ContextBudgetSnapshotRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ContextBudgetSnapshotRequest")
+            .field("request_id", &self.request_id)
+            .field("provider_kind", &self.provider_kind)
+            .field("model_id", &self.model_id)
+            .field("item_count", &self.items.len())
+            .field("has_prompt_prelude", &self.prompt_prelude.is_some())
+            .field("tool_definition_count", &self.tool_definitions.len())
+            .field("context_limit", &self.context_limit)
+            .field(
+                "has_upstream_context_tokens",
+                &self.upstream_context_tokens.is_some(),
+            )
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for ContextBudgetWorkerCommand {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ContextBudgetWorkerCommand")
+            .field("request_id", &self.request_id)
+            .field("generation", &self.generation)
+            .field("provider_kind", &self.provider_kind)
+            .field("model_id", &self.model_id)
+            .field("item_count", &self.items.len())
+            .field("has_prompt_prelude", &self.prompt_prelude.is_some())
+            .field("tool_definition_count", &self.tool_definitions.len())
+            .field("context_limit", &self.context_limit)
+            .field(
+                "has_upstream_context_tokens",
+                &self.upstream_context_tokens.is_some(),
+            )
+            .finish()
+    }
 }
 
 enum WorkerControl {
@@ -423,13 +458,13 @@ fn handle_context_budget_command(
 }
 
 fn context_budget_load_error_payload(
-    error: conversation_runtime::ContextBudgetError,
+    error: super::context_budget::ContextBudgetError,
 ) -> ContextBudgetLoadErrorPayload {
     match error {
-        conversation_runtime::ContextBudgetError::UnsupportedProvider { provider_kind } => {
+        super::context_budget::ContextBudgetError::UnsupportedProvider { provider_kind } => {
             ContextBudgetLoadErrorPayload::UnsupportedProvider { provider_kind }
         }
-        conversation_runtime::ContextBudgetError::Projection { failure, .. } => {
+        super::context_budget::ContextBudgetError::Projection { failure, .. } => {
             ContextBudgetLoadErrorPayload::ProjectionFailed {
                 kind: failure.kind,
                 status: failure.status,
@@ -572,6 +607,63 @@ mod tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("context budget result should wake its consumer");
         assert_eq!(worker.drain_events().len(), 1);
+    }
+
+    #[test]
+    fn request_and_command_debug_do_not_expose_provider_visible_payloads() {
+        let delivery_sentinel = "private-worker-delivery-sentinel";
+        let instruction_sentinel = "private-worker-instruction-sentinel";
+        let tool_sentinel = "private-worker-tool-schema-sentinel";
+        let request = ContextBudgetSnapshotRequest {
+            request_id: SessionLoadRequestId::new(13),
+            provider_kind: ProviderKind::OpenAiCompatible,
+            model_id: "fixture-model".to_string(),
+            items: Arc::from([ConversationItem::text(
+                provider_protocol::Role::User,
+                delivery_sentinel,
+            )]),
+            prompt_prelude: Some(PromptPreludeSnapshot {
+                sections: vec![runtime_domain::prompt_assembly::PromptPreludeSection {
+                    reference_id: "private-reference".to_string(),
+                    kind: runtime_domain::prompt_assembly::PromptSourceKind::ExtraPrompt,
+                    title: "private title".to_string(),
+                    origin: Some(runtime_domain::prompt_assembly::PromptSourceOrigin::Project),
+                    body: instruction_sentinel.to_string(),
+                }],
+            }),
+            tool_definitions: vec![ToolDefinition::new(
+                "private_tool",
+                "private tool",
+                serde_json::json!({"description": tool_sentinel}),
+            )],
+            context_limit: ContextTokenLimit::try_from(1_000)
+                .expect("fixture limit should be valid"),
+            upstream_context_tokens: None,
+        };
+        let request_debug = format!("{request:?}");
+        let command = ContextBudgetWorkerCommand {
+            request_id: request.request_id,
+            generation: 7,
+            provider_kind: request.provider_kind,
+            model_id: request.model_id,
+            items: request.items,
+            prompt_prelude: request.prompt_prelude,
+            tool_definitions: request.tool_definitions,
+            context_limit: request.context_limit,
+            upstream_context_tokens: request.upstream_context_tokens,
+        };
+        let command_debug = format!("{command:?}");
+
+        for sentinel in [delivery_sentinel, instruction_sentinel, tool_sentinel] {
+            assert!(
+                !request_debug.contains(sentinel),
+                "request debug leaked {sentinel}"
+            );
+            assert!(
+                !command_debug.contains(sentinel),
+                "command debug leaked {sentinel}"
+            );
+        }
     }
 
     #[test]

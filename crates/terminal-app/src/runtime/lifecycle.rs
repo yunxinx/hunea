@@ -331,7 +331,6 @@ impl ComponentGraph {
         self.reconcile();
     }
 
-    #[cfg(test)]
     pub(super) fn remove_capability(&mut self, key: &CapabilityKey) {
         self.capabilities.remove(key);
         self.reconcile();
@@ -341,30 +340,14 @@ impl ComponentGraph {
     ///
     /// 依赖方必须先离开 `Active`，旧 owner 的 effect 才能被释放；随后 resolver 才能
     /// 为新 generation 创建唯一的 active owner。
-    #[cfg(test)]
     pub(super) fn replace_capability(&mut self, key: &CapabilityKey) {
-        if !self.capabilities.contains(key) {
-            self.add_capability(key.clone());
-            return;
-        }
-
+        self.capabilities.remove(key);
         self.capability_generations
             .entry(key.clone())
             .and_modify(|generation| *generation = generation.saturating_add(1))
             .or_insert(1);
-
-        let ids = self
-            .components
-            .iter()
-            .filter(|(_, record)| {
-                record.state == ComponentState::Active && record.definition.required.contains(key)
-            })
-            .map(|(id, _)| id.clone())
-            .collect::<Vec<_>>();
-        for id in ids {
-            self.transition(&id, ComponentState::Deactivating);
-            self.transition(&id, ComponentState::Disposed);
-        }
+        self.reconcile();
+        self.capabilities.insert(key.clone());
         self.reconcile();
     }
 
@@ -398,6 +381,10 @@ impl ComponentGraph {
                 generation: self.capability_generations.get(key).copied().unwrap_or(0),
             })
             .collect()
+    }
+
+    pub(super) fn has_capability(&self, key: &CapabilityKey) -> bool {
+        self.capabilities.contains(key)
     }
 
     pub(super) fn components(&self) -> Vec<ComponentSnapshot> {
@@ -641,6 +628,11 @@ mod tests {
                 ComponentTransition {
                     component_id: "agent".to_string(),
                     from: ComponentState::Disposed,
+                    to: ComponentState::Pending,
+                },
+                ComponentTransition {
+                    component_id: "agent".to_string(),
+                    from: ComponentState::Pending,
                     to: ComponentState::Activating,
                 },
                 ComponentTransition {

@@ -74,7 +74,8 @@ fn resume_session_emits_transcript_and_restored_model() {
         ..AppRuntimeOptions::default()
     });
     let previous_context_cancellation = tokio_util::sync::CancellationToken::new();
-    coordinator.conversation_worker.cancellation = Some(previous_context_cancellation.clone());
+    coordinator.components.conversation_worker.cancellation =
+        Some(previous_context_cancellation.clone());
 
     coordinator
         .handle_runtime_command(RuntimeCommand::ResumeSession {
@@ -102,6 +103,7 @@ fn resume_session_emits_transcript_and_restored_model() {
     );
     assert_eq!(
         coordinator
+            .components
             .provider_conversation
             .history()
             .map(ConversationItem::text_content)
@@ -109,7 +111,7 @@ fn resume_session_emits_transcript_and_restored_model() {
         vec!["hello resume", "resume answer"]
     );
     assert_eq!(
-        coordinator.provider_conversation.system_prompt(),
+        coordinator.components.provider_conversation.system_prompt(),
         Some("historical prompt")
     );
     cleanup(&work_dir);
@@ -133,7 +135,8 @@ fn failed_resume_preserves_the_current_approval_context() {
         ..AppRuntimeOptions::default()
     });
     let current_context_cancellation = tokio_util::sync::CancellationToken::new();
-    coordinator.conversation_worker.cancellation = Some(current_context_cancellation.clone());
+    coordinator.components.conversation_worker.cancellation =
+        Some(current_context_cancellation.clone());
 
     coordinator
         .handle_runtime_command(RuntimeCommand::ResumeSession {
@@ -368,7 +371,7 @@ fn reset_after_resume_restores_fresh_prompt_prelude_for_next_new_session() {
     wait_for_session_resumed(&mut coordinator);
 
     assert_eq!(
-        coordinator.provider_conversation.system_prompt(),
+        coordinator.components.provider_conversation.system_prompt(),
         Some("historical prompt")
     );
 
@@ -377,6 +380,7 @@ fn reset_after_resume_restores_fresh_prompt_prelude_for_next_new_session() {
         .expect("reset should succeed");
 
     let request = coordinator
+        .components
         .provider_conversation
         .prepare_turn(&ConversationTurnRequest::new(
             "local",
@@ -596,7 +600,10 @@ fn load_session_preview_emits_transcript_without_resuming_runtime_session() {
         vec!["preview user", "preview answer"]
     );
     assert!(
-        coordinator.provider_conversation.is_history_empty(),
+        coordinator
+            .components
+            .provider_conversation
+            .is_history_empty(),
         "loading preview should not replace the active provider conversation"
     );
     cleanup(&work_dir);

@@ -169,6 +169,7 @@ fn context_budget_snapshot_uses_upstream_context_tokens_for_total() {
         ..AppRuntimeOptions::default()
     });
     coordinator
+        .components
         .provider_conversation
         .set_upstream_context_tokens(Some(48_052));
     let request_id = request_id(402);
@@ -370,6 +371,7 @@ fn context_budget_projection_failure_keeps_structured_error_kind() {
         ..AppRuntimeOptions::default()
     });
     coordinator
+        .components
         .provider_conversation
         .append_items(vec![ConversationItem::tool_result(
             "missing-call",
@@ -435,6 +437,7 @@ fn cancel_context_budget_snapshot_stops_background_tracking_and_drops_stale_even
         ..AppRuntimeOptions::default()
     });
     coordinator
+        .components
         .provider_conversation
         .append_items(vec![ConversationItem::text(
             Role::User,
@@ -484,6 +487,7 @@ fn latest_context_budget_request_supersedes_stale_work() {
         ..AppRuntimeOptions::default()
     });
     coordinator
+        .components
         .provider_conversation
         .append_items(vec![ConversationItem::text(
             Role::User,

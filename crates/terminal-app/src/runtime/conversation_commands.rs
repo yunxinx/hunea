@@ -29,19 +29,21 @@ impl AppRuntimeCoordinator {
         &mut self,
         retained_user_turns: usize,
     ) -> Result<RuntimeCommandReceipt, String> {
-        if self.conversation_worker.is_running() {
+        if self.components.conversation_worker.is_running() {
             return Err(
                 "Cannot truncate provider conversation while a request is running".to_string(),
             );
         }
         self.ensure_session_mutation_available("truncate conversation")?;
         if let Some((session_id, leaf_id)) = self
+            .components
             .provider_conversation
             .truncate_after_user_turns(retained_user_turns)
             .map_err(|error| error.to_string())?
         {
             let store = self.session_store()?;
-            self.session_store_worker
+            self.components
+                .session_store_worker
                 .set_leaf(store, session_id, leaf_id)?;
         }
         Ok(RuntimeCommandReceipt::Accepted)
@@ -53,8 +55,9 @@ impl AppRuntimeCoordinator {
         request_id: &str,
         option_id: Option<String>,
     ) -> Result<(), String> {
-        ensure_conversation_target(self.conversation_worker.current_target(), target)?;
-        self.conversation_worker
+        ensure_conversation_target(self.components.conversation_worker.current_target(), target)?;
+        self.components
+            .conversation_worker
             .respond_permission(request_id, option_id)
     }
 
@@ -68,7 +71,7 @@ impl AppRuntimeCoordinator {
             Some(RuntimeTarget::Provider(_)) => {
                 self.respond_conversation_permission(target, request_id, option_id)
             }
-            None if self.conversation_worker.is_running() => {
+            None if self.components.conversation_worker.is_running() => {
                 self.respond_conversation_permission(None, request_id, option_id)
             }
             None => Err("Conversation worker is not running".to_string()),
@@ -87,7 +90,7 @@ impl AppRuntimeCoordinator {
                 target.display_label()
             ));
         }
-        if self.conversation_worker.is_running() {
+        if self.components.conversation_worker.is_running() {
             return Err("Conversation request is already running".to_string());
         }
         if self.pending_conversation_turn.is_some() {
@@ -134,7 +137,8 @@ impl AppRuntimeCoordinator {
             manual_skill_activities,
         };
         if let Some(dynamic_environment_request) = self.dynamic_environment_request()? {
-            self.dynamic_environment_worker
+            self.components
+                .dynamic_environment_worker
                 .load(dynamic_environment_request)?;
             let activity_label = pending_turn.activity_label.clone();
             self.pending_conversation_turn = Some(pending_turn);
@@ -145,7 +149,11 @@ impl AppRuntimeCoordinator {
     }
 
     pub(super) fn drain_dynamic_environment_events_into(&mut self, events: &mut Vec<RuntimeEvent>) {
-        let Some(result) = self.dynamic_environment_worker.try_recv_injection() else {
+        let Some(result) = self
+            .components
+            .dynamic_environment_worker
+            .try_recv_injection()
+        else {
             return;
         };
         let Some(pending_turn) = self.pending_conversation_turn.take() else {
@@ -194,14 +202,15 @@ impl AppRuntimeCoordinator {
             turn_options = turn_options.with_dynamic_environment_observations(observations);
         }
         let prepared_request = self
+            .components
             .provider_conversation
             .prepare_turn_with_options(&provider_request, turn_options)
             .map_err(|error| error.to_string())?;
         self.pending_runtime_events
             .extend(self.manual_skill_runtime_events(target.clone(), &manual_skill_activities));
-        self.conversation_worker.start(
+        self.components.conversation_worker.start(
             prepared_request,
-            self.session_workspace_tools.clone(),
+            self.components.session_workspace_tools.clone(),
             self.options.runtime_request_policy.clone(),
         );
         Ok(RuntimeCommandReceipt::ConversationStarted { activity_label })
@@ -217,7 +226,7 @@ impl AppRuntimeCoordinator {
             return Ok(None);
         };
         let session_config = self.resolve_dynamic_environment_session_config(work_dir.as_path())?;
-        let is_first_turn = self.provider_conversation.is_history_empty();
+        let is_first_turn = self.components.provider_conversation.is_history_empty();
         let Some(snapshot_kind) =
             dynamic_environment_snapshot_for_turn(&session_config, is_first_turn)
         else {
@@ -234,6 +243,7 @@ impl AppRuntimeCoordinator {
             session_config,
             is_first_turn,
             previous_observations: self
+                .components
                 .provider_conversation
                 .dynamic_environment_observations()
                 .to_vec(),
@@ -254,7 +264,7 @@ impl AppRuntimeCoordinator {
         };
         let dynamic_environment_session_config =
             self.resolve_dynamic_environment_session_config(work_dir.as_path())?;
-        let is_first_turn = self.provider_conversation.is_history_empty();
+        let is_first_turn = self.components.provider_conversation.is_history_empty();
         let cancellation = tokio_util::sync::CancellationToken::new();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -267,6 +277,7 @@ impl AppRuntimeCoordinator {
                 session_config: dynamic_environment_session_config,
                 is_first_turn,
                 previous_observations: self
+                    .components
                     .provider_conversation
                     .dynamic_environment_observations()
                     .to_vec(),
@@ -280,6 +291,7 @@ impl AppRuntimeCoordinator {
         _work_dir: &std::path::Path,
     ) -> Result<DynamicEnvironmentSessionConfig, String> {
         if let Some(config) = self
+            .components
             .provider_conversation
             .dynamic_environment_session_config()
             .cloned()
@@ -292,7 +304,8 @@ impl AppRuntimeCoordinator {
             .initial_dynamic_environment_session_config
             .clone()
             .unwrap_or_default();
-        self.provider_conversation
+        self.components
+            .provider_conversation
             .set_dynamic_environment_session_config(Some(config.clone()));
         Ok(config)
     }
@@ -309,7 +322,7 @@ impl AppRuntimeCoordinator {
                 if let Some(receipt) = self.interrupt_pending_conversation_turn(None)? {
                     return Ok(receipt);
                 }
-                if self.conversation_worker.is_running() {
+                if self.components.conversation_worker.is_running() {
                     return self.interrupt_conversation_worker(None);
                 }
                 Ok(RuntimeCommandReceipt::Accepted)
@@ -324,9 +337,13 @@ impl AppRuntimeCoordinator {
         if let Some(receipt) = self.interrupt_pending_conversation_turn(command_target)? {
             return Ok(receipt);
         }
-        let active_target = self.conversation_worker.current_target().cloned();
+        let active_target = self
+            .components
+            .conversation_worker
+            .current_target()
+            .cloned();
         ensure_conversation_target(active_target.as_ref(), command_target)?;
-        if self.conversation_worker.interrupt() {
+        if self.components.conversation_worker.interrupt() {
             Ok(RuntimeCommandReceipt::Interrupted {
                 target: active_target,
             })
@@ -347,7 +364,7 @@ impl AppRuntimeCoordinator {
             return Ok(None);
         };
         ensure_conversation_target(Some(&active_target), command_target)?;
-        self.dynamic_environment_worker.cancel_pending();
+        self.components.dynamic_environment_worker.cancel_pending();
         self.pending_conversation_turn = None;
         Ok(Some(RuntimeCommandReceipt::Interrupted {
             target: Some(active_target),

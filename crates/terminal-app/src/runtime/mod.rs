@@ -1,3 +1,4 @@
+mod components;
 mod context_budget_command;
 mod context_budget_worker;
 mod conversation_commands;
@@ -16,10 +17,7 @@ use std::{
     sync::Arc,
 };
 
-use conversation_runtime::{
-    ConversationWorker, ModelRefreshWorker, ProviderConversation, RuntimeEventNotifier,
-    models as provider_models,
-};
+use conversation_runtime::{ProviderConversation, models as provider_models};
 use runtime_domain::{
     context_budget::ContextWindowUsage,
     dynamic_environment::DynamicEnvironmentSessionConfig,
@@ -41,16 +39,14 @@ use terminal_ui::{RuntimeWake, UiRuntimePort};
 use tool_runtime::{ToolDefinition, ToolExecutorRegistry, builtin::ManagedRipgrepConfig};
 
 use self::{
-    context_budget_worker::ContextBudgetWorker,
-    dynamic_environment_worker::DynamicEnvironmentWorker,
+    components::RuntimeComponents,
     event_mapping::{
         runtime_event_from_conversation_event, should_defer_runtime_event_for_render_barrier,
     },
-    session_worker::{SessionStoreWorker, SessionStoreWorkerEvent},
+    session_worker::SessionStoreWorkerEvent,
     workspace_tools::conversation_workspace_tools,
 };
 use crate::prompt_assembly::PromptAssemblyEditSession;
-use lifecycle::{EffectId, EffectScope};
 
 /// `tool_definitions_for_managed_ripgrep` 在 coordinator 创建前收集内置工具定义，
 /// 供初始 prompt assembly 加载使用。
@@ -122,20 +118,7 @@ pub(crate) struct AppRuntimeOptions {
 /// `AppRuntimeCoordinator` 负责把 TUI runtime command 连接到对话运行时。
 pub(crate) struct AppRuntimeCoordinator {
     options: AppRuntimeOptions,
-    conversation_worker: ConversationWorker,
-    provider_conversation: ProviderConversation,
-    model_refresh: ModelRefreshWorker,
-    workspace_tools: ToolExecutorRegistry,
-    /// 本 session 生效的工具集（按 enablement 过滤后的视图）；
-    /// `workspace_tools` 保持全量，供 `/prompt` inventory 展示所有工具。
-    session_workspace_tools: ToolExecutorRegistry,
-    prompt_assembly_tool_definitions: Vec<ToolDefinition>,
-    session_store_worker: SessionStoreWorker,
-    context_budget_worker: ContextBudgetWorker,
-    dynamic_environment_worker: DynamicEnvironmentWorker,
-    runtime_event_notifier: RuntimeEventNotifier,
-    effect_scope: EffectScope,
-    runtime_wake_effect: Option<EffectId>,
+    components: RuntimeComponents,
     pending_conversation_turn: Option<PendingConversationTurn>,
     pending_runtime_events: Vec<RuntimeEvent>,
     manual_skill_activity_sequence: usize,
@@ -170,32 +153,10 @@ impl Default for AppRuntimeOptions {
 
 impl AppRuntimeCoordinator {
     pub(crate) fn new(options: AppRuntimeOptions) -> Result<Self, String> {
-        let workspace_tools =
-            conversation_workspace_tools(&options.managed_ripgrep, &options.hunea_config_dir);
-        let prompt_assembly_tool_definitions = tool_definitions_from_registry(&workspace_tools);
-        let session_workspace_tools =
-            session_tools_for_manager(&workspace_tools, options.prompt_assembly_manager.as_ref());
-        let provider_conversation = fresh_provider_conversation(&options)?;
-        let dynamic_environment_observer = Arc::clone(&options.dynamic_environment_observer);
-        let runtime_event_notifier = RuntimeEventNotifier::default();
+        let components = RuntimeComponents::new(&options)?;
         let coordinator = Self {
             options,
-            conversation_worker: ConversationWorker::new(runtime_event_notifier.clone()),
-            provider_conversation,
-            model_refresh: ModelRefreshWorker::new(runtime_event_notifier.clone()),
-            workspace_tools,
-            session_workspace_tools,
-            prompt_assembly_tool_definitions,
-            session_store_worker: SessionStoreWorker::new(runtime_event_notifier.clone()),
-            context_budget_worker: ContextBudgetWorker::new(runtime_event_notifier.clone())
-                .map_err(|error| error.to_string())?,
-            dynamic_environment_worker: DynamicEnvironmentWorker::new(
-                dynamic_environment_observer,
-                runtime_event_notifier.clone(),
-            ),
-            runtime_event_notifier,
-            effect_scope: EffectScope::default(),
-            runtime_wake_effect: None,
+            components,
             pending_conversation_turn: None,
             pending_runtime_events: Vec::new(),
             manual_skill_activity_sequence: 0,
@@ -270,21 +231,8 @@ impl AppRuntimeCoordinator {
                 limit,
             } => self.record_message_history(entry_id, text, limit),
             RuntimeCommand::Reset => {
-                self.dynamic_environment_worker.cancel_pending();
+                self.components.reset_after_clear(&self.options)?;
                 self.pending_conversation_turn = None;
-                self.conversation_worker.reset_after_clear()?;
-                self.provider_conversation = fresh_provider_conversation(&self.options)?;
-                self.model_refresh.reset_after_clear()?;
-                self.context_budget_worker.cancel_pending();
-                self.workspace_tools = conversation_workspace_tools(
-                    &self.options.managed_ripgrep,
-                    &self.options.hunea_config_dir,
-                );
-                self.refresh_prompt_assembly_tool_definitions();
-                self.session_workspace_tools = session_tools_for_manager(
-                    &self.workspace_tools,
-                    self.options.prompt_assembly_manager.as_ref(),
-                );
                 self.pending_runtime_events.clear();
                 self.manual_skill_activity_sequence = 0;
                 self.prompt_assembly_edit_session = None;
@@ -310,7 +258,7 @@ impl AppRuntimeCoordinator {
     }
 
     fn ensure_session_mutation_available(&self, action: &str) -> Result<(), String> {
-        if self.session_store_worker.has_pending_mutation() {
+        if self.components.session_store_worker.has_pending_mutation() {
             return Err(format!(
                 "Cannot {action} while a session mutation is running"
             ));
@@ -319,60 +267,31 @@ impl AppRuntimeCoordinator {
     }
 
     fn prompt_assembly_tool_definitions(&self) -> &[ToolDefinition] {
-        &self.prompt_assembly_tool_definitions
-    }
-
-    fn refresh_prompt_assembly_tool_definitions(&mut self) {
-        self.prompt_assembly_tool_definitions =
-            tool_definitions_from_registry(&self.workspace_tools);
+        &self.components.prompt_assembly_tool_definitions
     }
 
     fn defer_runtime_event_until_next_render(&mut self, event: RuntimeEvent) {
         self.pending_runtime_events.push(event);
-        self.runtime_event_notifier.notify();
+        self.components.runtime_event_notifier.notify();
     }
 
     pub(crate) fn shutdown(&mut self) -> Result<(), String> {
-        let mut failures = Vec::new();
-        self.runtime_wake_effect = None;
-        if let Some(error) = self.effect_scope.dispose().error_message() {
-            failures.push(error);
-        }
-        if let Err(error) = self.conversation_worker.reset_for_context_change() {
-            failures.push(error);
-        }
         self.pending_conversation_turn = None;
         self.pending_runtime_events.clear();
-        if let Err(error) = self.context_budget_worker.shutdown() {
-            failures.push(error);
-        }
-        if let Err(error) = self.model_refresh.shutdown() {
-            failures.push(error);
-        }
-        self.dynamic_environment_worker.shutdown();
-        if self.session_store_worker.is_running()
-            && let Some(store) = self.options.session_store.as_ref()
-            && let Err(error) = self.session_store_worker.flush_all(store.clone())
-        {
-            failures.push(error);
-        }
-        if let Err(error) = self.session_store_worker.shutdown() {
-            failures.push(error);
-        }
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(failures.join("; "))
-        }
+        self.components
+            .shutdown(self.options.session_store.as_ref())
     }
 
     #[cfg(test)]
     pub(crate) fn has_pending_work_for_test(&self) -> bool {
-        self.conversation_worker.is_running()
-            || self.model_refresh.is_running()
-            || self.session_store_worker.has_pending_work()
-            || self.context_budget_worker.has_pending_work()
-            || self.dynamic_environment_worker.has_pending_work()
+        self.components.conversation_worker.is_running()
+            || self.components.model_refresh.is_running()
+            || self.components.session_store_worker.has_pending_work()
+            || self.components.context_budget_worker.has_pending_work()
+            || self
+                .components
+                .dynamic_environment_worker
+                .has_pending_work()
             || self.pending_conversation_turn.is_some()
     }
 }
@@ -491,23 +410,7 @@ fn restored_model_selection(
 
 impl UiRuntimePort for AppRuntimeCoordinator {
     fn bind_runtime_wake(&mut self, wake: RuntimeWake) -> Result<(), String> {
-        if let Some(effect_id) = self.runtime_wake_effect.take()
-            && let Some(error) = self.effect_scope.dispose_effect(effect_id).error_message()
-        {
-            return Err(error);
-        }
-        let mut binding = self
-            .runtime_event_notifier
-            .bind_callback(move || wake.wake());
-        let effect_id = self
-            .effect_scope
-            .register("runtime-wake", move || {
-                binding.dispose();
-                Ok(())
-            })
-            .map_err(|error| error.to_string())?;
-        self.runtime_wake_effect = Some(effect_id);
-        Ok(())
+        self.components.bind_runtime_wake(wake)
     }
 
     fn drain_runtime_events(&mut self) -> Vec<RuntimeEvent> {
@@ -518,23 +421,33 @@ impl UiRuntimePort for AppRuntimeCoordinator {
         self.drain_session_store_events_into(&mut events);
         self.drain_dynamic_environment_events_into(&mut events);
         loop {
-            let target = self.conversation_worker.current_target().cloned();
-            let Some(event) = self.conversation_worker.try_recv_event() else {
+            let target = self
+                .components
+                .conversation_worker
+                .current_target()
+                .cloned();
+            let Some(event) = self.components.conversation_worker.try_recv_event() else {
                 self.reconcile_conversation_updates();
                 break;
             };
             let upstream_context_tokens = if matches!(event, ConversationEvent::Finished { .. }) {
-                self.conversation_worker.take_upstream_context_tokens()
+                self.components
+                    .conversation_worker
+                    .take_upstream_context_tokens()
             } else {
                 None
             };
             self.reconcile_conversation_updates();
             if upstream_context_tokens.is_some() {
-                self.provider_conversation
+                self.components
+                    .provider_conversation
                     .set_upstream_context_tokens(upstream_context_tokens);
             }
             if event.is_terminal() {
-                let _ = self.provider_conversation.rollback_pending_user();
+                let _ = self
+                    .components
+                    .provider_conversation
+                    .rollback_pending_user();
             }
             let context_usage =
                 self.context_usage_for_finished_turn(target.as_ref(), upstream_context_tokens);
@@ -550,7 +463,7 @@ impl UiRuntimePort for AppRuntimeCoordinator {
 
     fn drain_model_provider_refresh_events(&mut self) -> Vec<ModelProviderRefreshEvent> {
         let mut events = Vec::new();
-        while let Some(event) = self.model_refresh.try_recv_event() {
+        while let Some(event) = self.components.model_refresh.try_recv_event() {
             events.push(event);
         }
         events
@@ -573,11 +486,11 @@ impl UiRuntimePort for AppRuntimeCoordinator {
     }
 
     fn refresh_model_provider(&mut self, request: ProviderSyncRequest) -> Result<(), String> {
-        if self.model_refresh.is_running() {
+        if self.components.model_refresh.is_running() {
             return Err("Model refresh is already running".to_string());
         }
 
-        self.model_refresh.start(request);
+        self.components.model_refresh.start(request);
         Ok(())
     }
 
@@ -623,15 +536,19 @@ impl AppRuntimeCoordinator {
     }
 
     fn drain_session_store_events_into(&mut self, events: &mut Vec<RuntimeEvent>) {
-        for event in self.session_store_worker.drain_events() {
+        for event in self.components.session_store_worker.drain_events() {
             match event {
                 SessionStoreWorkerEvent::Runtime { event, .. } => events.push(event),
                 SessionStoreWorkerEvent::Restored {
                     conversation,
                     payload,
                 } => {
-                    self.provider_conversation = conversation;
-                    if let Err(message) = self.conversation_worker.reset_for_context_change() {
+                    self.components.provider_conversation = conversation;
+                    if let Err(message) = self
+                        .components
+                        .conversation_worker
+                        .reset_for_context_change()
+                    {
                         events.push(RuntimeEvent::Failed {
                             target: None,
                             message,
@@ -645,8 +562,12 @@ impl AppRuntimeCoordinator {
                     tree_request_id,
                     tree_payload,
                 } => {
-                    self.provider_conversation = conversation;
-                    if let Err(message) = self.conversation_worker.reset_for_context_change() {
+                    self.components.provider_conversation = conversation;
+                    if let Err(message) = self
+                        .components
+                        .conversation_worker
+                        .reset_for_context_change()
+                    {
                         events.push(RuntimeEvent::Failed {
                             target: None,
                             message,
@@ -672,25 +593,37 @@ impl AppRuntimeCoordinator {
     }
 
     fn drain_context_budget_events_into(&mut self, events: &mut Vec<RuntimeEvent>) {
-        events.extend(self.context_budget_worker.drain_events());
+        events.extend(self.components.context_budget_worker.drain_events());
     }
 
     fn reconcile_conversation_updates(&mut self) {
-        let session_id = self.conversation_worker.take_pending_session_id();
-        if let Some(entry_id) = self.conversation_worker.take_pending_user_entry_id() {
+        let session_id = self
+            .components
+            .conversation_worker
+            .take_pending_session_id();
+        if let Some(entry_id) = self
+            .components
+            .conversation_worker
+            .take_pending_user_entry_id()
+        {
             let _ = self
+                .components
                 .provider_conversation
                 .commit_pending_user(Some(entry_id), session_id);
         } else if let Some(session_id) = session_id {
-            self.provider_conversation.set_session_id(session_id);
+            self.components
+                .provider_conversation
+                .set_session_id(session_id);
         }
 
-        let items = self.conversation_worker.take_session_items();
+        let items = self.components.conversation_worker.take_session_items();
         if items.is_empty() {
             return;
         }
 
-        self.provider_conversation.commit_turn_items(items);
+        self.components
+            .provider_conversation
+            .commit_turn_items(items);
     }
 }
 

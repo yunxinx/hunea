@@ -59,6 +59,7 @@ fn composition_snapshot_is_deterministic_and_redacted() {
     });
 
     let workspace_tool_names = coordinator
+        .components
         .workspace_tools
         .definitions()
         .definitions()
@@ -68,7 +69,8 @@ fn composition_snapshot_is_deterministic_and_redacted() {
         .first()
         .expect("default composition should expose workspace tools")
         .clone();
-    coordinator.session_workspace_tools = coordinator
+    coordinator.components.session_workspace_tools = coordinator
+        .components
         .workspace_tools
         .filtered(|name| name != disabled_session_tool);
 
@@ -123,7 +125,10 @@ fn composition_snapshot_is_deterministic_and_redacted() {
 
 #[test]
 fn ui_runtime_bridge_reacts_to_wake_binding_lifecycle() {
-    let mut coordinator = runtime_coordinator(AppRuntimeOptions::default());
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        session_store: Some(Arc::new(InMemorySessionStore::new())),
+        ..AppRuntimeOptions::default()
+    });
     assert_eq!(
         component_state(&coordinator, "ui_runtime_bridge"),
         "pending"
@@ -140,7 +145,7 @@ fn ui_runtime_bridge_reacts_to_wake_binding_lifecycle() {
     .expect("runtime wake should bind");
 
     assert_eq!(component_state(&coordinator, "ui_runtime_bridge"), "active");
-    coordinator.runtime_event_notifier.notify();
+    coordinator.components.runtime_event_notifier.notify();
     assert_eq!(wake_count.load(Ordering::SeqCst), 1);
 
     coordinator.shutdown().expect("runtime should shut down");
@@ -148,12 +153,82 @@ fn ui_runtime_bridge_reacts_to_wake_binding_lifecycle() {
         component_state(&coordinator, "ui_runtime_bridge"),
         "pending"
     );
-    coordinator.runtime_event_notifier.notify();
+    coordinator.components.runtime_event_notifier.notify();
     assert_eq!(
         wake_count.load(Ordering::SeqCst),
         1,
         "disposing the runtime owner must remove the old wake callback"
     );
+    let snapshot = composition_snapshot(&coordinator);
+    assert_eq!(snapshot["session_persistence"]["available"], false);
+}
+
+#[test]
+fn rebinding_ui_runtime_bridge_disposes_the_previous_wake_effect() {
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions::default());
+    let first_wake_count = Arc::new(AtomicUsize::new(0));
+    let first_wake_count_for_callback = Arc::clone(&first_wake_count);
+    UiRuntimePort::bind_runtime_wake(
+        &mut coordinator,
+        RuntimeWake::new(move || {
+            first_wake_count_for_callback.fetch_add(1, Ordering::SeqCst);
+        }),
+    )
+    .expect("first runtime wake should bind");
+
+    let second_wake_count = Arc::new(AtomicUsize::new(0));
+    let second_wake_count_for_callback = Arc::clone(&second_wake_count);
+    UiRuntimePort::bind_runtime_wake(
+        &mut coordinator,
+        RuntimeWake::new(move || {
+            second_wake_count_for_callback.fetch_add(1, Ordering::SeqCst);
+        }),
+    )
+    .expect("replacement runtime wake should bind");
+
+    coordinator.components.runtime_event_notifier.notify();
+    assert_eq!(first_wake_count.load(Ordering::SeqCst), 0);
+    assert_eq!(second_wake_count.load(Ordering::SeqCst), 1);
+    assert_eq!(component_state(&coordinator, "ui_runtime_bridge"), "active");
+}
+
+#[test]
+fn reset_replaces_session_component_generations_without_rebuilding_the_ui_bridge() {
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions::default());
+    UiRuntimePort::bind_runtime_wake(&mut coordinator, RuntimeWake::new(|| {}))
+        .expect("runtime wake should bind");
+    let before = composition_snapshot(&coordinator);
+
+    coordinator
+        .handle_runtime_command(runtime_domain::session::RuntimeCommand::Reset)
+        .expect("runtime reset should succeed");
+    let after = composition_snapshot(&coordinator);
+
+    for capability in [
+        "conversation_worker",
+        "model_catalog",
+        "prompt_assembly",
+        "tool_catalog",
+    ] {
+        assert_eq!(
+            capability_generation(&after, capability),
+            capability_generation(&before, capability) + 1,
+            "reset should replace {capability}"
+        );
+    }
+    assert_eq!(
+        capability_generation(&after, "runtime_event_stream"),
+        capability_generation(&before, "runtime_event_stream")
+    );
+    assert_eq!(
+        capability_generation(&after, "runtime_wake"),
+        capability_generation(&before, "runtime_wake")
+    );
+    assert_eq!(
+        component_state(&coordinator, "native_agent_runtime"),
+        "active"
+    );
+    assert_eq!(component_state(&coordinator, "ui_runtime_bridge"), "active");
 }
 
 fn names(value: &serde_json::Value) -> Vec<&str> {
@@ -171,8 +246,7 @@ fn names(value: &serde_json::Value) -> Vec<&str> {
 }
 
 fn component_state(coordinator: &AppRuntimeCoordinator, component_id: &str) -> String {
-    let snapshot = serde_json::to_value(coordinator.inspect_composition())
-        .expect("composition snapshot should serialize");
+    let snapshot = composition_snapshot(coordinator);
     snapshot["components"]
         .as_array()
         .expect("components should be an array")
@@ -181,4 +255,19 @@ fn component_state(coordinator: &AppRuntimeCoordinator, component_id: &str) -> S
         .and_then(|component| component["state"].as_str())
         .expect("component should have a lifecycle state")
         .to_string()
+}
+
+fn composition_snapshot(coordinator: &AppRuntimeCoordinator) -> serde_json::Value {
+    serde_json::to_value(coordinator.inspect_composition())
+        .expect("composition snapshot should serialize")
+}
+
+fn capability_generation(snapshot: &serde_json::Value, capability_key: &str) -> u64 {
+    snapshot["capabilities"]
+        .as_array()
+        .expect("capabilities should be an array")
+        .iter()
+        .find(|capability| capability["key"] == capability_key)
+        .and_then(|capability| capability["generation"].as_u64())
+        .expect("capability should have a generation")
 }

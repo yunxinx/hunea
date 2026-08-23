@@ -15,10 +15,10 @@ enum PromptSessionConfigRefreshTarget {
 
 impl AppRuntimeCoordinator {
     fn prompt_session_config_refresh_target(&self) -> PromptSessionConfigRefreshTarget {
-        if !self.conversation_worker.is_running()
+        if !self.components.conversation_worker.is_running()
             && self.pending_conversation_turn.is_none()
-            && self.provider_conversation.is_history_empty()
-            && self.provider_conversation.session_id().is_none()
+            && self.components.provider_conversation.is_history_empty()
+            && self.components.provider_conversation.session_id().is_none()
         {
             PromptSessionConfigRefreshTarget::CurrentEmptySession
         } else {
@@ -41,14 +41,18 @@ impl AppRuntimeCoordinator {
         }
         match self.prompt_session_config_refresh_target() {
             PromptSessionConfigRefreshTarget::CurrentEmptySession => {
-                self.provider_conversation
+                self.components
+                    .provider_conversation
                     .set_prompt_prelude(Some(manager.resolution.prelude.clone()));
-                self.provider_conversation
+                self.components
+                    .provider_conversation
                     .set_dynamic_environment_session_config(Some(
                         dynamic_environment_session_config.clone(),
                     ));
-                self.session_workspace_tools =
-                    super::session_tools_for_manager(&self.workspace_tools, Some(manager));
+                self.components.session_workspace_tools = super::session_tools_for_manager(
+                    &self.components.workspace_tools,
+                    Some(manager),
+                );
                 Some(PromptAssemblyUpdateNotice::CurrentEmptySessionUpdated)
             }
             PromptSessionConfigRefreshTarget::NextNewSession => {

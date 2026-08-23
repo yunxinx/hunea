@@ -136,7 +136,8 @@ fn switch_branch_moves_leaf_and_rebuilds_transcript_and_tree() {
         .map(|row| row.preview_content)
         .collect::<Vec<_>>();
     let previous_context_cancellation = tokio_util::sync::CancellationToken::new();
-    coordinator.conversation_worker.cancellation = Some(previous_context_cancellation.clone());
+    coordinator.components.conversation_worker.cancellation =
+        Some(previous_context_cancellation.clone());
 
     coordinator
         .handle_runtime_command(RuntimeCommand::SwitchBranch {
@@ -152,6 +153,7 @@ fn switch_branch_moves_leaf_and_rebuilds_transcript_and_tree() {
     );
     assert_eq!(
         coordinator
+            .components
             .provider_conversation
             .history()
             .map(ConversationItem::text_content)

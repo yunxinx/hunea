@@ -29,21 +29,32 @@ impl AppRuntimeCoordinator {
             self.context_budget_unknown_provider_event(request_id, selection.provider_id.clone());
             return Ok(RuntimeCommandReceipt::Accepted);
         };
-        let items = self.provider_conversation.context_budget_probe_items();
+        let items = self
+            .components
+            .provider_conversation
+            .context_budget_probe_items();
         let tool_definitions =
-            context_budget_tool_definitions_for_worker(&self.session_workspace_tools);
-        if let Err(error) = self
-            .context_budget_worker
-            .load_snapshot(ContextBudgetSnapshotRequest {
-                request_id,
-                provider_kind: provider.connection().kind,
-                model_id: selection.model_id.clone(),
-                items,
-                prompt_prelude: self.provider_conversation.prompt_prelude().cloned(),
-                tool_definitions,
-                context_limit: self.options.loaded_models.context_limit_for(selection),
-                upstream_context_tokens: self.provider_conversation.upstream_context_tokens(),
-            })
+            context_budget_tool_definitions_for_worker(&self.components.session_workspace_tools);
+        if let Err(error) =
+            self.components
+                .context_budget_worker
+                .load_snapshot(ContextBudgetSnapshotRequest {
+                    request_id,
+                    provider_kind: provider.connection().kind,
+                    model_id: selection.model_id.clone(),
+                    items,
+                    prompt_prelude: self
+                        .components
+                        .provider_conversation
+                        .prompt_prelude()
+                        .cloned(),
+                    tool_definitions,
+                    context_limit: self.options.loaded_models.context_limit_for(selection),
+                    upstream_context_tokens: self
+                        .components
+                        .provider_conversation
+                        .upstream_context_tokens(),
+                })
         {
             self.pending_runtime_events
                 .push(RuntimeEvent::ContextBudgetSnapshotLoadFailed {
@@ -55,7 +66,7 @@ impl AppRuntimeCoordinator {
     }
 
     pub(super) fn cancel_context_budget_snapshot_command(&mut self) -> RuntimeCommandReceipt {
-        self.context_budget_worker.cancel_pending();
+        self.components.context_budget_worker.cancel_pending();
         RuntimeCommandReceipt::Accepted
     }
 }

@@ -5,9 +5,7 @@ use tool_runtime::{ToolDefinition, ToolKind, ToolPermissionPolicy};
 
 use super::{
     AppRuntimeCoordinator,
-    lifecycle::{
-        ComponentDefinition, ComponentGraph, ComponentSnapshot, OptionalCapabilitySnapshot,
-    },
+    lifecycle::{CapabilityKey, ComponentSnapshot, OptionalCapabilitySnapshot},
 };
 
 const COMPOSITION_SNAPSHOT_VERSION: u32 = 1;
@@ -141,8 +139,9 @@ struct SessionPersistenceSnapshot {
 
 impl AppRuntimeCoordinator {
     pub(super) fn inspect_composition(&self) -> RuntimeCompositionSnapshot {
-        let lifecycle = self.composition_lifecycle();
-        let capabilities = lifecycle
+        let capabilities = self
+            .components
+            .lifecycle
             .capabilities()
             .into_iter()
             .map(|capability| CapabilitySnapshot {
@@ -150,7 +149,9 @@ impl AppRuntimeCoordinator {
                 generation: capability.generation,
             })
             .collect();
-        let components = lifecycle
+        let components = self
+            .components
+            .lifecycle
             .components()
             .into_iter()
             .map(runtime_component_snapshot)
@@ -189,6 +190,7 @@ impl AppRuntimeCoordinator {
             });
 
         let mut workspace_tools = self
+            .components
             .workspace_tools
             .definitions()
             .definitions()
@@ -197,6 +199,7 @@ impl AppRuntimeCoordinator {
         workspace_tools.sort_by(|left, right| left.name.cmp(&right.name));
 
         let mut session_tools = self
+            .components
             .session_workspace_tools
             .definitions()
             .definitions()
@@ -215,49 +218,12 @@ impl AppRuntimeCoordinator {
             session_tools,
             prompt_tools: self.prompt_tool_snapshots(&session_tool_names),
             session_persistence: SessionPersistenceSnapshot {
-                available: self.options.session_store.is_some(),
+                available: self
+                    .components
+                    .lifecycle
+                    .has_capability(&CapabilityKey::from("session_persistence")),
             },
         }
-    }
-
-    fn composition_lifecycle(&self) -> ComponentGraph {
-        let mut graph = ComponentGraph::default();
-        for capability in [
-            "conversation_worker",
-            "model_catalog",
-            "prompt_assembly",
-            "runtime_event_stream",
-            "tool_catalog",
-        ] {
-            graph.add_capability(capability);
-        }
-        if self.options.session_store.is_some() {
-            graph.add_capability("session_persistence");
-        }
-        if self.runtime_wake_effect.is_some() {
-            graph.add_capability("runtime_wake");
-        }
-
-        graph.declare(
-            ComponentDefinition::new("native_agent_runtime")
-                .requires("conversation_worker")
-                .requires("model_catalog")
-                .requires("prompt_assembly")
-                .requires("tool_catalog")
-                .observes("session_persistence"),
-        );
-        graph.declare(
-            ComponentDefinition::new("prompt_assembly")
-                .requires("tool_catalog")
-                .observes("session_persistence"),
-        );
-        graph.declare(
-            ComponentDefinition::new("ui_runtime_bridge")
-                .requires("runtime_event_stream")
-                .requires("runtime_wake"),
-        );
-        graph.take_transitions();
-        graph
     }
 
     fn prompt_tool_snapshots(
@@ -279,7 +245,7 @@ impl AppRuntimeCoordinator {
                 );
             }
         } else {
-            for definition in &self.prompt_assembly_tool_definitions {
+            for definition in &self.components.prompt_assembly_tool_definitions {
                 tools.insert(
                     definition.name.clone(),
                     PromptToolSnapshot {

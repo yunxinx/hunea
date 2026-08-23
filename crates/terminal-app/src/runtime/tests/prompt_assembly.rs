@@ -484,7 +484,10 @@ fn prompt_assembly_changes_sync_current_empty_session_prelude_immediately() {
     });
 
     assert_eq!(
-        coordinator.provider_conversation.prompt_prelude(),
+        coordinator
+            .components
+            .provider_conversation
+            .prompt_prelude(),
         Some(&initial_prelude)
     );
 
@@ -515,7 +518,10 @@ fn prompt_assembly_changes_sync_current_empty_session_prelude_immediately() {
     );
 
     assert_eq!(
-        coordinator.provider_conversation.prompt_prelude(),
+        coordinator
+            .components
+            .provider_conversation
+            .prompt_prelude(),
         Some(&updated_manager.resolution.prelude)
     );
     assert_eq!(
@@ -588,6 +594,7 @@ fn prompt_assembly_changes_on_started_session_apply_only_after_next_new_session_
         ..AppRuntimeOptions::default()
     });
     coordinator
+        .components
         .provider_conversation
         .append_items(vec![ConversationItem::text(Role::User, "already started")])
         .expect("seed history should succeed");
@@ -618,7 +625,10 @@ fn prompt_assembly_changes_on_started_session_apply_only_after_next_new_session_
     );
 
     assert_eq!(
-        coordinator.provider_conversation.prompt_prelude(),
+        coordinator
+            .components
+            .provider_conversation
+            .prompt_prelude(),
         Some(&initial_prelude)
     );
     assert_eq!(
@@ -635,7 +645,10 @@ fn prompt_assembly_changes_on_started_session_apply_only_after_next_new_session_
         .expect("reset should succeed");
 
     assert_eq!(
-        coordinator.provider_conversation.prompt_prelude(),
+        coordinator
+            .components
+            .provider_conversation
+            .prompt_prelude(),
         coordinator.options.initial_prompt_prelude.as_ref()
     );
     cleanup(&root);
@@ -772,6 +785,7 @@ fn disabling_dynamic_environment_changes_waits_for_next_new_session() {
         ..AppRuntimeOptions::default()
     });
     coordinator
+        .components
         .provider_conversation
         .append_items(vec![ConversationItem::text(Role::User, "already started")])
         .expect("seed history should succeed");
@@ -817,6 +831,7 @@ fn disabling_dynamic_environment_changes_waits_for_next_new_session() {
         .handle_runtime_command(RuntimeCommand::Reset)
         .expect("reset should succeed");
     coordinator
+        .components
         .provider_conversation
         .append_items(vec![ConversationItem::text(Role::User, "fresh session")])
         .expect("fresh session history should seed");
@@ -922,6 +937,7 @@ fn disabling_tool_on_empty_session_updates_session_tools_immediately() {
         .clone();
     assert!(
         coordinator
+            .components
             .session_workspace_tools
             .definitions()
             .definitions()
@@ -961,6 +977,7 @@ fn disabling_tool_on_empty_session_updates_session_tools_immediately() {
     );
     assert!(
         !coordinator
+            .components
             .session_workspace_tools
             .definitions()
             .definitions()
@@ -969,6 +986,7 @@ fn disabling_tool_on_empty_session_updates_session_tools_immediately() {
     );
     assert!(
         coordinator
+            .components
             .workspace_tools
             .definitions()
             .definitions()
@@ -996,6 +1014,7 @@ fn disabling_tool_on_started_session_waits_for_next_new_session_reset() {
         ..AppRuntimeOptions::default()
     });
     coordinator
+        .components
         .provider_conversation
         .append_items(vec![ConversationItem::text(Role::User, "already started")])
         .expect("seed history should succeed");
@@ -1033,6 +1052,7 @@ fn disabling_tool_on_started_session_waits_for_next_new_session_reset() {
     );
     assert!(
         coordinator
+            .components
             .session_workspace_tools
             .definitions()
             .definitions()
@@ -1046,6 +1066,7 @@ fn disabling_tool_on_started_session_waits_for_next_new_session_reset() {
 
     assert!(
         !coordinator
+            .components
             .session_workspace_tools
             .definitions()
             .definitions()

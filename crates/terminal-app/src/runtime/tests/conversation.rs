@@ -88,7 +88,8 @@ fn reset_discards_a_turn_waiting_for_dynamic_environment() {
 fn shutdown_cancels_the_previous_approval_context_turn() {
     let mut coordinator = runtime_coordinator(AppRuntimeOptions::default());
     let previous_context_cancellation = tokio_util::sync::CancellationToken::new();
-    coordinator.conversation_worker.cancellation = Some(previous_context_cancellation.clone());
+    coordinator.components.conversation_worker.cancellation =
+        Some(previous_context_cancellation.clone());
 
     coordinator
         .shutdown()
@@ -113,6 +114,11 @@ fn shutdown_is_idempotent_with_session_persistence_enabled() {
     coordinator
         .shutdown()
         .expect("repeated shutdown should remain a no-op");
+
+    let error =
+        RuntimePort::bind_runtime_wake(&mut coordinator, terminal_ui::RuntimeWake::new(|| {}))
+            .expect_err("a disposed runtime owner must reject new effects");
+    assert_eq!(error, "Runtime components are shut down");
 }
 
 #[test]
@@ -194,7 +200,12 @@ fn conversation_failure_before_provider_request_rolls_back_pending_user() {
             .any(|event| matches!(event, RuntimeEvent::Failed { .. })),
         "preflight failure should be reported"
     );
-    assert!(coordinator.provider_conversation.is_history_empty());
+    assert!(
+        coordinator
+            .components
+            .provider_conversation
+            .is_history_empty()
+    );
 
     let next_request = ConversationTurnRequest::new(
         "local",
@@ -206,6 +217,7 @@ fn conversation_failure_before_provider_request_rolls_back_pending_user() {
         ConversationItem::text(Role::User, "next"),
     );
     coordinator
+        .components
         .provider_conversation
         .prepare_turn(&next_request)
         .expect("failed preflight turn should not leave stale pending state");

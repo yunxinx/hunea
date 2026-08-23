@@ -367,7 +367,7 @@ fn reset_after_resume_restores_fresh_prompt_prelude_for_next_new_session() {
     let mut coordinator = runtime_coordinator(AppRuntimeOptions {
         session_store: Some(store),
         session_header_template: Some(header),
-        initial_prompt_prelude: Some(fresh_prelude),
+        initial_prompt_assembly: Some(prompt_manager_with_prelude(fresh_prelude)),
         ..AppRuntimeOptions::default()
     });
 

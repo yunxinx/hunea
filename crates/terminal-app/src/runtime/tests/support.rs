@@ -34,6 +34,84 @@ pub(super) fn runtime_coordinator(options: AppRuntimeOptions) -> AppRuntimeCoord
     AppRuntimeCoordinator::new(options).expect("runtime coordinator should initialize")
 }
 
+pub(super) fn prompt_manager_with_prelude(
+    prelude: runtime_domain::prompt_assembly::PromptPreludeSnapshot,
+) -> runtime_domain::prompt_assembly::PromptAssemblyManagerSnapshot {
+    let mut manager = runtime_domain::prompt_assembly::PromptAssemblyManagerSnapshot::default();
+    manager.resolution.prelude = prelude;
+    manager
+}
+
+pub(super) fn prompt_manager_with_dynamic_environment_config(
+    config: runtime_domain::dynamic_environment::DynamicEnvironmentSessionConfig,
+) -> runtime_domain::prompt_assembly::PromptAssemblyManagerSnapshot {
+    use std::collections::BTreeMap;
+
+    use runtime_domain::{
+        dynamic_environment::DynamicEnvironmentSnapshotKind,
+        prompt_assembly::{
+            PromptAssemblyDynamicEnvironmentCandidate, PromptSourceKind, PromptSourceOrigin,
+            PromptSourceStatus, ResolvedPromptSource,
+        },
+    };
+
+    let mut selections = BTreeMap::new();
+    for selection in config.source_selections {
+        let entry = selections
+            .entry(selection.source_kind)
+            .or_insert((false, false));
+        match selection.snapshot_kind {
+            DynamicEnvironmentSnapshotKind::Baseline => entry.0 = selection.enabled,
+            DynamicEnvironmentSnapshotKind::Changes => entry.1 = selection.enabled,
+        }
+    }
+    let mut manager = runtime_domain::prompt_assembly::PromptAssemblyManagerSnapshot::default();
+    manager.candidates.dynamic_environment = selections
+        .into_iter()
+        .map(|(source_kind, (baseline_selected, changes_selected))| {
+            PromptAssemblyDynamicEnvironmentCandidate {
+                source_kind,
+                label: format!("{source_kind:?}"),
+                origin: PromptSourceOrigin::Builtin,
+                baseline_selected,
+                changes_selected,
+                baseline_preview_body: String::new(),
+                changes_preview_body: String::new(),
+            }
+        })
+        .collect();
+    if config.baseline_enabled {
+        manager
+            .resolution
+            .assembly
+            .active_sources
+            .push(ResolvedPromptSource {
+                reference_id: "env-baseline".to_string(),
+                kind: PromptSourceKind::DynamicEnvironmentBaseline,
+                title: "Dynamic environment baseline".to_string(),
+                origin: Some(PromptSourceOrigin::Builtin),
+                status: PromptSourceStatus::Active { order: 0 },
+            });
+    }
+    if config.changes_enabled {
+        manager
+            .resolution
+            .assembly
+            .active_sources
+            .push(ResolvedPromptSource {
+                reference_id: "env-changes".to_string(),
+                kind: PromptSourceKind::DynamicEnvironmentChanges,
+                title: "Dynamic environment changes".to_string(),
+                origin: Some(PromptSourceOrigin::Builtin),
+                status: PromptSourceStatus::Active {
+                    order: usize::from(config.baseline_enabled),
+                },
+            });
+    }
+    manager.dynamic_environment_observations = config.static_baseline_observations;
+    manager
+}
+
 pub(super) const fn request_id(value: u64) -> SessionLoadRequestId {
     SessionLoadRequestId::new(value)
 }

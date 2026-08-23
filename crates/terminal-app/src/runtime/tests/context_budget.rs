@@ -227,24 +227,26 @@ fn context_budget_snapshot_separates_skill_discovery_from_system_prompt() {
             ]),
             ..conversation_runtime::models::LoadedModelCatalog::default()
         },
-        initial_prompt_prelude: Some(runtime_domain::prompt_assembly::PromptPreludeSnapshot {
-            sections: vec![
-                runtime_domain::prompt_assembly::PromptPreludeSection {
-                    reference_id: "core-system".to_string(),
-                    kind: runtime_domain::prompt_assembly::PromptSourceKind::CoreSystemPrompt,
-                    title: "Core system prompt".to_string(),
-                    origin: Some(runtime_domain::prompt_assembly::PromptSourceOrigin::Builtin),
-                    body: "keep responses direct".to_string(),
-                },
-                runtime_domain::prompt_assembly::PromptPreludeSection {
-                    reference_id: "skill-discovery".to_string(),
-                    kind: runtime_domain::prompt_assembly::PromptSourceKind::SkillDiscovery,
-                    title: "Skill discovery".to_string(),
-                    origin: Some(runtime_domain::prompt_assembly::PromptSourceOrigin::Project),
-                    body: "<available_skills>code-review</available_skills>".to_string(),
-                },
-            ],
-        }),
+        initial_prompt_assembly: Some(prompt_manager_with_prelude(
+            runtime_domain::prompt_assembly::PromptPreludeSnapshot {
+                sections: vec![
+                    runtime_domain::prompt_assembly::PromptPreludeSection {
+                        reference_id: "core-system".to_string(),
+                        kind: runtime_domain::prompt_assembly::PromptSourceKind::CoreSystemPrompt,
+                        title: "Core system prompt".to_string(),
+                        origin: Some(runtime_domain::prompt_assembly::PromptSourceOrigin::Builtin),
+                        body: "keep responses direct".to_string(),
+                    },
+                    runtime_domain::prompt_assembly::PromptPreludeSection {
+                        reference_id: "skill-discovery".to_string(),
+                        kind: runtime_domain::prompt_assembly::PromptSourceKind::SkillDiscovery,
+                        title: "Skill discovery".to_string(),
+                        origin: Some(runtime_domain::prompt_assembly::PromptSourceOrigin::Project),
+                        body: "<available_skills>code-review</available_skills>".to_string(),
+                    },
+                ],
+            },
+        )),
         ..AppRuntimeOptions::default()
     });
     let request_id = request_id(401);

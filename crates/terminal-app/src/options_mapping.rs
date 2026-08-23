@@ -120,9 +120,7 @@ pub(crate) fn runtime_options_from_app_config_and_models(
         hunea_config_dir: data_dir_resolution.config_dir().to_path_buf(),
         session_store: None,
         session_header_template: None,
-        prompt_assembly_manager: None,
-        initial_prompt_prelude: None,
-        initial_dynamic_environment_session_config: None,
+        initial_prompt_assembly: None,
         dynamic_environment_observer:
             crate::dynamic_environment::default_dynamic_environment_observer(),
     }

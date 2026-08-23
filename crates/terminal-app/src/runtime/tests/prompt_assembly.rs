@@ -479,7 +479,7 @@ fn prompt_assembly_changes_sync_current_empty_session_prelude_immediately() {
             git_head: None,
             cli_version: None,
         }),
-        initial_prompt_prelude: Some(initial_prelude.clone()),
+        initial_prompt_assembly: Some(prompt_manager_with_prelude(initial_prelude.clone())),
         ..AppRuntimeOptions::default()
     });
 
@@ -527,7 +527,12 @@ fn prompt_assembly_changes_sync_current_empty_session_prelude_immediately() {
         Some(&updated_manager.resolution.prelude)
     );
     assert_eq!(
-        coordinator.options.initial_prompt_prelude.as_ref(),
+        coordinator
+            .components
+            .prompt_assembly
+            .session_snapshot()
+            .prompt_prelude
+            .as_ref(),
         Some(&updated_manager.resolution.prelude)
     );
     assert_eq!(
@@ -592,7 +597,7 @@ fn prompt_assembly_changes_on_started_session_apply_only_after_next_new_session_
             git_head: None,
             cli_version: None,
         }),
-        initial_prompt_prelude: Some(initial_prelude.clone()),
+        initial_prompt_assembly: Some(prompt_manager_with_prelude(initial_prelude.clone())),
         ..AppRuntimeOptions::default()
     });
     coordinator
@@ -636,7 +641,12 @@ fn prompt_assembly_changes_on_started_session_apply_only_after_next_new_session_
         Some(&initial_prelude)
     );
     assert_eq!(
-        coordinator.options.initial_prompt_prelude.as_ref(),
+        coordinator
+            .components
+            .prompt_assembly
+            .session_snapshot()
+            .prompt_prelude
+            .as_ref(),
         Some(&updated_manager.resolution.prelude)
     );
     assert_eq!(
@@ -654,7 +664,12 @@ fn prompt_assembly_changes_on_started_session_apply_only_after_next_new_session_
             .agent_runtime
             .provider_conversation_for_test()
             .prompt_prelude(),
-        coordinator.options.initial_prompt_prelude.as_ref()
+        coordinator
+            .components
+            .prompt_assembly
+            .session_snapshot()
+            .prompt_prelude
+            .as_ref()
     );
     cleanup(&root);
 }
@@ -771,7 +786,7 @@ fn disabling_dynamic_environment_changes_waits_for_next_new_session() {
             git_head: None,
             cli_version: None,
         }),
-        initial_dynamic_environment_session_config: Some(
+        initial_prompt_assembly: Some(prompt_manager_with_dynamic_environment_config(
             runtime_domain::dynamic_environment::DynamicEnvironmentSessionConfig {
                 baseline_enabled: false,
                 changes_enabled: true,
@@ -786,7 +801,7 @@ fn disabling_dynamic_environment_changes_waits_for_next_new_session() {
                 ],
                 static_baseline_observations: Vec::new(),
             },
-        ),
+        )),
         ..AppRuntimeOptions::default()
     });
     coordinator

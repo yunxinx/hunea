@@ -21,7 +21,7 @@ use super::{
     AgentCommand, AgentEvent, AgentEventKind, AgentId, AgentRuntime, AgentRuntimeError,
     AgentTurnId, AgentTurnRequest, NativeAgentRuntime,
 };
-use crate::runtime::AppRuntimeOptions;
+use crate::runtime::{AppRuntimeOptions, prompt_assembly::PromptAssemblySessionSnapshot};
 
 fn native_runtime(event_notifier: RuntimeEventNotifier) -> NativeAgentRuntime {
     NativeAgentRuntime::new(
@@ -35,6 +35,7 @@ fn native_runtime(event_notifier: RuntimeEventNotifier) -> NativeAgentRuntime {
         },
         ToolExecutorRegistry::default(),
         Vec::new(),
+        PromptAssemblySessionSnapshot::default(),
         event_notifier,
     )
     .expect("native Agent runtime should initialize")

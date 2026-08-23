@@ -6,9 +6,10 @@ use tool_runtime::{ToolDefinition, ToolKind, ToolPermissionPolicy};
 use super::{
     AppRuntimeCoordinator,
     lifecycle::{CapabilityKey, ComponentSnapshot, OptionalCapabilitySnapshot},
+    prompt_assembly::PromptContributionSnapshot,
 };
 
-const COMPOSITION_SNAPSHOT_VERSION: u32 = 1;
+const COMPOSITION_SNAPSHOT_VERSION: u32 = 2;
 
 /// `RuntimeCompositionSnapshot` 是默认 runtime composition 的只读诊断投影。
 ///
@@ -24,6 +25,7 @@ pub(super) struct RuntimeCompositionSnapshot {
     workspace_tools: Vec<ToolSnapshot>,
     session_tools: Vec<String>,
     prompt_tools: Vec<PromptToolSnapshot>,
+    prompt_sources: Vec<PromptSourceSnapshot>,
     session_persistence: SessionPersistenceSnapshot,
 }
 
@@ -50,6 +52,7 @@ impl RuntimeCompositionSnapshot {
             self.prompt_tools.iter().map(|tool| &tool.name),
             "prompt tool",
         )?;
+        ensure_prompt_sources_valid(&self.prompt_sources)?;
 
         let capabilities = self
             .capabilities
@@ -130,6 +133,18 @@ struct PromptToolSnapshot {
     session_enabled: bool,
     guidelines_available: bool,
     guidelines_selected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct PromptSourceSnapshot {
+    effective_order: usize,
+    stable_id: String,
+    kind: String,
+    origin: Option<String>,
+    scope: Option<String>,
+    priority: i32,
+    is_trusted: bool,
+    estimated_tokens: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -215,6 +230,13 @@ impl AppRuntimeCoordinator {
             workspace_tools,
             session_tools,
             prompt_tools: self.prompt_tool_snapshots(&tool_definitions, &session_tool_names),
+            prompt_sources: self
+                .components
+                .prompt_assembly
+                .inspection_snapshot()
+                .into_iter()
+                .map(prompt_source_snapshot)
+                .collect(),
             session_persistence: SessionPersistenceSnapshot {
                 available: self
                     .components
@@ -230,7 +252,7 @@ impl AppRuntimeCoordinator {
         session_tool_names: &BTreeSet<String>,
     ) -> Vec<PromptToolSnapshot> {
         let mut tools = BTreeMap::new();
-        if let Some(manager) = self.options.prompt_assembly_manager.as_ref() {
+        if let Some(manager) = self.components.prompt_assembly.manager_snapshot().as_ref() {
             let catalog_tool_names = tool_definitions
                 .iter()
                 .map(|definition| definition.name.as_str())
@@ -301,6 +323,38 @@ fn tool_snapshot(definition: &ToolDefinition) -> ToolSnapshot {
     }
 }
 
+fn prompt_source_snapshot(source: PromptContributionSnapshot) -> PromptSourceSnapshot {
+    PromptSourceSnapshot {
+        effective_order: source.effective_order,
+        stable_id: source.stable_id,
+        kind: prompt_source_kind_name(source.kind).to_string(),
+        origin: source.origin.map(|origin| origin.as_str().to_string()),
+        scope: source
+            .scope
+            .map(|scope| scope.as_stored_value().to_string()),
+        priority: source.priority,
+        is_trusted: source.is_trusted,
+        estimated_tokens: source.estimated_tokens,
+    }
+}
+
+const fn prompt_source_kind_name(
+    kind: runtime_domain::prompt_assembly::PromptSourceKind,
+) -> &'static str {
+    use runtime_domain::prompt_assembly::PromptSourceKind;
+
+    match kind {
+        PromptSourceKind::CoreSystemPrompt => "core_system_prompt",
+        PromptSourceKind::InstructionsFile => "instructions_file",
+        PromptSourceKind::ExtraPrompt => "extra_prompt",
+        PromptSourceKind::SkillDiscovery => "skill_discovery",
+        PromptSourceKind::LongLivedSkill => "long_lived_skill",
+        PromptSourceKind::ToolGuidelines => "tool_guidelines",
+        PromptSourceKind::DynamicEnvironmentBaseline => "dynamic_environment_baseline",
+        PromptSourceKind::DynamicEnvironmentChanges => "dynamic_environment_changes",
+    }
+}
+
 const fn tool_kind_name(kind: ToolKind) -> &'static str {
     match kind {
         ToolKind::Read => "read",
@@ -337,6 +391,21 @@ fn ensure_sorted_unique<'a>(
             ));
         }
         previous = Some(value);
+    }
+    Ok(())
+}
+
+fn ensure_prompt_sources_valid(sources: &[PromptSourceSnapshot]) -> Result<(), String> {
+    let mut stable_ids = BTreeSet::new();
+    for (expected_order, source) in sources.iter().enumerate() {
+        if source.effective_order != expected_order {
+            return Err(
+                "runtime composition prompt sources must follow effective order".to_string(),
+            );
+        }
+        if !stable_ids.insert(source.stable_id.as_str()) {
+            return Err("runtime composition prompt source entries must be unique".to_string());
+        }
     }
     Ok(())
 }

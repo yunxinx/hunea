@@ -7,6 +7,7 @@ mod dynamic_environment_worker;
 mod event_mapping;
 mod inspection;
 mod lifecycle;
+mod prompt_assembly;
 mod prompt_assembly_commands;
 mod session_commands;
 mod session_tree_load;
@@ -21,9 +22,8 @@ use std::{
 
 use conversation_runtime::models as provider_models;
 use runtime_domain::{
-    dynamic_environment::DynamicEnvironmentSessionConfig,
     model_catalog::{ModelProviderRefreshEvent, ModelSelection, ProviderSyncRequest},
-    prompt_assembly::{PromptAssemblyManagerSnapshot, PromptPreludeSnapshot},
+    prompt_assembly::PromptAssemblyManagerSnapshot,
     request_policy::RuntimeRequestPolicy,
     session::{
         RuntimeCommand, RuntimeCommandReceipt, RuntimeEvent, SessionBranchTreePayload,
@@ -105,9 +105,7 @@ pub(crate) struct AppRuntimeOptions {
     pub(crate) hunea_config_dir: PathBuf,
     pub(crate) session_store: Option<Arc<dyn SessionStore>>,
     pub(crate) session_header_template: Option<SessionHeader>,
-    pub(crate) prompt_assembly_manager: Option<PromptAssemblyManagerSnapshot>,
-    pub(crate) initial_prompt_prelude: Option<PromptPreludeSnapshot>,
-    pub(crate) initial_dynamic_environment_session_config: Option<DynamicEnvironmentSessionConfig>,
+    pub(crate) initial_prompt_assembly: Option<PromptAssemblyManagerSnapshot>,
     pub(crate) dynamic_environment_observer:
         Arc<dyn crate::dynamic_environment::DynamicEnvironmentObserver>,
 }
@@ -130,9 +128,7 @@ impl Default for AppRuntimeOptions {
             hunea_config_dir: PathBuf::from(".hunea"),
             session_store: None,
             session_header_template: None,
-            prompt_assembly_manager: None,
-            initial_prompt_prelude: None,
-            initial_dynamic_environment_session_config: None,
+            initial_prompt_assembly: None,
             dynamic_environment_observer:
                 crate::dynamic_environment::default_dynamic_environment_observer(),
         }

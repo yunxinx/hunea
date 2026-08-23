@@ -413,7 +413,7 @@ fn conversation_submit_dispatches_without_waiting_for_dynamic_environment_observ
             git_head: None,
             cli_version: None,
         }),
-        initial_dynamic_environment_session_config: Some(
+        initial_prompt_assembly: Some(prompt_manager_with_dynamic_environment_config(
             runtime_domain::dynamic_environment::DynamicEnvironmentSessionConfig {
                 baseline_enabled: true,
                 changes_enabled: false,
@@ -428,7 +428,7 @@ fn conversation_submit_dispatches_without_waiting_for_dynamic_environment_observ
                 ],
                 static_baseline_observations: Vec::new(),
             },
-        ),
+        )),
         ..AppRuntimeOptions::default()
     });
     let request = ConversationTurnRequest::new(
@@ -514,7 +514,7 @@ fn interrupting_pending_dynamic_environment_cancels_observation() {
             git_head: None,
             cli_version: None,
         }),
-        initial_dynamic_environment_session_config: Some(
+        initial_prompt_assembly: Some(prompt_manager_with_dynamic_environment_config(
             runtime_domain::dynamic_environment::DynamicEnvironmentSessionConfig {
                 baseline_enabled: true,
                 changes_enabled: false,
@@ -529,7 +529,7 @@ fn interrupting_pending_dynamic_environment_cancels_observation() {
                 ],
                 static_baseline_observations: Vec::new(),
             },
-        ),
+        )),
         ..AppRuntimeOptions::default()
     });
     let request = ConversationTurnRequest::new(
@@ -805,7 +805,7 @@ fn custom_prompt_attachment_uses_cached_prompt_assembly_without_waiting_for_stor
             git_head: None,
             cli_version: None,
         }),
-        prompt_assembly_manager: Some(cached_manager),
+        initial_prompt_assembly: Some(cached_manager),
         ..AppRuntimeOptions::default()
     });
     let user_message = runtime_domain::session::TranscriptUserMessage {

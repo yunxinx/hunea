@@ -24,7 +24,7 @@ use options_mapping::{
     model_options_from_app_config_and_models, model_options_from_config_and_models,
     runtime_options_from_app_config_and_models,
 };
-use prompt_assembly::{PromptAssemblyWorkspace, dynamic_environment_session_config_from_manager};
+use prompt_assembly::PromptAssemblyWorkspace;
 use replay::write_terminal_replay_on_exit;
 pub use replay::{
     write_terminal_replay, write_terminal_replay_preserving_ansi,
@@ -281,11 +281,7 @@ fn attach_default_session_persistence(
         PromptAssemblyWorkspace::new(work_dir.as_path(), config_dir, &tool_definitions)
             .load_manager(store)?;
     model_options.prompt_assembly = Some(loaded_prompt_assembly.clone());
-    options.initial_prompt_prelude = Some(loaded_prompt_assembly.resolution.prelude.clone());
-    options.initial_dynamic_environment_session_config = Some(
-        dynamic_environment_session_config_from_manager(&loaded_prompt_assembly),
-    );
-    options.prompt_assembly_manager = Some(loaded_prompt_assembly);
+    options.initial_prompt_assembly = Some(loaded_prompt_assembly);
     Ok(())
 }
 

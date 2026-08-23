@@ -12,6 +12,7 @@ use runtime_domain::{
 use terminal_ui::{RuntimeWake, UiRuntimePort};
 
 use super::support::*;
+use crate::runtime::prompt_assembly::PromptSectionContribution;
 
 const SECRET_SENTINEL: &str = "inspection-secret-sentinel";
 
@@ -50,7 +51,7 @@ fn composition_snapshot_is_deterministic_and_redacted() {
             ..conversation_runtime::models::LoadedModelCatalog::default()
         },
         session_store: Some(store),
-        initial_prompt_prelude: Some(PromptPreludeSnapshot {
+        initial_prompt_assembly: Some(prompt_manager_with_prelude(PromptPreludeSnapshot {
             sections: vec![PromptPreludeSection {
                 reference_id: "private-instruction".to_string(),
                 kind: PromptSourceKind::CoreSystemPrompt,
@@ -58,9 +59,30 @@ fn composition_snapshot_is_deterministic_and_redacted() {
                 origin: None,
                 body: SECRET_SENTINEL.to_string(),
             }],
-        }),
+        })),
         ..AppRuntimeOptions::default()
     });
+    let _private_runtime_registration = coordinator
+        .components
+        .prompt_assembly
+        .contribute(
+            "runtime-private-owner",
+            PromptSectionContribution {
+                stable_id: "runtime-private".to_string(),
+                scope: PromptAssemblyScope::Global,
+                priority: -1,
+                is_trusted: true,
+                estimated_tokens: Some(7),
+                section: PromptPreludeSection {
+                    reference_id: "runtime-private".to_string(),
+                    kind: PromptSourceKind::ExtraPrompt,
+                    title: "private runtime title".to_string(),
+                    origin: Some(PromptSourceOrigin::Builtin),
+                    body: SECRET_SENTINEL.to_string(),
+                },
+            },
+        )
+        .expect("private runtime contribution should register");
 
     let workspace_tool_names = coordinator
         .components
@@ -69,6 +91,32 @@ fn composition_snapshot_is_deterministic_and_redacted() {
         .into_iter()
         .map(|definition| definition.name)
         .collect::<Vec<_>>();
+    let mut prompt_manager = coordinator
+        .components
+        .prompt_assembly
+        .manager_snapshot()
+        .expect("test prelude should be owned by a manager");
+    prompt_manager.candidates.tools = coordinator
+        .components
+        .tool_catalog
+        .definitions()
+        .into_iter()
+        .map(|definition| PromptAssemblyToolCandidate {
+            name: definition.name,
+            label: None,
+            description: None,
+            prompt_guidelines: definition.prompt_guidelines,
+            origin: PromptSourceOrigin::Builtin,
+            selection_scope: PromptAssemblyScope::Global,
+            tool_enabled: true,
+            selection: PromptAssemblySelectionState::Selected { order: None },
+        })
+        .collect();
+    coordinator
+        .components
+        .prompt_assembly
+        .replace_manager(Some(prompt_manager))
+        .expect("test prompt manager should be replaceable");
     let disabled_session_tool = workspace_tool_names
         .first()
         .expect("default composition should expose workspace tools")
@@ -89,9 +137,12 @@ fn composition_snapshot_is_deterministic_and_redacted() {
         !json.contains(SECRET_SENTINEL),
         "snapshot must not contain credentials or instruction bodies: {json}"
     );
+    assert!(!json.contains("runtime-private-owner"));
+    assert!(!json.contains("registration_id"));
 
     let snapshot: serde_json::Value =
         serde_json::from_str(&json).expect("snapshot JSON should decode");
+    assert_eq!(snapshot["schema_version"], 2);
     assert_eq!(snapshot["session_persistence"]["available"], true);
     assert_eq!(
         snapshot["selected_model"],
@@ -125,6 +176,31 @@ fn composition_snapshot_is_deterministic_and_redacted() {
         .expect("prompt inventory should retain tools disabled for the session");
     assert_eq!(disabled_prompt_tool["tool_enabled"], true);
     assert_eq!(disabled_prompt_tool["session_enabled"], false);
+    assert_eq!(
+        snapshot["prompt_sources"],
+        serde_json::json!([
+            {
+                "effective_order": 0,
+                "stable_id": "runtime-private",
+                "kind": "extra_prompt",
+                "origin": "builtin",
+                "scope": "global",
+                "priority": -1,
+                "is_trusted": true,
+                "estimated_tokens": 7,
+            },
+            {
+                "effective_order": 1,
+                "stable_id": "private-instruction",
+                "kind": "core_system_prompt",
+                "origin": null,
+                "scope": null,
+                "priority": 0,
+                "is_trusted": false,
+                "estimated_tokens": null,
+            }
+        ])
+    );
 }
 
 #[test]
@@ -142,7 +218,7 @@ fn ui_runtime_bridge_reacts_to_wake_binding_lifecycle() {
     }];
     let mut coordinator = runtime_coordinator(AppRuntimeOptions {
         session_store: Some(Arc::new(InMemorySessionStore::new())),
-        prompt_assembly_manager: Some(prompt_assembly_manager),
+        initial_prompt_assembly: Some(prompt_assembly_manager),
         ..AppRuntimeOptions::default()
     });
     assert_eq!(
@@ -190,6 +266,7 @@ fn ui_runtime_bridge_reacts_to_wake_binding_lifecycle() {
     assert_eq!(snapshot["workspace_tools"], serde_json::json!([]));
     assert_eq!(snapshot["session_tools"], serde_json::json!([]));
     assert_eq!(snapshot["prompt_tools"], serde_json::json!([]));
+    assert_eq!(snapshot["prompt_sources"], serde_json::json!([]));
     assert_eq!(
         component_state(&coordinator, "native_agent_runtime"),
         "pending"

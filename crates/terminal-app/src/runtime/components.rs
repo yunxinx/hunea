@@ -8,6 +8,7 @@ use super::{
     agent::{AgentRuntime, NativeAgentRuntime},
     context_budget_worker::ContextBudgetWorker,
     lifecycle::{CapabilityKey, ComponentDefinition, ComponentGraph, EffectId, EffectScope},
+    prompt_assembly::{PromptAssembly, PromptRegistration},
     session_tools_for_manager,
     session_worker::SessionStoreWorker,
     tool_catalog::{ToolCatalog, ToolRegistration},
@@ -24,6 +25,7 @@ pub(super) struct RuntimeComponents {
     pub(super) agent_runtime: NativeAgentRuntime,
     pub(super) model_refresh: ModelRefreshWorker,
     pub(super) tool_catalog: ToolCatalog,
+    pub(super) prompt_assembly: PromptAssembly,
     pub(super) session_workspace_tools: ToolExecutorRegistry,
     pub(super) session_store_worker: SessionStoreWorker,
     pub(super) context_budget_worker: ContextBudgetWorker,
@@ -31,6 +33,7 @@ pub(super) struct RuntimeComponents {
     effect_scope: EffectScope,
     runtime_wake_effect: Option<EffectId>,
     tool_catalog_effect: Option<EffectId>,
+    prompt_assembly_effect: Option<EffectId>,
     pub(super) lifecycle: ComponentGraph,
     is_shutdown: bool,
 }
@@ -46,14 +49,23 @@ impl RuntimeComponents {
         // initial composition 先安装 inverse，再把任何 catalog snapshot 交给 consumer；
         // 后续构造失败时 local scope Drop 会完整回滚 registration。
         let tool_catalog_effect = register_tool_catalog_effect(&effect_scope, tool_registration)?;
+        let (prompt_assembly, prompt_registration) = PromptAssembly::adopt_manager(
+            "workspace-prompt",
+            options.initial_prompt_assembly.clone(),
+        )
+        .map_err(|error| error.to_string())?;
+        let prompt_assembly_effect =
+            register_prompt_assembly_effect(&effect_scope, prompt_registration)?;
+        let prompt_assembly_snapshot = prompt_assembly.session_snapshot();
         let prompt_assembly_tool_definitions = tool_catalog.definitions();
         let session_workspace_tools =
-            session_tools_for_manager(&tool_catalog, options.prompt_assembly_manager.as_ref());
+            session_tools_for_manager(&tool_catalog, prompt_assembly_snapshot.manager.as_ref());
         let runtime_event_notifier = RuntimeEventNotifier::default();
         let agent_runtime = NativeAgentRuntime::new(
             options,
             session_workspace_tools.clone(),
             prompt_assembly_tool_definitions,
+            prompt_assembly_snapshot,
             runtime_event_notifier.clone(),
         )?;
         let mut lifecycle = ComponentGraph::default();
@@ -90,6 +102,7 @@ impl RuntimeComponents {
             agent_runtime,
             model_refresh: ModelRefreshWorker::new(runtime_event_notifier.clone()),
             tool_catalog,
+            prompt_assembly,
             session_workspace_tools,
             session_store_worker: SessionStoreWorker::new(runtime_event_notifier.clone()),
             context_budget_worker: ContextBudgetWorker::new(runtime_event_notifier.clone())
@@ -98,6 +111,7 @@ impl RuntimeComponents {
             effect_scope,
             runtime_wake_effect: None,
             tool_catalog_effect: Some(tool_catalog_effect),
+            prompt_assembly_effect: Some(prompt_assembly_effect),
             lifecycle,
             is_shutdown: false,
         })
@@ -137,6 +151,14 @@ impl RuntimeComponents {
     }
 
     pub(super) fn reset_after_clear(&mut self, options: &AppRuntimeOptions) -> Result<(), String> {
+        self.reset_after_clear_with_native_mount_check(options, || Ok(()))
+    }
+
+    fn reset_after_clear_with_native_mount_check(
+        &mut self,
+        options: &AppRuntimeOptions,
+        native_mount_check: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
         if self.is_shutdown {
             return Err("Runtime components are shut down".to_string());
         }
@@ -159,6 +181,13 @@ impl RuntimeComponents {
         }
         self.context_budget_worker.cancel_pending();
         self.session_workspace_tools = ToolExecutorRegistry::new();
+        let current_prompt_assembly = self.prompt_assembly.manager_snapshot();
+        self.prompt_assembly.deactivate();
+        if let Some(effect_id) = self.prompt_assembly_effect.take()
+            && let Some(error) = self.effect_scope.dispose_effect(effect_id).error_message()
+        {
+            failures.push(error);
+        }
         if let Some(effect_id) = self.tool_catalog_effect.take()
             && let Some(error) = self.effect_scope.dispose_effect(effect_id).error_message()
         {
@@ -173,24 +202,55 @@ impl RuntimeComponents {
             &options.hunea_config_dir,
         )
         .map_err(|error| error.to_string())?;
+        let fresh_tool_catalog_effect =
+            register_tool_catalog_effect(&self.effect_scope, fresh_tool_registration)?;
         let prompt_assembly_tool_definitions = fresh_tool_catalog.definitions();
+        let (fresh_prompt_assembly, fresh_prompt_registration) =
+            match PromptAssembly::adopt_manager("workspace-prompt", current_prompt_assembly) {
+                Ok(prompt_assembly) => prompt_assembly,
+                Err(error) => {
+                    let _ = self.effect_scope.dispose_effect(fresh_tool_catalog_effect);
+                    return Err(error.to_string());
+                }
+            };
+        let fresh_prompt_assembly_effect =
+            match register_prompt_assembly_effect(&self.effect_scope, fresh_prompt_registration) {
+                Ok(effect_id) => effect_id,
+                Err(error) => {
+                    let _ = self.effect_scope.dispose_effect(fresh_tool_catalog_effect);
+                    return Err(error);
+                }
+            };
+        let fresh_prompt_assembly_snapshot = fresh_prompt_assembly.session_snapshot();
         let session_workspace_tools = session_tools_for_manager(
             &fresh_tool_catalog,
-            options.prompt_assembly_manager.as_ref(),
+            fresh_prompt_assembly_snapshot.manager.as_ref(),
         );
         // 旧 adapter 完全 quiescent 后才创建新 generation，避免 reset 期间存在两个
         // native worker path；构造失败时 capability 仍保持 removed，不发布半成品。
-        let fresh_agent_runtime = NativeAgentRuntime::new(
-            options,
-            session_workspace_tools.clone(),
-            prompt_assembly_tool_definitions,
-            self.runtime_event_notifier.clone(),
-        )?;
-        let fresh_tool_catalog_effect =
-            register_tool_catalog_effect(&self.effect_scope, fresh_tool_registration)?;
+        let fresh_agent_runtime = match native_mount_check().and_then(|()| {
+            NativeAgentRuntime::new(
+                options,
+                session_workspace_tools.clone(),
+                prompt_assembly_tool_definitions,
+                fresh_prompt_assembly_snapshot,
+                self.runtime_event_notifier.clone(),
+            )
+        }) {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                let _ = self
+                    .effect_scope
+                    .dispose_effect(fresh_prompt_assembly_effect);
+                let _ = self.effect_scope.dispose_effect(fresh_tool_catalog_effect);
+                return Err(error);
+            }
+        };
         self.agent_runtime = fresh_agent_runtime;
         self.tool_catalog = fresh_tool_catalog;
+        self.prompt_assembly = fresh_prompt_assembly;
         self.tool_catalog_effect = Some(fresh_tool_catalog_effect);
+        self.prompt_assembly_effect = Some(fresh_prompt_assembly_effect);
         self.session_workspace_tools = session_workspace_tools;
         for key in replaced {
             self.lifecycle.replace_capability(&key);
@@ -225,6 +285,12 @@ impl RuntimeComponents {
             failures.push(error.to_string());
         }
         self.session_workspace_tools = ToolExecutorRegistry::new();
+        self.prompt_assembly.deactivate();
+        if let Some(effect_id) = self.prompt_assembly_effect.take()
+            && let Some(error) = self.effect_scope.dispose_effect(effect_id).error_message()
+        {
+            failures.push(error);
+        }
         if let Some(effect_id) = self.tool_catalog_effect.take()
             && let Some(error) = self.effect_scope.dispose_effect(effect_id).error_message()
         {
@@ -272,6 +338,18 @@ fn register_tool_catalog_effect(
         .map_err(|error| error.to_string())
 }
 
+fn register_prompt_assembly_effect(
+    effect_scope: &EffectScope,
+    mut registration: PromptRegistration,
+) -> Result<EffectId, String> {
+    effect_scope
+        .register("prompt-assembly", move || {
+            registration.dispose();
+            Ok(())
+        })
+        .map_err(|error| error.to_string())
+}
+
 impl Drop for RuntimeComponents {
     fn drop(&mut self) {
         let _ = self.shutdown(None);
@@ -282,6 +360,28 @@ impl Drop for RuntimeComponents {
 mod tests {
     use super::*;
     use crate::runtime::lifecycle::ComponentState;
+    use runtime_domain::prompt_assembly::{
+        PromptPreludeSection, PromptSourceKind, PromptSourceOrigin,
+    };
+
+    fn manager_with_section(
+        reference_id: &str,
+        body: &str,
+    ) -> runtime_domain::prompt_assembly::PromptAssemblyManagerSnapshot {
+        let mut manager = runtime_domain::prompt_assembly::PromptAssemblyManagerSnapshot::default();
+        manager
+            .resolution
+            .prelude
+            .sections
+            .push(PromptPreludeSection {
+                reference_id: reference_id.to_string(),
+                kind: PromptSourceKind::ExtraPrompt,
+                title: reference_id.to_string(),
+                origin: Some(PromptSourceOrigin::Project),
+                body: body.to_string(),
+            });
+        manager
+    }
 
     #[test]
     fn failed_tool_catalog_remount_keeps_capabilities_removed_and_effects_reverted() {
@@ -313,6 +413,104 @@ mod tests {
                 .lifecycle
                 .has_capability(&CapabilityKey::from("tool_catalog"))
         );
+        assert_eq!(
+            components.lifecycle.state("native_agent_runtime"),
+            Some(ComponentState::Pending)
+        );
+        assert_eq!(
+            components.lifecycle.state("prompt_assembly"),
+            Some(ComponentState::Pending)
+        );
+        assert!(components.prompt_assembly.manager_snapshot().is_none());
+        assert!(components.prompt_assembly.inspection_snapshot().is_empty());
+    }
+
+    #[test]
+    fn shutdown_clears_prompt_and_tool_generations() {
+        let options = AppRuntimeOptions {
+            initial_prompt_assembly: Some(manager_with_section("initial", "initial body")),
+            ..AppRuntimeOptions::default()
+        };
+        let mut components =
+            RuntimeComponents::new(&options).expect("runtime components should initialize");
+
+        components
+            .shutdown(None)
+            .expect("shutdown should dispose all runtime effects");
+
+        assert!(components.prompt_assembly.manager_snapshot().is_none());
+        assert!(components.prompt_assembly.inspection_snapshot().is_empty());
+        assert!(components.tool_catalog.definitions().is_empty());
+        assert_eq!(
+            components.lifecycle.state("native_agent_runtime"),
+            Some(ComponentState::Pending)
+        );
+        assert_eq!(
+            components.lifecycle.state("prompt_assembly"),
+            Some(ComponentState::Pending)
+        );
+    }
+
+    #[test]
+    fn reset_rebinds_the_current_live_prompt_manager() {
+        let options = AppRuntimeOptions {
+            initial_prompt_assembly: Some(manager_with_section("initial", "initial body")),
+            ..AppRuntimeOptions::default()
+        };
+        let mut components =
+            RuntimeComponents::new(&options).expect("runtime components should initialize");
+        components
+            .prompt_assembly
+            .replace_manager(Some(manager_with_section("live", "live body")))
+            .expect("live manager should be replaceable");
+
+        components
+            .reset_after_clear(&options)
+            .expect("reset should install a new generation");
+
+        let snapshot = components
+            .prompt_assembly
+            .session_snapshot()
+            .prompt_prelude
+            .expect("fresh generation should keep the live manager");
+        assert_eq!(snapshot.sections[0].reference_id, "live");
+        assert_eq!(snapshot.sections[0].body, "live body");
+    }
+
+    #[test]
+    fn failed_native_mount_reverts_fresh_prompt_and_tool_effects() {
+        let options = AppRuntimeOptions {
+            initial_prompt_assembly: Some(manager_with_section("initial", "initial body")),
+            ..AppRuntimeOptions::default()
+        };
+        let mut components =
+            RuntimeComponents::new(&options).expect("runtime components should initialize");
+
+        let error = components
+            .reset_after_clear_with_native_mount_check(&options, || {
+                Err("injected native mount failure".to_string())
+            })
+            .expect_err("injected native mount failure should abort publication");
+
+        assert_eq!(error, "injected native mount failure");
+        assert!(components.tool_catalog.definitions().is_empty());
+        assert!(components.prompt_assembly.manager_snapshot().is_none());
+        assert!(components.prompt_assembly.inspection_snapshot().is_empty());
+        assert_eq!(
+            components
+                .session_workspace_tools
+                .definitions()
+                .definitions()
+                .count(),
+            0
+        );
+        for capability in ["model_catalog", "prompt_assembly", "tool_catalog"] {
+            assert!(
+                !components
+                    .lifecycle
+                    .has_capability(&CapabilityKey::from(capability))
+            );
+        }
         assert_eq!(
             components.lifecycle.state("native_agent_runtime"),
             Some(ComponentState::Pending)

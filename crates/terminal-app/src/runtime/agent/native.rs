@@ -33,6 +33,7 @@ use crate::runtime::{
         DynamicEnvironmentInjection, DynamicEnvironmentRequest, DynamicEnvironmentWorker,
         dynamic_environment_snapshot_for_turn,
     },
+    prompt_assembly::PromptAssemblySessionSnapshot,
 };
 
 struct PendingNativeTurn {
@@ -72,7 +73,7 @@ pub struct NativeAgentRuntime {
     prompt_assembly_manager: Option<PromptAssemblyManagerSnapshot>,
     hunea_config_dir: std::path::PathBuf,
     session_header_template: Option<SessionHeader>,
-    initial_dynamic_environment_session_config: Option<DynamicEnvironmentSessionConfig>,
+    prompt_assembly_session_config: Option<DynamicEnvironmentSessionConfig>,
     pending_turn: Option<PendingNativeTurn>,
     active_turn: Option<ActiveNativeTurn>,
     pending_events: VecDeque<AgentEvent>,
@@ -85,9 +86,10 @@ impl NativeAgentRuntime {
         options: &AppRuntimeOptions,
         session_workspace_tools: ToolExecutorRegistry,
         prompt_assembly_tool_definitions: Vec<ToolDefinition>,
+        prompt_assembly: PromptAssemblySessionSnapshot,
         event_notifier: RuntimeEventNotifier,
     ) -> Result<Self, String> {
-        let provider_conversation = fresh_provider_conversation(options)?;
+        let provider_conversation = fresh_provider_conversation(options, &prompt_assembly)?;
         Ok(Self {
             worker: ConversationWorker::new(event_notifier.clone()),
             provider_conversation,
@@ -100,12 +102,10 @@ impl NativeAgentRuntime {
             loaded_models: options.loaded_models.clone(),
             session_workspace_tools,
             prompt_assembly_tool_definitions,
-            prompt_assembly_manager: options.prompt_assembly_manager.clone(),
+            prompt_assembly_manager: prompt_assembly.manager,
             hunea_config_dir: options.hunea_config_dir.clone(),
             session_header_template: options.session_header_template.clone(),
-            initial_dynamic_environment_session_config: options
-                .initial_dynamic_environment_session_config
-                .clone(),
+            prompt_assembly_session_config: prompt_assembly.dynamic_environment_session_config,
             pending_turn: None,
             active_turn: None,
             pending_events: VecDeque::new(),
@@ -172,18 +172,17 @@ impl NativeAgentRuntime {
 
     pub(crate) fn update_empty_session_configuration(
         &mut self,
-        manager: &PromptAssemblyManagerSnapshot,
-        dynamic_environment_session_config: DynamicEnvironmentSessionConfig,
+        prompt_assembly: PromptAssemblySessionSnapshot,
         session_workspace_tools: ToolExecutorRegistry,
     ) {
         self.provider_conversation
-            .set_prompt_prelude(Some(manager.resolution.prelude.clone()));
+            .set_prompt_prelude(prompt_assembly.prompt_prelude);
         self.provider_conversation
-            .set_dynamic_environment_session_config(Some(
-                dynamic_environment_session_config.clone(),
-            ));
-        self.prompt_assembly_manager = Some(manager.clone());
-        self.initial_dynamic_environment_session_config = Some(dynamic_environment_session_config);
+            .set_dynamic_environment_session_config(
+                prompt_assembly.dynamic_environment_session_config.clone(),
+            );
+        self.prompt_assembly_manager = prompt_assembly.manager;
+        self.prompt_assembly_session_config = prompt_assembly.dynamic_environment_session_config;
         self.session_workspace_tools = session_workspace_tools;
     }
 
@@ -641,7 +640,7 @@ impl NativeAgentRuntime {
             return config;
         }
         let config = self
-            .initial_dynamic_environment_session_config
+            .prompt_assembly_session_config
             .clone()
             .unwrap_or_default();
         self.provider_conversation
@@ -786,6 +785,7 @@ impl Drop for NativeAgentRuntime {
 
 fn fresh_provider_conversation(
     options: &AppRuntimeOptions,
+    prompt_assembly: &PromptAssemblySessionSnapshot,
 ) -> Result<ProviderConversation, String> {
     let mut provider_conversation = match (
         options.session_store.clone(),
@@ -797,9 +797,9 @@ fn fresh_provider_conversation(
         }
         _ => ProviderConversation::default(),
     };
-    provider_conversation.set_prompt_prelude(options.initial_prompt_prelude.clone());
+    provider_conversation.set_prompt_prelude(prompt_assembly.prompt_prelude.clone());
     provider_conversation.set_dynamic_environment_session_config(
-        options.initial_dynamic_environment_session_config.clone(),
+        prompt_assembly.dynamic_environment_session_config.clone(),
     );
     Ok(provider_conversation)
 }

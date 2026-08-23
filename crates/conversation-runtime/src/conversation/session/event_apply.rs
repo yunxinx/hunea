@@ -79,7 +79,6 @@ impl ConversationWorker {
         self.target = None;
         self.pending_session_id = None;
         self.pending_user_entry_id = None;
-        self.permission_broker.cancel_all();
         self.join_worker_thread()
     }
 }

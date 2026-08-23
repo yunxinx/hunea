@@ -1,4 +1,5 @@
 use std::{
+    ops::{Deref, DerefMut},
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -18,16 +19,62 @@ use runtime_domain::{
         RuntimeToolActivityStatus, RuntimeToolKind, TranscriptSkillBinding, TranscriptUserMessage,
     },
 };
-use tool_runtime::ToolExecutorRegistry;
+use tokio_util::sync::CancellationToken;
+use tool_runtime::{
+    Tool, ToolCall as RuntimeToolCall, ToolDefinition, ToolExecutionFuture, ToolExecutorRegistry,
+    ToolKind, ToolPermissionPolicy, ToolPermissionPreview, ToolResult,
+};
 
 use super::{
     AgentCommand, AgentEvent, AgentEventKind, AgentId, AgentRuntime, AgentRuntimeError,
     AgentTurnId, AgentTurnRequest, NativeAgentRuntime,
 };
-use crate::runtime::{AppRuntimeOptions, prompt_assembly::PromptAssemblySessionSnapshot};
+use crate::runtime::{
+    AppRuntimeOptions,
+    permission_policy::{
+        ApprovalProviderRegistration, InteractiveApprovalProviderFactory, PermissionPolicy,
+        TERMINAL_APPROVAL_PROVIDER_ID,
+    },
+    prompt_assembly::PromptAssemblySessionSnapshot,
+};
 
-fn native_runtime(event_notifier: RuntimeEventNotifier) -> NativeAgentRuntime {
-    NativeAgentRuntime::new(
+struct NativeRuntimeFixture {
+    runtime: NativeAgentRuntime,
+    _approval_registration: ApprovalProviderRegistration,
+}
+
+impl Deref for NativeRuntimeFixture {
+    type Target = NativeAgentRuntime;
+
+    fn deref(&self) -> &Self::Target {
+        &self.runtime
+    }
+}
+
+impl DerefMut for NativeRuntimeFixture {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.runtime
+    }
+}
+
+fn permission_policy_fixture(
+    event_notifier: RuntimeEventNotifier,
+) -> (PermissionPolicy, ApprovalProviderRegistration) {
+    let policy = PermissionPolicy::new(event_notifier);
+    let registration = policy
+        .register(
+            "native-test",
+            TERMINAL_APPROVAL_PROVIDER_ID,
+            std::sync::Arc::new(InteractiveApprovalProviderFactory),
+        )
+        .expect("native test approval provider should register");
+    (policy, registration)
+}
+
+fn native_runtime(event_notifier: RuntimeEventNotifier) -> NativeRuntimeFixture {
+    let (permission_policy, approval_registration) =
+        permission_policy_fixture(event_notifier.clone());
+    let runtime = NativeAgentRuntime::new(
         &AppRuntimeOptions {
             runtime_request_policy: runtime_domain::request_policy::RuntimeRequestPolicy::new(
                 0,
@@ -41,8 +88,14 @@ fn native_runtime(event_notifier: RuntimeEventNotifier) -> NativeAgentRuntime {
         PromptAssemblySessionSnapshot::default(),
         event_notifier,
         crate::runtime::llm_port::LlmPort::new(),
+        permission_policy,
+        TERMINAL_APPROVAL_PROVIDER_ID,
     )
-    .expect("native Agent runtime should initialize")
+    .expect("native Agent runtime should initialize");
+    NativeRuntimeFixture {
+        runtime,
+        _approval_registration: approval_registration,
+    }
 }
 
 struct NativeStreamProvider;
@@ -151,6 +204,114 @@ impl crate::runtime::llm_port::ProviderClientFactory for NativeFailureFactory {
 
     fn adapter_kind(&self) -> &'static str {
         "native-failure-fixture"
+    }
+}
+
+struct NativeApprovalProvider {
+    call_count: std::sync::atomic::AtomicUsize,
+}
+
+impl ProviderClient for NativeApprovalProvider {
+    fn stream_prompt<'a>(
+        &'a self,
+        _request: &'a PromptRequest,
+        sink: &'a mut (dyn StreamEventSink + Send),
+    ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
+        Box::pin(async move {
+            let call = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            sink.emit(StreamEvent::TurnStarted);
+            let completion = if call == 0 {
+                PromptCompletion::new(
+                    vec![ConversationItem::assistant_with_tool_calls(
+                        "before approval".to_string(),
+                        vec![provider_protocol::ToolCall::new(
+                            "approval-call",
+                            "write",
+                            serde_json::json!({"content": "approved"}).to_string(),
+                        )],
+                    )],
+                    FinishReason::ToolCalls,
+                    None,
+                )
+            } else {
+                PromptCompletion::new(
+                    vec![ConversationItem::text(Role::Assistant, "approved")],
+                    FinishReason::Stop,
+                    None,
+                )
+            };
+            sink.emit(StreamEvent::TurnCompleted(completion.clone()));
+            Ok(completion)
+        })
+    }
+
+    fn list_models<'a>(
+        &'a self,
+    ) -> ProviderFuture<'a, Result<Vec<ModelDescriptor>, ProviderError>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::chat_completions()
+    }
+}
+
+struct NativeApprovalFactory;
+
+impl crate::runtime::llm_port::ProviderClientFactory for NativeApprovalFactory {
+    fn create_client(
+        &self,
+        _idle_timeout: Duration,
+    ) -> Result<std::sync::Arc<dyn ProviderClient>, crate::runtime::llm_port::LlmPortError> {
+        Ok(std::sync::Arc::new(NativeApprovalProvider {
+            call_count: std::sync::atomic::AtomicUsize::new(0),
+        }))
+    }
+
+    fn provider_kind(&self) -> runtime_domain::provider::ProviderKind {
+        runtime_domain::provider::ProviderKind::OpenAiCompatible
+    }
+
+    fn prompt_cache_policy(&self) -> conversation_runtime::ProviderPromptCachePolicy {
+        conversation_runtime::ProviderPromptCachePolicy::Disabled
+    }
+
+    fn adapter_kind(&self) -> &'static str {
+        "native-approval-fixture"
+    }
+}
+
+struct NativeAskTool;
+
+impl Tool for NativeAskTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new("write")
+            .with_kind(ToolKind::Write)
+            .with_permission_policy(ToolPermissionPolicy::Ask)
+    }
+
+    fn execute<'a>(
+        &'a self,
+        call: RuntimeToolCall,
+        _cancellation: &'a CancellationToken,
+    ) -> ToolExecutionFuture<'a> {
+        Box::pin(async move { ToolResult::success(call.call_id, "write complete") })
+    }
+
+    fn permission_preview(
+        &self,
+        _call: &RuntimeToolCall,
+        _cancellation: &CancellationToken,
+    ) -> Option<ToolPermissionPreview> {
+        Some(ToolPermissionPreview {
+            path: "fixture.txt".to_string(),
+            old_text: None,
+            new_text: "approved".to_string(),
+            is_truncated: false,
+            snapshot: None,
+        })
     }
 }
 
@@ -370,7 +531,7 @@ fn native_runtime_wakes_only_after_an_identified_event_is_available() {
     let mut runtime = native_runtime(notifier);
     let turn_id = AgentTurnId::new(17);
     let target = failing_turn_request().target();
-    let runtime_contract: &mut dyn AgentRuntime = &mut runtime;
+    let runtime_contract: &mut dyn AgentRuntime = &mut *runtime;
 
     runtime_contract
         .dispatch(AgentCommand::SubmitTurn {
@@ -403,6 +564,8 @@ fn native_runtime_streams_through_the_llm_port_factory() {
             std::sync::Arc::new(NativeStreamFactory),
         )
         .expect("fixture provider should register");
+    let notifier = RuntimeEventNotifier::default();
+    let (permission_policy, _approval_registration) = permission_policy_fixture(notifier.clone());
     let mut runtime = NativeAgentRuntime::new(
         &AppRuntimeOptions {
             runtime_request_policy: runtime_domain::request_policy::RuntimeRequestPolicy::new(
@@ -415,8 +578,10 @@ fn native_runtime_streams_through_the_llm_port_factory() {
         ToolExecutorRegistry::default(),
         Vec::new(),
         PromptAssemblySessionSnapshot::default(),
-        RuntimeEventNotifier::default(),
+        notifier,
         llm_port,
+        permission_policy,
+        TERMINAL_APPROVAL_PROVIDER_ID,
     )
     .expect("native Agent runtime should initialize");
     let request = AgentTurnRequest::from_conversation_request(ConversationTurnRequest::new(
@@ -453,6 +618,98 @@ fn native_runtime_streams_through_the_llm_port_factory() {
 }
 
 #[test]
+fn native_runtime_routes_tool_approval_through_the_live_permission_turn() {
+    let llm_port = crate::runtime::llm_port::LlmPort::new();
+    let _registration = llm_port
+        .register(
+            "native-approval-test",
+            "fixture",
+            std::sync::Arc::new(NativeApprovalFactory),
+        )
+        .expect("approval fixture provider should register");
+    let notifier = RuntimeEventNotifier::default();
+    let (permission_policy, _approval_registration) = permission_policy_fixture(notifier.clone());
+    let mut tools = ToolExecutorRegistry::new();
+    tools.insert(NativeAskTool);
+    let mut runtime = NativeAgentRuntime::new(
+        &AppRuntimeOptions {
+            runtime_request_policy: runtime_domain::request_policy::RuntimeRequestPolicy::new(
+                0,
+                Vec::new(),
+                1,
+            ),
+            ..AppRuntimeOptions::default()
+        },
+        tools,
+        Vec::new(),
+        PromptAssemblySessionSnapshot::default(),
+        notifier,
+        llm_port,
+        permission_policy,
+        TERMINAL_APPROVAL_PROVIDER_ID,
+    )
+    .expect("native Agent runtime should initialize");
+    let request = AgentTurnRequest::from_conversation_request(ConversationTurnRequest::new(
+        "fixture",
+        "fixture-model",
+        ConversationItem::text(Role::User, "approve this tool"),
+    ));
+    let target = request.target();
+    runtime
+        .dispatch(AgentCommand::SubmitTurn {
+            agent_id: AgentId::MAIN,
+            turn_id: AgentTurnId::new(19),
+            request: Box::new(request),
+        })
+        .expect("native approval turn should start");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut events = Vec::new();
+    while Instant::now() < deadline {
+        events.extend(runtime.drain_events());
+        if events
+            .iter()
+            .any(|event| matches!(&event.kind, AgentEventKind::PermissionRequested { .. }))
+            || events.iter().any(|event| event.kind.is_terminal())
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let permission_index = events
+        .iter()
+        .position(|event| matches!(&event.kind, AgentEventKind::PermissionRequested { .. }))
+        .unwrap_or_else(|| panic!("native worker should publish an approval request: {events:?}"));
+    assert!(
+        events[..permission_index]
+            .iter()
+            .any(|event| matches!(event.kind, AgentEventKind::ToolActivityStarted { .. }))
+    );
+    let request_id = match &events[permission_index].kind {
+        AgentEventKind::PermissionRequested { request } => request.request_id.clone(),
+        _ => unreachable!(),
+    };
+    runtime
+        .dispatch(AgentCommand::RespondPermission {
+            agent_id: AgentId::MAIN,
+            target: Some(target),
+            request_id,
+            option_id: Some("allow_once".to_string()),
+        })
+        .expect("approval response should route to the active turn");
+
+    let remaining = collect_until_terminal(&mut runtime);
+    assert!(
+        remaining
+            .iter()
+            .any(|event| matches!(event.kind, AgentEventKind::TurnFinished { .. }))
+    );
+    runtime
+        .shutdown()
+        .expect("native approval runtime should shut down cleanly");
+}
+
+#[test]
 fn provider_failure_is_redacted_before_runtime_event_projection() {
     let sentinel = "https://private.invalid/private-instruction-sentinel";
     let llm_port = crate::runtime::llm_port::LlmPort::new();
@@ -463,6 +720,8 @@ fn provider_failure_is_redacted_before_runtime_event_projection() {
             std::sync::Arc::new(NativeFailureFactory),
         )
         .expect("fixture provider should register");
+    let notifier = RuntimeEventNotifier::default();
+    let (permission_policy, _approval_registration) = permission_policy_fixture(notifier.clone());
     let mut runtime = NativeAgentRuntime::new(
         &AppRuntimeOptions {
             runtime_request_policy: runtime_domain::request_policy::RuntimeRequestPolicy::new(
@@ -475,8 +734,10 @@ fn provider_failure_is_redacted_before_runtime_event_projection() {
         ToolExecutorRegistry::default(),
         Vec::new(),
         PromptAssemblySessionSnapshot::default(),
-        RuntimeEventNotifier::default(),
+        notifier,
         llm_port,
+        permission_policy,
+        TERMINAL_APPROVAL_PROVIDER_ID,
     )
     .expect("native Agent runtime should initialize");
 
@@ -518,7 +779,7 @@ fn provider_failure_is_redacted_before_runtime_event_projection() {
 fn shared_identity_and_terminal_contract_runs_for_native_and_replay() {
     let mut native = native_runtime(RuntimeEventNotifier::default());
     assert_shared_identity_and_terminal(
-        &mut native,
+        &mut *native,
         failing_turn_request(),
         AgentId::MAIN,
         AgentTurnId::new(31),
@@ -543,7 +804,7 @@ fn shared_identity_and_terminal_contract_runs_for_native_and_replay() {
 #[test]
 fn shared_lifecycle_contract_runs_for_native_and_replay() {
     let mut native = native_runtime(RuntimeEventNotifier::default());
-    assert_shared_lifecycle_contract(&mut native);
+    assert_shared_lifecycle_contract(&mut *native);
 
     let mut replay =
         super::replay::ReplayAgentRuntime::new(replay_fixture(), RuntimeEventNotifier::default());
@@ -556,7 +817,7 @@ fn shared_busy_and_interrupt_contract_runs_for_native_and_replay() {
     let native_target = native_request.target();
     let mut native = native_runtime(RuntimeEventNotifier::default());
     native.set_pending_turn_for_test(native_request.native_request.clone());
-    assert_shared_busy_and_interrupt_contract(&mut native, native_target, failing_turn_request());
+    assert_shared_busy_and_interrupt_contract(&mut *native, native_target, failing_turn_request());
 
     let active_replay_request = replay_request();
     let replay_target = active_replay_request.target();

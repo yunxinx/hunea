@@ -2,7 +2,6 @@
 
 mod client;
 mod error;
-mod permission;
 mod provider_conversation;
 mod response;
 mod session;
@@ -10,7 +9,6 @@ mod turn;
 
 pub use client::run_conversation_turn_with_cancellation;
 pub use error::TurnExecutionError;
-pub(crate) use permission::ConversationPermissionBroker;
 pub(crate) use provider_conversation::{
     PersistedConversationItem, PreparedConversationPersistence,
 };

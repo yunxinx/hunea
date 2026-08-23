@@ -3,8 +3,8 @@ use provider_protocol::{ContentBlock, ConversationItem, Role};
 use std::{fmt, time::Duration};
 
 use super::{
-    RuntimePermissionRequest, RuntimeTarget, RuntimeTerminalSnapshot, RuntimeToolActivity,
-    RuntimeToolActivityUpdate, TranscriptUserMessage,
+    RuntimeTarget, RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityUpdate,
+    TranscriptUserMessage,
 };
 
 /// `ConversationRequest` 描述一次完整的对话执行请求。
@@ -383,9 +383,6 @@ pub enum ConversationEvent {
     },
     TerminalUpdated {
         snapshot: RuntimeTerminalSnapshot,
-    },
-    PermissionRequested {
-        request: RuntimePermissionRequest,
     },
     Finished {
         response: ConversationResponse,

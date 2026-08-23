@@ -26,7 +26,6 @@ fn conversation_worker_persists_config_change_and_flushes_finished_turn() {
         worker_thread: None,
         cancellation: Some(CancellationToken::new()),
         target: Some(RuntimeTarget::provider("local", "qwen3")),
-        permission_broker: ConversationPermissionBroker::default(),
         pending_session_id: None,
         pending_user_entry_id: None,
         session_items: Vec::new(),
@@ -109,7 +108,7 @@ fn conversation_worker_persists_user_turn_when_request_fails_before_streaming() 
             ToolExecutorRegistry::new(),
             RuntimeRequestPolicy::default(),
             CancellationToken::new(),
-            ConversationPermissionBroker::default(),
+            None,
             sender,
         ));
 

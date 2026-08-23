@@ -9,7 +9,7 @@ use super::{
     prompt_assembly::PromptContributionSnapshot,
 };
 
-const COMPOSITION_SNAPSHOT_VERSION: u32 = 3;
+const COMPOSITION_SNAPSHOT_VERSION: u32 = 4;
 
 /// `RuntimeCompositionSnapshot` 是默认 runtime composition 的只读诊断投影。
 ///
@@ -20,6 +20,7 @@ pub(super) struct RuntimeCompositionSnapshot {
     schema_version: u32,
     capabilities: Vec<CapabilitySnapshot>,
     components: Vec<RuntimeComponentSnapshot>,
+    approval_providers: Vec<ApprovalProviderSnapshot>,
     providers: Vec<ProviderSnapshot>,
     selected_model: Option<ModelSelectionSnapshot>,
     workspace_tools: Vec<ToolSnapshot>,
@@ -38,6 +39,12 @@ impl RuntimeCompositionSnapshot {
         ensure_sorted_unique(
             self.components.iter().map(|component| &component.id),
             "component",
+        )?;
+        ensure_sorted_unique(
+            self.approval_providers
+                .iter()
+                .map(|provider| &provider.provider_id),
+            "approval provider",
         )?;
         ensure_sorted_unique(
             self.providers.iter().map(|provider| &provider.id),
@@ -102,6 +109,13 @@ struct RuntimeComponentSnapshot {
 struct OptionalDependencySnapshot {
     key: String,
     available: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ApprovalProviderSnapshot {
+    provider_id: String,
+    adapter_kind: String,
+    mounted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -200,6 +214,18 @@ impl AppRuntimeCoordinator {
             .collect::<Vec<_>>();
         providers.sort_by(|left, right| left.id.cmp(&right.id));
 
+        let approval_providers = self
+            .components
+            .permission_policy
+            .inspection_snapshot()
+            .into_iter()
+            .map(|provider| ApprovalProviderSnapshot {
+                provider_id: provider.provider_id,
+                adapter_kind: provider.adapter_kind,
+                mounted: true,
+            })
+            .collect();
+
         let selected_model = self
             .options
             .loaded_models
@@ -231,6 +257,7 @@ impl AppRuntimeCoordinator {
             schema_version: COMPOSITION_SNAPSHOT_VERSION,
             capabilities,
             components,
+            approval_providers,
             providers,
             selected_model,
             workspace_tools,

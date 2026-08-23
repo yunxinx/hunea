@@ -21,8 +21,7 @@ use session_store::SessionId;
 use tool_runtime::{SharedToolPermissionHandler, ToolExecutorRegistry};
 
 use super::{
-    ConversationPermissionBroker, PersistedConversationItem, TurnExecutionError,
-    turn::run_prepared_conversation_with_progress,
+    PersistedConversationItem, TurnExecutionError, turn::run_prepared_conversation_with_progress,
 };
 use crate::{NotifyingSender, RuntimeEventNotifier};
 use crate::{PreparedConversationRequest, ProviderClientLease};
@@ -39,9 +38,7 @@ use persistence::{
     ConversationDelta, SessionPersistenceCommand, flush_session_persistence,
     run_session_persistence_actor,
 };
-use progress_mapping::{
-    conversation_worker_event_from_progress, progress_sender_to_permission_sender,
-};
+use progress_mapping::conversation_worker_event_from_progress;
 
 #[cfg(test)]
 use persistence::{
@@ -78,7 +75,6 @@ pub struct ConversationWorker {
     worker_thread: Option<JoinHandle<()>>,
     pub cancellation: Option<CancellationToken>,
     pub target: Option<RuntimeTarget>,
-    permission_broker: ConversationPermissionBroker,
     pending_session_id: Option<SessionId>,
     pending_user_entry_id: Option<String>,
     session_items: Vec<PersistedConversationItem>,
@@ -93,7 +89,6 @@ impl ConversationWorker {
             worker_thread: None,
             cancellation: None,
             target: None,
-            permission_broker: ConversationPermissionBroker::default(),
             pending_session_id: None,
             pending_user_entry_id: None,
             session_items: Vec::new(),
@@ -108,14 +103,13 @@ impl ConversationWorker {
         provider_lease: ProviderClientLease,
         executor: ToolExecutorRegistry,
         request_policy: RuntimeRequestPolicy,
+        permission_handler: Option<SharedToolPermissionHandler>,
     ) {
         let (sender, receiver) = mpsc::channel();
         let sender = ConversationWorkerEventSender::new(sender, self.event_notifier.clone());
         let cancellation = CancellationToken::default();
         let thread_cancellation = cancellation.clone();
         let target = request.target();
-        let permission_broker = self.permission_broker.clone();
-        let thread_permission_broker = permission_broker.clone();
         let worker_thread = thread::spawn(move || {
             let _exit_notification = sender.notify_on_drop();
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -129,7 +123,7 @@ impl ConversationWorker {
                         executor,
                         request_policy,
                         thread_cancellation,
-                        thread_permission_broker,
+                        permission_handler,
                         sender,
                     ));
                 }
@@ -160,7 +154,6 @@ impl ConversationWorker {
         if let Some(cancellation) = self.cancellation.take() {
             cancellation.cancel();
         }
-        self.permission_broker.cancel_all();
         self.receiver = None;
         self.target = None;
         self.pending_session_id = None;
@@ -170,13 +163,6 @@ impl ConversationWorker {
         self.join_worker_thread()
     }
 
-    /// 取消当前 turn，并清除切换 conversation 后不得继续复用的权限规则。
-    pub fn reset_for_context_change(&mut self) -> Result<(), String> {
-        let cleanup_result = self.reset_after_clear();
-        self.clear_permission_context();
-        cleanup_result
-    }
-
     pub fn interrupt(&mut self) -> bool {
         if !self.is_running() {
             return false;
@@ -184,22 +170,7 @@ impl ConversationWorker {
         if let Some(cancellation) = self.cancellation.take() {
             cancellation.cancel();
         }
-        self.permission_broker.cancel_all();
         true
-    }
-
-    /// 清除当前 runtime 的权限上下文，用于切换到另一条 conversation 或关闭 runtime。
-    pub fn clear_permission_context(&mut self) {
-        self.permission_broker.clear_permission_context();
-    }
-
-    pub fn respond_permission(
-        &mut self,
-        request_id: &str,
-        option_id: Option<String>,
-    ) -> Result<(), String> {
-        self.permission_broker
-            .respond_permission(request_id, option_id)
     }
 
     pub fn current_target(&self) -> Option<&RuntimeTarget> {
@@ -250,7 +221,7 @@ async fn run_conversation_worker(
     executor: ToolExecutorRegistry,
     request_policy: RuntimeRequestPolicy,
     cancellation: CancellationToken,
-    permission_broker: ConversationPermissionBroker,
+    permission_handler: Option<SharedToolPermissionHandler>,
     sender: ConversationWorkerEventSender,
 ) {
     let provider_context_items_started = Arc::new(AtomicBool::new(false));
@@ -283,9 +254,6 @@ async fn run_conversation_worker(
         let attempt_provider_context_repair_ledger = Arc::clone(&provider_context_repair_ledger);
         let attempt_cancellation = cancellation.child_token();
         let progress_attempt_cancellation = attempt_cancellation.clone();
-        let permission_handler: SharedToolPermissionHandler = std::sync::Arc::new(
-            permission_broker.handler(progress_sender_to_permission_sender(sender.clone())),
-        );
         let attempt_result = run_with_cancellation_grace(
             &cancellation,
             &attempt_cancellation,
@@ -296,7 +264,7 @@ async fn run_conversation_worker(
                 executor.clone(),
                 &attempt_cancellation,
                 request_policy.tool_max_turns(),
-                Some(permission_handler),
+                permission_handler.clone(),
                 move |progress| match progress {
                     crate::conversation::ConversationProgress::ProviderTurnStarted => {}
                     crate::conversation::ConversationProgress::ProviderContextItem { item } => {
@@ -369,7 +337,6 @@ async fn run_conversation_worker(
 
         match attempt_result {
             TurnAttemptOutcome::Completed(Ok(completion)) => {
-                permission_broker.cancel_all();
                 if let Err(error) = flush_session_persistence(&session_sender).await {
                     let _ = sender.send(ConversationWorkerEvent::progress(
                         ConversationEvent::Failed {
@@ -390,7 +357,6 @@ async fn run_conversation_worker(
                 return;
             }
             TurnAttemptOutcome::Completed(Err(TurnExecutionError::Cancelled)) => {
-                permission_broker.cancel_all();
                 send_repair_items(
                     provider_context_repair_ledger.as_ref(),
                     &session_sender,
@@ -409,7 +375,6 @@ async fn run_conversation_worker(
                 return;
             }
             TurnAttemptOutcome::CancelledAfterGrace => {
-                permission_broker.cancel_all();
                 send_repair_items(
                     provider_context_repair_ledger.as_ref(),
                     &session_sender,
@@ -430,7 +395,6 @@ async fn run_conversation_worker(
             TurnAttemptOutcome::Completed(Err(_error))
                 if attempt < request_policy.attempts() && can_retry_from_original_request =>
             {
-                permission_broker.cancel_all();
                 if retry_conversation_after_attempt(
                     attempt,
                     &request_policy,
@@ -446,7 +410,6 @@ async fn run_conversation_worker(
                 }
             }
             TurnAttemptOutcome::Completed(Err(error)) => {
-                permission_broker.cancel_all();
                 send_repair_items(
                     provider_context_repair_ledger.as_ref(),
                     &session_sender,

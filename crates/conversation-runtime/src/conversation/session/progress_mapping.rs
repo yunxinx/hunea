@@ -1,21 +1,7 @@
-use std::{sync::mpsc, thread};
-
 use runtime_domain::session::ConversationEvent;
 
 use super::ConversationWorkerEvent;
 use crate::conversation::ConversationProgress;
-
-pub(super) fn progress_sender_to_permission_sender(
-    sender: super::ConversationWorkerEventSender,
-) -> mpsc::Sender<ConversationEvent> {
-    let (permission_sender, permission_receiver) = mpsc::channel();
-    thread::spawn(move || {
-        while let Ok(event) = permission_receiver.recv() {
-            let _ = sender.send(ConversationWorkerEvent::progress(event));
-        }
-    });
-    permission_sender
-}
 
 pub(super) fn conversation_worker_event_from_progress(
     progress: ConversationProgress,

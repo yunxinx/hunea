@@ -172,7 +172,7 @@ fn composition_snapshot_is_deterministic_and_redacted() {
 
     let snapshot: serde_json::Value =
         serde_json::from_str(&json).expect("snapshot JSON should decode");
-    assert_eq!(snapshot["schema_version"], 3);
+    assert_eq!(snapshot["schema_version"], 4);
     assert_eq!(snapshot["session_persistence"]["available"], true);
     assert_eq!(
         snapshot["selected_model"],
@@ -188,6 +188,14 @@ fn composition_snapshot_is_deterministic_and_redacted() {
     assert_eq!(
         snapshot["providers"][0]["model_ids"],
         serde_json::json!(["a-model", "z-model"])
+    );
+    assert_eq!(
+        snapshot["approval_providers"],
+        serde_json::json!([{
+            "provider_id": "terminal-interactive",
+            "adapter_kind": "terminal-interactive",
+            "mounted": true,
+        }])
     );
 
     let workspace_names = names(&snapshot["workspace_tools"]);
@@ -316,6 +324,7 @@ fn ui_runtime_bridge_reacts_to_wake_binding_lifecycle() {
     assert_eq!(snapshot["prompt_tools"], serde_json::json!([]));
     assert_eq!(snapshot["prompt_sources"], serde_json::json!([]));
     assert_eq!(snapshot["providers"], serde_json::json!([]));
+    assert_eq!(snapshot["approval_providers"], serde_json::json!([]));
     assert_eq!(
         component_state(&coordinator, "native_agent_runtime"),
         "pending"

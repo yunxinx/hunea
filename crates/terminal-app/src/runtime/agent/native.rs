@@ -12,9 +12,9 @@ use runtime_domain::{
     prompt_assembly::{PromptAssemblyManagerSnapshot, PromptPreludeSnapshot},
     request_policy::RuntimeRequestPolicy,
     session::{
-        ConversationEvent, ConversationTurnRequest, RuntimeRequestMetrics, RuntimeTarget,
-        RuntimeToolActivity, RuntimeToolActivityRawValue, RuntimeToolActivityStatus,
-        RuntimeToolKind, TranscriptReplayItem, TranscriptUserMessage,
+        ConversationEvent, ConversationTurnRequest, RuntimePermissionRequest,
+        RuntimeRequestMetrics, RuntimeTarget, RuntimeToolActivity, RuntimeToolActivityRawValue,
+        RuntimeToolActivityStatus, RuntimeToolKind, TranscriptReplayItem, TranscriptUserMessage,
     },
 };
 use session_store::{SessionHeader, SessionId};
@@ -34,6 +34,7 @@ use crate::runtime::{
         dynamic_environment_snapshot_for_turn,
     },
     llm_port::LlmPort,
+    permission_policy::{PermissionPolicy, PermissionTurn},
     prompt_assembly::PromptAssemblySessionSnapshot,
 };
 
@@ -65,6 +66,8 @@ pub struct NativeContextBudgetSnapshot {
 pub struct NativeAgentRuntime {
     worker: ConversationWorker,
     llm_port: LlmPort,
+    permission_policy: PermissionPolicy,
+    permission_provider_id: String,
     provider_conversation: ProviderConversation,
     dynamic_environment_worker: DynamicEnvironmentWorker,
     event_notifier: RuntimeEventNotifier,
@@ -78,12 +81,16 @@ pub struct NativeAgentRuntime {
     prompt_assembly_session_config: Option<DynamicEnvironmentSessionConfig>,
     pending_turn: Option<PendingNativeTurn>,
     active_turn: Option<ActiveNativeTurn>,
+    permission_turn: Option<PermissionTurn>,
     pending_events: VecDeque<AgentEvent>,
     manual_skill_activity_sequence: usize,
     is_shutdown: bool,
 }
 
 impl NativeAgentRuntime {
+    // provider identity 必须与传入的 PermissionPolicy generation 成对传递；将其
+    // 隐藏到全局默认值会让 provider replacement 后的 turn 错误地访问旧注册。
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         options: &AppRuntimeOptions,
         session_workspace_tools: ToolExecutorRegistry,
@@ -91,11 +98,15 @@ impl NativeAgentRuntime {
         prompt_assembly: PromptAssemblySessionSnapshot,
         event_notifier: RuntimeEventNotifier,
         llm_port: LlmPort,
+        permission_policy: PermissionPolicy,
+        permission_provider_id: impl Into<String>,
     ) -> Result<Self, String> {
         let provider_conversation = fresh_provider_conversation(options, &prompt_assembly)?;
         Ok(Self {
             worker: ConversationWorker::new(event_notifier.clone()),
             llm_port,
+            permission_policy,
+            permission_provider_id: permission_provider_id.into(),
             provider_conversation,
             dynamic_environment_worker: DynamicEnvironmentWorker::new(
                 Arc::clone(&options.dynamic_environment_observer),
@@ -112,6 +123,7 @@ impl NativeAgentRuntime {
             prompt_assembly_session_config: prompt_assembly.dynamic_environment_session_config,
             pending_turn: None,
             active_turn: None,
+            permission_turn: None,
             pending_events: VecDeque::new(),
             manual_skill_activity_sequence: 0,
             is_shutdown: false,
@@ -194,12 +206,14 @@ impl NativeAgentRuntime {
         &mut self,
         conversation: ProviderConversation,
     ) -> Result<(), String> {
-        let worker_result = self.worker.reset_for_context_change();
+        let worker_result = self.worker.reset_after_clear();
+        self.cancel_permission_turn();
         self.dynamic_environment_worker.cancel_pending();
         self.pending_turn = None;
         self.active_turn = None;
         self.pending_events.clear();
         worker_result?;
+        self.permission_policy.clear_context();
         self.provider_conversation = conversation;
         Ok(())
     }
@@ -217,6 +231,11 @@ impl NativeAgentRuntime {
     #[cfg(test)]
     pub(crate) fn provider_conversation_for_test(&self) -> &ProviderConversation {
         &self.provider_conversation
+    }
+
+    #[cfg(test)]
+    pub(crate) fn permission_provider_id_for_test(&self) -> &str {
+        &self.permission_provider_id
     }
 
     #[cfg(test)]
@@ -366,6 +385,7 @@ impl NativeAgentRuntime {
             .map(|active| active.target.clone());
         ensure_conversation_target(active_target.as_ref(), target)?;
         if self.worker.interrupt() {
+            self.cancel_permission_turn();
             Ok(AgentCommandReceipt::Interrupted {
                 target: active_target,
             })
@@ -392,9 +412,15 @@ impl NativeAgentRuntime {
                 "Conversation worker is not running".to_string(),
             ));
         }
-        self.worker
-            .respond_permission(request_id, option_id)
-            .map_err(AgentRuntimeError::CommandRejected)?;
+        self.permission_turn
+            .as_ref()
+            .ok_or_else(|| {
+                AgentRuntimeError::CommandRejected(
+                    "Conversation permission turn is not active".to_string(),
+                )
+            })?
+            .respond(request_id, option_id)
+            .map_err(|error| AgentRuntimeError::CommandRejected(error.to_string()))?;
         Ok(AgentCommandReceipt::Accepted)
     }
 
@@ -447,6 +473,10 @@ impl NativeAgentRuntime {
                 self.request_policy.timeout(),
             )
             .map_err(|error| AgentRuntimeError::CommandRejected(error.to_string()))?;
+        let permission_turn = self
+            .permission_policy
+            .begin_turn(&self.permission_provider_id)
+            .map_err(|error| AgentRuntimeError::CommandRejected(error.to_string()))?;
         let prepared_request = self
             .provider_conversation
             .prepare_turn_with_options(&provider_request, turn_options)
@@ -457,11 +487,14 @@ impl NativeAgentRuntime {
             turn_id,
             target,
         });
+        let permission_handler = permission_turn.handler();
+        self.permission_turn = Some(permission_turn);
         self.worker.start(
             prepared_request,
             provider_lease,
             self.session_workspace_tools.clone(),
             self.request_policy.clone(),
+            Some(permission_handler),
         );
         if !self.pending_events.is_empty() {
             self.event_notifier.notify();
@@ -535,6 +568,7 @@ impl NativeAgentRuntime {
             });
             if is_terminal {
                 self.active_turn = None;
+                self.cancel_permission_turn();
                 break;
             }
         }
@@ -572,9 +606,6 @@ impl NativeAgentRuntime {
             }
             ConversationEvent::TerminalUpdated { snapshot } => {
                 AgentEventKind::TerminalUpdated { snapshot }
-            }
-            ConversationEvent::PermissionRequested { request } => {
-                AgentEventKind::PermissionRequested { request }
             }
             ConversationEvent::Finished { response, metrics } => AgentEventKind::TurnFinished {
                 response,
@@ -621,6 +652,24 @@ impl NativeAgentRuntime {
         let items = self.worker.take_session_items();
         if !items.is_empty() {
             self.provider_conversation.commit_turn_items(items);
+        }
+    }
+
+    fn drain_permission_requests(&mut self, events: &mut Vec<AgentEvent>) {
+        let Some(active) = self.active_turn.clone() else {
+            return;
+        };
+        let Some(turn) = self.permission_turn.as_ref() else {
+            return;
+        };
+        while let Some(request) = turn.try_recv_request() {
+            events.push(permission_agent_event(&active, request));
+        }
+    }
+
+    fn cancel_permission_turn(&mut self) {
+        if let Some(mut turn) = self.permission_turn.take() {
+            turn.cancel_pending();
         }
     }
 
@@ -784,6 +833,7 @@ impl AgentRuntime for NativeAgentRuntime {
         let mut events = self.pending_events.drain(..).collect::<Vec<_>>();
         self.drain_dynamic_environment(&mut events);
         self.drain_worker(&mut events);
+        self.drain_permission_requests(&mut events);
         events
     }
 
@@ -797,12 +847,25 @@ impl AgentRuntime for NativeAgentRuntime {
         self.dynamic_environment_worker.shutdown();
         let worker_result = self
             .worker
-            .reset_for_context_change()
+            .reset_after_clear()
             .map_err(AgentRuntimeError::Shutdown);
+        self.cancel_permission_turn();
         self.active_turn = None;
         self.session_workspace_tools = ToolExecutorRegistry::new();
         self.prompt_assembly_tool_definitions.clear();
         worker_result
+    }
+}
+
+fn permission_agent_event(
+    active: &ActiveNativeTurn,
+    request: RuntimePermissionRequest,
+) -> AgentEvent {
+    AgentEvent {
+        agent_id: active.agent_id,
+        turn_id: active.turn_id,
+        target: active.target.clone(),
+        kind: AgentEventKind::PermissionRequested { request },
     }
 }
 

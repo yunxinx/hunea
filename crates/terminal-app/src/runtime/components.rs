@@ -9,6 +9,10 @@ use super::{
     context_budget_worker::ContextBudgetWorker,
     lifecycle::{CapabilityKey, ComponentDefinition, ComponentGraph, EffectId, EffectScope},
     llm_port::{LlmPort, ProviderRegistrations},
+    permission_policy::{
+        ApprovalProviderRegistration, InteractiveApprovalProviderFactory, PermissionPolicy,
+        TERMINAL_APPROVAL_PROVIDER_ID,
+    },
     prompt_assembly::{PromptAssembly, PromptRegistration},
     session_tools_for_manager,
     session_worker::SessionStoreWorker,
@@ -26,6 +30,8 @@ pub(super) struct RuntimeComponents {
     pub(super) agent_runtime: NativeAgentRuntime,
     pub(super) model_refresh: ModelRefreshWorker,
     pub(super) llm_port: LlmPort,
+    pub(super) permission_policy: PermissionPolicy,
+    permission_provider_id: String,
     pub(super) tool_catalog: ToolCatalog,
     pub(super) prompt_assembly: PromptAssembly,
     pub(super) session_workspace_tools: ToolExecutorRegistry,
@@ -35,6 +41,7 @@ pub(super) struct RuntimeComponents {
     effect_scope: EffectScope,
     runtime_wake_effect: Option<EffectId>,
     llm_port_effect: Option<EffectId>,
+    permission_policy_effect: Option<EffectId>,
     tool_catalog_effect: Option<EffectId>,
     prompt_assembly_effect: Option<EffectId>,
     pub(super) lifecycle: ComponentGraph,
@@ -44,6 +51,17 @@ pub(super) struct RuntimeComponents {
 impl RuntimeComponents {
     pub(super) fn new(options: &AppRuntimeOptions) -> Result<Self, String> {
         let effect_scope = EffectScope::default();
+        let runtime_event_notifier = RuntimeEventNotifier::default();
+        let permission_policy = PermissionPolicy::new(runtime_event_notifier.clone());
+        let approval_registration = permission_policy
+            .register(
+                "terminal-runtime",
+                TERMINAL_APPROVAL_PROVIDER_ID,
+                Arc::new(InteractiveApprovalProviderFactory),
+            )
+            .map_err(|error| error.to_string())?;
+        let permission_policy_effect =
+            register_permission_policy_effect(&effect_scope, approval_registration)?;
         let llm_port = LlmPort::new();
         let provider_registrations = llm_port
             .mount_builtin_providers("models-config", &options.loaded_models.provider_configs)
@@ -68,7 +86,6 @@ impl RuntimeComponents {
         let prompt_assembly_tool_definitions = tool_catalog.definitions();
         let session_workspace_tools =
             session_tools_for_manager(&tool_catalog, prompt_assembly_snapshot.manager.as_ref());
-        let runtime_event_notifier = RuntimeEventNotifier::default();
         let agent_runtime = NativeAgentRuntime::new(
             options,
             session_workspace_tools.clone(),
@@ -76,12 +93,15 @@ impl RuntimeComponents {
             prompt_assembly_snapshot,
             runtime_event_notifier.clone(),
             llm_port.clone(),
+            permission_policy.clone(),
+            TERMINAL_APPROVAL_PROVIDER_ID,
         )?;
         let mut lifecycle = ComponentGraph::default();
         lifecycle.declare(
             ComponentDefinition::new("native_agent_runtime")
                 .requires("llm_port")
                 .requires("model_catalog")
+                .requires("permission_policy")
                 .requires("prompt_assembly")
                 .requires("tool_catalog")
                 .observes("session_persistence"),
@@ -91,6 +111,8 @@ impl RuntimeComponents {
                 .requires("llm_port")
                 .requires("model_catalog"),
         );
+        lifecycle
+            .declare(ComponentDefinition::new("permission_policy").requires("approval_provider"));
         lifecycle.declare(
             ComponentDefinition::new("prompt_assembly")
                 .requires("tool_catalog")
@@ -102,8 +124,10 @@ impl RuntimeComponents {
                 .requires("runtime_wake"),
         );
         for capability in [
+            "approval_provider",
             "llm_port",
             "model_catalog",
+            "permission_policy",
             "prompt_assembly",
             "runtime_event_stream",
             "tool_catalog",
@@ -118,6 +142,8 @@ impl RuntimeComponents {
             agent_runtime,
             model_refresh: ModelRefreshWorker::new(runtime_event_notifier.clone()),
             llm_port,
+            permission_policy,
+            permission_provider_id: TERMINAL_APPROVAL_PROVIDER_ID.to_string(),
             tool_catalog,
             prompt_assembly,
             session_workspace_tools,
@@ -128,6 +154,7 @@ impl RuntimeComponents {
             effect_scope,
             runtime_wake_effect: None,
             llm_port_effect: Some(llm_port_effect),
+            permission_policy_effect: Some(permission_policy_effect),
             tool_catalog_effect: Some(tool_catalog_effect),
             prompt_assembly_effect: Some(prompt_assembly_effect),
             lifecycle,
@@ -170,6 +197,102 @@ impl RuntimeComponents {
 
     pub(super) fn reset_after_clear(&mut self, options: &AppRuntimeOptions) -> Result<(), String> {
         self.reset_after_clear_with_native_mount_check(options, || Ok(()))
+    }
+
+    /// Replaces the approval provider generation while keeping the other runtime capabilities
+    /// intact. The old Native adapter is quiesced before its policy is deactivated so no turn can
+    /// retain a handler into the removed provider generation.
+    #[allow(dead_code)]
+    pub(super) fn replace_permission_provider(
+        &mut self,
+        options: &AppRuntimeOptions,
+        owner: impl Into<String>,
+        provider_id: impl Into<String>,
+        factory: Arc<dyn super::permission_policy::ApprovalProviderFactory>,
+    ) -> Result<(), String> {
+        self.replace_permission_provider_with_native_mount_check(
+            options,
+            owner,
+            provider_id,
+            factory,
+            || Ok(()),
+        )
+    }
+
+    #[allow(dead_code)]
+    fn replace_permission_provider_with_native_mount_check(
+        &mut self,
+        options: &AppRuntimeOptions,
+        owner: impl Into<String>,
+        provider_id: impl Into<String>,
+        factory: Arc<dyn super::permission_policy::ApprovalProviderFactory>,
+        native_mount_check: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        if self.is_shutdown {
+            return Err("Runtime components are shut down".to_string());
+        }
+        for key in ["approval_provider", "permission_policy"] {
+            self.lifecycle.remove_capability(&CapabilityKey::from(key));
+        }
+        self.discard_lifecycle_transitions();
+
+        let mut failures = Vec::new();
+        if let Err(error) = self.agent_runtime.shutdown() {
+            failures.push(error.to_string());
+        }
+        self.permission_policy.deactivate();
+        if let Some(effect_id) = self.permission_policy_effect.take()
+            && let Some(error) = self.effect_scope.dispose_effect(effect_id).error_message()
+        {
+            failures.push(error);
+        }
+        if !failures.is_empty() {
+            return Err(failures.join("; "));
+        }
+
+        let provider_id = provider_id.into();
+        let fresh_policy = PermissionPolicy::new(self.runtime_event_notifier.clone());
+        let fresh_registration = fresh_policy
+            .register(owner, provider_id.clone(), factory)
+            .map_err(|error| error.to_string())?;
+        let fresh_policy_effect =
+            match register_permission_policy_effect(&self.effect_scope, fresh_registration) {
+                Ok(effect_id) => effect_id,
+                Err(error) => {
+                    fresh_policy.deactivate();
+                    return Err(error);
+                }
+            };
+
+        let fresh_agent_runtime = match native_mount_check().and_then(|()| {
+            NativeAgentRuntime::new(
+                options,
+                self.session_workspace_tools.clone(),
+                self.tool_catalog.definitions(),
+                self.prompt_assembly.session_snapshot(),
+                self.runtime_event_notifier.clone(),
+                self.llm_port.clone(),
+                fresh_policy.clone(),
+                provider_id.clone(),
+            )
+        }) {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                let _ = self.effect_scope.dispose_effect(fresh_policy_effect);
+                fresh_policy.deactivate();
+                return Err(error);
+            }
+        };
+
+        self.permission_policy = fresh_policy;
+        self.permission_provider_id = provider_id;
+        self.permission_policy_effect = Some(fresh_policy_effect);
+        self.agent_runtime = fresh_agent_runtime;
+        for key in ["approval_provider", "permission_policy"] {
+            self.lifecycle.replace_capability(&CapabilityKey::from(key));
+        }
+        self.discard_lifecycle_transitions();
+        Ok(())
     }
 
     fn reset_after_clear_with_native_mount_check(
@@ -278,6 +401,8 @@ impl RuntimeComponents {
                 fresh_prompt_assembly_snapshot,
                 self.runtime_event_notifier.clone(),
                 fresh_llm_port.clone(),
+                self.permission_policy.clone(),
+                self.permission_provider_id.as_str(),
             )
         }) {
             Ok(runtime) => runtime,
@@ -318,8 +443,10 @@ impl RuntimeComponents {
             failures.push(error);
         }
         for key in [
+            "approval_provider",
             "llm_port",
             "model_catalog",
+            "permission_policy",
             "prompt_assembly",
             "runtime_event_stream",
             "tool_catalog",
@@ -332,6 +459,12 @@ impl RuntimeComponents {
             failures.push(error.to_string());
         }
         if let Err(error) = self.model_refresh.shutdown() {
+            failures.push(error);
+        }
+        self.permission_policy.deactivate();
+        if let Some(effect_id) = self.permission_policy_effect.take()
+            && let Some(error) = self.effect_scope.dispose_effect(effect_id).error_message()
+        {
             failures.push(error);
         }
         self.session_workspace_tools = ToolExecutorRegistry::new();
@@ -398,6 +531,18 @@ fn register_llm_port_effect(
     effect_scope
         .register("llm-providers", move || {
             registrations.dispose();
+            Ok(())
+        })
+        .map_err(|error| error.to_string())
+}
+
+fn register_permission_policy_effect(
+    effect_scope: &EffectScope,
+    mut registration: ApprovalProviderRegistration,
+) -> Result<EffectId, String> {
+    effect_scope
+        .register("approval-provider", move || {
+            registration.dispose();
             Ok(())
         })
         .map_err(|error| error.to_string())
@@ -674,6 +819,113 @@ mod tests {
         );
         assert_eq!(
             components.lifecycle.state("model_refresh"),
+            Some(ComponentState::Pending)
+        );
+    }
+
+    #[test]
+    fn permission_provider_replacement_quiesces_old_generation_before_publish() {
+        let options = options_with_provider();
+        let mut components =
+            RuntimeComponents::new(&options).expect("runtime components should initialize");
+        let before = components.permission_policy.inspection_snapshot();
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].provider_id, TERMINAL_APPROVAL_PROVIDER_ID);
+
+        components
+            .replace_permission_provider(
+                &options,
+                "replacement-owner",
+                "replacement-provider",
+                Arc::new(InteractiveApprovalProviderFactory),
+            )
+            .expect("replacement provider should mount");
+
+        let after = components.permission_policy.inspection_snapshot();
+        assert_eq!(
+            after
+                .iter()
+                .map(|provider| provider.provider_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["replacement-provider"]
+        );
+        assert_eq!(
+            components.lifecycle.state("permission_policy"),
+            Some(ComponentState::Active)
+        );
+        assert_eq!(
+            components.lifecycle.state("native_agent_runtime"),
+            Some(ComponentState::Active)
+        );
+        assert!(
+            components
+                .lifecycle
+                .capabilities()
+                .iter()
+                .any(|capability| capability.key == "approval_provider")
+        );
+    }
+
+    #[test]
+    fn permission_provider_replacement_keeps_provider_id_across_reset() {
+        let options = options_with_provider();
+        let mut components =
+            RuntimeComponents::new(&options).expect("runtime components should initialize");
+
+        components
+            .replace_permission_provider(
+                &options,
+                "replacement-owner",
+                "replacement-provider",
+                Arc::new(InteractiveApprovalProviderFactory),
+            )
+            .expect("replacement provider should mount");
+        components
+            .reset_after_clear(&options)
+            .expect("reset should preserve the active provider generation");
+
+        assert_eq!(
+            components.agent_runtime.permission_provider_id_for_test(),
+            "replacement-provider"
+        );
+    }
+
+    #[test]
+    fn failed_permission_provider_replacement_does_not_revive_old_generation() {
+        let options = options_with_provider();
+        let mut components =
+            RuntimeComponents::new(&options).expect("runtime components should initialize");
+
+        let error = components
+            .replace_permission_provider_with_native_mount_check(
+                &options,
+                "replacement-owner",
+                "replacement-provider",
+                Arc::new(InteractiveApprovalProviderFactory),
+                || Err("injected permission native mount failure".to_string()),
+            )
+            .expect_err("injected native mount failure should abort replacement");
+
+        assert_eq!(error, "injected permission native mount failure");
+        assert!(
+            components
+                .permission_policy
+                .inspection_snapshot()
+                .is_empty()
+        );
+        for capability in ["approval_provider", "permission_policy"] {
+            assert!(
+                !components
+                    .lifecycle
+                    .has_capability(&CapabilityKey::from(capability))
+            );
+        }
+        assert_eq!(
+            components.lifecycle.state("native_agent_runtime"),
+            Some(ComponentState::Pending)
+        );
+        assert_eq!(
+            components.lifecycle.state("permission_policy"),
             Some(ComponentState::Pending)
         );
     }

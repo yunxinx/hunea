@@ -9,6 +9,7 @@ mod event_mapping;
 mod inspection;
 mod lifecycle;
 mod llm_port;
+mod permission_policy;
 mod prompt_assembly;
 mod prompt_assembly_commands;
 mod session_commands;

@@ -89,7 +89,7 @@ async fn conversation_worker_reports_interrupted_when_pre_cancelled() {
         executor,
         RuntimeRequestPolicy::default(),
         cancellation,
-        ConversationPermissionBroker::default(),
+        None,
         sender,
     )
     .await;
@@ -135,7 +135,7 @@ async fn conversation_retry_reuses_the_same_provider_client_lease() {
         ToolExecutorRegistry::new(),
         RuntimeRequestPolicy::new(1, vec![0], 1),
         CancellationToken::new(),
-        ConversationPermissionBroker::default(),
+        None,
         sender,
     )
     .await;

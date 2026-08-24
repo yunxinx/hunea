@@ -222,22 +222,45 @@ impl ComponentLifecycleExecutor {
         self.context.snapshots()
     }
 
-    pub(super) fn declare_all(
+    /// 把完整 desired definition set 作为一个 preflight/retire/commit/activate transaction 执行。
+    pub(super) fn reconcile_definitions(
         &mut self,
         definitions: impl IntoIterator<Item = ComponentDefinition>,
         callbacks: &mut impl ComponentLifecycleCallbacks,
+        mode: ComponentLifecycleMode,
     ) -> Result<(), LifecycleExecutionError> {
         self.ensure_running()?;
-        let mut reports = Vec::new();
-        for definition in definitions {
-            let component_id = definition.id.clone();
-            let declaration = self
-                .graph
-                .declare(definition)
-                .map_err(|error| LifecycleExecutionError::graph(component_id, error))?;
-            reports.push(declaration);
+        let prepared = self
+            .graph
+            .prepare_definition_reconciliation(definitions)
+            .map_err(|error| LifecycleExecutionError::graph("runtime_composition", error))?;
+        let retirement_order = prepared.retirement_order().to_vec();
+        let mut failures = Vec::new();
+
+        for component_id in retirement_order {
+            if !self.graph.is_active(&component_id) {
+                continue;
+            }
+            let report = match self.graph.suspend(&component_id) {
+                Ok(report) => report,
+                Err(error) => {
+                    failures.extend(
+                        LifecycleExecutionError::graph(component_id.clone(), error).failures,
+                    );
+                    continue;
+                }
+            };
+            if let Err(error) = self.execute_report(report, callbacks, mode) {
+                failures.extend(error.failures);
+            }
         }
-        self.execute_reports(reports, callbacks, ComponentLifecycleMode::Initial)
+        LifecycleExecutionError::finish(failures)?;
+
+        let activation_order = self
+            .graph
+            .commit_definition_reconciliation(prepared)
+            .map_err(|error| LifecycleExecutionError::graph("runtime_composition", error))?;
+        self.activate_components(activation_order, callbacks, mode)
     }
 
     #[cfg(test)]
@@ -372,15 +395,11 @@ impl ComponentLifecycleExecutor {
             .filter(|component_id| requested.contains(component_id))
             .collect::<Vec<_>>();
         let mut failures = Vec::new();
+        let mut reports = Vec::new();
 
         for component_id in order {
             match self.graph.activate(&component_id) {
-                Ok(report) => {
-                    if let Err(error) = self.execute_report(report, callbacks, mode) {
-                        failures.extend(error.failures);
-                        continue;
-                    }
-                }
+                Ok(report) => reports.push(report),
                 Err(error) => {
                     failures.extend(
                         LifecycleExecutionError::graph(component_id.clone(), error).failures,
@@ -388,6 +407,9 @@ impl ComponentLifecycleExecutor {
                     continue;
                 }
             }
+        }
+        if let Err(error) = self.execute_reports(reports, callbacks, mode) {
+            failures.extend(error.failures);
         }
 
         LifecycleExecutionError::finish(failures)
@@ -867,13 +889,28 @@ mod tests {
         ]
     }
 
+    fn storage_definitions() -> Vec<ComponentDefinition> {
+        vec![
+            ComponentDefinition::new("storage").provides("database"),
+            ComponentDefinition::new("service")
+                .requires("database")
+                .observes("metrics")
+                .provides("service"),
+            ComponentDefinition::new("ui").requires("service"),
+        ]
+    }
+
     #[test]
     fn activation_and_recursive_deactivation_follow_topology() {
         let mut executor = ComponentLifecycleExecutor::default();
         let mut callbacks = FakeCallbacks::publishing(&["database", "service"]);
 
         executor
-            .declare_all(definitions(), &mut callbacks)
+            .reconcile_definitions(
+                definitions(),
+                &mut callbacks,
+                ComponentLifecycleMode::Initial,
+            )
             .expect("acyclic composition should activate");
         assert_eq!(
             callbacks.snapshot(),
@@ -923,13 +960,21 @@ mod tests {
         let mut forward = ComponentLifecycleExecutor::default();
         let mut forward_callbacks = FakeCallbacks::publishing(&["database", "service"]);
         forward
-            .declare_all(definitions(), &mut forward_callbacks)
+            .reconcile_definitions(
+                definitions(),
+                &mut forward_callbacks,
+                ComponentLifecycleMode::Initial,
+            )
             .expect("forward graph should activate");
 
         let mut reverse = ComponentLifecycleExecutor::default();
         let mut reverse_callbacks = FakeCallbacks::publishing(&["database", "service"]);
         reverse
-            .declare_all(definitions().into_iter().rev(), &mut reverse_callbacks)
+            .reconcile_definitions(
+                definitions().into_iter().rev(),
+                &mut reverse_callbacks,
+                ComponentLifecycleMode::Initial,
+            )
             .expect("reverse graph should activate");
 
         assert_eq!(forward_callbacks.snapshot(), reverse_callbacks.snapshot());
@@ -937,6 +982,361 @@ mod tests {
             reverse_callbacks.snapshot(),
             vec!["activate:database", "activate:service", "activate:ui"]
         );
+    }
+
+    #[test]
+    fn mixed_definition_reconciliation_is_graph_ordered_and_deterministic() {
+        let mut forward = ComponentLifecycleExecutor::default();
+        let mut forward_callbacks = FakeCallbacks::publishing(&["database", "storage", "service"]);
+        forward
+            .reconcile_definitions(
+                definitions(),
+                &mut forward_callbacks,
+                ComponentLifecycleMode::Initial,
+            )
+            .expect("initial composition should activate");
+        forward_callbacks
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+
+        let mut reverse = ComponentLifecycleExecutor::default();
+        let mut reverse_callbacks = FakeCallbacks::publishing(&["database", "storage", "service"]);
+        reverse
+            .reconcile_definitions(
+                definitions(),
+                &mut reverse_callbacks,
+                ComponentLifecycleMode::Initial,
+            )
+            .expect("initial composition should activate");
+        reverse_callbacks
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+
+        forward
+            .reconcile_definitions(
+                storage_definitions(),
+                &mut forward_callbacks,
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect("mixed definitions should reconcile");
+        reverse
+            .reconcile_definitions(
+                storage_definitions().into_iter().rev(),
+                &mut reverse_callbacks,
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect("desired input order must not affect reconciliation");
+
+        let expected = vec![
+            "quiesce:ui",
+            "dispose:ui",
+            "quiesce:service",
+            "dispose:service",
+            "quiesce:database",
+            "dispose:database",
+            "activate:storage",
+            "activate:service",
+            "activate:ui",
+        ];
+        assert_eq!(forward_callbacks.snapshot(), expected);
+        assert_eq!(reverse_callbacks.snapshot(), expected);
+        assert_eq!(forward.graph().components(), reverse.graph().components());
+        assert_eq!(
+            forward.graph().capabilities(),
+            reverse.graph().capabilities()
+        );
+        assert_eq!(forward.context_snapshots(), reverse.context_snapshots());
+        assert_eq!(forward.graph().state("database"), None);
+        assert_eq!(
+            forward.graph().provided_capabilities("database"),
+            Err(ComponentGraphError::UnknownComponent {
+                component_id: "database".to_string(),
+            })
+        );
+        assert_eq!(
+            forward
+                .graph
+                .add_capability("database", CapabilityKey::from("database")),
+            Err(ComponentGraphError::UnknownComponent {
+                component_id: "database".to_string(),
+            })
+        );
+        assert_eq!(forward.graph().epoch("storage"), Some(1));
+        assert_eq!(forward.graph().epoch("service"), Some(2));
+        assert_eq!(forward.graph().epoch("ui"), Some(2));
+        let database = forward
+            .graph()
+            .capability(&CapabilityKey::from("database"))
+            .expect("storage should publish database");
+        assert_eq!(database.key, "database");
+        assert_eq!(database.provider_component, "storage");
+        assert_eq!(database.generation, 1);
+    }
+
+    #[test]
+    fn definition_cleanup_failure_keeps_old_authority_and_blocks_fresh_activation() {
+        let mut executor = ComponentLifecycleExecutor::default();
+        let mut callbacks = FakeCallbacks::publishing(&["database", "storage", "service"]);
+        executor
+            .reconcile_definitions(
+                definitions(),
+                &mut callbacks,
+                ComponentLifecycleMode::Initial,
+            )
+            .expect("initial composition should activate");
+        callbacks
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        callbacks.quiescence_failures.insert("service".to_string());
+
+        let error = executor
+            .reconcile_definitions(
+                storage_definitions(),
+                &mut callbacks,
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect_err("old cleanup failure must abort definition commit");
+
+        assert_eq!(
+            callbacks.snapshot(),
+            vec![
+                "quiesce:ui",
+                "dispose:ui",
+                "quiesce:service",
+                "dispose:service",
+                "quiesce:database",
+                "dispose:database",
+            ]
+        );
+        assert_eq!(executor.graph().state("storage"), None);
+        assert_eq!(
+            executor.graph().state("service"),
+            Some(ComponentState::Failed)
+        );
+        assert_eq!(
+            executor.graph().state("database"),
+            Some(ComponentState::Pending)
+        );
+        let service = executor
+            .graph()
+            .components()
+            .into_iter()
+            .find(|component| component.id == "service")
+            .expect("old service definition should remain visible");
+        assert!(service.optional.is_empty());
+        assert!(executor.graph().capabilities().is_empty());
+        assert!(executor.context_snapshots().is_empty());
+        assert!(executor.scope_snapshots().is_empty());
+        assert!(error.to_string().contains("QUIESCENCE_SECRET"));
+        assert!(!format!("{error:?}").contains("QUIESCENCE_SECRET"));
+
+        let events_before_retry = callbacks.snapshot();
+        let retry = executor
+            .reconcile_definitions(
+                storage_definitions(),
+                &mut callbacks,
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect_err("terminal cleanup failure must block replacement retry");
+        assert!(retry.to_string().contains("unresolved cleanup failure"));
+        assert_eq!(callbacks.snapshot(), events_before_retry);
+    }
+
+    #[test]
+    fn definition_disposal_failure_keeps_old_authority_and_blocks_fresh_activation() {
+        let mut executor = ComponentLifecycleExecutor::default();
+        let mut callbacks = FakeCallbacks::publishing(&["database", "storage", "service"]);
+        callbacks.disposal_failures.insert("service".to_string());
+        executor
+            .reconcile_definitions(
+                definitions(),
+                &mut callbacks,
+                ComponentLifecycleMode::Initial,
+            )
+            .expect("initial composition should activate");
+        callbacks
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+
+        let error = executor
+            .reconcile_definitions(
+                storage_definitions(),
+                &mut callbacks,
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect_err("old disposal failure must abort definition commit");
+
+        assert_eq!(
+            callbacks.snapshot(),
+            vec![
+                "quiesce:ui",
+                "dispose:ui",
+                "quiesce:service",
+                "dispose:service",
+                "quiesce:database",
+                "dispose:database",
+            ]
+        );
+        assert_eq!(executor.graph().state("storage"), None);
+        assert_eq!(
+            executor.graph().state("service"),
+            Some(ComponentState::Failed)
+        );
+        assert_eq!(
+            executor.graph().state("database"),
+            Some(ComponentState::Pending)
+        );
+        let service = executor
+            .graph()
+            .components()
+            .into_iter()
+            .find(|component| component.id == "service")
+            .expect("old service definition should remain visible");
+        assert!(service.optional.is_empty());
+        assert!(executor.graph().capabilities().is_empty());
+        assert!(executor.context_snapshots().is_empty());
+        assert!(executor.scope_snapshots().is_empty());
+        assert!(error.to_string().contains("DISPOSER_SECRET"));
+        assert!(!format!("{error:?}").contains("DISPOSER_SECRET"));
+    }
+
+    #[test]
+    fn fresh_definition_activation_failure_never_restores_old_definition() {
+        let mut executor = ComponentLifecycleExecutor::default();
+        let mut callbacks = FakeCallbacks::publishing(&["database", "storage", "service"]);
+        executor
+            .reconcile_definitions(
+                definitions(),
+                &mut callbacks,
+                ComponentLifecycleMode::Initial,
+            )
+            .expect("initial composition should activate");
+        callbacks
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        callbacks.activation_failures.insert("storage".to_string());
+
+        executor
+            .reconcile_definitions(
+                storage_definitions(),
+                &mut callbacks,
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect_err("fresh storage activation should fail");
+
+        assert_eq!(
+            callbacks.snapshot(),
+            vec![
+                "quiesce:ui",
+                "dispose:ui",
+                "quiesce:service",
+                "dispose:service",
+                "quiesce:database",
+                "dispose:database",
+                "activate:storage",
+                "quiesce:storage",
+                "dispose:storage",
+            ]
+        );
+        assert_eq!(executor.graph().state("database"), None);
+        assert_eq!(
+            executor.graph().state("storage"),
+            Some(ComponentState::Failed)
+        );
+        assert_eq!(
+            executor.graph().state("service"),
+            Some(ComponentState::Pending)
+        );
+        assert_eq!(executor.graph().state("ui"), Some(ComponentState::Pending));
+        let service = executor
+            .graph()
+            .components()
+            .into_iter()
+            .find(|component| component.id == "service")
+            .expect("desired service definition should be committed");
+        assert_eq!(
+            service
+                .optional
+                .into_iter()
+                .map(|optional| optional.key)
+                .collect::<Vec<_>>(),
+            vec!["metrics"]
+        );
+        assert!(executor.graph().capabilities().is_empty());
+        assert!(executor.context_snapshots().is_empty());
+        assert!(executor.scope_snapshots().is_empty());
+    }
+
+    #[test]
+    fn invalid_definition_batch_is_rejected_before_concrete_cleanup() {
+        let mut executor = ComponentLifecycleExecutor::default();
+        let mut callbacks = FakeCallbacks::publishing(&["database", "service"]);
+        executor
+            .reconcile_definitions(
+                definitions(),
+                &mut callbacks,
+                ComponentLifecycleMode::Initial,
+            )
+            .expect("initial composition should activate");
+        callbacks
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        let components_before = executor.graph().components();
+        let capabilities_before = executor.graph().capabilities();
+        let context_before = executor.context_snapshots();
+        let scopes_before = executor.scope_snapshots();
+
+        executor
+            .reconcile_definitions(
+                [
+                    ComponentDefinition::new("provider-a").provides("shared"),
+                    ComponentDefinition::new("provider-b").provides("shared"),
+                ],
+                &mut callbacks,
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect_err("duplicate provider must fail during preflight");
+
+        assert!(callbacks.snapshot().is_empty());
+        assert_eq!(executor.graph().components(), components_before);
+        assert_eq!(executor.graph().capabilities(), capabilities_before);
+        assert_eq!(executor.context_snapshots(), context_before);
+        assert_eq!(executor.scope_snapshots(), scopes_before);
+
+        executor.inject_epoch_exhaustion("service");
+        let components_before = executor.graph().components();
+        let capabilities_before = executor.graph().capabilities();
+        let context_before = executor.context_snapshots();
+        let scopes_before = executor.scope_snapshots();
+        let error = executor
+            .reconcile_definitions(
+                storage_definitions(),
+                &mut callbacks,
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect_err("activation epoch exhaustion must fail during preflight");
+        assert!(
+            error
+                .to_string()
+                .contains("component `service` activation epoch is exhausted")
+        );
+        assert!(callbacks.snapshot().is_empty());
+        assert_eq!(executor.graph().components(), components_before);
+        assert_eq!(executor.graph().capabilities(), capabilities_before);
+        assert_eq!(executor.context_snapshots(), context_before);
+        assert_eq!(executor.scope_snapshots(), scopes_before);
     }
 
     #[test]
@@ -950,7 +1350,7 @@ mod tests {
         let mut callbacks = FakeCallbacks::publishing(&["a-provider"]);
 
         executor
-            .declare_all(definitions, &mut callbacks)
+            .reconcile_definitions(definitions, &mut callbacks, ComponentLifecycleMode::Initial)
             .expect("branched composition should activate");
 
         assert_eq!(
@@ -972,7 +1372,7 @@ mod tests {
         let mut executor = ComponentLifecycleExecutor::default();
         let mut callbacks = FakeCallbacks::publishing(&["database", "service"]);
         executor
-            .declare_all(
+            .reconcile_definitions(
                 [
                     ComponentDefinition::new("database").provides("database"),
                     ComponentDefinition::new("service")
@@ -981,6 +1381,7 @@ mod tests {
                     ComponentDefinition::new("leaf").requires("service"),
                 ],
                 &mut callbacks,
+                ComponentLifecycleMode::Initial,
             )
             .expect("composition should activate");
         executor.inject_epoch_exhaustion("leaf");
@@ -1023,7 +1424,11 @@ mod tests {
         let mut executor = ComponentLifecycleExecutor::default();
         let mut callbacks = FakeCallbacks::publishing(&["database", "service"]);
         executor
-            .declare_all(definitions(), &mut callbacks)
+            .reconcile_definitions(
+                definitions(),
+                &mut callbacks,
+                ComponentLifecycleMode::Initial,
+            )
             .expect("composition should activate");
         callbacks
             .events
@@ -1057,12 +1462,13 @@ mod tests {
         let mut executor = ComponentLifecycleExecutor::default();
         let mut callbacks = FakeCallbacks::publishing(&["database"]);
         executor
-            .declare_all(
+            .reconcile_definitions(
                 [
                     ComponentDefinition::new("database").provides("database"),
                     ComponentDefinition::new("service").requires("database"),
                 ],
                 &mut callbacks,
+                ComponentLifecycleMode::Initial,
             )
             .expect("composition should activate");
         callbacks
@@ -1099,7 +1505,7 @@ mod tests {
         let mut executor = ComponentLifecycleExecutor::default();
         let mut callbacks = FakeCallbacks::publishing(&["source", "left-branch", "right-branch"]);
         executor
-            .declare_all(
+            .reconcile_definitions(
                 [
                     ComponentDefinition::new("source")
                         .provides("left-input")
@@ -1115,6 +1521,7 @@ mod tests {
                         .requires("right-ready"),
                 ],
                 &mut callbacks,
+                ComponentLifecycleMode::Initial,
             )
             .expect("diamond composition should activate");
         callbacks
@@ -1151,12 +1558,13 @@ mod tests {
         let mut executor = ComponentLifecycleExecutor::default();
         let mut callbacks = FakeCallbacks::publishing(&["a-provider"]);
         executor
-            .declare_all(
+            .reconcile_definitions(
                 [
                     ComponentDefinition::new("a-provider").provides("optional-input"),
                     ComponentDefinition::new("z-observer").observes("optional-input"),
                 ],
                 &mut callbacks,
+                ComponentLifecycleMode::Initial,
             )
             .expect("observed composition should activate");
         callbacks
@@ -1195,9 +1603,10 @@ mod tests {
         callbacks.activation_failures.insert("database".to_string());
 
         let error = executor
-            .declare_all(
+            .reconcile_definitions(
                 [ComponentDefinition::new("database").provides("database")],
                 &mut callbacks,
+                ComponentLifecycleMode::Initial,
             )
             .expect_err("injected activation failure should be returned");
 
@@ -1216,26 +1625,21 @@ mod tests {
     }
 
     #[test]
-    fn publication_failure_quiesces_callback_and_rolls_back_scope_atomically() {
+    fn definition_preflight_rejects_generation_exhaustion_before_callback() {
         let mut executor = ComponentLifecycleExecutor::default();
         executor.inject_generation_exhaustion(CapabilityKey::from("database"));
         let mut callbacks = FakeCallbacks::publishing(&["database"]);
 
         let error = executor
-            .declare_all(
+            .reconcile_definitions(
                 [ComponentDefinition::new("database").provides("database")],
                 &mut callbacks,
+                ComponentLifecycleMode::Initial,
             )
             .expect_err("generation exhaustion should reject publication");
 
-        assert_eq!(
-            callbacks.snapshot(),
-            vec!["activate:database", "quiesce:database", "dispose:database",]
-        );
-        assert_eq!(
-            executor.graph().state("database"),
-            Some(ComponentState::Failed)
-        );
+        assert!(callbacks.snapshot().is_empty());
+        assert_eq!(executor.graph().state("database"), None);
         assert!(executor.graph().capabilities().is_empty());
         assert!(executor.scope_snapshots().is_empty());
         assert!(error.to_string().contains("generation is exhausted"));
@@ -1247,7 +1651,11 @@ mod tests {
         let mut executor = ComponentLifecycleExecutor::default();
         let mut callbacks = FakeCallbacks::publishing(&["database", "service"]);
         executor
-            .declare_all(definitions(), &mut callbacks)
+            .reconcile_definitions(
+                definitions(),
+                &mut callbacks,
+                ComponentLifecycleMode::Initial,
+            )
             .expect("composition should activate");
         callbacks
             .events
@@ -1289,7 +1697,11 @@ mod tests {
         let mut executor = ComponentLifecycleExecutor::default();
         let mut callbacks = FakeCallbacks::publishing(&["database", "service"]);
         executor
-            .declare_all(definitions(), &mut callbacks)
+            .reconcile_definitions(
+                definitions(),
+                &mut callbacks,
+                ComponentLifecycleMode::Initial,
+            )
             .expect("composition should activate");
         callbacks
             .events
@@ -1335,12 +1747,13 @@ mod tests {
         let mut callbacks = FakeCallbacks::publishing(&["database"]);
         callbacks.quiescence_failures.insert("service".to_string());
         executor
-            .declare_all(
+            .reconcile_definitions(
                 [
                     ComponentDefinition::new("database").provides("database"),
                     ComponentDefinition::new("service").requires("database"),
                 ],
                 &mut callbacks,
+                ComponentLifecycleMode::Initial,
             )
             .expect("composition should activate");
 
@@ -1369,13 +1782,14 @@ mod tests {
         let mut callbacks = FakeCallbacks::publishing(&["database"]);
         callbacks.disposal_failures.insert("a-consumer".to_string());
         executor
-            .declare_all(
+            .reconcile_definitions(
                 [
                     ComponentDefinition::new("database").provides("database"),
                     ComponentDefinition::new("a-consumer").requires("database"),
                     ComponentDefinition::new("z-consumer").requires("database"),
                 ],
                 &mut callbacks,
+                ComponentLifecycleMode::Initial,
             )
             .expect("composition should activate");
         callbacks

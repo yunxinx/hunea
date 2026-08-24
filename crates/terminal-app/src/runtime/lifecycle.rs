@@ -280,8 +280,34 @@ pub(super) struct ComponentSnapshot {
 struct ComponentRecord {
     definition: ComponentDefinition,
     state: ComponentState,
-    epoch: u64,
     failure: Option<ComponentFailureSnapshot>,
+}
+
+struct DefinitionIndexes {
+    providers: BTreeMap<CapabilityKey, String>,
+    dependents: BTreeMap<CapabilityKey, BTreeSet<String>>,
+}
+
+/// `PreparedDefinitionReconciliation` 只保存 mutation-free preflight 的封闭 graph 事实。
+pub(super) struct PreparedDefinitionReconciliation {
+    observed_definitions: BTreeMap<String, ComponentDefinition>,
+    observed_epochs: BTreeMap<String, u64>,
+    desired_definitions: BTreeMap<String, ComponentDefinition>,
+    desired_providers: BTreeMap<CapabilityKey, String>,
+    desired_dependents: BTreeMap<CapabilityKey, BTreeSet<String>>,
+    retirement_order: Vec<String>,
+    activation_order: Vec<String>,
+}
+
+impl PreparedDefinitionReconciliation {
+    pub(super) fn retirement_order(&self) -> &[String] {
+        &self.retirement_order
+    }
+
+    #[cfg(test)]
+    fn activation_order(&self) -> &[String] {
+        &self.activation_order
+    }
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -341,6 +367,12 @@ pub(super) enum ComponentGraphError {
     ActivationEpochExhausted { component_id: String },
     #[error("capability `{capability}` generation is exhausted")]
     CapabilityGenerationExhausted { capability: String },
+    #[error("component `{component_id}` is busy during definition reconciliation")]
+    DefinitionReconciliationBusy { component_id: String },
+    #[error("component `{component_id}` has an unresolved cleanup failure")]
+    DefinitionCleanupBlocked { component_id: String },
+    #[error("component definition reconciliation is stale")]
+    StaleDefinitionReconciliation,
 }
 
 /// `ComponentGraph` 是最小 reactive coeffect resolver。
@@ -351,12 +383,14 @@ pub(super) enum ComponentGraphError {
 pub(super) struct ComponentGraph {
     capabilities: BTreeMap<CapabilityKey, String>,
     capability_generations: BTreeMap<CapabilityKey, u64>,
+    component_epochs: BTreeMap<String, u64>,
     components: BTreeMap<String, ComponentRecord>,
     providers: BTreeMap<CapabilityKey, String>,
     dependents: BTreeMap<CapabilityKey, BTreeSet<String>>,
 }
 
 impl ComponentGraph {
+    #[cfg(test)]
     pub(super) fn declare(
         &mut self,
         definition: ComponentDefinition,
@@ -382,11 +416,173 @@ impl ComponentGraph {
             ComponentRecord {
                 definition,
                 state: ComponentState::Declared,
-                epoch: 0,
                 failure: None,
             },
         );
+        self.component_epochs.entry(id.clone()).or_insert(0);
         self.reconcile_components(vec![id], None)
+    }
+
+    /// 在任何 concrete cleanup 前校验完整 desired definition set 并推导 graph order。
+    pub(super) fn prepare_definition_reconciliation(
+        &self,
+        definitions: impl IntoIterator<Item = ComponentDefinition>,
+    ) -> Result<PreparedDefinitionReconciliation, ComponentGraphError> {
+        let mut desired_definitions = BTreeMap::new();
+        for definition in definitions {
+            let component_id = definition.id.clone();
+            if desired_definitions
+                .insert(component_id.clone(), definition)
+                .is_some()
+            {
+                return Err(ComponentGraphError::DuplicateComponent { component_id });
+            }
+        }
+
+        let indexes = definition_indexes(&desired_definitions)?;
+        let desired_providers = indexes.providers;
+        let desired_dependents = indexes.dependents;
+        let desired_topology = topology_order(&desired_definitions, &desired_providers)?;
+        let observed_definitions = self.component_definitions();
+        let changed_roots = observed_definitions
+            .keys()
+            .chain(desired_definitions.keys())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter(|component_id| {
+                observed_definitions.get(*component_id) != desired_definitions.get(*component_id)
+            })
+            .cloned()
+            .collect::<BTreeSet<_>>();
+
+        let observed_edges = required_component_dependents(&observed_definitions, &self.providers);
+        let desired_edges = required_component_dependents(&desired_definitions, &desired_providers);
+        let mut affected = dependent_closure(&changed_roots, &observed_edges);
+        affected.extend(dependent_closure(&changed_roots, &desired_edges));
+
+        let observed_ids = observed_definitions
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let desired_ids = desired_definitions.keys().cloned().collect::<BTreeSet<_>>();
+        let retirement_set = affected
+            .intersection(&observed_ids)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let activation_set = affected
+            .intersection(&desired_ids)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let retirement_order = self
+            .deactivation_order()
+            .into_iter()
+            .filter(|component_id| retirement_set.contains(component_id))
+            .collect::<Vec<_>>();
+        let activation_order = desired_topology
+            .into_iter()
+            .filter(|component_id| activation_set.contains(component_id))
+            .collect::<Vec<_>>();
+
+        for component_id in &retirement_order {
+            let record = self
+                .components
+                .get(component_id)
+                .expect("retirement order should reference an observed component");
+            if matches!(
+                record.state,
+                ComponentState::Activating | ComponentState::Deactivating
+            ) {
+                return Err(ComponentGraphError::DefinitionReconciliationBusy {
+                    component_id: component_id.clone(),
+                });
+            }
+            if record.state == ComponentState::Failed
+                && record.failure.as_ref().is_some_and(|failure| {
+                    failure.operation == ComponentFailureOperation::Deactivation
+                })
+            {
+                return Err(ComponentGraphError::DefinitionCleanupBlocked {
+                    component_id: component_id.clone(),
+                });
+            }
+        }
+        for component_id in &activation_order {
+            if self.component_epoch(component_id) == u64::MAX {
+                return Err(ComponentGraphError::ActivationEpochExhausted {
+                    component_id: component_id.clone(),
+                });
+            }
+            let definition = desired_definitions
+                .get(component_id)
+                .expect("activation order should reference a desired component");
+            for capability in &definition.provides {
+                if self.capability_generations.get(capability) == Some(&u64::MAX) {
+                    return Err(ComponentGraphError::CapabilityGenerationExhausted {
+                        capability: capability.to_string(),
+                    });
+                }
+            }
+        }
+
+        Ok(PreparedDefinitionReconciliation {
+            observed_definitions,
+            observed_epochs: self.component_epochs.clone(),
+            desired_definitions,
+            desired_providers,
+            desired_dependents,
+            retirement_order,
+            activation_order,
+        })
+    }
+
+    /// old effects 全部退役后，一次性提交 prepared definitions 与全部 dependency indexes。
+    pub(super) fn commit_definition_reconciliation(
+        &mut self,
+        prepared: PreparedDefinitionReconciliation,
+    ) -> Result<Vec<String>, ComponentGraphError> {
+        if self.component_definitions() != prepared.observed_definitions
+            || self.component_epochs != prepared.observed_epochs
+        {
+            return Err(ComponentGraphError::StaleDefinitionReconciliation);
+        }
+        if prepared.retirement_order.iter().any(|component_id| {
+            self.components.get(component_id).is_some_and(|record| {
+                matches!(
+                    record.state,
+                    ComponentState::Active
+                        | ComponentState::Activating
+                        | ComponentState::Deactivating
+                )
+            })
+        }) {
+            return Err(ComponentGraphError::StaleDefinitionReconciliation);
+        }
+        if self.capabilities.iter().any(|(capability, provider)| {
+            prepared.desired_providers.get(capability) != Some(provider)
+        }) {
+            return Err(ComponentGraphError::StaleDefinitionReconciliation);
+        }
+
+        let mut observed_records = std::mem::take(&mut self.components);
+        let mut desired_records = BTreeMap::new();
+        for (component_id, definition) in prepared.desired_definitions {
+            self.component_epochs
+                .entry(component_id.clone())
+                .or_insert(0);
+            let record = match observed_records.remove(&component_id) {
+                Some(record) if record.definition == definition => record,
+                _ => ComponentRecord {
+                    definition,
+                    state: ComponentState::Declared,
+                    failure: None,
+                },
+            };
+            desired_records.insert(component_id, record);
+        }
+        self.components = desired_records;
+        self.providers = prepared.desired_providers;
+        self.dependents = prepared.desired_dependents;
+        Ok(prepared.activation_order)
     }
 
     pub(super) fn add_capability(
@@ -464,12 +660,12 @@ impl ComponentGraph {
         &self,
         component_id: &str,
     ) -> Result<(), ComponentGraphError> {
-        let record = self.components.get(component_id).ok_or_else(|| {
-            ComponentGraphError::UnknownComponent {
+        self.components
+            .get(component_id)
+            .ok_or_else(|| ComponentGraphError::UnknownComponent {
                 component_id: component_id.to_string(),
-            }
-        })?;
-        if record.epoch == u64::MAX {
+            })?;
+        if self.component_epoch(component_id) == u64::MAX {
             return Err(ComponentGraphError::ActivationEpochExhausted {
                 component_id: component_id.to_string(),
             });
@@ -660,11 +856,7 @@ impl ComponentGraph {
         match state {
             ComponentState::Active => {
                 self.transition(component_id, ComponentState::Deactivating, &mut report);
-                let epoch = self
-                    .components
-                    .get(component_id)
-                    .expect("component should remain declared during deactivation")
-                    .epoch;
+                let epoch = self.component_epoch(component_id);
                 report.deactivation_requests.push(DeactivationToken {
                     component_id: component_id.to_string(),
                     epoch,
@@ -792,17 +984,27 @@ impl ComponentGraph {
         self.components.get(component_id).map(|record| record.state)
     }
 
+    pub(super) fn is_active(&self, component_id: &str) -> bool {
+        self.components
+            .get(component_id)
+            .is_some_and(|record| record.state == ComponentState::Active)
+    }
+
     #[cfg(test)]
     pub(super) fn epoch(&self, component_id: &str) -> Option<u64> {
-        self.components.get(component_id).map(|record| record.epoch)
+        self.components
+            .contains_key(component_id)
+            .then(|| self.component_epoch(component_id))
     }
 
     #[cfg(test)]
     pub(super) fn inject_epoch_exhaustion(&mut self, component_id: &str) {
-        self.components
-            .get_mut(component_id)
-            .expect("component should exist before epoch exhaustion is injected")
-            .epoch = u64::MAX;
+        assert!(
+            self.components.contains_key(component_id),
+            "component should exist before epoch exhaustion is injected"
+        );
+        self.component_epochs
+            .insert(component_id.to_string(), u64::MAX);
     }
 
     #[cfg(test)]
@@ -882,7 +1084,7 @@ impl ComponentGraph {
             .map(|(id, record)| ComponentSnapshot {
                 id: id.clone(),
                 state: record.state,
-                epoch: record.epoch,
+                epoch: self.component_epoch(id),
                 required: record
                     .definition
                     .required
@@ -941,6 +1143,7 @@ impl ComponentGraph {
             .collect()
     }
 
+    #[cfg(test)]
     fn validate_definition(
         &self,
         definition: &ComponentDefinition,
@@ -1074,11 +1277,7 @@ impl ComponentGraph {
             }
             (ComponentState::Active, false) => {
                 self.transition(id, ComponentState::Deactivating, report);
-                let epoch = self
-                    .components
-                    .get(id)
-                    .expect("component should remain declared during deactivation")
-                    .epoch;
+                let epoch = self.component_epoch(id);
                 report.deactivation_requests.push(DeactivationToken {
                     component_id: id.to_string(),
                     epoch,
@@ -1098,17 +1297,16 @@ impl ComponentGraph {
         id: &str,
         report: &mut ReconciliationReport,
     ) -> Result<(), ComponentGraphError> {
-        let record = self
-            .components
-            .get_mut(id)
-            .expect("component should remain declared during activation");
-        let epoch = record.epoch.checked_add(1).ok_or_else(|| {
+        let epoch = self.component_epoch(id).checked_add(1).ok_or_else(|| {
             ComponentGraphError::ActivationEpochExhausted {
                 component_id: id.to_string(),
             }
         })?;
-        record.failure = None;
-        record.epoch = epoch;
+        self.component_epochs.insert(id.to_string(), epoch);
+        self.components
+            .get_mut(id)
+            .expect("component should remain declared during activation")
+            .failure = None;
         self.transition(id, ComponentState::Activating, report);
         report.activation_requests.push(ActivationToken {
             component_id: id.to_string(),
@@ -1140,7 +1338,7 @@ impl ComponentGraph {
                     ComponentState::Declared | ComponentState::Pending | ComponentState::Disposed
                 ) && will_be_ready
             };
-            if will_begin && record.epoch == u64::MAX {
+            if will_begin && self.component_epoch(&id) == u64::MAX {
                 return Err(ComponentGraphError::ActivationEpochExhausted { component_id: id });
             }
         }
@@ -1167,11 +1365,12 @@ impl ComponentGraph {
                 component_id: token.component_id.clone(),
             }
         })?;
-        if record.epoch != token.epoch {
+        let current = self.component_epoch(&token.component_id);
+        if current != token.epoch {
             return Err(ComponentGraphError::StaleActivation {
                 component_id: token.component_id.clone(),
                 expected: token.epoch,
-                current: record.epoch,
+                current,
             });
         }
         if record.state != ComponentState::Activating {
@@ -1191,11 +1390,12 @@ impl ComponentGraph {
                 component_id: token.component_id.clone(),
             }
         })?;
-        if record.epoch != token.epoch {
+        let current = self.component_epoch(&token.component_id);
+        if current != token.epoch {
             return Err(ComponentGraphError::StaleDeactivation {
                 component_id: token.component_id.clone(),
                 expected: token.epoch,
-                current: record.epoch,
+                current,
             });
         }
         if record.state != ComponentState::Deactivating {
@@ -1224,20 +1424,104 @@ impl ComponentGraph {
             .failure = None;
     }
 
+    fn component_epoch(&self, component_id: &str) -> u64 {
+        self.component_epochs
+            .get(component_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
     fn transition(&mut self, id: &str, to: ComponentState, report: &mut ReconciliationReport) {
-        let record = self
-            .components
-            .get_mut(id)
-            .expect("component id should remain declared");
-        let from = record.state;
-        record.state = to;
+        let from = {
+            let record = self
+                .components
+                .get_mut(id)
+                .expect("component id should remain declared");
+            let from = record.state;
+            record.state = to;
+            from
+        };
         report.transitions.push(ComponentTransition {
             component_id: id.to_string(),
             from,
             to,
-            epoch: record.epoch,
+            epoch: self.component_epoch(id),
         });
     }
+}
+
+fn definition_indexes(
+    definitions: &BTreeMap<String, ComponentDefinition>,
+) -> Result<DefinitionIndexes, ComponentGraphError> {
+    let mut providers = BTreeMap::new();
+    let mut dependents = BTreeMap::<CapabilityKey, BTreeSet<String>>::new();
+    for (component_id, definition) in definitions {
+        for capability in &definition.provides {
+            if definition.required.contains(capability) {
+                return Err(ComponentGraphError::SelfDependency {
+                    component_id: component_id.clone(),
+                    capability: capability.to_string(),
+                });
+            }
+            if let Some(existing_component_id) =
+                providers.insert(capability.clone(), component_id.clone())
+            {
+                return Err(ComponentGraphError::DuplicateCapabilityProvider {
+                    capability: capability.to_string(),
+                    existing_component_id,
+                });
+            }
+        }
+        for dependency in definition.required.iter().chain(&definition.optional) {
+            dependents
+                .entry(dependency.clone())
+                .or_default()
+                .insert(component_id.clone());
+        }
+    }
+    Ok(DefinitionIndexes {
+        providers,
+        dependents,
+    })
+}
+
+fn required_component_dependents(
+    definitions: &BTreeMap<String, ComponentDefinition>,
+    providers: &BTreeMap<CapabilityKey, String>,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut dependents = definitions
+        .keys()
+        .map(|component_id| (component_id.clone(), BTreeSet::new()))
+        .collect::<BTreeMap<_, _>>();
+    for (consumer_id, definition) in definitions {
+        for dependency in &definition.required {
+            let Some(provider_id) = providers.get(dependency) else {
+                continue;
+            };
+            dependents
+                .get_mut(provider_id)
+                .expect("provider index should reference a desired component")
+                .insert(consumer_id.clone());
+        }
+    }
+    dependents
+}
+
+fn dependent_closure(
+    roots: &BTreeSet<String>,
+    dependents: &BTreeMap<String, BTreeSet<String>>,
+) -> BTreeSet<String> {
+    let mut pending = roots.iter().cloned().collect::<Vec<_>>();
+    let mut closure = BTreeSet::new();
+    while let Some(component_id) = pending.pop() {
+        if !closure.insert(component_id.clone()) {
+            continue;
+        }
+        if let Some(component_dependents) = dependents.get(&component_id) {
+            pending.extend(component_dependents.iter().cloned());
+        }
+    }
+    closure
 }
 
 fn topology_order(
@@ -2164,5 +2448,233 @@ mod tests {
         );
         assert!(graph.has_capability(&capability));
         assert_eq!(graph.capabilities()[0].generation, u64::MAX);
+    }
+
+    #[test]
+    fn definition_reconciliation_mixed_diff_is_input_order_independent() {
+        let observed = [
+            ComponentDefinition::new("database").provides("database"),
+            ComponentDefinition::new("service")
+                .requires("database")
+                .provides("service"),
+            ComponentDefinition::new("ui").requires("service"),
+            ComponentDefinition::new("removed"),
+        ];
+        let desired = vec![
+            ComponentDefinition::new("storage").provides("database"),
+            ComponentDefinition::new("service")
+                .requires("database")
+                .observes("metrics")
+                .provides("service"),
+            ComponentDefinition::new("ui").requires("service"),
+            ComponentDefinition::new("added"),
+        ];
+        let mut graph = ComponentGraph::default();
+        let initial = graph
+            .prepare_definition_reconciliation(observed)
+            .expect("initial definitions should preflight");
+        graph
+            .commit_definition_reconciliation(initial)
+            .expect("initial definitions should commit");
+
+        let forward = graph
+            .prepare_definition_reconciliation(desired.clone())
+            .expect("mixed desired definitions should preflight");
+        let reverse = graph
+            .prepare_definition_reconciliation(desired.into_iter().rev())
+            .expect("input order must not affect preflight");
+
+        assert_eq!(forward.retirement_order(), reverse.retirement_order());
+        assert_eq!(forward.activation_order(), reverse.activation_order());
+        assert_eq!(
+            forward.retirement_order(),
+            ["ui", "service", "removed", "database"]
+        );
+        assert_eq!(
+            forward.activation_order(),
+            ["added", "storage", "service", "ui"]
+        );
+    }
+
+    #[test]
+    fn removed_component_epoch_tombstone_rejects_old_tokens_after_readd() {
+        let mut graph = ComponentGraph::default();
+        let declaration = graph
+            .declare(ComponentDefinition::new("agent"))
+            .expect("agent should declare");
+        let stale_activation = declaration.activation_requests[0].clone();
+        graph
+            .complete_activation(stale_activation.clone())
+            .expect("agent should activate");
+        let removal = graph
+            .prepare_definition_reconciliation([])
+            .expect("removal should preflight");
+        let deactivation = graph
+            .deactivate("agent")
+            .expect("active agent should begin deactivation")
+            .deactivation_requests
+            .into_iter()
+            .next()
+            .expect("deactivation token should exist");
+        graph
+            .complete_deactivation(deactivation.clone())
+            .expect("old agent should dispose");
+        graph
+            .commit_definition_reconciliation(removal)
+            .expect("removed definition should commit");
+        assert_eq!(graph.state("agent"), None);
+        assert_eq!(graph.component_epochs.get("agent"), Some(&1));
+
+        let addition = graph
+            .prepare_definition_reconciliation([ComponentDefinition::new("agent")])
+            .expect("same id should be addable after removal");
+        graph
+            .commit_definition_reconciliation(addition)
+            .expect("fresh definition should commit");
+        let fresh = graph
+            .activate("agent")
+            .expect("fresh agent should begin activation")
+            .activation_requests
+            .into_iter()
+            .next()
+            .expect("fresh activation token should exist");
+        assert_eq!(fresh.epoch(), 2);
+        assert_eq!(
+            graph.complete_activation(stale_activation),
+            Err(ComponentGraphError::StaleActivation {
+                component_id: "agent".to_string(),
+                expected: 1,
+                current: 2,
+            })
+        );
+        assert_eq!(
+            graph.complete_deactivation(deactivation),
+            Err(ComponentGraphError::StaleDeactivation {
+                component_id: "agent".to_string(),
+                expected: 1,
+                current: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn same_id_definition_replacement_rejects_old_tokens() {
+        let mut graph = ComponentGraph::default();
+        let initial = graph
+            .prepare_definition_reconciliation([
+                ComponentDefinition::new("agent").observes("old-observation")
+            ])
+            .expect("initial definition should preflight");
+        graph
+            .commit_definition_reconciliation(initial)
+            .expect("initial definition should commit");
+        let stale_activation = graph
+            .activate("agent")
+            .expect("initial agent should begin activation")
+            .activation_requests
+            .into_iter()
+            .next()
+            .expect("initial activation token should exist");
+        graph
+            .complete_activation(stale_activation.clone())
+            .expect("initial agent should activate");
+
+        let replacement = graph
+            .prepare_definition_reconciliation([
+                ComponentDefinition::new("agent").observes("fresh-observation")
+            ])
+            .expect("same-id replacement should preflight");
+        let stale_deactivation = graph
+            .suspend("agent")
+            .expect("old agent should begin suspension")
+            .deactivation_requests
+            .into_iter()
+            .next()
+            .expect("old deactivation token should exist");
+        graph
+            .complete_deactivation(stale_deactivation.clone())
+            .expect("old agent should suspend");
+        assert_eq!(
+            graph
+                .commit_definition_reconciliation(replacement)
+                .expect("same-id replacement should commit"),
+            vec!["agent"]
+        );
+        let fresh_activation = graph
+            .activate("agent")
+            .expect("replacement agent should begin activation")
+            .activation_requests
+            .into_iter()
+            .next()
+            .expect("fresh activation token should exist");
+
+        assert_eq!(fresh_activation.epoch(), 2);
+        assert_eq!(
+            graph.complete_activation(stale_activation),
+            Err(ComponentGraphError::StaleActivation {
+                component_id: "agent".to_string(),
+                expected: 1,
+                current: 2,
+            })
+        );
+        assert_eq!(
+            graph.complete_deactivation(stale_deactivation),
+            Err(ComponentGraphError::StaleDeactivation {
+                component_id: "agent".to_string(),
+                expected: 1,
+                current: 2,
+            })
+        );
+        assert_eq!(graph.state("agent"), Some(ComponentState::Activating));
+        assert_eq!(
+            graph.components()[0]
+                .optional
+                .iter()
+                .map(|dependency| dependency.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["fresh-observation"]
+        );
+    }
+
+    #[test]
+    fn definition_preflight_rejects_invalid_batch_without_mutation() {
+        let mut graph = ComponentGraph::default();
+        let initial = graph
+            .prepare_definition_reconciliation([
+                ComponentDefinition::new("provider").provides("shared"),
+                ComponentDefinition::new("consumer").requires("shared"),
+            ])
+            .expect("initial definitions should preflight");
+        graph
+            .commit_definition_reconciliation(initial)
+            .expect("initial definitions should commit");
+        let components_before = graph.components();
+        let order_before = graph.activation_order();
+
+        assert!(matches!(
+            graph.prepare_definition_reconciliation([
+                ComponentDefinition::new("provider-a").provides("shared"),
+                ComponentDefinition::new("provider-b").provides("shared"),
+            ]),
+            Err(ComponentGraphError::DuplicateCapabilityProvider {
+                capability,
+                existing_component_id,
+            }) if capability == "shared" && existing_component_id == "provider-a"
+        ));
+        assert!(matches!(
+            graph.prepare_definition_reconciliation([
+                ComponentDefinition::new("a")
+                    .requires("b-capability")
+                    .provides("a-capability"),
+                ComponentDefinition::new("b")
+                    .requires("a-capability")
+                    .provides("b-capability"),
+            ]),
+            Err(ComponentGraphError::DependencyCycle {
+                component_ids,
+            }) if component_ids == ["a", "b"]
+        ));
+        assert_eq!(graph.components(), components_before);
+        assert_eq!(graph.activation_order(), order_before);
     }
 }

@@ -984,7 +984,13 @@ proptest! {
             &mut executor,
             &mut callbacks,
             ActivationExpectation::All,
-            |executor, callbacks| executor.declare_all(definitions(), callbacks),
+            |executor, callbacks| {
+                executor.reconcile_definitions(
+                    definitions(),
+                    callbacks,
+                    ComponentLifecycleMode::Initial,
+                )
+            },
         )?;
         prop_assert!(initial.is_ok());
         let initial_state = callbacks.snapshot();
@@ -1027,7 +1033,13 @@ proptest! {
             &mut executor,
             &mut callbacks,
             ActivationExpectation::All,
-            |executor, callbacks| executor.declare_all(definitions(), callbacks),
+            |executor, callbacks| {
+                executor.reconcile_definitions(
+                    definitions(),
+                    callbacks,
+                    ComponentLifecycleMode::Initial,
+                )
+            },
         )?;
         prop_assert!(initial.is_ok());
 
@@ -1112,7 +1124,13 @@ proptest! {
             &mut executor,
             &mut callbacks,
             ActivationExpectation::All,
-            |executor, callbacks| executor.declare_all(definitions(), callbacks),
+            |executor, callbacks| {
+                executor.reconcile_definitions(
+                    definitions(),
+                    callbacks,
+                    ComponentLifecycleMode::Initial,
+                )
+            },
         )?;
         prop_assert!(initial.is_ok());
 
@@ -1262,15 +1280,20 @@ proptest! {
         let mut executor = ComponentLifecycleExecutor::default();
         let mut callbacks = PropertyCallbacks::default();
         executor
-            .declare_all(definitions(), &mut callbacks)
+            .reconcile_definitions(
+                definitions(),
+                &mut callbacks,
+                ComponentLifecycleMode::Initial,
+            )
             .expect("fixed acyclic graph must activate");
         let _ = executor.shutdown(&mut callbacks);
         let before = (executor_snapshot(&executor), callbacks.snapshot());
 
         let result = match mutation {
-            PostShutdownMutation::Declare => executor.declare_all(
+            PostShutdownMutation::Declare => executor.reconcile_definitions(
                 [ComponentDefinition::new("extra_component")],
                 &mut callbacks,
+                ComponentLifecycleMode::Initial,
             ),
             PostShutdownMutation::RemoveCapability => executor.remove_capability(
                 TestComponent::AlphaSource.as_str(),

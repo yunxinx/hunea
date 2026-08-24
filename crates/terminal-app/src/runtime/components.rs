@@ -404,8 +404,14 @@ impl RuntimeComponents {
                 .is_some()
         );
         let definitions = self.plugins.definitions();
-        self.with_lifecycle(|lifecycle, components| lifecycle.declare_all(definitions, components))
-            .map_err(|error| error.to_string())
+        self.with_lifecycle(|lifecycle, components| {
+            lifecycle.reconcile_definitions(
+                definitions,
+                components,
+                ComponentLifecycleMode::Initial,
+            )
+        })
+        .map_err(|error| error.to_string())
     }
 
     pub(super) fn bind_runtime_wake(&mut self, wake: RuntimeWake) -> Result<(), String> {

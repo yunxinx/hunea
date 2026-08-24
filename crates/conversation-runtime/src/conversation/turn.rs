@@ -4,7 +4,10 @@ use super::{
 };
 use crate::{
     PreparedConversationRequest, ProviderClientLease, ProviderProgress,
-    llm::{execute_conversation_request, execute_prepared_conversation_request},
+    llm::{
+        PreparedRequestExecutionOptions, execute_conversation_request,
+        execute_prepared_conversation_request,
+    },
 };
 use tool_runtime::{SharedToolPermissionHandler, ToolExecutorRegistry};
 
@@ -77,8 +80,7 @@ pub(crate) async fn run_prepared_conversation_with_progress<F>(
     request: &PreparedConversationRequest,
     executor: ToolExecutorRegistry,
     cancellation: &tokio_util::sync::CancellationToken,
-    tool_max_turns: Option<usize>,
-    permission_handler: Option<SharedToolPermissionHandler>,
+    options: PreparedRequestExecutionOptions,
     mut on_progress: F,
 ) -> Result<ConversationCompletion, TurnExecutionError>
 where
@@ -89,8 +91,7 @@ where
         request,
         executor,
         cancellation,
-        tool_max_turns,
-        permission_handler,
+        options,
         &mut on_progress,
     )
     .await

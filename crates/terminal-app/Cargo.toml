@@ -10,6 +10,7 @@ color-eyre.workspace = true
 app-config.workspace = true
 runtime-domain.workspace = true
 conversation-runtime.workspace = true
+extension-hook-runtime.workspace = true
 extension-runtime.workspace = true
 tool-loop-runtime.workspace = true
 session-store.workspace = true

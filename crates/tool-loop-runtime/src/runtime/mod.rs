@@ -101,12 +101,13 @@ where
                 clock: &clock,
                 permission_handler: options.permission_handler.as_ref(),
                 error_formatter: &options.error_formatter,
+                extension_hooks: &options.extension_hooks,
                 state: &mut state,
             };
             let execution = if cancellation.is_cancelled() {
                 interrupted_tool_execution(call)
             } else {
-                execute_tool_call(call, &mut tool_call_context, &mut on_progress).await
+                execute_tool_call(call, &mut tool_call_context, &mut on_progress).await?
             };
             let update = runtime_tool_activity_update_from_result(
                 call,

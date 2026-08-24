@@ -103,6 +103,11 @@ impl PreparedConversationRequest {
         &self.items
     }
 
+    /// 应用已经过 hook registry 校验的 provider-visible items。
+    pub(crate) fn replace_items_from_hook(&mut self, items: Vec<ConversationItem>) {
+        self.items = items;
+    }
+
     /// `prompt_prelude` 返回本次请求绑定的 prompt prelude 快照。
     pub fn prompt_prelude(&self) -> Option<&PromptPreludeSnapshot> {
         self.prompt_prelude.as_ref()

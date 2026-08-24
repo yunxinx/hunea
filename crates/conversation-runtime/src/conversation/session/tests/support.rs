@@ -9,6 +9,10 @@ pub(super) use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+pub(super) use extension_hook_runtime::{
+    BeforeTurnDecision, ExtensionHookRegistry, HookFailureKind, HookId, HookOwnerId, HookPriority,
+    HookRegistrationOptions,
+};
 pub(super) use provider_protocol::{ContentBlock, ConversationItem, Role, ToolCall};
 pub(super) use provider_protocol::{
     ModelDescriptor, PromptCompletion, PromptRequest, ProviderCapabilities, ProviderClient,
@@ -33,11 +37,11 @@ pub(super) use tool_runtime::ToolExecutorRegistry;
 pub(super) use super::super::persistence::{SessionPersistenceCommand, SessionPersistenceError};
 pub(super) use super::super::{
     ConversationDelta, ConversationEvent, ConversationWorker, ConversationWorkerEvent,
-    ConversationWorkerEventSender, ProviderContextRepairLedger, SessionPersistenceState,
-    TOOL_EXECUTION_INTERRUPTED, TurnAttemptOutcome, flush_session_persistence,
-    persist_context_item, persist_terminal_snapshot, persist_tool_activity_started,
-    persist_tool_activity_update, persist_turn_start, run_conversation_worker,
-    run_session_persistence_actor, run_with_cancellation_grace,
+    ConversationWorkerEventSender, ConversationWorkerOptions, ProviderContextRepairLedger,
+    SessionPersistenceState, TOOL_EXECUTION_INTERRUPTED, TurnAttemptOutcome,
+    flush_session_persistence, persist_context_item, persist_terminal_snapshot,
+    persist_tool_activity_started, persist_tool_activity_update, persist_turn_start,
+    run_conversation_worker, run_session_persistence_actor, run_with_cancellation_grace,
 };
 pub(super) use crate::{
     ConversationResponse, PreparedConversationRequest, PreparedTurnOptions, ProviderClientLease,
@@ -90,6 +94,17 @@ pub(super) fn conversation_worker_event_channel() -> (
         ConversationWorkerEventSender::new(sender, RuntimeEventNotifier::default()),
         receiver,
     )
+}
+
+pub(super) fn conversation_worker_options(
+    request_policy: RuntimeRequestPolicy,
+    extension_hooks: ExtensionHookRegistry,
+) -> ConversationWorkerOptions {
+    ConversationWorkerOptions {
+        request_policy,
+        permission_handler: None,
+        extension_hooks,
+    }
 }
 
 pub(super) fn run_store<T>(

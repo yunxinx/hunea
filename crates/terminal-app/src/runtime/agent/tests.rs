@@ -5,6 +5,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+use extension_hook_runtime::{
+    BeforeTurnDecision, BeforeTurnPayload, ExtensionHookRegistry, HookFailureKind, HookId,
+    HookOwnerId, HookPriority, HookRegistrationOptions,
+};
 use provider_protocol::{
     ConversationItem, FinishReason, ModelDescriptor, PromptCompletion, PromptRequest,
     ProviderCapabilities, ProviderClient, ProviderError, ProviderFuture, Role, StreamEvent,
@@ -26,9 +30,9 @@ use tool_runtime::{
 };
 
 use super::{
-    AgentCommand, AgentEvent, AgentEventKind, AgentId, AgentRuntime, AgentRuntimeActivity,
-    AgentRuntimeConstructionGrants, AgentRuntimeError, AgentRuntimePort, AgentSessionRestore,
-    AgentTurnId, AgentTurnRequest, NativeAgentRuntime,
+    AgentCommand, AgentEvent, AgentEventKind, AgentId, AgentRuntime, AgentRuntimeActivationGrants,
+    AgentRuntimeActivity, AgentRuntimeConstructionGrants, AgentRuntimeError, AgentRuntimePort,
+    AgentSessionRestore, AgentTurnId, AgentTurnRequest, NativeAgentRuntime,
 };
 
 use crate::runtime::{
@@ -204,6 +208,7 @@ fn native_runtime_with_llm_port(
             ),
             ..AppRuntimeOptions::default()
         },
+        ExtensionHookRegistry::new(),
         ToolExecutorRegistry::default(),
         Vec::new(),
         PromptAssemblySessionSnapshot::default(),
@@ -752,6 +757,7 @@ fn native_runtime_streams_through_the_llm_port_factory() {
             ),
             ..AppRuntimeOptions::default()
         },
+        ExtensionHookRegistry::new(),
         ToolExecutorRegistry::default(),
         Vec::new(),
         PromptAssemblySessionSnapshot::default(),
@@ -796,6 +802,119 @@ fn native_runtime_streams_through_the_llm_port_factory() {
 }
 
 #[test]
+fn native_before_turn_failure_rolls_back_pending_user_and_allows_the_next_turn() {
+    const USER_SENTINEL: &str = "private instruction private user private tool arguments private tool schema private tool result /private/workspace/file private-credential https://private.example/v1 private-session-id private-request-id private-call-id";
+    const PRIVATE_VALUES: &[&str] = &[
+        "private instruction",
+        "private user",
+        "private tool arguments",
+        "private tool schema",
+        "private tool result",
+        "/private/workspace/file",
+        "private-credential",
+        "https://private.example/v1",
+        "private-session-id",
+        "private-request-id",
+        "private-call-id",
+    ];
+    let llm_port = crate::runtime::llm_port::LlmPort::new();
+    let _provider_registration = llm_port
+        .register(
+            "native-hook-test",
+            "fixture",
+            std::sync::Arc::new(NativeStreamFactory),
+        )
+        .expect("fixture provider should register");
+    let hooks = ExtensionHookRegistry::new();
+    let mut hook_registration = hooks
+        .register_before_turn(
+            HookOwnerId::try_new("native-policy").expect("owner id should validate"),
+            HookId::try_new("fail-first-turn").expect("hook id should validate"),
+            HookRegistrationOptions::try_new(HookPriority::default(), Duration::from_secs(1))
+                .expect("hook options should validate"),
+            std::sync::Arc::new(|_payload: BeforeTurnPayload, _cancellation| async move {
+                Err::<BeforeTurnDecision, _>(HookFailureKind::Internal)
+            }),
+        )
+        .expect("hook should register");
+    let notifier = RuntimeEventNotifier::default();
+    let (permission_policy, _approval_registration) = permission_policy_fixture(notifier.clone());
+    let mut runtime = NativeAgentRuntime::new_for_test(
+        &AppRuntimeOptions {
+            runtime_request_policy: runtime_domain::request_policy::RuntimeRequestPolicy::new(
+                0,
+                Vec::new(),
+                1,
+            ),
+            ..AppRuntimeOptions::default()
+        },
+        hooks,
+        ToolExecutorRegistry::default(),
+        Vec::new(),
+        PromptAssemblySessionSnapshot::default(),
+        None,
+        notifier,
+        llm_port,
+        permission_policy,
+        TERMINAL_APPROVAL_PROVIDER_ID,
+    )
+    .expect("native Agent runtime should initialize");
+
+    runtime
+        .dispatch(AgentCommand::SubmitTurn {
+            agent_id: AgentId::MAIN,
+            turn_id: AgentTurnId::new(19),
+            request: Box::new(AgentTurnRequest::from_conversation_request(
+                ConversationTurnRequest::new(
+                    "fixture",
+                    "fixture-model",
+                    ConversationItem::text(Role::User, USER_SENTINEL),
+                ),
+            )),
+        })
+        .expect("hook-failed turn should be admitted asynchronously");
+    let failed_events = collect_until_terminal(&mut runtime);
+
+    assert!(matches!(
+        failed_events.last().map(|event| &event.kind),
+        Some(AgentEventKind::TurnFailed { message })
+            if message == "extension hook dispatch failed: phase=before_turn kind=hook_internal_failure owner=native-policy hook=fail-first-turn"
+    ));
+    let diagnostic = format!("{failed_events:?}");
+    for private in PRIVATE_VALUES {
+        assert!(!diagnostic.contains(private), "diagnostic leaked {private}");
+    }
+    assert!(
+        runtime.is_history_empty(),
+        "terminal hook failure must roll back the pending user"
+    );
+
+    assert!(hook_registration.dispose());
+    runtime
+        .dispatch(AgentCommand::SubmitTurn {
+            agent_id: AgentId::MAIN,
+            turn_id: AgentTurnId::new(20),
+            request: Box::new(AgentTurnRequest::from_conversation_request(
+                ConversationTurnRequest::new(
+                    "fixture",
+                    "fixture-model",
+                    ConversationItem::text(Role::User, "next turn"),
+                ),
+            )),
+        })
+        .expect("same adapter should admit the next turn after rollback");
+    let successful_events = collect_until_terminal(&mut runtime);
+    assert!(matches!(
+        successful_events.last().map(|event| &event.kind),
+        Some(AgentEventKind::TurnFinished { .. })
+    ));
+    assert!(!runtime.is_history_empty());
+    runtime
+        .shutdown()
+        .expect("native runtime should shut down cleanly");
+}
+
+#[test]
 fn native_runtime_routes_tool_approval_through_the_live_permission_turn() {
     let llm_port = crate::runtime::llm_port::LlmPort::new();
     let _registration = llm_port
@@ -818,6 +937,7 @@ fn native_runtime_routes_tool_approval_through_the_live_permission_turn() {
             ),
             ..AppRuntimeOptions::default()
         },
+        ExtensionHookRegistry::new(),
         tools,
         Vec::new(),
         PromptAssemblySessionSnapshot::default(),
@@ -908,6 +1028,7 @@ fn provider_failure_is_redacted_before_runtime_event_projection() {
             ),
             ..AppRuntimeOptions::default()
         },
+        ExtensionHookRegistry::new(),
         ToolExecutorRegistry::default(),
         Vec::new(),
         PromptAssemblySessionSnapshot::default(),
@@ -1318,7 +1439,10 @@ fn replay_suspension_reverts_queued_facts_and_rebinds_the_event_stream() {
     );
 
     runtime
-        .activate(RuntimeContext::test_event_stream_lease(old_notifier))
+        .activate(
+            AgentRuntimeActivationGrants::empty()
+                .with_event_stream(RuntimeContext::test_event_stream_lease(old_notifier)),
+        )
         .expect("Replay should bind the first event-stream generation");
     assert_eq!(runtime.activity(), AgentRuntimeActivity::Idle);
     assert!(!runtime.has_pending_work());
@@ -1346,7 +1470,10 @@ fn replay_suspension_reverts_queued_facts_and_rebinds_the_event_stream() {
     assert!(runtime.drain_events().is_empty());
 
     runtime
-        .activate(RuntimeContext::test_event_stream_lease(fresh_notifier))
+        .activate(
+            AgentRuntimeActivationGrants::empty()
+                .with_event_stream(RuntimeContext::test_event_stream_lease(fresh_notifier)),
+        )
         .expect("Replay should accept a fresh event-stream generation");
     runtime
         .dispatch(AgentCommand::SubmitTurn {
@@ -1403,8 +1530,8 @@ fn replay_shutdown_erases_active_state_and_undelivered_facts() {
         .expect_err("disposed replay must reject commands");
     assert!(matches!(error, AgentRuntimeError::Disposed));
     let activation_error = runtime
-        .activate(RuntimeContext::test_event_stream_lease(
-            RuntimeEventNotifier::default(),
+        .activate(AgentRuntimeActivationGrants::empty().with_event_stream(
+            RuntimeContext::test_event_stream_lease(RuntimeEventNotifier::default()),
         ))
         .expect_err("finalized Replay must reject reactivation");
     assert_eq!(activation_error, "Agent adapter is finalized");

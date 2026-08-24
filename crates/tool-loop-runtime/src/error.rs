@@ -1,3 +1,4 @@
+use extension_hook_runtime::HookDispatchError;
 use provider_protocol::ProviderError;
 use thiserror::Error;
 
@@ -8,6 +9,11 @@ pub enum ToolLoopError {
     Provider(#[from] ProviderError),
     #[error("tool loop cancelled")]
     Cancelled,
+    #[error("{source}")]
+    ExtensionHook {
+        #[source]
+        source: HookDispatchError,
+    },
     #[error("request received no items")]
     EmptyPrompt,
     #[error("tool turn limit reached ({max_turns})")]

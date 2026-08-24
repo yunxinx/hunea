@@ -1,5 +1,6 @@
 use std::time::{Duration, Instant};
 
+use extension_hook_runtime::ExtensionHookRegistry;
 use provider_protocol::ConversationItem;
 use runtime_domain::session::{
     ProviderRequestMetrics, RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityUpdate,
@@ -83,6 +84,7 @@ pub struct ToolLoopOptions {
     pub permission_handler: Option<SharedToolPermissionHandler>,
     pub error_formatter: SharedToolErrorFormatter,
     pub clock: ToolLoopClock,
+    pub extension_hooks: ExtensionHookRegistry,
 }
 
 impl Default for ToolLoopOptions {
@@ -92,6 +94,7 @@ impl Default for ToolLoopOptions {
             permission_handler: None,
             error_formatter: std::sync::Arc::new(DefaultToolErrorFormatter),
             clock: ToolLoopClock::default(),
+            extension_hooks: ExtensionHookRegistry::new(),
         }
     }
 }

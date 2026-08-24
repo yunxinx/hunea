@@ -6,6 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+extension-hook-runtime.workspace = true
 tool-loop-runtime.workspace = true
 provider-protocol.workspace = true
 runtime-domain.workspace = true

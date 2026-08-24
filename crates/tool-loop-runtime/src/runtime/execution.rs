@@ -1,3 +1,7 @@
+use extension_hook_runtime::{
+    AfterToolResultPayload, BeforeToolExecutePayload, ExtensionHookRegistry, HookDispatchError,
+    HookDispatchErrorKind,
+};
 use provider_protocol::{
     ContentBlock, ToolCall as AiToolCall, ToolCallArgumentsError,
     ToolDefinition as AiToolDefinition, ToolResult as AiToolResult,
@@ -13,9 +17,11 @@ use tool_runtime::{
 };
 
 use super::{ToolLoopClock, ToolLoopProgress, state::RuntimeTurnState};
+use crate::error::ToolLoopError;
 
 const TOOL_PERMISSION_DENIED: &str = "Tool permission denied";
 const TOOL_EXECUTION_INTERRUPTED: &str = "Tool execution interrupted";
+const TOOL_EXECUTION_REJECTED_BY_EXTENSION: &str = "Tool execution rejected by extension policy";
 
 pub(super) struct ToolExecution {
     pub(super) raw_result: ToolResult,
@@ -64,40 +70,71 @@ pub(super) async fn execute_tool_call(
     call: &AiToolCall,
     context: &mut ToolCallExecutionContext<'_>,
     on_progress: &mut impl FnMut(ToolLoopProgress),
-) -> ToolExecution {
+) -> Result<ToolExecution, ToolLoopError> {
     let arguments = match call.parsed_arguments_value() {
         Ok(value) => value,
         Err(error) => {
-            return invalid_arguments_tool_execution(call, error);
+            return Ok(invalid_arguments_tool_execution(call, error));
         }
     };
     let runtime_call =
         tool_runtime::ToolCall::new(call.call_id.clone(), call.name.clone(), arguments);
 
     let authorization = authorize_tool_call(&runtime_call, context).await;
-    let raw_result = match authorization.denial_message {
-        Some(message) => ToolResult::error(call.call_id.clone(), message),
-        None => {
-            execute_tool_with_progress(
-                runtime_call,
-                authorization.permission_snapshot,
-                context,
-                on_progress,
+    let (raw_result, is_extension_rejection) = match authorization.denial_message {
+        Some(message) => (ToolResult::error(call.call_id.clone(), message), false),
+        None => match context
+            .extension_hooks
+            .dispatch_before_tool_execute(
+                BeforeToolExecutePayload::new(runtime_call.clone()),
+                context.cancellation,
             )
             .await
-        }
+        {
+            Ok(()) => {
+                let raw_result = execute_tool_with_progress(
+                    runtime_call,
+                    authorization.permission_snapshot,
+                    context,
+                    on_progress,
+                )
+                .await;
+                let raw_result = context
+                    .extension_hooks
+                    .dispatch_after_tool_result(
+                        AfterToolResultPayload::new(call.name.clone(), raw_result),
+                        context.cancellation,
+                    )
+                    .await
+                    .map_err(tool_loop_hook_error)?
+                    .into_result();
+                (raw_result, false)
+            }
+            Err(error) if matches!(error.kind(), HookDispatchErrorKind::Rejected(_)) => (
+                ToolResult::error(call.call_id.clone(), TOOL_EXECUTION_REJECTED_BY_EXTENSION),
+                true,
+            ),
+            Err(error) => return Err(tool_loop_hook_error(error)),
+        },
     };
 
-    let processed_error = (raw_result.is_error()
-        && !is_command_execution_error(
-            &raw_result,
-            context.tool_definitions.definition(&call.name),
+    let processed_error = if is_extension_rejection {
+        Some(ProcessedToolError::new(
+            TOOL_EXECUTION_REJECTED_BY_EXTENSION,
+            TOOL_EXECUTION_REJECTED_BY_EXTENSION,
         ))
-    .then(|| {
-        context
-            .error_formatter
-            .format_tool_error(&call.name, &raw_result.text_content())
-    });
+    } else {
+        (raw_result.is_error()
+            && !is_command_execution_error(
+                &raw_result,
+                context.tool_definitions.definition(&call.name),
+            ))
+        .then(|| {
+            context
+                .error_formatter
+                .format_tool_error(&call.name, &raw_result.text_content())
+        })
+    };
     let provider_content = processed_error
         .as_ref()
         .map(|processed| vec![ContentBlock::Text(processed.assistant_message.clone())])
@@ -118,10 +155,18 @@ pub(super) async fn execute_tool_call(
         )
     };
 
-    ToolExecution {
+    Ok(ToolExecution {
         raw_result,
         provider_result,
         processed_error,
+    })
+}
+
+fn tool_loop_hook_error(error: HookDispatchError) -> ToolLoopError {
+    if error.kind() == HookDispatchErrorKind::CallerCancelled {
+        ToolLoopError::Cancelled
+    } else {
+        ToolLoopError::ExtensionHook { source: error }
     }
 }
 
@@ -349,6 +394,7 @@ pub(super) struct ToolCallExecutionContext<'a> {
     pub(super) clock: &'a ToolLoopClock,
     pub(super) permission_handler: Option<&'a SharedToolPermissionHandler>,
     pub(super) error_formatter: &'a SharedToolErrorFormatter,
+    pub(super) extension_hooks: &'a ExtensionHookRegistry,
     pub(super) state: &'a mut RuntimeTurnState,
 }
 
@@ -373,6 +419,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::{ToolCallExecutionContext, authorize_tool_call, invalid_arguments_tool_execution};
+    use extension_hook_runtime::ExtensionHookRegistry;
     use provider_protocol::ToolCall as AiToolCall;
     use tokio_util::sync::CancellationToken;
     use tool_runtime::{
@@ -416,6 +463,7 @@ mod tests {
         let cancellation = CancellationToken::new();
         let clock = ToolLoopClock::default();
         let error_formatter: SharedToolErrorFormatter = Arc::new(DefaultToolErrorFormatter);
+        let extension_hooks = ExtensionHookRegistry::new();
         let mut state = RuntimeTurnState::new("qwen3".to_string());
         let mut context = ToolCallExecutionContext {
             executor: &executor,
@@ -424,6 +472,7 @@ mod tests {
             clock: &clock,
             permission_handler: Some(&permission_handler),
             error_formatter: &error_formatter,
+            extension_hooks: &extension_hooks,
             state: &mut state,
         };
         let call = ToolCall::new("call-1", "panic_preview", serde_json::json!({}));

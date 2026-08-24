@@ -1,6 +1,7 @@
 use std::{collections::VecDeque, path::Path, sync::Arc};
 
 use conversation_runtime::{ConversationWorker, PreparedTurnOptions, ProviderConversation};
+use extension_hook_runtime::ExtensionHookRegistry;
 use runtime_domain::{
     context_budget::ContextWindowUsage,
     dynamic_environment::{
@@ -25,9 +26,10 @@ use super::{
     AgentCommand, AgentCommandReceipt, AgentContextBudgetSnapshot,
     AgentEmptySessionConfigurationOutcome, AgentEvent, AgentEventKind, AgentId,
     AgentPermissionConstructionGrant, AgentPromptConstructionGrant, AgentRuntime,
-    AgentRuntimeActivity, AgentRuntimeConstructionGrants, AgentRuntimeError, AgentRuntimePort,
-    AgentSessionCapability, AgentSessionConstructionGrant, AgentSessionRestore,
-    AgentSessionSnapshot, AgentToolConstructionGrant, AgentTurnId, AgentTurnRequest,
+    AgentRuntimeActivationGrants, AgentRuntimeActivity, AgentRuntimeConstructionGrants,
+    AgentRuntimeError, AgentRuntimePort, AgentSessionCapability, AgentSessionConstructionGrant,
+    AgentSessionRestore, AgentSessionSnapshot, AgentToolConstructionGrant, AgentTurnId,
+    AgentTurnRequest,
 };
 use crate::prompt_assembly::{
     AttachedPromptMessageAssembly, ManualSkillPromptUse, PromptAssemblyWorkspace,
@@ -62,6 +64,7 @@ struct ActiveNativeTurn {
 /// `NativeAgentRuntime` 封装当前 conversation worker 的完整 turn choreography。
 pub struct NativeAgentRuntime {
     worker: ConversationWorker,
+    extension_hooks: Option<ExtensionHookRegistry>,
     llm_port: LlmPort,
     permission_policy: PermissionPolicy,
     permission_provider_id: String,
@@ -104,6 +107,7 @@ impl NativeAgentRuntime {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_for_test(
         options: &crate::runtime::AppRuntimeOptions,
+        extension_hooks: ExtensionHookRegistry,
         session_workspace_tools: ToolExecutorRegistry,
         prompt_assembly_tool_definitions: Vec<ToolDefinition>,
         prompt_assembly: PromptAssemblySessionSnapshot,
@@ -114,6 +118,7 @@ impl NativeAgentRuntime {
         permission_provider_id: impl Into<String>,
     ) -> Result<Self, String> {
         let grants = AgentRuntimeConstructionGrants::empty()
+            .with_extension_hooks(extension_hooks)
             .with_llm_port(llm_port)
             .with_loaded_models(options.loaded_models.clone())
             .with_permission(
@@ -136,6 +141,7 @@ impl NativeAgentRuntime {
         event_notifier: RuntimeEventNotifier,
     ) -> Result<Self, String> {
         let AgentRuntimeConstructionGrants {
+            extension_hooks,
             llm_port,
             loaded_models,
             permission,
@@ -143,6 +149,9 @@ impl NativeAgentRuntime {
             tools,
             session,
         } = grants;
+        let extension_hooks = extension_hooks.ok_or_else(|| {
+            "Agent construction grant is unavailable: extension_hooks".to_string()
+        })?;
         let llm_port = llm_port
             .ok_or_else(|| "Agent construction grant is unavailable: llm_port".to_string())?;
         let loaded_models = loaded_models
@@ -181,6 +190,7 @@ impl NativeAgentRuntime {
             RuntimeContext::event_stream_lease(event_notifier.clone(), "native_agent_bootstrap");
         Ok(Self {
             worker: ConversationWorker::new((*event_stream).clone()),
+            extension_hooks: Some(extension_hooks),
             llm_port,
             permission_policy,
             permission_provider_id,
@@ -570,6 +580,9 @@ impl NativeAgentRuntime {
             self.session_workspace_tools.clone(),
             self.request_policy.clone(),
             Some(permission_handler),
+            self.extension_hooks
+                .clone()
+                .ok_or(AgentRuntimeError::Disposed)?,
         );
         if !self.pending_events.is_empty() {
             self.notify_runtime_event();
@@ -879,16 +892,16 @@ impl NativeAgentRuntime {
 }
 
 impl AgentRuntimePort for NativeAgentRuntime {
-    fn activate(
-        &mut self,
-        event_stream: CapabilityLease<RuntimeEventStreamCapability>,
-    ) -> Result<(), String> {
+    fn activate(&mut self, mut grants: AgentRuntimeActivationGrants) -> Result<(), String> {
         if self.is_busy() {
             return Err("Cannot replace runtime event stream while Agent is busy".to_string());
         }
+        let event_stream = grants.take_event_stream()?;
+        let extension_hooks = grants.take_extension_hooks()?;
         self.worker = ConversationWorker::new((*event_stream).clone());
         self.dynamic_environment_worker
             .rebind_event_stream(event_stream.clone());
+        self.extension_hooks = Some((*extension_hooks).clone());
         self.event_stream = Some(event_stream);
         self.is_shutdown = false;
         Ok(())
@@ -908,6 +921,7 @@ impl AgentRuntimePort for NativeAgentRuntime {
             .map_err(AgentRuntimeError::Shutdown);
         self.cancel_permission_turn();
         self.active_turn = None;
+        self.extension_hooks = None;
         self.event_stream = None;
         worker_result
     }
@@ -931,6 +945,11 @@ impl AgentRuntimePort for NativeAgentRuntime {
     #[cfg(test)]
     fn has_pending_work(&self) -> bool {
         self.has_pending_work()
+    }
+
+    #[cfg(test)]
+    fn extension_hooks_for_test(&self) -> Option<ExtensionHookRegistry> {
+        self.extension_hooks.clone()
     }
 }
 

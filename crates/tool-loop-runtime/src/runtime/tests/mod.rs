@@ -2,6 +2,7 @@ include!("support/common.rs");
 include!("support/providers.rs");
 include!("support/tools.rs");
 
+mod hooks;
 mod loop_control;
 mod metrics;
 mod permission;

@@ -1,11 +1,13 @@
 use std::fmt;
 
+use extension_hook_runtime::HookDispatchError;
 use provider_protocol::ProviderError;
 
 /// `ProviderRequestError` 描述 provider 请求失败。
 pub enum ProviderRequestError {
     EmptyPrompt { provider_id: String },
     Provider { source: ProviderError },
+    ExtensionHook { source: HookDispatchError },
     ToolTurnLimit { max_turns: usize },
     Cancelled,
 }
@@ -18,6 +20,10 @@ impl fmt::Debug for ProviderRequestError {
                 .field("provider_id", provider_id)
                 .finish(),
             Self::Provider { .. } => formatter.write_str("Provider(REDACTED)"),
+            Self::ExtensionHook { source } => formatter
+                .debug_tuple("ExtensionHook")
+                .field(source)
+                .finish(),
             Self::ToolTurnLimit { max_turns } => formatter
                 .debug_struct("ToolTurnLimit")
                 .field("max_turns", max_turns)
@@ -34,6 +40,7 @@ impl fmt::Display for ProviderRequestError {
                 write!(f, "provider {provider_id} received no prompt items")
             }
             Self::Provider { .. } => write!(f, "provider request failed"),
+            Self::ExtensionHook { source } => write!(f, "{source}"),
             Self::ToolTurnLimit { max_turns } => {
                 write!(f, "tool turn limit reached ({max_turns})")
             }
@@ -46,6 +53,7 @@ impl std::error::Error for ProviderRequestError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Provider { source } => Some(source),
+            Self::ExtensionHook { source } => Some(source),
             Self::EmptyPrompt { .. } | Self::ToolTurnLimit { .. } | Self::Cancelled => None,
         }
     }

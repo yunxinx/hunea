@@ -9,7 +9,10 @@ pub use error::ProviderRequestError;
 pub use lease::{ProviderClientLease, ProviderPromptCachePolicy};
 pub use runtime_domain::session::ProviderRequestMetrics;
 
-pub(crate) use client::{execute_conversation_request, execute_prepared_conversation_request};
+pub(crate) use client::{
+    PreparedRequestExecutionOptions, execute_conversation_request,
+    execute_prepared_conversation_request,
+};
 pub(crate) use request::{
     prompt_request_from_prepared_request, prompt_request_from_provider_request,
 };

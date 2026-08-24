@@ -13,6 +13,7 @@ use std::{
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio_util::sync::CancellationToken;
 
+use extension_hook_runtime::{BeforeTurnPayload, ExtensionHookRegistry, HookDispatchErrorKind};
 use runtime_domain::{
     event_notifier::{NotifyingSender, RuntimeEventNotifier},
     request_policy::RuntimeRequestPolicy,
@@ -24,6 +25,7 @@ use tool_runtime::{SharedToolPermissionHandler, ToolExecutorRegistry};
 use super::{
     PersistedConversationItem, TurnExecutionError, turn::run_prepared_conversation_with_progress,
 };
+use crate::llm::PreparedRequestExecutionOptions;
 use crate::{PreparedConversationRequest, ProviderClientLease};
 
 mod cancellation;
@@ -69,6 +71,12 @@ impl ConversationWorkerEvent {
 
 type ConversationWorkerEventSender = NotifyingSender<ConversationWorkerEvent>;
 
+struct ConversationWorkerOptions {
+    request_policy: RuntimeRequestPolicy,
+    permission_handler: Option<SharedToolPermissionHandler>,
+    extension_hooks: ExtensionHookRegistry,
+}
+
 /// `ConversationWorker` 管理对话请求的后台 worker 与取消状态。
 pub struct ConversationWorker {
     receiver: Option<Receiver<ConversationWorkerEvent>>,
@@ -104,6 +112,7 @@ impl ConversationWorker {
         executor: ToolExecutorRegistry,
         request_policy: RuntimeRequestPolicy,
         permission_handler: Option<SharedToolPermissionHandler>,
+        extension_hooks: ExtensionHookRegistry,
     ) {
         let (sender, receiver) = mpsc::channel();
         let sender = ConversationWorkerEventSender::new(sender, self.event_notifier.clone());
@@ -121,9 +130,12 @@ impl ConversationWorker {
                         request,
                         provider_lease,
                         executor,
-                        request_policy,
                         thread_cancellation,
-                        permission_handler,
+                        ConversationWorkerOptions {
+                            request_policy,
+                            permission_handler,
+                            extension_hooks,
+                        },
                         sender,
                     ));
                 }
@@ -216,14 +228,55 @@ impl Default for ConversationWorker {
 }
 
 async fn run_conversation_worker(
-    request: PreparedConversationRequest,
+    mut request: PreparedConversationRequest,
     provider_lease: ProviderClientLease,
     executor: ToolExecutorRegistry,
-    request_policy: RuntimeRequestPolicy,
     cancellation: CancellationToken,
-    permission_handler: Option<SharedToolPermissionHandler>,
+    options: ConversationWorkerOptions,
     sender: ConversationWorkerEventSender,
 ) {
+    let ConversationWorkerOptions {
+        request_policy,
+        permission_handler,
+        extension_hooks,
+    } = options;
+    if cancellation.is_cancelled() {
+        let _ = sender.send(ConversationWorkerEvent::progress(
+            ConversationEvent::Interrupted,
+        ));
+        return;
+    }
+    if !request.items().is_empty() {
+        let payload = BeforeTurnPayload::try_new(request.items().to_vec())
+            .expect("non-empty conversation items must form a valid before_turn payload");
+        match extension_hooks
+            .dispatch_before_turn(payload, &cancellation)
+            .await
+        {
+            Ok(payload) => request.replace_items_from_hook(payload.into_items()),
+            Err(error) if error.kind() == HookDispatchErrorKind::CallerCancelled => {
+                let _ = sender.send(ConversationWorkerEvent::progress(
+                    ConversationEvent::Interrupted,
+                ));
+                return;
+            }
+            Err(error) => {
+                let _ = sender.send(ConversationWorkerEvent::progress(
+                    ConversationEvent::Failed {
+                        message: error.to_string(),
+                    },
+                ));
+                return;
+            }
+        }
+    }
+    if cancellation.is_cancelled() {
+        let _ = sender.send(ConversationWorkerEvent::progress(
+            ConversationEvent::Interrupted,
+        ));
+        return;
+    }
+
     let provider_context_items_started = Arc::new(AtomicBool::new(false));
     let provider_context_repair_ledger =
         Arc::new(Mutex::new(ProviderContextRepairLedger::default()));
@@ -236,14 +289,6 @@ async fn run_conversation_worker(
         sender.clone(),
         session_actor_cancellation,
     ));
-    if cancellation.is_cancelled() {
-        let _ = sender.send(ConversationWorkerEvent::progress(
-            ConversationEvent::Interrupted,
-        ));
-        drop(session_sender);
-        let _ = session_actor.await;
-        return;
-    }
     let _ = session_sender
         .send(SessionPersistenceCommand::ProviderTurnStarted)
         .await;
@@ -263,8 +308,11 @@ async fn run_conversation_worker(
                 &request,
                 executor.clone(),
                 &attempt_cancellation,
-                request_policy.tool_max_turns(),
-                permission_handler.clone(),
+                PreparedRequestExecutionOptions {
+                    tool_max_turns: request_policy.tool_max_turns(),
+                    permission_handler: permission_handler.clone(),
+                    extension_hooks: extension_hooks.clone(),
+                },
                 move |progress| match progress {
                     crate::conversation::ConversationProgress::ProviderTurnStarted => {}
                     crate::conversation::ConversationProgress::ProviderContextItem { item } => {

@@ -342,16 +342,14 @@ impl AgentRuntime for ReplayAgentRuntime {
 }
 
 impl AgentRuntimePort for ReplayAgentRuntime {
-    fn activate(
-        &mut self,
-        event_stream: CapabilityLease<RuntimeEventStreamCapability>,
-    ) -> Result<(), String> {
+    fn activate(&mut self, mut grants: super::AgentRuntimeActivationGrants) -> Result<(), String> {
         if self.is_finalized {
             return Err("Agent adapter is finalized".to_string());
         }
         if self.active_turn.is_some() {
             return Err("Cannot replace runtime event stream while Agent is busy".to_string());
         }
+        let event_stream = grants.take_event_stream()?;
         self.event_stream = Some(event_stream);
         self.is_shutdown = false;
         if let Some(probe) = &self.lifecycle_probe {

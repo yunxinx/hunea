@@ -9,6 +9,7 @@ use std::{
     sync::{Arc, Mutex, Weak},
 };
 
+use extension_hook_runtime::ExtensionHookRegistry;
 use runtime_domain::{event_notifier::RuntimeEventNotifier, runtime_wake::RuntimeWake};
 
 use super::{
@@ -45,6 +46,11 @@ runtime_capability!(
 );
 runtime_capability!(LlmPortCapability, "llm_port", LlmPort);
 runtime_capability!(ModelCatalogCapability, "model_catalog", LlmPort);
+runtime_capability!(
+    ExtensionHookRegistryCapability,
+    "extension_hooks",
+    ExtensionHookRegistry
+);
 runtime_capability!(
     PermissionPolicyCapability,
     "permission_policy",

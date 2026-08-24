@@ -1,4 +1,13 @@
 use super::support::*;
+use std::sync::Mutex;
+
+use extension_hook_runtime::{
+    AfterToolResultDecision, AfterToolResultPayload, HookRegistrationOptions,
+};
+use tool_runtime::{
+    Tool, ToolCall as RuntimeToolCall, ToolDefinition, ToolExecutionFuture, ToolKind,
+    ToolPermissionPolicy, ToolResult,
+};
 
 #[test]
 fn conversation_worker_persists_config_change_and_flushes_finished_turn() {
@@ -76,6 +85,168 @@ fn conversation_worker_persists_config_change_and_flushes_finished_turn() {
 }
 
 #[test]
+fn conversation_worker_persists_only_the_transformed_tool_result() {
+    const RAW_RESULT: &str = "raw-tool-result-secret";
+    const TRANSFORMED_RESULT: &str = "transformed-tool-result";
+
+    let root = tempdir_path("worker-transformed-tool-result");
+    let work_dir = root.join("workspace");
+    fs::create_dir_all(&work_dir).expect("work dir should be creatable");
+    let store =
+        Arc::new(run_store(LocalSessionStore::open_in(root)).expect("local store should open"));
+    let store_trait: Arc<dyn SessionStore> = store.clone();
+    let mut conversation =
+        ProviderConversation::with_session_port(store_trait, sample_header(&work_dir, "qwen3"))
+            .expect("persisted conversation should initialize");
+    let user = ConversationItem::text(Role::User, "run echo");
+    let request = conversation
+        .prepare_turn(&runtime_domain::session::ConversationTurnRequest::new(
+            "local",
+            "qwen3",
+            user.clone(),
+        ))
+        .expect("turn should prepare");
+    let mut executor = ToolExecutorRegistry::new();
+    executor.insert(RawPersistenceTool);
+    let hooks = ExtensionHookRegistry::new();
+    let _registration = hooks
+        .register_after_tool_result(
+            HookOwnerId::try_new("persistence-owner").expect("owner id should validate"),
+            HookId::try_new("replace-result").expect("hook id should validate"),
+            HookRegistrationOptions::try_new(HookPriority::default(), Duration::from_secs(1))
+                .expect("hook options should validate"),
+            Arc::new(|payload: AfterToolResultPayload, _| async move {
+                let replacement =
+                    ToolResult::success(payload.result().call_id().to_string(), TRANSFORMED_RESULT);
+                Ok(AfterToolResultDecision::Continue(
+                    payload
+                        .replace_result(replacement)
+                        .expect("call identity should remain stable"),
+                ))
+            }),
+        )
+        .expect("result hook should register");
+    let provider = Arc::new(ToolResultPersistenceProvider {
+        calls: Mutex::new(0),
+    });
+    let provider_lease = ProviderClientLease::new(
+        "local",
+        ProviderKind::OpenAiCompatible,
+        provider,
+        ProviderPromptCachePolicy::Disabled,
+    );
+    let (sender, receiver) = conversation_worker_event_channel();
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime should build")
+        .block_on(run_conversation_worker(
+            request,
+            provider_lease,
+            executor,
+            CancellationToken::new(),
+            conversation_worker_options(RuntimeRequestPolicy::default(), hooks),
+            sender,
+        ));
+
+    let events = receiver.try_iter().collect::<Vec<_>>();
+    assert!(matches!(
+        events.last(),
+        Some(ConversationWorkerEvent::Finished { .. })
+    ));
+    let metas = run_store(store.list_sessions(
+        &ProjectDir::from_work_dir(&work_dir),
+        SessionListOptions::default(),
+    ))
+    .expect("session meta should list");
+    assert_eq!(metas.len(), 1);
+    let resolved = run_store(store.resolve(&metas[0].session_id, None))
+        .expect("resolved items should be readable");
+    let persisted_tool_result = resolved
+        .iter()
+        .find(|item| matches!(item, ConversationItem::ToolResult { .. }))
+        .expect("transformed tool result should persist");
+
+    assert_eq!(persisted_tool_result.text_content(), TRANSFORMED_RESULT);
+    assert!(!format!("{resolved:?}").contains(RAW_RESULT));
+    assert_eq!(resolved.first(), Some(&user));
+}
+
+struct ToolResultPersistenceProvider {
+    calls: Mutex<usize>,
+}
+
+impl ProviderClient for ToolResultPersistenceProvider {
+    fn stream_prompt<'a>(
+        &'a self,
+        request: &'a PromptRequest,
+        _sink: &'a mut (dyn StreamEventSink + Send),
+    ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
+        Box::pin(async move {
+            let mut calls = self.calls.lock().expect("provider lock should not poison");
+            *calls += 1;
+            if *calls == 1 {
+                return Ok(PromptCompletion::new(
+                    vec![ConversationItem::assistant_with_tool_calls(
+                        "checking".to_string(),
+                        vec![ToolCall::new("call-1", "echo", r#"{"text":"hello"}"#)],
+                    )],
+                    provider_protocol::FinishReason::ToolCalls,
+                    None,
+                ));
+            }
+
+            let tool_result = request
+                .items
+                .iter()
+                .find(|item| matches!(item, ConversationItem::ToolResult { .. }))
+                .expect("second provider request should contain a tool result");
+            assert_eq!(tool_result.text_content(), "transformed-tool-result");
+            assert!(
+                !tool_result
+                    .text_content()
+                    .contains("raw-tool-result-secret")
+            );
+            Ok(PromptCompletion::new(
+                vec![ConversationItem::text(Role::Assistant, "done")],
+                provider_protocol::FinishReason::Stop,
+                None,
+            ))
+        })
+    }
+
+    fn list_models<'a>(
+        &'a self,
+    ) -> ProviderFuture<'a, Result<Vec<ModelDescriptor>, ProviderError>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::chat_completions()
+    }
+}
+
+struct RawPersistenceTool;
+
+impl Tool for RawPersistenceTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new("echo")
+            .with_label("Echo")
+            .with_kind(ToolKind::Other)
+            .with_permission_policy(ToolPermissionPolicy::Always)
+    }
+
+    fn execute<'a>(
+        &'a self,
+        call: RuntimeToolCall,
+        _cancellation: &'a CancellationToken,
+    ) -> ToolExecutionFuture<'a> {
+        Box::pin(async move { ToolResult::success(call.call_id, "raw-tool-result-secret") })
+    }
+}
+
+#[test]
 fn conversation_worker_persists_user_turn_when_request_fails_before_streaming() {
     let root = tempdir_path("worker-pre-stream-failure-persistence");
     let work_dir = root.join("workspace");
@@ -106,9 +277,11 @@ fn conversation_worker_persists_user_turn_when_request_fails_before_streaming() 
             request,
             fake_provider_lease(),
             ToolExecutorRegistry::new(),
-            RuntimeRequestPolicy::default(),
             CancellationToken::new(),
-            None,
+            conversation_worker_options(
+                RuntimeRequestPolicy::default(),
+                ExtensionHookRegistry::new(),
+            ),
             sender,
         ));
 

@@ -4,6 +4,7 @@ use std::{
 };
 
 use conversation_runtime::ModelRefreshWorker;
+use extension_hook_runtime::ExtensionHookRegistry;
 use extension_runtime::{ExtensionToolMount, ExtensionToolSet, ExtensionToolSetSource};
 use runtime_domain::event_notifier::{RuntimeEventBinding, RuntimeEventNotifier};
 use tool_runtime::{ToolCatalog, ToolExecutorRegistry, ToolRegistration};
@@ -11,14 +12,15 @@ use tool_runtime::{ToolCatalog, ToolExecutorRegistry, ToolRegistration};
 use super::{
     AppRuntimeOptions,
     agent::{
-        AgentRuntimeConstructionGrants, AgentRuntimeFactory, AgentRuntimePort,
-        AgentSessionCapability, construct_native_agent_runtime,
+        AgentRuntimeActivationGrants, AgentRuntimeConstructionGrants, AgentRuntimeFactory,
+        AgentRuntimePort, AgentSessionCapability, construct_native_agent_runtime,
     },
     context::{
-        ApprovalProviderCapability, CapabilityLease, ComponentActivationContext, LlmPortCapability,
-        ModelCatalogCapability, PermissionPolicyCapability, PromptAssemblyCapability,
-        RuntimeCapability, RuntimeContextError, RuntimeEventStreamCapability,
-        RuntimeWakeCapability, SessionPersistenceCapability, ToolCatalogCapability,
+        ApprovalProviderCapability, CapabilityLease, ComponentActivationContext,
+        ExtensionHookRegistryCapability, LlmPortCapability, ModelCatalogCapability,
+        PermissionPolicyCapability, PromptAssemblyCapability, RuntimeCapability,
+        RuntimeContextError, RuntimeEventStreamCapability, RuntimeWakeCapability,
+        SessionPersistenceCapability, ToolCatalogCapability,
     },
     context_budget_worker::ContextBudgetWorker,
     effect_scope::{EffectScope, EffectScopeSnapshot},
@@ -62,6 +64,10 @@ const APPROVAL_PROVIDER: CapabilityOwner = CapabilityOwner {
 const LLM_PORT: CapabilityOwner = CapabilityOwner {
     component_id: "llm_port",
     capability: "llm_port",
+};
+const EXTENSION_HOOKS: CapabilityOwner = CapabilityOwner {
+    component_id: "extension_hooks",
+    capability: "extension_hooks",
 };
 const MODEL_CATALOG: CapabilityOwner = CapabilityOwner {
     component_id: "llm_port",
@@ -111,6 +117,7 @@ const MODEL_REFRESH_PLUGIN: &str = "model-refresh";
 const CONTEXT_BUDGET_PLUGIN: &str = "context-budget";
 const UI_RUNTIME_BRIDGE_PLUGIN: &str = "terminal-ui-runtime-adapter";
 const EXTERNAL_EXTENSION_PLUGIN: &str = "stdio-extension-tools";
+const EXTENSION_HOOKS_PLUGIN: &str = "typed-extension-hooks";
 
 type RuntimePluginActivation = for<'a> fn(
     &mut RuntimeComponents,
@@ -221,6 +228,7 @@ fn agent_runtime_descriptor(
 ) -> PluginDescriptorBuilder {
     builtin_descriptor(plugin_type, display_name)
         .requires(RUNTIME_EVENT_STREAM.capability)
+        .requires(EXTENSION_HOOKS.capability)
         .requires(LLM_PORT.capability)
         .requires(MODEL_CATALOG.capability)
         .requires(PERMISSION_POLICY.capability)
@@ -233,6 +241,7 @@ fn builtin_desired_composition() -> Result<DesiredPluginComposition, PluginCatal
     DesiredPluginComposition::try_new([
         desired_builtin(APPROVAL_PROVIDER.component_id, APPROVAL_PROVIDER_PLUGIN),
         desired_builtin(LLM_PORT.component_id, LLM_PORT_PLUGIN),
+        desired_builtin(EXTENSION_HOOKS.component_id, EXTENSION_HOOKS_PLUGIN),
         desired_builtin(
             RUNTIME_EVENT_STREAM.component_id,
             RUNTIME_EVENT_STREAM_PLUGIN,
@@ -303,6 +312,46 @@ fn desired_with_agent_plugin_for_test(
     .expect("Agent replacement desired state should validate")
 }
 
+#[cfg(test)]
+fn desired_with_extension_hooks_plugin_for_test(
+    current: &DesiredPluginComposition,
+    plugin_type: &'static str,
+) -> DesiredPluginComposition {
+    DesiredPluginComposition::try_new(current.iter().map(|(component_id, current_type)| {
+        if component_id.as_str() == EXTENSION_HOOKS.component_id {
+            (component_id.as_str(), builtin_plugin_type(plugin_type))
+        } else {
+            (component_id.as_str(), current_type.clone())
+        }
+    }))
+    .expect("extension hook replacement desired state should validate")
+}
+
+#[cfg(test)]
+fn desired_without_extension_hooks_for_test(
+    current: &DesiredPluginComposition,
+) -> DesiredPluginComposition {
+    DesiredPluginComposition::try_new(
+        current
+            .iter()
+            .filter(|(component_id, _)| component_id.as_str() != EXTENSION_HOOKS.component_id)
+            .map(|(component_id, current_type)| (component_id.as_str(), current_type.clone())),
+    )
+    .expect("extension hook removal desired state should validate")
+}
+
+#[cfg(test)]
+fn extension_hooks_replacement_factory(
+    plugin_type: &'static str,
+) -> PluginFactory<RuntimePluginImplementation> {
+    runtime_plugin_factory(
+        builtin_descriptor(plugin_type, "Replacement typed extension hooks")
+            .provides(EXTENSION_HOOKS.capability),
+        RuntimeComponents::activate_extension_hooks,
+        RuntimeComponents::quiesce_extension_hooks,
+    )
+}
+
 fn builtin_plugin_catalog()
 -> Result<PluginFactoryCatalog<RuntimePluginImplementation>, PluginCatalogError> {
     builtin_plugin_catalog_with_agent_factory(AgentRuntimeFactory::new(
@@ -326,6 +375,12 @@ fn builtin_plugin_catalog_with_agent_factory(
                 .provides(MODEL_CATALOG.capability),
             RuntimeComponents::activate_llm_port,
             RuntimeComponents::quiesce_llm_port,
+        ),
+        runtime_plugin_factory(
+            builtin_descriptor(EXTENSION_HOOKS_PLUGIN, "Typed extension hooks")
+                .provides(EXTENSION_HOOKS.capability),
+            RuntimeComponents::activate_extension_hooks,
+            RuntimeComponents::quiesce_extension_hooks,
         ),
         runtime_plugin_factory(
             builtin_descriptor(RUNTIME_EVENT_STREAM_PLUGIN, "Runtime event stream")
@@ -449,6 +504,7 @@ enum AgentPluginReconciliation {
 
 struct AgentRuntimeGrantSource<'a> {
     options: &'a AppRuntimeOptions,
+    extension_hooks: &'a ExtensionHookRegistry,
     session_workspace_tools: &'a ToolExecutorRegistry,
     tool_catalog: &'a ToolCatalog,
     prompt_assembly: &'a PromptAssembly,
@@ -488,6 +544,7 @@ impl<'a> AgentRuntimeGrantSource<'a> {
     #[allow(clippy::too_many_arguments)]
     fn new(
         options: &'a AppRuntimeOptions,
+        extension_hooks: &'a ExtensionHookRegistry,
         session_workspace_tools: &'a ToolExecutorRegistry,
         tool_catalog: &'a ToolCatalog,
         prompt_assembly: &'a PromptAssembly,
@@ -498,6 +555,7 @@ impl<'a> AgentRuntimeGrantSource<'a> {
     ) -> Self {
         Self {
             options,
+            extension_hooks,
             session_workspace_tools,
             tool_catalog,
             prompt_assembly,
@@ -528,6 +586,10 @@ impl<'a> AgentRuntimeGrantSource<'a> {
 
     fn project(self, descriptor: &PluginDescriptor) -> AgentRuntimeConstructionGrants {
         let mut grants = AgentRuntimeConstructionGrants::empty();
+        if descriptor.declares_required(EXTENSION_HOOKS.capability) {
+            self.record_materialization();
+            grants = grants.with_extension_hooks(self.extension_hooks.clone());
+        }
         if descriptor.declares_required(LLM_PORT.capability) {
             self.record_materialization();
             grants = grants.with_llm_port(self.llm_port.clone());
@@ -578,6 +640,7 @@ impl<'a> AgentRuntimeGrantSource<'a> {
 pub(super) struct RuntimeComponents {
     agent_runtime: Box<dyn AgentRuntimePort>,
     pub(super) model_refresh: ModelRefreshWorker,
+    extension_hooks: ExtensionHookRegistry,
     llm_port: LlmPort,
     permission_policy: PermissionPolicy,
     permission_provider_id: String,
@@ -725,6 +788,7 @@ impl RuntimeComponents {
             .prepare_startup()
             .map_err(|error| error.to_string())?;
         let runtime_event_notifier = RuntimeEventNotifier::default();
+        let extension_hooks = ExtensionHookRegistry::new();
         let permission_policy = PermissionPolicy::new();
         let approval_registration = permission_policy
             .register(
@@ -761,6 +825,7 @@ impl RuntimeComponents {
             &plugins,
             AgentRuntimeGrantSource::new(
                 options,
+                &extension_hooks,
                 &session_workspace_tools,
                 &tool_catalog,
                 &prompt_assembly,
@@ -775,6 +840,7 @@ impl RuntimeComponents {
         let mut components = Self {
             agent_runtime,
             model_refresh,
+            extension_hooks,
             llm_port,
             permission_policy,
             permission_provider_id: TERMINAL_APPROVAL_PROVIDER_ID.to_string(),
@@ -1245,6 +1311,7 @@ impl RuntimeComponents {
             &self.plugins,
             AgentRuntimeGrantSource::new(
                 options,
+                &self.extension_hooks,
                 &session_workspace_tools,
                 &fresh_tool_catalog,
                 &fresh_prompt_assembly,
@@ -1362,8 +1429,18 @@ impl RuntimeComponents {
         options: &'a AppRuntimeOptions,
         session_port: Option<&'a Arc<dyn session_store::SessionPort>>,
     ) -> AgentRuntimeGrantSource<'a> {
+        self.agent_runtime_grant_source_with_hooks(options, &self.extension_hooks, session_port)
+    }
+
+    fn agent_runtime_grant_source_with_hooks<'a>(
+        &'a self,
+        options: &'a AppRuntimeOptions,
+        extension_hooks: &'a ExtensionHookRegistry,
+        session_port: Option<&'a Arc<dyn session_store::SessionPort>>,
+    ) -> AgentRuntimeGrantSource<'a> {
         let source = AgentRuntimeGrantSource::new(
             options,
+            extension_hooks,
             &self.session_workspace_tools,
             &self.tool_catalog,
             &self.prompt_assembly,
@@ -1444,6 +1521,7 @@ impl RuntimeComponents {
             &self.plugins,
             AgentRuntimeGrantSource::new(
                 options,
+                &self.extension_hooks,
                 &self.session_workspace_tools,
                 &self.tool_catalog,
                 &self.prompt_assembly,
@@ -1663,6 +1741,18 @@ impl RuntimeComponents {
         Ok(ComponentActivationOutcome::PublishCapabilities)
     }
 
+    fn activate_extension_hooks(
+        &mut self,
+        _scope: &EffectScope,
+        context: &mut ComponentActivationContext<'_>,
+        _mode: ComponentLifecycleMode,
+    ) -> Result<ComponentActivationOutcome, String> {
+        context
+            .publish::<ExtensionHookRegistryCapability>(self.extension_hooks.clone())
+            .map_err(|error| error.to_string())?;
+        Ok(ComponentActivationOutcome::PublishCapabilities)
+    }
+
     fn activate_ui_runtime_bridge(
         &mut self,
         scope: &EffectScope,
@@ -1686,10 +1776,36 @@ impl RuntimeComponents {
         context: &mut ComponentActivationContext<'_>,
         _mode: ComponentLifecycleMode,
     ) -> Result<ComponentActivationOutcome, String> {
-        let event_stream = context
-            .require::<RuntimeEventStreamCapability>()
-            .map_err(|error| error.to_string())?;
-        self.agent_runtime.activate(event_stream)?;
+        let (requires_event_stream, requires_extension_hooks) = self
+            .plugins
+            .instance(AGENT_RUNTIME_COMPONENT)
+            .map(|instance| {
+                (
+                    instance
+                        .descriptor()
+                        .declares_required(RUNTIME_EVENT_STREAM.capability),
+                    instance
+                        .descriptor()
+                        .declares_required(EXTENSION_HOOKS.capability),
+                )
+            })
+            .ok_or_else(|| "Agent component has no committed plugin implementation".to_string())?;
+        let mut grants = AgentRuntimeActivationGrants::empty();
+        if requires_event_stream {
+            grants = grants.with_event_stream(
+                context
+                    .require::<RuntimeEventStreamCapability>()
+                    .map_err(|error| error.to_string())?,
+            );
+        }
+        if requires_extension_hooks {
+            grants = grants.with_extension_hooks(
+                context
+                    .require::<ExtensionHookRegistryCapability>()
+                    .map_err(|error| error.to_string())?,
+            );
+        }
+        self.agent_runtime.activate(grants)?;
         self.is_agent_replacement_activating = false;
         Ok(ComponentActivationOutcome::Ready)
     }
@@ -1770,6 +1886,14 @@ impl RuntimeComponents {
 
     fn quiesce_tool_catalog(&mut self, _mode: ComponentLifecycleMode) -> Result<(), String> {
         self.session_workspace_tools = ToolExecutorRegistry::new();
+        Ok(())
+    }
+
+    fn quiesce_extension_hooks(&mut self, mode: ComponentLifecycleMode) -> Result<(), String> {
+        if mode != ComponentLifecycleMode::Reconfigure {
+            return Ok(());
+        }
+        self.extension_hooks = ExtensionHookRegistry::new();
         Ok(())
     }
 
@@ -1855,9 +1979,6 @@ impl RuntimeComponents {
             PreparedAgentRuntimeCommit::Replace(_)
         );
         if is_agent_replacement {
-            let options = agent_options.ok_or_else(|| {
-                "Agent replacement construction source is not available".to_string()
-            })?;
             if matches!(
                 &prepared.agent_runtime,
                 PreparedAgentRuntimeCommit::Replace(replacement)
@@ -1868,6 +1989,9 @@ impl RuntimeComponents {
             self.finalize_agent_runtime_replacement()?;
 
             let candidate = {
+                let options = agent_options.ok_or_else(|| {
+                    "Agent replacement construction options are missing".to_string()
+                })?;
                 let prepared = self
                     .prepared_plugin_commit
                     .as_ref()
@@ -2154,6 +2278,10 @@ mod tests {
     use super::*;
     use crate::runtime::agent::{AgentRuntimeActivity, AgentSessionRestore};
     use crate::runtime::lifecycle::{ComponentDefinition, ComponentState};
+    use extension_hook_runtime::{
+        BeforeTurnDecision, BeforeTurnPayload, HookId, HookOwnerId, HookPriority,
+        HookRegistrationOptions,
+    };
     use extension_protocol::{
         ExtensionCapability, ExtensionMethod, ExtensionRequest, ExtensionResponse,
         InitializeResult, ToolDescriptor, ToolsListResult,
@@ -2420,10 +2548,7 @@ mod tests {
     }
 
     impl AgentRuntimePort for RecordingAgentRuntime {
-        fn activate(
-            &mut self,
-            _event_stream: CapabilityLease<RuntimeEventStreamCapability>,
-        ) -> Result<(), String> {
+        fn activate(&mut self, _grants: AgentRuntimeActivationGrants) -> Result<(), String> {
             if self.activation_failure {
                 return Err("SENSITIVE_AGENT_ACTIVATION_FAILURE".to_string());
             }
@@ -2505,7 +2630,7 @@ mod tests {
                 ComponentLifecycleMode::Reconfigure,
             )
             .expect("recording Agent should replace Native through plugin reconciliation");
-        assert_eq!(grant_payload_count.load(Ordering::SeqCst), 6);
+        assert_eq!(grant_payload_count.load(Ordering::SeqCst), 7);
         let unavailable = match components.agent_session_mut() {
             Ok(_) => panic!("recording Agent must not fabricate a session capability"),
             Err(error) => error,
@@ -2664,6 +2789,8 @@ mod tests {
         assert!(!production_source.contains(&old_mount_check));
         assert!(!production_source.contains(&old_fresh_helper));
         assert!(!production_source.contains(&old_replacement_guard));
+        assert!(!production_source.contains("AgentRuntimeConstructionInputs"));
+        assert!(!production_source.contains("agent_construction_inputs"));
         assert_eq!(native_source.matches(&native_factory_definition).count(), 1);
         assert_eq!(native_source.matches(&native_construction).count(), 1);
         assert_eq!(native_source.matches(&erased_native_owner).count(), 1);
@@ -2695,10 +2822,17 @@ mod tests {
         assert!(!production_source.contains(&concrete_binding));
         assert_eq!(
             production_source
-                .matches("self.agent_runtime.activate(event_stream)?")
+                .matches("self.agent_runtime.activate(grants)?")
                 .count(),
             1
         );
+        assert!(!production_source.contains("AgentDependencyReconstruction"));
+        let hook_quiescence_source = production_source
+            .split_once("fn quiesce_extension_hooks(")
+            .and_then(|(_, tail)| tail.split_once("fn quiesce_external_extension("))
+            .map(|(method, _)| method)
+            .expect("hook provider quiescence should remain inspectable");
+        assert!(!hook_quiescence_source.contains(".instance("));
         let agent_quiescence_source = production_source
             .split_once("fn quiesce_agent_runtime(")
             .and_then(|(_, tail)| tail.split_once("fn finalize_agent_runtime_replacement("))
@@ -2877,6 +3011,7 @@ mod tests {
                 (AGENT_RUNTIME_COMPONENT, NATIVE_AGENT_RUNTIME_PLUGIN),
                 (APPROVAL_PROVIDER.component_id, APPROVAL_PROVIDER_PLUGIN),
                 (CONTEXT_BUDGET_COMPONENT, CONTEXT_BUDGET_PLUGIN),
+                (EXTENSION_HOOKS.component_id, EXTENSION_HOOKS_PLUGIN),
                 (LLM_PORT.component_id, LLM_PORT_PLUGIN),
                 (MODEL_REFRESH_COMPONENT, MODEL_REFRESH_PLUGIN),
                 (PERMISSION_POLICY.component_id, PERMISSION_POLICY_PLUGIN),
@@ -2898,6 +3033,7 @@ mod tests {
                 ComponentDefinition::new(AGENT_RUNTIME_COMPONENT)
                     .implemented_by(NATIVE_AGENT_RUNTIME_PLUGIN)
                     .requires(RUNTIME_EVENT_STREAM.capability)
+                    .requires(EXTENSION_HOOKS.capability)
                     .requires(LLM_PORT.capability)
                     .requires(MODEL_CATALOG.capability)
                     .requires(PERMISSION_POLICY.capability)
@@ -2914,6 +3050,9 @@ mod tests {
                     .requires(MODEL_CATALOG.capability)
                     .requires(PROMPT_ASSEMBLY.capability)
                     .requires(TOOL_CATALOG.capability),
+                ComponentDefinition::new(EXTENSION_HOOKS.component_id)
+                    .implemented_by(EXTENSION_HOOKS_PLUGIN)
+                    .provides(EXTENSION_HOOKS.capability),
                 ComponentDefinition::new(LLM_PORT.component_id)
                     .implemented_by(LLM_PORT_PLUGIN)
                     .provides(LLM_PORT.capability)
@@ -2952,6 +3091,257 @@ mod tests {
                     .requires(RUNTIME_WAKE.capability),
             ]
         );
+    }
+
+    #[test]
+    fn extension_hook_provider_replacement_rebinds_native_to_a_fresh_generation() {
+        const REPLACEMENT_HOOKS: &str = "typed-extension-hooks-v2";
+        let constructions = Arc::new(AtomicUsize::new(0));
+        let observed_constructions = Arc::clone(&constructions);
+        let mut options = options_with_provider();
+        let mut components = RuntimeComponents::new_with_agent_runtime_factory(
+            &mut options,
+            AgentRuntimeFactory::new(move |grants| {
+                observed_constructions.fetch_add(1, Ordering::SeqCst);
+                construct_native_agent_runtime(grants)
+            }),
+        )
+        .expect("runtime components should initialize");
+        let old_registry = components.extension_hooks.clone();
+        let mut old_registration = old_registry
+            .register_before_turn(
+                HookOwnerId::try_new("old-owner").expect("owner id should validate"),
+                HookId::try_new("old-hook").expect("hook id should validate"),
+                hook_registration_options(),
+                Arc::new(|payload: BeforeTurnPayload, _cancellation| async move {
+                    Ok(BeforeTurnDecision::Continue(payload))
+                }),
+            )
+            .expect("old generation hook should register");
+        let old_generation = components
+            .require::<ExtensionHookRegistryCapability>()
+            .expect("initial hook capability should be visible")
+            .generation();
+        let trace = Arc::new(Mutex::new(Vec::new()));
+        components.plugin_transaction_trace = Some(Arc::clone(&trace));
+        let materializations = Arc::new(AgentRuntimeGrantMaterializationProbe::default());
+        components.agent_grant_materialization_probe = Some(Arc::clone(&materializations));
+        let catalog =
+            PluginFactoryCatalog::try_new([extension_hooks_replacement_factory(REPLACEMENT_HOOKS)])
+                .expect("replacement hook catalog should validate");
+        let desired = desired_with_extension_hooks_plugin_for_test(
+            components.plugin_loader.desired(),
+            REPLACEMENT_HOOKS,
+        );
+
+        components
+            .reconcile_plugin_composition_with_catalog(
+                &options,
+                &catalog,
+                desired,
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect("hook provider replacement should succeed");
+        let fresh_registry = components.extension_hooks.clone();
+        components.plugin_transaction_trace = None;
+
+        assert_eq!(
+            components.lifecycle.state(AGENT_RUNTIME_COMPONENT),
+            Some(ComponentState::Active)
+        );
+        assert_eq!(
+            components.lifecycle.state(EXTENSION_HOOKS.component_id),
+            Some(ComponentState::Active)
+        );
+        assert_eq!(old_registry.snapshot().len(), 1);
+        assert!(fresh_registry.snapshot().is_empty());
+        assert!(components.extension_hooks.snapshot().is_empty());
+        assert!(
+            components
+                .require::<ExtensionHookRegistryCapability>()
+                .expect("fresh hook capability should be visible")
+                .generation()
+                > old_generation
+        );
+        assert_eq!(materializations.materializations(), 0);
+        assert_eq!(constructions.load(Ordering::SeqCst), 1);
+        let fresh_registration = fresh_registry
+            .register_before_turn(
+                HookOwnerId::try_new("fresh-owner").expect("owner id should validate"),
+                HookId::try_new("fresh-hook").expect("hook id should validate"),
+                hook_registration_options(),
+                Arc::new(|payload: BeforeTurnPayload, _| async move {
+                    Ok(BeforeTurnDecision::Continue(payload))
+                }),
+            )
+            .expect("fresh generation hook should register");
+        assert_eq!(
+            components
+                .agent_runtime
+                .extension_hooks_for_test()
+                .expect("Native should retain the active hook lease")
+                .snapshot(),
+            fresh_registry.snapshot()
+        );
+        let trace = trace
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let quiesce_agent = trace
+            .iter()
+            .position(|event| event == "quiesce:agent_runtime")
+            .expect("Native should quiesce before hook provider replacement");
+        let quiesce_provider = trace
+            .iter()
+            .position(|event| event == "quiesce:extension_hooks")
+            .expect("hook provider should quiesce after its consumer");
+        let activate_provider = trace
+            .iter()
+            .position(|event| event == "activate:extension_hooks")
+            .expect("fresh hook provider should activate");
+        let activate_agent = trace
+            .iter()
+            .position(|event| event == "activate:agent_runtime")
+            .expect("Native should reactivate after its provider");
+        assert!(quiesce_agent < quiesce_provider);
+        assert!(activate_provider < activate_agent);
+        drop(trace);
+        assert!(old_registration.dispose());
+        drop(fresh_registration);
+    }
+
+    #[test]
+    fn extension_hook_provider_removal_suspends_native_until_a_fresh_generation_returns() {
+        let mut options = options_with_provider();
+        let mut components =
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+        let old_registry = components.extension_hooks.clone();
+        let mut old_registration = old_registry
+            .register_before_turn(
+                HookOwnerId::try_new("old-owner").expect("owner id should validate"),
+                HookId::try_new("old-hook").expect("hook id should validate"),
+                hook_registration_options(),
+                Arc::new(|payload: BeforeTurnPayload, _| async move {
+                    Ok(BeforeTurnDecision::Continue(payload))
+                }),
+            )
+            .expect("old generation hook should register");
+        let old_generation = components
+            .require::<ExtensionHookRegistryCapability>()
+            .expect("initial hook capability should be visible")
+            .generation();
+        let materializations = Arc::new(AgentRuntimeGrantMaterializationProbe::default());
+        components.agent_grant_materialization_probe = Some(Arc::clone(&materializations));
+        let removal_trace = Arc::new(Mutex::new(Vec::new()));
+        components.plugin_transaction_trace = Some(Arc::clone(&removal_trace));
+        let desired = desired_without_extension_hooks_for_test(components.plugin_loader.desired());
+
+        components
+            .reconcile_plugin_composition(&options, desired, ComponentLifecycleMode::Reconfigure)
+            .expect("hook provider removal should leave Native pending");
+
+        assert_eq!(
+            components.lifecycle.state(AGENT_RUNTIME_COMPONENT),
+            Some(ComponentState::Pending)
+        );
+        assert_eq!(
+            components.lifecycle.state(EXTENSION_HOOKS.component_id),
+            None
+        );
+        assert!(matches!(
+            components.require::<ExtensionHookRegistryCapability>(),
+            Err(RuntimeContextError::MissingCapability { .. })
+        ));
+        assert_eq!(old_registry.snapshot().len(), 1);
+        assert!(components.extension_hooks.snapshot().is_empty());
+        assert!(
+            components
+                .agent_runtime
+                .extension_hooks_for_test()
+                .is_none()
+        );
+        assert_eq!(materializations.materializations(), 0);
+        let removal_trace = removal_trace
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let quiesce_agent = removal_trace
+            .iter()
+            .position(|event| event == "quiesce:agent_runtime")
+            .expect("Native should quiesce before hook provider removal");
+        let quiesce_provider = removal_trace
+            .iter()
+            .position(|event| event == "quiesce:extension_hooks")
+            .expect("hook provider should quiesce after Native");
+        assert!(quiesce_agent < quiesce_provider);
+        drop(removal_trace);
+
+        let restoration_trace = Arc::new(Mutex::new(Vec::new()));
+        components.plugin_transaction_trace = Some(Arc::clone(&restoration_trace));
+        components
+            .reconcile_plugin_composition(
+                &options,
+                builtin_desired_composition().expect("builtin desired state should validate"),
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect("fresh hook provider should restore Native");
+        components.plugin_transaction_trace = None;
+
+        assert_eq!(
+            components.lifecycle.state(AGENT_RUNTIME_COMPONENT),
+            Some(ComponentState::Active)
+        );
+        assert_eq!(
+            components.lifecycle.state(EXTENSION_HOOKS.component_id),
+            Some(ComponentState::Active)
+        );
+        assert!(
+            components
+                .require::<ExtensionHookRegistryCapability>()
+                .expect("restored hook capability should be visible")
+                .generation()
+                > old_generation
+        );
+        assert_eq!(materializations.materializations(), 0);
+        assert_eq!(old_registry.snapshot().len(), 1);
+        assert!(components.extension_hooks.snapshot().is_empty());
+        let fresh_registry = components.extension_hooks.clone();
+        let fresh_registration = fresh_registry
+            .register_before_turn(
+                HookOwnerId::try_new("restored-owner").expect("owner id should validate"),
+                HookId::try_new("restored-hook").expect("hook id should validate"),
+                hook_registration_options(),
+                Arc::new(|payload: BeforeTurnPayload, _| async move {
+                    Ok(BeforeTurnDecision::Continue(payload))
+                }),
+            )
+            .expect("restored generation hook should register");
+        assert_eq!(
+            components
+                .agent_runtime
+                .extension_hooks_for_test()
+                .expect("Native should retain the restored hook lease")
+                .snapshot(),
+            fresh_registry.snapshot()
+        );
+        let restoration_trace = restoration_trace
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let activate_provider = restoration_trace
+            .iter()
+            .position(|event| event == "activate:extension_hooks")
+            .expect("fresh hook provider should activate");
+        let activate_agent = restoration_trace
+            .iter()
+            .position(|event| event == "activate:agent_runtime")
+            .expect("Native should reactivate after its dependency");
+        assert!(activate_provider < activate_agent);
+        drop(restoration_trace);
+        assert!(old_registration.dispose());
+        drop(fresh_registration);
+    }
+
+    fn hook_registration_options() -> HookRegistrationOptions {
+        HookRegistrationOptions::try_new(HookPriority::default(), std::time::Duration::from_secs(1))
+            .expect("hook options should validate")
     }
 
     #[test]
@@ -3235,6 +3625,7 @@ mod tests {
     #[test]
     fn replay_agent_uses_the_plugin_owner_and_reactive_lifecycle() {
         const REPLAY_AGENT: &str = "replay-agent-loop";
+        const REPLACEMENT_HOOKS: &str = "typed-extension-hooks-for-replay";
         let replay_fixture = ReplayFixture::new(vec![
             AgentEventKind::AssistantDelta {
                 content: "replayed through composition".to_string(),
@@ -3256,6 +3647,8 @@ mod tests {
         )])
         .expect("Replay Agent catalog should validate");
         let mut options = AppRuntimeOptions::default();
+        let observer = Arc::clone(&options.dynamic_environment_observer);
+        let observer_owners_without_agent = Arc::strong_count(&observer);
         let mut components =
             RuntimeComponents::new(&mut options).expect("runtime components should initialize");
         let grant_materialization = Arc::new(AgentRuntimeGrantMaterializationProbe::default());
@@ -3285,9 +3678,47 @@ mod tests {
         assert_eq!(replay_lifecycle.constructions(), 1);
         assert_eq!(replay_lifecycle.activations(), 1);
         assert_eq!(
+            Arc::strong_count(&observer),
+            observer_owners_without_agent,
+            "Replay must not retain Native-only construction payloads"
+        );
+        assert_eq!(
             grant_materialization.materializations(),
             0,
             "Replay construction must not materialize Native-only grants"
+        );
+        let old_hook_generation = components
+            .require::<ExtensionHookRegistryCapability>()
+            .expect("hook capability should be visible")
+            .generation();
+        let hook_catalog =
+            PluginFactoryCatalog::try_new([extension_hooks_replacement_factory(REPLACEMENT_HOOKS)])
+                .expect("replacement hook catalog should validate");
+        let desired = desired_with_extension_hooks_plugin_for_test(
+            components.plugin_loader.desired(),
+            REPLACEMENT_HOOKS,
+        );
+        components
+            .reconcile_plugin_composition_with_catalog(
+                &options,
+                &hook_catalog,
+                desired,
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect("unobserved hook provider should replace without rebuilding Replay");
+        assert!(
+            components
+                .require::<ExtensionHookRegistryCapability>()
+                .expect("fresh hook capability should be visible")
+                .generation()
+                > old_hook_generation
+        );
+        assert_eq!(replay_lifecycle.constructions(), 1);
+        assert_eq!(replay_lifecycle.activations(), 1);
+        assert_eq!(
+            grant_materialization.materializations(),
+            0,
+            "Replay must not materialize or react to an undeclared hook capability"
         );
         let restore_materialized = Arc::new(AtomicBool::new(false));
         let session_id = session_store::SessionId::new();
@@ -3429,7 +3860,7 @@ mod tests {
         assert_eq!(replay_lifecycle.constructions(), 1);
         assert_eq!(
             grant_materialization.materializations(),
-            6,
+            7,
             "Native restoration should materialize exactly its declared grant groups"
         );
         assert!(components.agent_session().is_ok());
@@ -4220,10 +4651,13 @@ mod tests {
             RuntimeComponents::quiesce_noop,
         )])
         .expect("invalid replacement catalog should validate its descriptor");
+        let rejected_options = AppRuntimeOptions::default();
+        let rejected_observer = Arc::clone(&rejected_options.dynamic_environment_observer);
+        let rejected_observer_owners = Arc::strong_count(&rejected_observer);
 
         let error = components
             .reconcile_plugin_composition_with_catalog(
-                &options,
+                &rejected_options,
                 &catalog,
                 desired_with_runtime_event_plugin(INVALID_PLUGIN),
                 ComponentLifecycleMode::Reconfigure,
@@ -4233,6 +4667,11 @@ mod tests {
         assert!(error.contains("graph"));
         assert_eq!(components.plugin_descriptor_snapshots(), old_descriptors);
         assert_eq!(components.plugin_loader.desired(), &old_desired);
+        assert_eq!(
+            Arc::strong_count(&rejected_observer),
+            rejected_observer_owners,
+            "graph preflight failure must not retain unpublished Agent inputs"
+        );
         components
             .validate_context_alignment()
             .expect("failed desired input must not desynchronize Context");

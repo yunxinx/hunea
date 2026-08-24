@@ -481,6 +481,7 @@ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 name = "conversation-runtime"
 version = "0.12.1-alpha.4"
 dependencies = [
+ "extension-hook-runtime",
  "libc",
  "provider-protocol",
  "runtime-domain",
@@ -885,6 +886,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1a05365e3b1c6d1650318537c7460c6923f1abdd272ad6842baa2b509957a06"
 dependencies = [
  "num-traits",
+]
+
+[[package]]
+name = "extension-hook-runtime"
+version = "0.12.1-alpha.4"
+dependencies = [
+ "provider-protocol",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "tool-runtime",
 ]
 
 [[package]]
@@ -3423,6 +3436,7 @@ dependencies = [
  "color-eyre",
  "conversation-runtime",
  "crossterm",
+ "extension-hook-runtime",
  "extension-protocol",
  "extension-runtime",
  "futures-util",
@@ -3795,6 +3809,7 @@ checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 name = "tool-loop-runtime"
 version = "0.12.1-alpha.4"
 dependencies = [
+ "extension-hook-runtime",
  "provider-protocol",
  "runtime-domain",
  "serde_json",

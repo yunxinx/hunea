@@ -11,6 +11,7 @@ use std::{fmt, path::PathBuf, sync::Arc};
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use extension_hook_runtime::ExtensionHookRegistry;
 use session_store::{ResolvedConversationState, SessionHeader, SessionId, SessionPort};
 use tool_runtime::ToolExecutorRegistry;
 
@@ -28,7 +29,7 @@ use runtime_domain::session::{ConversationTurnRequest, TranscriptUserMessage};
 use crate::{
     dynamic_environment::DynamicEnvironmentObserver,
     runtime::{
-        context::{CapabilityLease, RuntimeEventStreamCapability},
+        context::{CapabilityLease, ExtensionHookRegistryCapability, RuntimeEventStreamCapability},
         llm_port::LlmPort,
         permission_policy::PermissionPolicy,
         prompt_assembly::PromptAssemblySessionSnapshot,
@@ -45,6 +46,51 @@ struct AgentPermissionConstructionGrant {
     runtime_request_policy: RuntimeRequestPolicy,
     permission_policy: PermissionPolicy,
     permission_provider_id: String,
+}
+
+/// Agent activation 只接收 descriptor 声明且由当前 Context generation 提供的 live leases。
+#[derive(Default)]
+pub(super) struct AgentRuntimeActivationGrants {
+    event_stream: Option<CapabilityLease<RuntimeEventStreamCapability>>,
+    extension_hooks: Option<CapabilityLease<ExtensionHookRegistryCapability>>,
+}
+
+impl AgentRuntimeActivationGrants {
+    pub(super) fn empty() -> Self {
+        Self::default()
+    }
+
+    pub(super) fn with_event_stream(
+        mut self,
+        event_stream: CapabilityLease<RuntimeEventStreamCapability>,
+    ) -> Self {
+        self.event_stream = Some(event_stream);
+        self
+    }
+
+    pub(super) fn with_extension_hooks(
+        mut self,
+        extension_hooks: CapabilityLease<ExtensionHookRegistryCapability>,
+    ) -> Self {
+        self.extension_hooks = Some(extension_hooks);
+        self
+    }
+
+    fn take_event_stream(
+        &mut self,
+    ) -> Result<CapabilityLease<RuntimeEventStreamCapability>, String> {
+        self.event_stream.take().ok_or_else(|| {
+            "Agent activation grant is unavailable: runtime_event_stream".to_string()
+        })
+    }
+
+    fn take_extension_hooks(
+        &mut self,
+    ) -> Result<CapabilityLease<ExtensionHookRegistryCapability>, String> {
+        self.extension_hooks
+            .take()
+            .ok_or_else(|| "Agent activation grant is unavailable: extension_hooks".to_string())
+    }
 }
 
 struct AgentPromptConstructionGrant {
@@ -66,6 +112,7 @@ struct AgentSessionConstructionGrant {
 /// Agent plugin factory 只能看到 descriptor 允许 host 投影的 typed construction grants。
 #[derive(Default)]
 pub(super) struct AgentRuntimeConstructionGrants {
+    extension_hooks: Option<ExtensionHookRegistry>,
     llm_port: Option<LlmPort>,
     loaded_models: Option<conversation_runtime::models::LoadedModelCatalog>,
     permission: Option<AgentPermissionConstructionGrant>,
@@ -77,6 +124,11 @@ pub(super) struct AgentRuntimeConstructionGrants {
 impl AgentRuntimeConstructionGrants {
     pub(super) fn empty() -> Self {
         Self::default()
+    }
+
+    pub(super) fn with_extension_hooks(mut self, extension_hooks: ExtensionHookRegistry) -> Self {
+        self.extension_hooks = Some(extension_hooks);
+        self
     }
 
     pub(super) fn with_llm_port(mut self, llm_port: LlmPort) -> Self {
@@ -146,6 +198,7 @@ impl AgentRuntimeConstructionGrants {
 
     pub(super) fn payload_count(&self) -> usize {
         [
+            self.extension_hooks.is_some(),
             self.llm_port.is_some(),
             self.loaded_models.is_some(),
             self.permission.is_some(),
@@ -262,11 +315,8 @@ pub(super) trait AgentRuntimeTestHarness {
 /// production implementation。worker、receiver 与 event-stream lease 全部封装在 implementation
 /// 内，host 只消费 lifecycle、Agent facts 与 session/configuration view。
 pub(super) trait AgentRuntimePort: AgentRuntime + Send {
-    /// 使用当前 host event-stream generation 激活 adapter。
-    fn activate(
-        &mut self,
-        event_stream: CapabilityLease<RuntimeEventStreamCapability>,
-    ) -> Result<(), String>;
+    /// 使用 descriptor-filtered current Context generations 激活 adapter。
+    fn activate(&mut self, grants: AgentRuntimeActivationGrants) -> Result<(), String>;
 
     /// 撤销当前 activation generation 的副作用，同时保留可供重新激活的持久状态。
     fn suspend(&mut self) -> Result<(), AgentRuntimeError>;
@@ -282,6 +332,11 @@ pub(super) trait AgentRuntimePort: AgentRuntime + Send {
 
     #[cfg(test)]
     fn has_pending_work(&self) -> bool;
+
+    #[cfg(test)]
+    fn extension_hooks_for_test(&self) -> Option<ExtensionHookRegistry> {
+        None
+    }
 }
 
 /// Agent loop 是否仍占有一个未结束或未完成交付的 turn。

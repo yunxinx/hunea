@@ -886,7 +886,17 @@ mod property_tests;
 mod tests {
     use std::sync::{Arc, Mutex};
 
+    use extension_hook_runtime::{
+        BeforeTurnDecision, BeforeTurnPayload, ExtensionHookRegistry, HookDispatchError,
+        HookDispatchErrorKind, HookFailureKind, HookId, HookOwnerId, HookPriority,
+        HookRegistrationOptions,
+    };
+    use provider_protocol::{ConversationItem, Role};
+    use tokio::sync::Notify;
+    use tokio_util::sync::CancellationToken;
+
     use super::*;
+    use crate::runtime::context::ExtensionHookRegistryCapability;
 
     #[derive(Default)]
     struct FakeCallbacks {
@@ -1017,6 +1027,226 @@ mod tests {
                 Ok(())
             }
         }
+    }
+
+    const HOOK_PROVIDER_COMPONENT: &str = "extension-hooks";
+    const HOOK_PRODUCER_COMPONENT: &str = "hook-producer";
+
+    struct HookLifecycleCallbacks {
+        registry: ExtensionHookRegistry,
+        invocation_started: Arc<Notify>,
+        reject_producer_activation: bool,
+    }
+
+    impl HookLifecycleCallbacks {
+        fn new(reject_producer_activation: bool) -> Self {
+            Self {
+                registry: ExtensionHookRegistry::new(),
+                invocation_started: Arc::new(Notify::new()),
+                reject_producer_activation,
+            }
+        }
+    }
+
+    impl ComponentLifecycleCallbacks for HookLifecycleCallbacks {
+        fn prepare_authority(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn commit_authority(&mut self) {}
+
+        fn abort_authority(&mut self) {}
+
+        fn activate_component(
+            &mut self,
+            component_id: &str,
+            scope: &EffectScope,
+            context: &mut ComponentActivationContext<'_>,
+            _mode: ComponentLifecycleMode,
+        ) -> Result<ComponentActivationOutcome, String> {
+            match component_id {
+                HOOK_PROVIDER_COMPONENT => {
+                    context
+                        .publish::<ExtensionHookRegistryCapability>(self.registry.clone())
+                        .map_err(|error| error.to_string())?;
+                    Ok(ComponentActivationOutcome::PublishCapabilities)
+                }
+                HOOK_PRODUCER_COMPONENT => {
+                    let registry = context
+                        .require::<ExtensionHookRegistryCapability>()
+                        .map_err(|error| error.to_string())?;
+                    let invocation_started = Arc::clone(&self.invocation_started);
+                    let mut registration = registry
+                        .register_before_turn(
+                            HookOwnerId::try_new(component_id)
+                                .expect("component id should be a valid hook owner"),
+                            HookId::try_new("before-turn").expect("hook id should validate"),
+                            HookRegistrationOptions::try_new(
+                                HookPriority::default(),
+                                std::time::Duration::from_secs(30),
+                            )
+                            .expect("hook options should validate"),
+                            Arc::new(move |_: BeforeTurnPayload, _| {
+                                let invocation_started = Arc::clone(&invocation_started);
+                                async move {
+                                    invocation_started.notify_one();
+                                    std::future::pending::<
+                                        Result<BeforeTurnDecision, HookFailureKind>,
+                                    >()
+                                    .await
+                                }
+                            }),
+                        )
+                        .map_err(|error| error.to_string())?;
+                    scope
+                        .register("before_turn_hook", move || {
+                            registration.dispose();
+                            Ok(())
+                        })
+                        .map_err(|error| error.to_string())?;
+                    if self.reject_producer_activation {
+                        return Err("hook producer activation rejected".to_string());
+                    }
+                    Ok(ComponentActivationOutcome::Ready)
+                }
+                _ => Err("unknown test component".to_string()),
+            }
+        }
+
+        fn quiesce_component(
+            &mut self,
+            _component_id: &str,
+            _mode: ComponentLifecycleMode,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn hook_definitions(producer_implementation: &str) -> Vec<ComponentDefinition> {
+        vec![
+            ComponentDefinition::new(HOOK_PROVIDER_COMPONENT)
+                .implemented_by("typed-extension-hooks")
+                .provides(ExtensionHookRegistryCapability::KEY),
+            ComponentDefinition::new(HOOK_PRODUCER_COMPONENT)
+                .implemented_by(producer_implementation)
+                .requires(ExtensionHookRegistryCapability::KEY),
+        ]
+    }
+
+    fn hook_turn_payload() -> BeforeTurnPayload {
+        BeforeTurnPayload::try_new(vec![ConversationItem::text(Role::User, "delivery")])
+            .expect("hook payload should validate")
+    }
+
+    fn spawn_hook_dispatch(
+        registry: ExtensionHookRegistry,
+    ) -> tokio::task::JoinHandle<Result<BeforeTurnPayload, HookDispatchError>> {
+        tokio::spawn(async move {
+            let cancellation = CancellationToken::new();
+            registry
+                .dispatch_before_turn(hook_turn_payload(), &cancellation)
+                .await
+        })
+    }
+
+    async fn expect_registration_disposed(
+        dispatch: tokio::task::JoinHandle<Result<BeforeTurnPayload, HookDispatchError>>,
+    ) {
+        let error = tokio::time::timeout(std::time::Duration::from_secs(1), dispatch)
+            .await
+            .expect("registration disposal should stop the invocation")
+            .expect("dispatch task should not panic")
+            .expect_err("disposed registration should fail closed");
+        assert_eq!(error.kind(), HookDispatchErrorKind::RegistrationDisposed);
+    }
+
+    #[test]
+    fn hook_registration_rolls_back_through_the_lifecycle_executor() {
+        let mut executor = ComponentLifecycleExecutor::default();
+        let mut callbacks = HookLifecycleCallbacks::new(true);
+
+        executor
+            .reconcile_definitions(
+                hook_definitions("hook-producer-v1"),
+                &mut callbacks,
+                ComponentLifecycleMode::Initial,
+            )
+            .expect_err("producer activation should be rejected");
+
+        assert!(callbacks.registry.snapshot().is_empty());
+        assert_eq!(
+            executor.graph().state(HOOK_PRODUCER_COMPONENT),
+            Some(ComponentState::Failed)
+        );
+    }
+
+    #[tokio::test]
+    async fn hook_registration_removal_cancels_the_in_flight_invocation() {
+        let mut executor = ComponentLifecycleExecutor::default();
+        let mut callbacks = HookLifecycleCallbacks::new(false);
+        executor
+            .reconcile_definitions(
+                hook_definitions("hook-producer-v1"),
+                &mut callbacks,
+                ComponentLifecycleMode::Initial,
+            )
+            .expect("hook producer should activate");
+        assert_eq!(
+            callbacks.registry.snapshot()[0].owner.as_str(),
+            HOOK_PRODUCER_COMPONENT
+        );
+        let dispatch = spawn_hook_dispatch(callbacks.registry.clone());
+        callbacks.invocation_started.notified().await;
+
+        executor
+            .reconcile_definitions(
+                [ComponentDefinition::new(HOOK_PROVIDER_COMPONENT)
+                    .implemented_by("typed-extension-hooks")
+                    .provides(ExtensionHookRegistryCapability::KEY)],
+                &mut callbacks,
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect("hook producer should be removed");
+
+        expect_registration_disposed(dispatch).await;
+        assert!(callbacks.registry.snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn hook_registration_replacement_and_shutdown_dispose_each_generation() {
+        let mut executor = ComponentLifecycleExecutor::default();
+        let mut callbacks = HookLifecycleCallbacks::new(false);
+        executor
+            .reconcile_definitions(
+                hook_definitions("hook-producer-v1"),
+                &mut callbacks,
+                ComponentLifecycleMode::Initial,
+            )
+            .expect("initial hook producer should activate");
+        let old_dispatch = spawn_hook_dispatch(callbacks.registry.clone());
+        callbacks.invocation_started.notified().await;
+
+        executor
+            .reconcile_definitions(
+                hook_definitions("hook-producer-v2"),
+                &mut callbacks,
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect("replacement hook producer should activate");
+
+        expect_registration_disposed(old_dispatch).await;
+        let snapshot = callbacks.registry.snapshot();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].owner.as_str(), HOOK_PRODUCER_COMPONENT);
+
+        let fresh_dispatch = spawn_hook_dispatch(callbacks.registry.clone());
+        callbacks.invocation_started.notified().await;
+        executor
+            .shutdown(&mut callbacks)
+            .expect("shutdown should dispose the fresh hook producer");
+
+        expect_registration_disposed(fresh_dispatch).await;
+        assert!(callbacks.registry.snapshot().is_empty());
     }
 
     fn definitions() -> Vec<ComponentDefinition> {

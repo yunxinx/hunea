@@ -200,6 +200,11 @@ fn composition_snapshot_is_deterministic_and_redacted() {
                 "generation": 0,
             },
             {
+                "key": "extension_hooks",
+                "provider_component": "extension_hooks",
+                "generation": 0,
+            },
+            {
                 "key": "llm_port",
                 "provider_component": "llm_port",
                 "generation": 0,
@@ -242,6 +247,7 @@ fn composition_snapshot_is_deterministic_and_redacted() {
             "agent_runtime",
             "approval_provider",
             "context_budget",
+            "extension_hooks",
             "llm_port",
             "model_refresh",
             "permission_policy",
@@ -256,6 +262,7 @@ fn composition_snapshot_is_deterministic_and_redacted() {
     for (component_id, plugin_type) in [
         ("approval_provider", "terminal-approval-provider"),
         ("context_budget", "context-budget"),
+        ("extension_hooks", "typed-extension-hooks"),
         ("llm_port", "openai-compatible-provider-catalog"),
         ("model_refresh", "model-refresh"),
         ("agent_runtime", "native-agent-loop"),
@@ -280,6 +287,7 @@ fn composition_snapshot_is_deterministic_and_redacted() {
     }
     for (component_id, provides) in [
         ("approval_provider", &["approval_provider"][..]),
+        ("extension_hooks", &["extension_hooks"][..]),
         ("llm_port", &["llm_port", "model_catalog"][..]),
         ("permission_policy", &["permission_policy"][..]),
         ("prompt_assembly", &["prompt_assembly"][..]),
@@ -294,6 +302,7 @@ fn composition_snapshot_is_deterministic_and_redacted() {
         snapshot["activation_order"],
         serde_json::json!([
             "approval_provider",
+            "extension_hooks",
             "llm_port",
             "runtime_event_stream",
             "model_refresh",
@@ -321,6 +330,7 @@ fn composition_snapshot_is_deterministic_and_redacted() {
             "model_refresh",
             "runtime_event_stream",
             "llm_port",
+            "extension_hooks",
             "approval_provider",
         ])
     );
@@ -369,7 +379,7 @@ fn composition_snapshot_is_deterministic_and_redacted() {
         serde_json::json!([
             {
                 "owner": "agent_runtime",
-                "effects": ["dependency:runtime_event_stream"],
+                "effects": ["dependency:extension_hooks", "dependency:runtime_event_stream"],
                 "children": [],
             },
             {
@@ -380,6 +390,11 @@ fn composition_snapshot_is_deterministic_and_redacted() {
             {
                 "owner": "context_budget",
                 "effects": ["dependency:runtime_event_stream"],
+                "children": [],
+            },
+            {
+                "owner": "extension_hooks",
+                "effects": ["capability:extension_hooks"],
                 "children": [],
             },
             {

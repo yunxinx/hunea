@@ -8,7 +8,9 @@ use tool_runtime::ToolExecutorRegistry;
 
 use super::{
     AppRuntimeOptions,
-    agent::{AgentRuntimePort, NativeAgentRuntime, NativeAgentRuntimeMount},
+    agent::{
+        AgentRuntimeFactory, AgentRuntimeMount, AgentRuntimePort, construct_native_agent_runtime,
+    },
     context::{
         ApprovalProviderCapability, CapabilityLease, ComponentActivationContext, LlmPortCapability,
         ModelCatalogCapability, PermissionPolicyCapability, PromptAssemblyCapability,
@@ -113,9 +115,71 @@ type RuntimePluginQuiescence =
     fn(&mut RuntimeComponents, ComponentLifecycleMode) -> Result<(), String>;
 
 #[derive(Clone, Copy)]
-struct RuntimePluginImplementation {
+struct RuntimePluginLifecycle {
     activate: RuntimePluginActivation,
     quiesce: RuntimePluginQuiescence,
+}
+
+#[derive(Clone)]
+enum RuntimePluginImplementationKind {
+    Component,
+    AgentRuntime(AgentRuntimeFactory),
+}
+
+#[derive(Clone)]
+struct RuntimePluginImplementation {
+    lifecycle: RuntimePluginLifecycle,
+    kind: RuntimePluginImplementationKind,
+}
+
+impl RuntimePluginImplementation {
+    fn component(activate: RuntimePluginActivation, quiesce: RuntimePluginQuiescence) -> Self {
+        Self {
+            lifecycle: RuntimePluginLifecycle { activate, quiesce },
+            kind: RuntimePluginImplementationKind::Component,
+        }
+    }
+
+    fn agent_runtime(
+        factory: AgentRuntimeFactory,
+        activate: RuntimePluginActivation,
+        quiesce: RuntimePluginQuiescence,
+    ) -> Self {
+        Self {
+            lifecycle: RuntimePluginLifecycle { activate, quiesce },
+            kind: RuntimePluginImplementationKind::AgentRuntime(factory),
+        }
+    }
+
+    fn activate(
+        &self,
+        components: &mut RuntimeComponents,
+        scope: &EffectScope,
+        context: &mut ComponentActivationContext<'_>,
+        mode: ComponentLifecycleMode,
+    ) -> Result<ComponentActivationOutcome, String> {
+        (self.lifecycle.activate)(components, scope, context, mode)
+    }
+
+    fn quiesce(
+        &self,
+        components: &mut RuntimeComponents,
+        mode: ComponentLifecycleMode,
+    ) -> Result<(), String> {
+        (self.lifecycle.quiesce)(components, mode)
+    }
+
+    fn construct_agent_runtime(
+        &self,
+        mount: AgentRuntimeMount,
+    ) -> Result<Box<dyn AgentRuntimePort>, String> {
+        match &self.kind {
+            RuntimePluginImplementationKind::AgentRuntime(factory) => factory.construct(mount),
+            RuntimePluginImplementationKind::Component => {
+                Err("plugin implementation does not provide an Agent runtime factory".to_string())
+            }
+        }
+    }
 }
 
 fn builtin_plugin_type(type_id: &'static str) -> PluginTypeId {
@@ -167,17 +231,40 @@ fn runtime_plugin_factory(
     activate: RuntimePluginActivation,
     quiesce: RuntimePluginQuiescence,
 ) -> PluginFactory<RuntimePluginImplementation> {
-    let implementation = RuntimePluginImplementation { activate, quiesce };
+    let implementation = RuntimePluginImplementation::component(activate, quiesce);
     PluginFactory::new(
         descriptor
             .build()
             .expect("builtin plugin descriptor must be valid"),
-        move || Ok(implementation),
+        move || Ok(implementation.clone()),
+    )
+}
+
+fn agent_runtime_plugin_factory(
+    descriptor: PluginDescriptorBuilder,
+    factory: AgentRuntimeFactory,
+    activate: RuntimePluginActivation,
+    quiesce: RuntimePluginQuiescence,
+) -> PluginFactory<RuntimePluginImplementation> {
+    let implementation = RuntimePluginImplementation::agent_runtime(factory, activate, quiesce);
+    PluginFactory::new(
+        descriptor
+            .build()
+            .expect("builtin plugin descriptor must be valid"),
+        move || Ok(implementation.clone()),
     )
 }
 
 fn builtin_plugin_catalog()
 -> Result<PluginFactoryCatalog<RuntimePluginImplementation>, PluginCatalogError> {
+    builtin_plugin_catalog_with_agent_factory(AgentRuntimeFactory::new(
+        construct_native_agent_runtime,
+    ))
+}
+
+fn builtin_plugin_catalog_with_agent_factory(
+    agent_runtime_factory: AgentRuntimeFactory,
+) -> Result<PluginFactoryCatalog<RuntimePluginImplementation>, PluginCatalogError> {
     PluginFactoryCatalog::try_new([
         runtime_plugin_factory(
             builtin_descriptor(APPROVAL_PROVIDER_PLUGIN, "Terminal approval provider")
@@ -233,7 +320,7 @@ fn builtin_plugin_catalog()
             RuntimeComponents::activate_prompt_assembly,
             RuntimeComponents::quiesce_prompt_assembly,
         ),
-        runtime_plugin_factory(
+        agent_runtime_plugin_factory(
             builtin_descriptor(NATIVE_AGENT_RUNTIME_PLUGIN, "Native agent loop")
                 .requires(RUNTIME_EVENT_STREAM.capability)
                 .requires(LLM_PORT.capability)
@@ -242,6 +329,7 @@ fn builtin_plugin_catalog()
                 .requires(PROMPT_ASSEMBLY.capability)
                 .requires(TOOL_CATALOG.capability)
                 .observes(SESSION_PERSISTENCE.capability),
+            agent_runtime_factory,
             RuntimeComponents::activate_native_agent_runtime,
             RuntimeComponents::quiesce_native_agent_runtime,
         ),
@@ -325,10 +413,14 @@ pub(super) struct RuntimeComponents {
     is_shutdown: bool,
 }
 
-fn boxed_native_agent_runtime(
-    mount: NativeAgentRuntimeMount<'_>,
+fn construct_agent_runtime(
+    plugins: &PluginComposition<RuntimePluginImplementation>,
+    mount: AgentRuntimeMount,
 ) -> Result<Box<dyn AgentRuntimePort>, String> {
-    NativeAgentRuntime::new(mount).map(|runtime| Box::new(runtime) as Box<dyn AgentRuntimePort>)
+    plugins
+        .implementation(NATIVE_AGENT_RUNTIME_COMPONENT)
+        .ok_or_else(|| "Agent component has no committed plugin implementation".to_string())?
+        .construct_agent_runtime(mount)
 }
 
 impl RuntimeComponents {
@@ -357,6 +449,25 @@ impl RuntimeComponents {
     pub(super) fn new(options: &mut AppRuntimeOptions) -> Result<Self, String> {
         let desired_plugins = builtin_desired_composition().map_err(|error| error.to_string())?;
         let plugin_catalog = builtin_plugin_catalog().map_err(|error| error.to_string())?;
+        Self::new_with_plugin_catalog(options, desired_plugins, plugin_catalog)
+    }
+
+    #[cfg(test)]
+    fn new_with_agent_runtime_factory(
+        options: &mut AppRuntimeOptions,
+        factory: AgentRuntimeFactory,
+    ) -> Result<Self, String> {
+        let desired_plugins = builtin_desired_composition().map_err(|error| error.to_string())?;
+        let plugin_catalog = builtin_plugin_catalog_with_agent_factory(factory)
+            .map_err(|error| error.to_string())?;
+        Self::new_with_plugin_catalog(options, desired_plugins, plugin_catalog)
+    }
+
+    fn new_with_plugin_catalog(
+        options: &mut AppRuntimeOptions,
+        desired_plugins: DesiredPluginComposition,
+        plugin_catalog: PluginFactoryCatalog<RuntimePluginImplementation>,
+    ) -> Result<Self, String> {
         let plugin_loader = PluginCompositionLoader::try_new(plugin_catalog, desired_plugins)
             .map_err(|error| error.to_string())?;
         let plugins = plugin_loader
@@ -396,18 +507,21 @@ impl RuntimeComponents {
         let session_store_worker = SessionStoreWorker::new(RuntimeEventNotifier::default());
         let context_budget_worker = ContextBudgetWorker::new(RuntimeEventNotifier::default())
             .map_err(|error| error.to_string())?;
-        let agent_runtime = boxed_native_agent_runtime(NativeAgentRuntimeMount {
-            options,
-            session_workspace_tools: session_workspace_tools.clone(),
-            prompt_assembly_tool_definitions,
-            prompt_assembly: prompt_assembly_snapshot,
-            session_port: session_backend_views
-                .as_ref()
-                .map(|views| Arc::clone(&views.port)),
-            llm_port: llm_port.clone(),
-            permission_policy: permission_policy.clone(),
-            permission_provider_id: TERMINAL_APPROVAL_PROVIDER_ID.to_string(),
-        })?;
+        let agent_runtime = construct_agent_runtime(
+            &plugins,
+            AgentRuntimeMount::new(
+                options,
+                session_workspace_tools.clone(),
+                prompt_assembly_tool_definitions,
+                prompt_assembly_snapshot,
+                session_backend_views
+                    .as_ref()
+                    .map(|views| Arc::clone(&views.port)),
+                llm_port.clone(),
+                permission_policy.clone(),
+                TERMINAL_APPROVAL_PROVIDER_ID.to_string(),
+            ),
+        )?;
         let model_refresh = ModelRefreshWorker::new(RuntimeEventNotifier::default());
         let has_session_backend = session_backend_views.is_some();
         let mut components = Self {
@@ -483,6 +597,7 @@ impl RuntimeComponents {
         if self.is_shutdown {
             return Err("Runtime components are shut down".to_string());
         }
+        self.validate_agent_plugin_identity(&desired)?;
         let reconciliation = self
             .plugin_loader
             .prepare_reconciliation(&desired, &self.plugins)
@@ -497,10 +612,34 @@ impl RuntimeComponents {
         desired: DesiredPluginComposition,
         mode: ComponentLifecycleMode,
     ) -> Result<(), String> {
+        self.validate_agent_plugin_identity(&desired)?;
         let reconciliation = catalog
             .prepare_reconciliation(&desired, &self.plugins)
             .map_err(|error| error.to_string())?;
         self.commit_prepared_plugin_reconciliation(desired, reconciliation, mode)
+    }
+
+    fn validate_agent_plugin_identity(
+        &self,
+        desired: &DesiredPluginComposition,
+    ) -> Result<(), String> {
+        let desired_type = desired
+            .iter()
+            .find(|(component_id, _)| component_id.as_str() == NATIVE_AGENT_RUNTIME_COMPONENT)
+            .map(|(_, plugin_type)| plugin_type);
+        let observed = self.plugins.observed();
+        let observed_type = observed
+            .iter()
+            .find(|(component_id, _)| component_id.as_str() == NATIVE_AGENT_RUNTIME_COMPONENT)
+            .map(|(_, plugin_type)| plugin_type);
+        if desired_type == observed_type && desired_type.is_some() {
+            Ok(())
+        } else {
+            Err(
+                "Agent plugin identity replacement requires an adapter replacement transaction"
+                    .to_string(),
+            )
+        }
     }
 
     fn commit_prepared_plugin_reconciliation(
@@ -656,7 +795,83 @@ impl RuntimeComponents {
     }
 
     pub(super) fn reset_after_clear(&mut self, options: &AppRuntimeOptions) -> Result<(), String> {
-        self.reset_after_clear_with_native_mount_check(options, || Ok(()))
+        if self.is_shutdown {
+            return Err("Runtime components are shut down".to_string());
+        }
+        let replaced = [LLM_PORT, MODEL_CATALOG, PROMPT_ASSEMBLY, TOOL_CATALOG];
+        self.lifecycle
+            .validate_reconfiguration(
+                replaced.map(|capability| {
+                    (
+                        capability.component_id,
+                        CapabilityKey::from(capability.capability),
+                    )
+                }),
+                [LLM_PORT.component_id, TOOL_CATALOG.component_id],
+            )
+            .map_err(|error| error.to_string())?;
+
+        let current_prompt_assembly = self.prompt_assembly.manager_snapshot();
+        self.with_lifecycle(|lifecycle, components| {
+            lifecycle.deactivate_components(
+                [TOOL_CATALOG.component_id, LLM_PORT.component_id],
+                components,
+                ComponentLifecycleMode::Reconfigure,
+            )
+        })
+        .map_err(|error| error.to_string())?;
+
+        let fresh_llm_port = LlmPort::new();
+        let fresh_provider_registrations = fresh_llm_port
+            .mount_builtin_providers("models-config", &options.loaded_models.provider_configs)
+            .map_err(|error| error.to_string())?;
+        let (fresh_tool_catalog, fresh_tool_registration) = conversation_workspace_tool_catalog(
+            &options.managed_ripgrep,
+            &options.hunea_config_dir,
+        )
+        .map_err(|error| error.to_string())?;
+        let prompt_assembly_tool_definitions = fresh_tool_catalog.definitions();
+        let (fresh_prompt_assembly, fresh_prompt_registration) =
+            PromptAssembly::adopt_manager("workspace-prompt", current_prompt_assembly)
+                .map_err(|error| error.to_string())?;
+        let fresh_prompt_assembly_snapshot = fresh_prompt_assembly.session_snapshot();
+        let session_workspace_tools = session_tools_for_manager(
+            &fresh_tool_catalog,
+            fresh_prompt_assembly_snapshot.manager.as_ref(),
+        );
+        // 旧 adapter 完全 quiescent 后才请 committed plugin 构造新 generation；失败时
+        // capability 保持 removed，所有尚未发布的 fresh registrations 由 Drop 逆向撤销。
+        let fresh_agent_runtime = construct_agent_runtime(
+            &self.plugins,
+            AgentRuntimeMount::new(
+                options,
+                session_workspace_tools.clone(),
+                prompt_assembly_tool_definitions,
+                fresh_prompt_assembly_snapshot,
+                self.session_backend_views
+                    .as_ref()
+                    .map(|views| Arc::clone(&views.port)),
+                fresh_llm_port.clone(),
+                self.permission_policy.clone(),
+                self.permission_provider_id.clone(),
+            ),
+        )?;
+        self.agent_runtime = fresh_agent_runtime;
+        self.llm_port = fresh_llm_port;
+        self.tool_catalog = fresh_tool_catalog;
+        self.prompt_assembly = fresh_prompt_assembly;
+        self.session_workspace_tools = session_workspace_tools;
+        self.activation_staging.provider_registrations = Some(fresh_provider_registrations);
+        self.activation_staging.tool_registration = Some(fresh_tool_registration);
+        self.activation_staging.prompt_registration = Some(fresh_prompt_registration);
+        self.with_lifecycle(|lifecycle, components| {
+            lifecycle.activate_components(
+                [LLM_PORT.component_id, TOOL_CATALOG.component_id],
+                components,
+                ComponentLifecycleMode::Reconfigure,
+            )
+        })
+        .map_err(|error| error.to_string())
     }
 
     /// 在全部 consumer 与旧 worker quiesce 后替换当前 session backend。
@@ -665,16 +880,6 @@ impl RuntimeComponents {
         &mut self,
         options: &AppRuntimeOptions,
         store: Arc<dyn session_store::SessionStore>,
-    ) -> Result<(), String> {
-        self.replace_session_backend_with_native_mount_check(options, store, || Ok(()))
-    }
-
-    #[allow(dead_code)]
-    fn replace_session_backend_with_native_mount_check(
-        &mut self,
-        options: &AppRuntimeOptions,
-        store: Arc<dyn session_store::SessionStore>,
-        native_mount_check: impl FnOnce() -> Result<(), String>,
     ) -> Result<(), String> {
         if self.is_shutdown {
             return Err("Runtime components are shut down".to_string());
@@ -721,20 +926,19 @@ impl RuntimeComponents {
         let Some(fresh_views) = fresh_views else {
             return Err("session backend mount did not produce views".to_string());
         };
-        let fresh_agent_runtime = match native_mount_check().and_then(|()| {
-            self.fresh_native_agent_runtime(options, Some(Arc::clone(&fresh_views.port)))
-        }) {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                if let Some(session_port) = &fresh_session_port {
-                    session_port.deactivate();
+        let fresh_agent_runtime =
+            match self.fresh_agent_runtime(options, Some(Arc::clone(&fresh_views.port))) {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    if let Some(session_port) = &fresh_session_port {
+                        session_port.deactivate();
+                    }
+                    drop(fresh_registration);
+                    self.restore_ephemeral_session_consumers(options)
+                        .map_err(|fallback_error| format!("{error}; {fallback_error}"))?;
+                    return Err(error);
                 }
-                drop(fresh_registration);
-                self.restore_ephemeral_session_consumers(options)
-                    .map_err(|fallback_error| format!("{error}; {fallback_error}"))?;
-                return Err(error);
-            }
-        };
+            };
 
         self.session_store_worker = SessionStoreWorker::default();
         self.agent_runtime = fresh_agent_runtime;
@@ -754,21 +958,24 @@ impl RuntimeComponents {
         .map_err(|error| error.to_string())
     }
 
-    fn fresh_native_agent_runtime(
+    fn fresh_agent_runtime(
         &self,
         options: &AppRuntimeOptions,
         session_port: Option<Arc<dyn session_store::SessionPort>>,
     ) -> Result<Box<dyn AgentRuntimePort>, String> {
-        boxed_native_agent_runtime(NativeAgentRuntimeMount {
-            options,
-            session_workspace_tools: self.session_workspace_tools.clone(),
-            prompt_assembly_tool_definitions: self.tool_catalog.definitions(),
-            prompt_assembly: self.prompt_assembly.session_snapshot(),
-            session_port,
-            llm_port: self.llm_port.clone(),
-            permission_policy: self.permission_policy.clone(),
-            permission_provider_id: self.permission_provider_id.clone(),
-        })
+        construct_agent_runtime(
+            &self.plugins,
+            AgentRuntimeMount::new(
+                options,
+                self.session_workspace_tools.clone(),
+                self.tool_catalog.definitions(),
+                self.prompt_assembly.session_snapshot(),
+                session_port,
+                self.llm_port.clone(),
+                self.permission_policy.clone(),
+                self.permission_provider_id.clone(),
+            ),
+        )
     }
 
     fn restore_ephemeral_session_consumers(
@@ -776,7 +983,7 @@ impl RuntimeComponents {
         options: &AppRuntimeOptions,
     ) -> Result<(), String> {
         let fresh_agent_runtime = self
-            .fresh_native_agent_runtime(options, None)
+            .fresh_agent_runtime(options, None)
             .map_err(|error| format!("restore ephemeral Agent after backend failure: {error}"))?;
         self.agent_runtime = fresh_agent_runtime;
         self.session_store_worker = SessionStoreWorker::default();
@@ -800,24 +1007,6 @@ impl RuntimeComponents {
         owner: impl Into<String>,
         provider_id: impl Into<String>,
         factory: Arc<dyn super::permission_policy::ApprovalProviderFactory>,
-    ) -> Result<(), String> {
-        self.replace_permission_provider_with_native_mount_check(
-            options,
-            owner,
-            provider_id,
-            factory,
-            || Ok(()),
-        )
-    }
-
-    #[allow(dead_code)]
-    fn replace_permission_provider_with_native_mount_check(
-        &mut self,
-        options: &AppRuntimeOptions,
-        owner: impl Into<String>,
-        provider_id: impl Into<String>,
-        factory: Arc<dyn super::permission_policy::ApprovalProviderFactory>,
-        native_mount_check: impl FnOnce() -> Result<(), String>,
     ) -> Result<(), String> {
         if self.is_shutdown {
             return Err("Runtime components are shut down".to_string());
@@ -848,21 +1037,21 @@ impl RuntimeComponents {
         let fresh_registration = fresh_policy
             .register(owner, provider_id.clone(), factory)
             .map_err(|error| error.to_string())?;
-        let fresh_agent_runtime = match native_mount_check().and_then(|()| {
-            boxed_native_agent_runtime(NativeAgentRuntimeMount {
+        let fresh_agent_runtime = match construct_agent_runtime(
+            &self.plugins,
+            AgentRuntimeMount::new(
                 options,
-                session_workspace_tools: self.session_workspace_tools.clone(),
-                prompt_assembly_tool_definitions: self.tool_catalog.definitions(),
-                prompt_assembly: self.prompt_assembly.session_snapshot(),
-                session_port: self
-                    .session_backend_views
+                self.session_workspace_tools.clone(),
+                self.tool_catalog.definitions(),
+                self.prompt_assembly.session_snapshot(),
+                self.session_backend_views
                     .as_ref()
                     .map(|views| Arc::clone(&views.port)),
-                llm_port: self.llm_port.clone(),
-                permission_policy: fresh_policy.clone(),
-                permission_provider_id: provider_id.clone(),
-            })
-        }) {
+                self.llm_port.clone(),
+                fresh_policy.clone(),
+                provider_id.clone(),
+            ),
+        ) {
             Ok(runtime) => runtime,
             Err(error) => {
                 fresh_policy.deactivate();
@@ -878,90 +1067,6 @@ impl RuntimeComponents {
         self.with_lifecycle(|lifecycle, components| {
             lifecycle.activate_components(
                 [APPROVAL_PROVIDER.component_id],
-                components,
-                ComponentLifecycleMode::Reconfigure,
-            )
-        })
-        .map_err(|error| error.to_string())
-    }
-
-    fn reset_after_clear_with_native_mount_check(
-        &mut self,
-        options: &AppRuntimeOptions,
-        native_mount_check: impl FnOnce() -> Result<(), String>,
-    ) -> Result<(), String> {
-        if self.is_shutdown {
-            return Err("Runtime components are shut down".to_string());
-        }
-        let replaced = [LLM_PORT, MODEL_CATALOG, PROMPT_ASSEMBLY, TOOL_CATALOG];
-        self.lifecycle
-            .validate_reconfiguration(
-                replaced.map(|capability| {
-                    (
-                        capability.component_id,
-                        CapabilityKey::from(capability.capability),
-                    )
-                }),
-                [LLM_PORT.component_id, TOOL_CATALOG.component_id],
-            )
-            .map_err(|error| error.to_string())?;
-
-        let current_prompt_assembly = self.prompt_assembly.manager_snapshot();
-        self.with_lifecycle(|lifecycle, components| {
-            lifecycle.deactivate_components(
-                [TOOL_CATALOG.component_id, LLM_PORT.component_id],
-                components,
-                ComponentLifecycleMode::Reconfigure,
-            )
-        })
-        .map_err(|error| error.to_string())?;
-
-        let fresh_llm_port = LlmPort::new();
-        let fresh_provider_registrations = fresh_llm_port
-            .mount_builtin_providers("models-config", &options.loaded_models.provider_configs)
-            .map_err(|error| error.to_string())?;
-        let (fresh_tool_catalog, fresh_tool_registration) = conversation_workspace_tool_catalog(
-            &options.managed_ripgrep,
-            &options.hunea_config_dir,
-        )
-        .map_err(|error| error.to_string())?;
-        let prompt_assembly_tool_definitions = fresh_tool_catalog.definitions();
-        let (fresh_prompt_assembly, fresh_prompt_registration) =
-            PromptAssembly::adopt_manager("workspace-prompt", current_prompt_assembly)
-                .map_err(|error| error.to_string())?;
-        let fresh_prompt_assembly_snapshot = fresh_prompt_assembly.session_snapshot();
-        let session_workspace_tools = session_tools_for_manager(
-            &fresh_tool_catalog,
-            fresh_prompt_assembly_snapshot.manager.as_ref(),
-        );
-        // 旧 adapter 完全 quiescent 后才创建新 generation，避免 reset 期间存在两个
-        // native worker path；构造失败时 capability 仍保持 removed，不发布半成品。
-        let fresh_agent_runtime = native_mount_check().and_then(|()| {
-            boxed_native_agent_runtime(NativeAgentRuntimeMount {
-                options,
-                session_workspace_tools: session_workspace_tools.clone(),
-                prompt_assembly_tool_definitions,
-                prompt_assembly: fresh_prompt_assembly_snapshot,
-                session_port: self
-                    .session_backend_views
-                    .as_ref()
-                    .map(|views| Arc::clone(&views.port)),
-                llm_port: fresh_llm_port.clone(),
-                permission_policy: self.permission_policy.clone(),
-                permission_provider_id: self.permission_provider_id.clone(),
-            })
-        })?;
-        self.agent_runtime = fresh_agent_runtime;
-        self.llm_port = fresh_llm_port;
-        self.tool_catalog = fresh_tool_catalog;
-        self.prompt_assembly = fresh_prompt_assembly;
-        self.session_workspace_tools = session_workspace_tools;
-        self.activation_staging.provider_registrations = Some(fresh_provider_registrations);
-        self.activation_staging.tool_registration = Some(fresh_tool_registration);
-        self.activation_staging.prompt_registration = Some(fresh_prompt_registration);
-        self.with_lifecycle(|lifecycle, components| {
-            lifecycle.activate_components(
-                [LLM_PORT.component_id, TOOL_CATALOG.component_id],
                 components,
                 ComponentLifecycleMode::Reconfigure,
             )
@@ -1285,11 +1390,11 @@ impl ComponentLifecycleCallbacks for RuntimeComponents {
         let implementation = self
             .plugins
             .implementation(component_id)
-            .copied()
+            .cloned()
             .ok_or_else(|| format!("component `{component_id}` has no prepared plugin instance"))?;
         #[cfg(test)]
         self.record_plugin_transaction_event(format!("activate:{component_id}"));
-        (implementation.activate)(self, scope, context, mode)
+        implementation.activate(self, scope, context, mode)
     }
 
     fn quiesce_component(
@@ -1300,11 +1405,11 @@ impl ComponentLifecycleCallbacks for RuntimeComponents {
         let implementation = self
             .plugins
             .implementation(component_id)
-            .copied()
+            .cloned()
             .ok_or_else(|| format!("component `{component_id}` has no prepared plugin instance"))?;
         #[cfg(test)]
         self.record_plugin_transaction_event(format!("quiesce:{component_id}"));
-        (implementation.quiesce)(self, mode)
+        implementation.quiesce(self, mode)
     }
 }
 
@@ -1424,7 +1529,7 @@ mod tests {
         pin::Pin,
         sync::{
             Mutex,
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
     };
 
@@ -1657,12 +1762,48 @@ mod tests {
     #[test]
     fn runtime_components_source_keeps_agent_ownership_erased() {
         let source = include_str!("components.rs");
+        let production_source = source
+            .split_once("#[cfg(test)]\nmod tests")
+            .map(|(production, _)| production)
+            .expect("components source should keep tests behind cfg(test)");
+        let native_source = include_str!("agent/native.rs");
         let concrete_owner = ["agent_runtime: ", "NativeAgentRuntime"].concat();
         let concrete_constructor = ["NativeAgentRuntime", "::new("].concat();
+        let plugin_factory_wiring = [
+            "builtin_plugin_catalog_with_agent_factory(AgentRuntimeFactory::new(\n",
+            "        construct_native_agent_runtime,\n",
+            "    ))",
+        ]
+        .concat();
+        let native_factory_definition = ["fn construct_native_", "agent_runtime("].concat();
+        let native_construction = ["NativeAgentRuntime", "::new(mount)"].concat();
+        let erased_native_owner = ["Box::new(runtime) as Box<dyn Agent", "RuntimePort>"].concat();
+        let concrete_materialization = ["Self", " {"].concat();
+        let plugin_factory_dispatch = [".construct_agent_", "runtime(mount)"].concat();
+        let optional_factory = ["Option<Agent", "RuntimeFactory>"].concat();
+        let old_mount_check = ["native_mount", "_check"].concat();
+        let old_fresh_helper = ["fresh_native_", "agent_runtime"].concat();
 
-        assert!(source.contains("agent_runtime: Box<dyn AgentRuntimePort>"));
-        assert!(!source.contains(&concrete_owner));
-        assert_eq!(source.matches(&concrete_constructor).count(), 1);
+        assert_eq!(
+            production_source
+                .matches("agent_runtime: Box<dyn AgentRuntimePort>")
+                .count(),
+            1
+        );
+        assert!(!production_source.contains(&concrete_owner));
+        assert!(!production_source.contains(&concrete_constructor));
+        assert_eq!(production_source.matches(&plugin_factory_wiring).count(), 1);
+        assert_eq!(
+            production_source.matches(&plugin_factory_dispatch).count(),
+            1
+        );
+        assert!(!production_source.contains(&optional_factory));
+        assert!(!production_source.contains(&old_mount_check));
+        assert!(!production_source.contains(&old_fresh_helper));
+        assert_eq!(native_source.matches(&native_factory_definition).count(), 1);
+        assert_eq!(native_source.matches(&native_construction).count(), 1);
+        assert_eq!(native_source.matches(&erased_native_owner).count(), 1);
+        assert_eq!(native_source.matches(&concrete_materialization).count(), 1);
         for forbidden in [
             ["downcast", "_ref"].concat(),
             ["downcast", "_mut"].concat(),
@@ -1670,19 +1811,48 @@ mod tests {
             ["dyn", " Any"].concat(),
         ] {
             assert!(
-                !source.contains(&forbidden),
+                !production_source.contains(&forbidden),
                 "Agent owner must not regain concrete access through {forbidden}"
             );
         }
         let concrete_binding = ["agent_runtime", ".bind_event_stream"].concat();
-        assert!(!source.contains(&concrete_binding));
-        assert!(source.contains("self.agent_runtime.activate(event_stream)?"));
-        assert!(source.contains("self.agent_runtime.suspend()"));
-        assert!(source.contains("self.agent_runtime.shutdown()"));
+        assert!(!production_source.contains(&concrete_binding));
+        assert_eq!(
+            production_source
+                .matches("self.agent_runtime.activate(event_stream)?")
+                .count(),
+            1
+        );
+        assert_eq!(
+            production_source
+                .matches("self.agent_runtime.suspend()")
+                .count(),
+            1
+        );
+        assert_eq!(
+            production_source
+                .matches("self.agent_runtime.shutdown()")
+                .count(),
+            1
+        );
     }
 
     fn desired_with_runtime_event_plugin(plugin_type: &'static str) -> DesiredPluginComposition {
         desired_with_runtime_event_plugin_in_order(plugin_type, false)
+    }
+
+    fn desired_with_agent_plugin(plugin_type: Option<&'static str>) -> DesiredPluginComposition {
+        let desired = builtin_desired_composition().expect("builtin desired state should validate");
+        DesiredPluginComposition::try_new(desired.iter().filter_map(
+            |(component_id, current_type)| {
+                if component_id.as_str() != NATIVE_AGENT_RUNTIME_COMPONENT {
+                    return Some((component_id.as_str(), current_type.clone()));
+                }
+                plugin_type
+                    .map(|plugin_type| (component_id.as_str(), builtin_plugin_type(plugin_type)))
+            },
+        ))
+        .expect("Agent replacement desired state should validate")
     }
 
     fn desired_with_runtime_event_plugin_in_order(
@@ -1733,10 +1903,10 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(format!("prepare:{plugin_type}"));
-            Ok(RuntimePluginImplementation {
-                activate: RuntimeComponents::activate_runtime_event_stream,
-                quiesce: RuntimeComponents::quiesce_noop,
-            })
+            Ok(RuntimePluginImplementation::component(
+                RuntimeComponents::activate_runtime_event_stream,
+                RuntimeComponents::quiesce_noop,
+            ))
         })
     }
 
@@ -1841,6 +2011,39 @@ mod tests {
                     .requires(RUNTIME_WAKE.capability),
             ]
         );
+    }
+
+    #[test]
+    fn agent_plugin_identity_changes_are_rejected_before_runtime_mutation() {
+        let mut options = AppRuntimeOptions::default();
+        let mut components =
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+        let old_descriptors = components.plugin_descriptor_snapshots();
+        let old_desired = components.plugin_loader.desired().clone();
+        let old_components = components.lifecycle.components();
+        let old_capabilities = components.lifecycle.capabilities();
+        let old_context = components.lifecycle.context_snapshots();
+        let old_scopes = components.effect_scope_snapshots();
+
+        for desired in [
+            desired_with_agent_plugin(Some("alternate-agent-loop")),
+            desired_with_agent_plugin(None),
+        ] {
+            let error = components
+                .reconcile_plugin_composition(desired, ComponentLifecycleMode::Reconfigure)
+                .expect_err("Agent plugin identity changes require a later transaction stage");
+
+            assert_eq!(
+                error,
+                "Agent plugin identity replacement requires an adapter replacement transaction"
+            );
+            assert_eq!(components.plugin_descriptor_snapshots(), old_descriptors);
+            assert_eq!(components.plugin_loader.desired(), &old_desired);
+            assert_eq!(components.lifecycle.components(), old_components);
+            assert_eq!(components.lifecycle.capabilities(), old_capabilities);
+            assert_eq!(components.lifecycle.context_snapshots(), old_context);
+            assert_eq!(components.effect_scope_snapshots(), old_scopes);
+        }
     }
 
     #[test]
@@ -2582,22 +2785,33 @@ mod tests {
     }
 
     #[test]
-    fn failed_native_mount_reverts_fresh_provider_prompt_and_tool_effects() {
+    fn failed_agent_plugin_mount_reverts_fresh_provider_prompt_and_tool_effects() {
         let mut options = AppRuntimeOptions {
             loaded_models: options_with_provider().loaded_models,
             initial_prompt_assembly: Some(manager_with_section("initial", "initial body")),
             ..AppRuntimeOptions::default()
         };
-        let mut components =
-            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+        let construction_attempts = Arc::new(AtomicUsize::new(0));
+        let factory_attempts = Arc::clone(&construction_attempts);
+        let mut components = RuntimeComponents::new_with_agent_runtime_factory(
+            &mut options,
+            AgentRuntimeFactory::new(move |mount| {
+                if factory_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    construct_native_agent_runtime(mount)
+                } else {
+                    Err("injected Agent plugin mount failure".to_string())
+                }
+            }),
+        )
+        .expect("runtime components should initialize through the injected plugin factory");
 
         let error = components
-            .reset_after_clear_with_native_mount_check(&options, || {
-                Err("injected native mount failure".to_string())
-            })
-            .expect_err("injected native mount failure should abort publication");
+            .reset_after_clear(&options)
+            .expect_err("injected Agent plugin mount failure should abort publication");
 
-        assert_eq!(error, "injected native mount failure");
+        assert_eq!(error, "Agent plugin failed to construct its adapter");
+        assert!(!error.contains("injected Agent plugin mount failure"));
+        assert_eq!(construction_attempts.load(Ordering::SeqCst), 2);
         components
             .validate_context_alignment()
             .expect("failed remount should leave graph and context equally absent");
@@ -2773,8 +2987,19 @@ mod tests {
             session_store: Some(Arc::new(session_store::InMemorySessionStore::new())),
             ..options_with_provider()
         };
-        let mut components =
-            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+        let construction_attempts = Arc::new(AtomicUsize::new(0));
+        let factory_attempts = Arc::clone(&construction_attempts);
+        let mut components = RuntimeComponents::new_with_agent_runtime_factory(
+            &mut options,
+            AgentRuntimeFactory::new(move |mount| {
+                if factory_attempts.fetch_add(1, Ordering::SeqCst) == 1 {
+                    Err("injected session Agent plugin mount failure".to_string())
+                } else {
+                    construct_native_agent_runtime(mount)
+                }
+            }),
+        )
+        .expect("runtime components should initialize through the injected plugin factory");
         assert!(options.session_store.is_none());
         assert!(components.session_backend_views.is_some());
         assert!(
@@ -2782,16 +3007,16 @@ mod tests {
                 .lifecycle
                 .has_capability(&CapabilityKey::from("session_persistence"))
         );
-
         let error = components
-            .replace_session_backend_with_native_mount_check(
+            .replace_session_backend(
                 &options,
                 Arc::new(session_store::InMemorySessionStore::new()),
-                || Err("injected session Agent mount failure".to_string()),
             )
             .expect_err("injected session backend mount failure should abort publication");
 
-        assert_eq!(error, "injected session Agent mount failure");
+        assert_eq!(error, "Agent plugin failed to construct its adapter");
+        assert!(!error.contains("injected session Agent plugin mount failure"));
+        assert_eq!(construction_attempts.load(Ordering::SeqCst), 3);
         assert!(components.session_backend_views.is_none());
         assert!(
             !components
@@ -2920,20 +3145,32 @@ mod tests {
     #[test]
     fn failed_permission_provider_replacement_does_not_revive_old_generation() {
         let mut options = options_with_provider();
-        let mut components =
-            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+        let construction_attempts = Arc::new(AtomicUsize::new(0));
+        let factory_attempts = Arc::clone(&construction_attempts);
+        let mut components = RuntimeComponents::new_with_agent_runtime_factory(
+            &mut options,
+            AgentRuntimeFactory::new(move |mount| {
+                if factory_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    construct_native_agent_runtime(mount)
+                } else {
+                    Err("injected permission Agent plugin mount failure".to_string())
+                }
+            }),
+        )
+        .expect("runtime components should initialize through the injected plugin factory");
 
         let error = components
-            .replace_permission_provider_with_native_mount_check(
+            .replace_permission_provider(
                 &options,
                 "replacement-owner",
                 "replacement-provider",
                 Arc::new(InteractiveApprovalProviderFactory),
-                || Err("injected permission native mount failure".to_string()),
             )
-            .expect_err("injected native mount failure should abort replacement");
+            .expect_err("injected Agent plugin mount failure should abort replacement");
 
-        assert_eq!(error, "injected permission native mount failure");
+        assert_eq!(error, "Agent plugin failed to construct its adapter");
+        assert!(!error.contains("injected permission Agent plugin mount failure"));
+        assert_eq!(construction_attempts.load(Ordering::SeqCst), 2);
         assert!(
             components
                 .permission_policy

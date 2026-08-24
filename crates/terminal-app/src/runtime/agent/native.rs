@@ -24,14 +24,13 @@ use tool_runtime::{ToolDefinition, ToolExecutorRegistry};
 use super::AgentRuntimeTestHarness;
 use super::{
     AgentCommand, AgentCommandReceipt, AgentContextBudgetSnapshot, AgentEvent, AgentEventKind,
-    AgentId, AgentRuntime, AgentRuntimeError, AgentRuntimePort, AgentSessionRestore, AgentTurnId,
-    AgentTurnRequest,
+    AgentId, AgentRuntime, AgentRuntimeError, AgentRuntimeMount, AgentRuntimePort,
+    AgentSessionRestore, AgentTurnId, AgentTurnRequest,
 };
 use crate::prompt_assembly::{
     AttachedPromptMessageAssembly, ManualSkillPromptUse, PromptAssemblyWorkspace,
 };
 use crate::runtime::{
-    AppRuntimeOptions,
     context::{CapabilityLease, RuntimeContext, RuntimeEventStreamCapability},
     dynamic_environment_worker::{
         DynamicEnvironmentInjection, DynamicEnvironmentRequest, DynamicEnvironmentWorker,
@@ -85,24 +84,58 @@ pub struct NativeAgentRuntime {
     is_shutdown: bool,
 }
 
-/// 构造一个 Native adapter generation 所需的完整 host capability snapshot。
-pub(crate) struct NativeAgentRuntimeMount<'a> {
-    pub(crate) options: &'a AppRuntimeOptions,
-    pub(crate) session_workspace_tools: ToolExecutorRegistry,
-    pub(crate) prompt_assembly_tool_definitions: Vec<ToolDefinition>,
-    pub(crate) prompt_assembly: PromptAssemblySessionSnapshot,
-    pub(crate) session_port: Option<Arc<dyn SessionPort>>,
-    pub(crate) llm_port: LlmPort,
-    pub(crate) permission_policy: PermissionPolicy,
-    pub(crate) permission_provider_id: String,
+/// Native plugin factory 构造 concrete adapter 后立即擦除 implementation type。
+pub(in crate::runtime) fn construct_native_agent_runtime(
+    mount: AgentRuntimeMount,
+) -> Result<Box<dyn AgentRuntimePort>, String> {
+    NativeAgentRuntime::new(mount).map(|runtime| Box::new(runtime) as Box<dyn AgentRuntimePort>)
 }
 
 impl NativeAgentRuntime {
     // provider identity 必须与传入的 PermissionPolicy generation 成对传递；将其
     // 隐藏到全局默认值会让 provider replacement 后的 turn 错误地访问旧注册。
-    pub(crate) fn new(mount: NativeAgentRuntimeMount<'_>) -> Result<Self, String> {
-        let NativeAgentRuntimeMount {
-            options,
+    fn new(mount: AgentRuntimeMount) -> Result<Self, String> {
+        Self::new_with_notifier(mount, RuntimeEventNotifier::default())
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_for_test(
+        options: &crate::runtime::AppRuntimeOptions,
+        session_workspace_tools: ToolExecutorRegistry,
+        prompt_assembly_tool_definitions: Vec<ToolDefinition>,
+        prompt_assembly: PromptAssemblySessionSnapshot,
+        session_port: Option<Arc<dyn SessionPort>>,
+        event_notifier: RuntimeEventNotifier,
+        llm_port: LlmPort,
+        permission_policy: PermissionPolicy,
+        permission_provider_id: impl Into<String>,
+    ) -> Result<Self, String> {
+        Self::new_with_notifier(
+            AgentRuntimeMount::new(
+                options,
+                session_workspace_tools,
+                prompt_assembly_tool_definitions,
+                prompt_assembly,
+                session_port,
+                llm_port,
+                permission_policy,
+                permission_provider_id.into(),
+            ),
+            event_notifier,
+        )
+    }
+
+    fn new_with_notifier(
+        mount: AgentRuntimeMount,
+        event_notifier: RuntimeEventNotifier,
+    ) -> Result<Self, String> {
+        let AgentRuntimeMount {
+            loaded_models,
+            runtime_request_policy,
+            dynamic_environment_observer,
+            hunea_config_dir,
+            session_header_template,
             session_workspace_tools,
             prompt_assembly_tool_definitions,
             prompt_assembly,
@@ -111,81 +144,33 @@ impl NativeAgentRuntime {
             permission_policy,
             permission_provider_id,
         } = mount;
-        Self::new_with_notifier(
-            options,
-            session_workspace_tools,
-            prompt_assembly_tool_definitions,
-            prompt_assembly,
+        let provider_conversation = fresh_provider_conversation(
             session_port,
-            RuntimeEventNotifier::default(),
-            llm_port,
-            permission_policy,
-            permission_provider_id,
-        )
-    }
-
-    #[cfg(test)]
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new_for_test(
-        options: &AppRuntimeOptions,
-        session_workspace_tools: ToolExecutorRegistry,
-        prompt_assembly_tool_definitions: Vec<ToolDefinition>,
-        prompt_assembly: PromptAssemblySessionSnapshot,
-        session_port: Option<Arc<dyn SessionPort>>,
-        event_notifier: RuntimeEventNotifier,
-        llm_port: LlmPort,
-        permission_policy: PermissionPolicy,
-        permission_provider_id: impl Into<String>,
-    ) -> Result<Self, String> {
-        Self::new_with_notifier(
-            options,
-            session_workspace_tools,
-            prompt_assembly_tool_definitions,
-            prompt_assembly,
-            session_port,
-            event_notifier,
-            llm_port,
-            permission_policy,
-            permission_provider_id,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn new_with_notifier(
-        options: &AppRuntimeOptions,
-        session_workspace_tools: ToolExecutorRegistry,
-        prompt_assembly_tool_definitions: Vec<ToolDefinition>,
-        prompt_assembly: PromptAssemblySessionSnapshot,
-        session_port: Option<Arc<dyn SessionPort>>,
-        event_notifier: RuntimeEventNotifier,
-        llm_port: LlmPort,
-        permission_policy: PermissionPolicy,
-        permission_provider_id: impl Into<String>,
-    ) -> Result<Self, String> {
-        let provider_conversation =
-            fresh_provider_conversation(session_port, options, &prompt_assembly)?;
+            session_header_template.clone(),
+            &prompt_assembly,
+        )?;
         let event_stream =
             RuntimeContext::event_stream_lease(event_notifier.clone(), "native_agent_bootstrap");
         Ok(Self {
             worker: ConversationWorker::new((*event_stream).clone()),
             llm_port,
             permission_policy,
-            permission_provider_id: permission_provider_id.into(),
+            permission_provider_id,
             provider_conversation,
             dynamic_environment_worker: DynamicEnvironmentWorker::new(
-                Arc::clone(&options.dynamic_environment_observer),
+                dynamic_environment_observer,
                 event_stream.clone(),
             ),
             event_stream: None,
             #[cfg(test)]
             test_event_notifier: event_notifier,
-            request_policy: options.runtime_request_policy.clone(),
-            loaded_models: options.loaded_models.clone(),
+            request_policy: runtime_request_policy,
+            loaded_models,
             session_workspace_tools,
             prompt_assembly_tool_definitions,
             prompt_assembly_manager: prompt_assembly.manager,
-            hunea_config_dir: options.hunea_config_dir.clone(),
-            session_header_template: options.session_header_template.clone(),
+            hunea_config_dir,
+            session_header_template,
             prompt_assembly_session_config: prompt_assembly.dynamic_environment_session_config,
             pending_turn: None,
             active_turn: None,
@@ -1073,10 +1058,10 @@ impl Drop for NativeAgentRuntime {
 
 fn fresh_provider_conversation(
     session_port: Option<Arc<dyn SessionPort>>,
-    options: &AppRuntimeOptions,
+    session_header_template: Option<SessionHeader>,
     prompt_assembly: &PromptAssemblySessionSnapshot,
 ) -> Result<ProviderConversation, String> {
-    let mut provider_conversation = match (session_port, options.session_header_template.clone()) {
+    let mut provider_conversation = match (session_port, session_header_template) {
         (Some(session_port), Some(header_template)) => {
             ProviderConversation::with_session_port(session_port, header_template)
                 .map_err(|error| error.to_string())?

@@ -6,13 +6,14 @@ mod replay;
 #[cfg(test)]
 mod tests;
 
-use std::{fmt, sync::Arc};
+use std::{fmt, path::PathBuf, sync::Arc};
 
 use session_store::{ResolvedConversationState, SessionHeader, SessionId, SessionPort};
 use tool_runtime::ToolExecutorRegistry;
 
 use runtime_domain::{
     context_budget::ContextWindowUsage,
+    request_policy::RuntimeRequestPolicy,
     session::{
         ConversationResponse, ConversationTurnRequest, RuntimePermissionRequest,
         RuntimeRequestMetrics, RuntimeTarget, RuntimeTerminalSnapshot, RuntimeToolActivity,
@@ -21,9 +22,99 @@ use runtime_domain::{
     },
 };
 
-use crate::runtime::context::{CapabilityLease, RuntimeEventStreamCapability};
+use crate::{
+    dynamic_environment::DynamicEnvironmentObserver,
+    runtime::{
+        AppRuntimeOptions,
+        context::{CapabilityLease, RuntimeEventStreamCapability},
+        llm_port::LlmPort,
+        permission_policy::PermissionPolicy,
+        prompt_assembly::PromptAssemblySessionSnapshot,
+    },
+};
 
-pub(super) use native::{NativeAgentRuntime, NativeAgentRuntimeMount};
+#[cfg(test)]
+pub(super) use native::NativeAgentRuntime;
+pub(super) use native::construct_native_agent_runtime;
+
+/// `AgentRuntimeMount` 是构造一个 Agent adapter generation 所需的 immutable host snapshot。
+///
+/// 字段只对 `runtime::agent` implementation 可见；host 只能一次性构造并交给 plugin factory，
+/// 不能把它当作绕过 Context lifecycle 的 live registry。
+pub(super) struct AgentRuntimeMount {
+    loaded_models: conversation_runtime::models::LoadedModelCatalog,
+    runtime_request_policy: RuntimeRequestPolicy,
+    dynamic_environment_observer: Arc<dyn DynamicEnvironmentObserver>,
+    hunea_config_dir: PathBuf,
+    session_header_template: Option<SessionHeader>,
+    session_workspace_tools: ToolExecutorRegistry,
+    prompt_assembly_tool_definitions: Vec<tool_runtime::ToolDefinition>,
+    prompt_assembly: PromptAssemblySessionSnapshot,
+    session_port: Option<Arc<dyn SessionPort>>,
+    llm_port: LlmPort,
+    permission_policy: PermissionPolicy,
+    permission_provider_id: String,
+}
+
+impl AgentRuntimeMount {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new(
+        options: &AppRuntimeOptions,
+        session_workspace_tools: ToolExecutorRegistry,
+        prompt_assembly_tool_definitions: Vec<tool_runtime::ToolDefinition>,
+        prompt_assembly: PromptAssemblySessionSnapshot,
+        session_port: Option<Arc<dyn SessionPort>>,
+        llm_port: LlmPort,
+        permission_policy: PermissionPolicy,
+        permission_provider_id: String,
+    ) -> Self {
+        Self {
+            loaded_models: options.loaded_models.clone(),
+            runtime_request_policy: options.runtime_request_policy.clone(),
+            dynamic_environment_observer: Arc::clone(&options.dynamic_environment_observer),
+            hunea_config_dir: options.hunea_config_dir.clone(),
+            session_header_template: options.session_header_template.clone(),
+            session_workspace_tools,
+            prompt_assembly_tool_definitions,
+            prompt_assembly,
+            session_port,
+            llm_port,
+            permission_policy,
+            permission_provider_id,
+        }
+    }
+}
+
+type AgentRuntimeConstructor =
+    dyn Fn(AgentRuntimeMount) -> Result<Box<dyn AgentRuntimePort>, String> + Send + Sync;
+
+const AGENT_RUNTIME_CONSTRUCTION_FAILED: &str = "Agent plugin failed to construct its adapter";
+
+/// `AgentRuntimeFactory` 是 Agent plugin implementation 独占的 adapter construction authority。
+#[derive(Clone)]
+pub(super) struct AgentRuntimeFactory {
+    construct: Arc<AgentRuntimeConstructor>,
+}
+
+impl AgentRuntimeFactory {
+    pub(super) fn new(
+        construct: impl Fn(AgentRuntimeMount) -> Result<Box<dyn AgentRuntimePort>, String>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        Self {
+            construct: Arc::new(construct),
+        }
+    }
+
+    pub(super) fn construct(
+        &self,
+        mount: AgentRuntimeMount,
+    ) -> Result<Box<dyn AgentRuntimePort>, String> {
+        (self.construct)(mount).map_err(|_| AGENT_RUNTIME_CONSTRUCTION_FAILED.to_string())
+    }
+}
 
 #[cfg(test)]
 pub(super) trait AgentRuntimeTestHarness {

@@ -5,9 +5,7 @@ use runtime_domain::session::TranscriptUserMessage;
 
 use super::{
     AppRuntimeCoordinator,
-    agent::{
-        AgentCommand, AgentCommandReceipt, AgentId, AgentRuntime, AgentTurnId, AgentTurnRequest,
-    },
+    agent::{AgentCommand, AgentCommandReceipt, AgentId, AgentTurnId, AgentTurnRequest},
 };
 #[cfg(test)]
 use crate::prompt_assembly::AttachedPromptMessageAssembly;
@@ -20,7 +18,7 @@ impl AppRuntimeCoordinator {
         self.ensure_session_mutation_available("truncate conversation")?;
         if let Some((session_id, leaf_id)) = self
             .components
-            .agent_runtime
+            .agent_port_mut()
             .truncate_after_user_turns(retained_user_turns)?
         {
             let views = self.session_views()?;
@@ -38,7 +36,7 @@ impl AppRuntimeCoordinator {
         option_id: Option<String>,
     ) -> Result<(), String> {
         self.components
-            .agent_runtime
+            .agent_port_mut()
             .dispatch(AgentCommand::RespondPermission {
                 agent_id: AgentId::MAIN,
                 target: target.cloned(),
@@ -64,7 +62,7 @@ impl AppRuntimeCoordinator {
         let turn_id = AgentTurnId::new(self.next_agent_turn_id);
         let receipt = self
             .components
-            .agent_runtime
+            .agent_port_mut()
             .dispatch(AgentCommand::SubmitTurn {
                 agent_id: AgentId::MAIN,
                 turn_id,
@@ -80,7 +78,7 @@ impl AppRuntimeCoordinator {
         target: Option<RuntimeTarget>,
     ) -> Result<RuntimeCommandReceipt, String> {
         self.components
-            .agent_runtime
+            .agent_port_mut()
             .dispatch(AgentCommand::Interrupt {
                 agent_id: AgentId::MAIN,
                 target,

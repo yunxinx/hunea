@@ -47,7 +47,6 @@ use terminal_ui::{RuntimeWake, UiRuntimePort};
 use tool_runtime::{ToolDefinition, ToolExecutorRegistry, builtin::ManagedRipgrepConfig};
 
 use self::{
-    agent::AgentRuntime,
     components::RuntimeComponents,
     context::{LlmPortCapability, SessionPersistenceCapability, ToolCatalogCapability},
     event_mapping::{
@@ -286,7 +285,7 @@ impl AppRuntimeCoordinator {
 
     #[cfg(test)]
     pub(crate) fn has_pending_work_for_test(&self) -> bool {
-        self.components.agent_runtime.has_pending_work()
+        self.components.agent_port().has_pending_work()
             || self.components.model_refresh.is_running()
             || self.components.session_store_worker.has_pending_work()
             || self.components.context_budget_worker.has_pending_work()
@@ -416,7 +415,7 @@ impl UiRuntimePort for AppRuntimeCoordinator {
         let mut events = std::mem::take(&mut self.pending_runtime_events);
         self.drain_context_budget_events_into(&mut events);
         self.drain_session_store_events_into(&mut events);
-        let agent_events = self.components.agent_runtime.drain_events();
+        let agent_events = self.components.agent_port_mut().drain_events();
         let mut agent_events = agent_events.into_iter().map(runtime_event_from_agent_event);
         while let Some(runtime_event) = agent_events.next() {
             if should_defer_runtime_event_for_render_barrier(&events, &runtime_event) {
@@ -495,7 +494,7 @@ impl AppRuntimeCoordinator {
                 } => {
                     if let Err(message) = self
                         .components
-                        .agent_runtime
+                        .agent_port_mut()
                         .replace_conversation(conversation)
                     {
                         events.push(RuntimeEvent::Failed {
@@ -514,7 +513,7 @@ impl AppRuntimeCoordinator {
                 } => {
                     if let Err(message) = self
                         .components
-                        .agent_runtime
+                        .agent_port_mut()
                         .replace_conversation(conversation)
                     {
                         events.push(RuntimeEvent::Failed {

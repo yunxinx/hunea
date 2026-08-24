@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use conversation_runtime::RuntimeEventNotifier;
+use conversation_runtime::{ProviderConversation, RuntimeEventNotifier};
 use provider_protocol::{
     ConversationItem, FinishReason, ModelDescriptor, PromptCompletion, PromptRequest,
     ProviderCapabilities, ProviderClient, ProviderError, ProviderFuture, Role, StreamEvent,
@@ -27,7 +27,7 @@ use tool_runtime::{
 
 use super::{
     AgentCommand, AgentEvent, AgentEventKind, AgentId, AgentRuntime, AgentRuntimeError,
-    AgentTurnId, AgentTurnRequest, NativeAgentRuntime,
+    AgentRuntimePort, AgentTurnId, AgentTurnRequest, NativeAgentRuntime,
 };
 use crate::runtime::{
     AppRuntimeOptions,
@@ -41,6 +41,43 @@ use crate::runtime::{
 struct NativeRuntimeFixture {
     runtime: NativeAgentRuntime,
     _approval_registration: ApprovalProviderRegistration,
+}
+
+#[test]
+fn native_runtime_projects_host_operations_through_agent_port() {
+    let mut fixture = native_runtime(RuntimeEventNotifier::default());
+    let port: &mut dyn AgentRuntimePort = &mut fixture.runtime;
+
+    assert!(!port.is_busy());
+    assert!(port.session_id().is_none());
+    assert!(port.is_history_empty());
+    assert!(port.is_idle_empty_session());
+    assert!(port.context_budget_snapshot().items.is_empty());
+    assert!(!port.has_pending_work());
+    assert!(port.drain_events().is_empty());
+
+    let mut restored = ProviderConversation::new();
+    restored
+        .append_items(vec![ConversationItem::text(Role::User, "restored")])
+        .expect("restored conversation fixture should accept history");
+    port.replace_conversation(restored)
+        .expect("host port should install a restored conversation");
+
+    assert!(!port.is_history_empty());
+    assert!(!port.is_idle_empty_session());
+    assert_eq!(port.context_budget_snapshot().items.len(), 1);
+
+    port.shutdown()
+        .expect("host port should quiesce its single native owner");
+    assert!(!port.has_pending_work());
+    assert!(port.drain_events().is_empty());
+    assert!(matches!(
+        port.dispatch(AgentCommand::Interrupt {
+            agent_id: AgentId::MAIN,
+            target: None,
+        }),
+        Err(AgentRuntimeError::Disposed)
+    ));
 }
 
 impl Deref for NativeRuntimeFixture {
@@ -383,7 +420,10 @@ fn permission_fixture() -> super::replay::ReplayFixture {
     .expect("permission replay fixture should be valid")
 }
 
-fn collect_until_terminal(runtime: &mut dyn AgentRuntime) -> Vec<AgentEvent> {
+fn collect_until_terminal<R>(runtime: &mut R) -> Vec<AgentEvent>
+where
+    R: AgentRuntime + ?Sized,
+{
     let deadline = Instant::now() + Duration::from_secs(2);
     let mut events = Vec::new();
     while Instant::now() < deadline {
@@ -396,12 +436,14 @@ fn collect_until_terminal(runtime: &mut dyn AgentRuntime) -> Vec<AgentEvent> {
     events
 }
 
-fn assert_shared_identity_and_terminal(
-    runtime: &mut dyn AgentRuntime,
+fn assert_shared_identity_and_terminal<R>(
+    runtime: &mut R,
     request: AgentTurnRequest,
     expected_agent: AgentId,
     expected_turn: AgentTurnId,
-) {
+) where
+    R: AgentRuntime + ?Sized,
+{
     let target = request.target();
     runtime
         .dispatch(AgentCommand::SubmitTurn {
@@ -422,7 +464,10 @@ fn assert_shared_identity_and_terminal(
     );
 }
 
-fn assert_shared_lifecycle_contract(runtime: &mut dyn AgentRuntime) {
+fn assert_shared_lifecycle_contract<R>(runtime: &mut R)
+where
+    R: AgentRuntime + ?Sized,
+{
     assert!(runtime.drain_events().is_empty());
     let error = runtime
         .dispatch(AgentCommand::Interrupt {
@@ -445,11 +490,13 @@ fn assert_shared_lifecycle_contract(runtime: &mut dyn AgentRuntime) {
     assert!(runtime.drain_events().is_empty());
 }
 
-fn assert_shared_busy_and_interrupt_contract(
-    runtime: &mut dyn AgentRuntime,
+fn assert_shared_busy_and_interrupt_contract<R>(
+    runtime: &mut R,
     target: RuntimeTarget,
     next_request: AgentTurnRequest,
-) {
+) where
+    R: AgentRuntime + ?Sized,
+{
     let busy = runtime
         .dispatch(AgentCommand::SubmitTurn {
             agent_id: AgentId::MAIN,
@@ -658,18 +705,18 @@ fn native_runtime_routes_tool_approval_through_the_live_permission_turn() {
         ConversationItem::text(Role::User, "approve this tool"),
     ));
     let target = request.target();
-    runtime
-        .dispatch(AgentCommand::SubmitTurn {
-            agent_id: AgentId::MAIN,
-            turn_id: AgentTurnId::new(19),
-            request: Box::new(request),
-        })
-        .expect("native approval turn should start");
+    let port: &mut dyn AgentRuntimePort = &mut runtime;
+    port.dispatch(AgentCommand::SubmitTurn {
+        agent_id: AgentId::MAIN,
+        turn_id: AgentTurnId::new(19),
+        request: Box::new(request),
+    })
+    .expect("native approval turn should start");
 
     let deadline = Instant::now() + Duration::from_secs(2);
     let mut events = Vec::new();
     while Instant::now() < deadline {
-        events.extend(runtime.drain_events());
+        events.extend(port.drain_events());
         if events
             .iter()
             .any(|event| matches!(&event.kind, AgentEventKind::PermissionRequested { .. }))
@@ -692,23 +739,21 @@ fn native_runtime_routes_tool_approval_through_the_live_permission_turn() {
         AgentEventKind::PermissionRequested { request } => request.request_id.clone(),
         _ => unreachable!(),
     };
-    runtime
-        .dispatch(AgentCommand::RespondPermission {
-            agent_id: AgentId::MAIN,
-            target: Some(target),
-            request_id,
-            option_id: Some("allow_once".to_string()),
-        })
-        .expect("approval response should route to the active turn");
+    port.dispatch(AgentCommand::RespondPermission {
+        agent_id: AgentId::MAIN,
+        target: Some(target),
+        request_id,
+        option_id: Some("allow_once".to_string()),
+    })
+    .expect("approval response should route to the active turn");
 
-    let remaining = collect_until_terminal(&mut runtime);
+    let remaining = collect_until_terminal(port);
     assert!(
         remaining
             .iter()
             .any(|event| matches!(event.kind, AgentEventKind::TurnFinished { .. }))
     );
-    runtime
-        .shutdown()
+    port.shutdown()
         .expect("native approval runtime should shut down cleanly");
 }
 
@@ -782,8 +827,9 @@ fn provider_failure_is_redacted_before_runtime_event_projection() {
 #[test]
 fn shared_identity_and_terminal_contract_runs_for_native_and_replay() {
     let mut native = native_runtime(RuntimeEventNotifier::default());
+    let native_port: &mut dyn AgentRuntimePort = &mut *native;
     assert_shared_identity_and_terminal(
-        &mut *native,
+        native_port,
         failing_turn_request(),
         AgentId::MAIN,
         AgentTurnId::new(31),
@@ -808,7 +854,8 @@ fn shared_identity_and_terminal_contract_runs_for_native_and_replay() {
 #[test]
 fn shared_lifecycle_contract_runs_for_native_and_replay() {
     let mut native = native_runtime(RuntimeEventNotifier::default());
-    assert_shared_lifecycle_contract(&mut *native);
+    let native_port: &mut dyn AgentRuntimePort = &mut *native;
+    assert_shared_lifecycle_contract(native_port);
 
     let mut replay =
         super::replay::ReplayAgentRuntime::new(replay_fixture(), RuntimeEventNotifier::default());
@@ -821,7 +868,8 @@ fn shared_busy_and_interrupt_contract_runs_for_native_and_replay() {
     let native_target = native_request.target();
     let mut native = native_runtime(RuntimeEventNotifier::default());
     native.set_pending_turn_for_test(native_request.native_request.clone());
-    assert_shared_busy_and_interrupt_contract(&mut *native, native_target, failing_turn_request());
+    let native_port: &mut dyn AgentRuntimePort = &mut *native;
+    assert_shared_busy_and_interrupt_contract(native_port, native_target, failing_turn_request());
 
     let active_replay_request = replay_request();
     let replay_target = active_replay_request.target();

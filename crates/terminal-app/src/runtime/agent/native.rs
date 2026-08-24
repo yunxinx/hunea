@@ -9,7 +9,7 @@ use runtime_domain::{
         DynamicEnvironmentSessionConfig, enabled_dynamic_environment_sources_for_session_config,
     },
     model_catalog::ModelSelection,
-    prompt_assembly::{PromptAssemblyManagerSnapshot, PromptPreludeSnapshot},
+    prompt_assembly::PromptAssemblyManagerSnapshot,
     request_policy::RuntimeRequestPolicy,
     session::{
         ConversationEvent, ConversationTurnRequest, RuntimePermissionRequest,
@@ -21,8 +21,8 @@ use session_store::{SessionHeader, SessionId, SessionPort};
 use tool_runtime::{ToolDefinition, ToolExecutorRegistry};
 
 use super::{
-    AgentCommand, AgentCommandReceipt, AgentEvent, AgentEventKind, AgentId, AgentRuntime,
-    AgentRuntimeError, AgentTurnId, AgentTurnRequest,
+    AgentCommand, AgentCommandReceipt, AgentContextBudgetSnapshot, AgentEvent, AgentEventKind,
+    AgentId, AgentRuntime, AgentRuntimeError, AgentRuntimePort, AgentTurnId, AgentTurnRequest,
 };
 use crate::prompt_assembly::{
     AttachedPromptMessageAssembly, ManualSkillPromptUse, PromptAssemblyWorkspace,
@@ -53,14 +53,6 @@ struct ActiveNativeTurn {
     agent_id: AgentId,
     turn_id: AgentTurnId,
     target: RuntimeTarget,
-}
-
-/// `/context` 所需的 Agent conversation 只读快照。
-pub struct NativeContextBudgetSnapshot {
-    pub(crate) items: Arc<[conversation_runtime::ConversationItem]>,
-    pub(crate) prompt_prelude: Option<PromptPreludeSnapshot>,
-    pub(crate) upstream_context_tokens: Option<usize>,
-    pub(crate) tool_definitions: Vec<conversation_runtime::ToolDefinition>,
 }
 
 /// `NativeAgentRuntime` 封装当前 conversation worker 的完整 turn choreography。
@@ -274,8 +266,8 @@ impl NativeAgentRuntime {
             .map_err(|error| error.to_string())
     }
 
-    pub(crate) fn context_budget_snapshot(&self) -> NativeContextBudgetSnapshot {
-        NativeContextBudgetSnapshot {
+    pub(crate) fn context_budget_snapshot(&self) -> AgentContextBudgetSnapshot {
+        AgentContextBudgetSnapshot {
             items: self.provider_conversation.context_budget_probe_items(),
             prompt_prelude: self.provider_conversation.prompt_prelude().cloned(),
             upstream_context_tokens: self.provider_conversation.upstream_context_tokens(),
@@ -909,6 +901,52 @@ impl NativeAgentRuntime {
             }))),
             raw_output: None,
         }
+    }
+}
+
+impl AgentRuntimePort for NativeAgentRuntime {
+    fn is_busy(&self) -> bool {
+        self.is_busy()
+    }
+
+    fn session_id(&self) -> Option<SessionId> {
+        self.session_id().cloned()
+    }
+
+    fn is_history_empty(&self) -> bool {
+        self.is_history_empty()
+    }
+
+    fn is_idle_empty_session(&self) -> bool {
+        self.is_idle_empty_session()
+    }
+
+    fn truncate_after_user_turns(
+        &mut self,
+        retained_user_turns: usize,
+    ) -> Result<Option<(SessionId, String)>, String> {
+        self.truncate_after_user_turns(retained_user_turns)
+    }
+
+    fn context_budget_snapshot(&self) -> AgentContextBudgetSnapshot {
+        self.context_budget_snapshot()
+    }
+
+    fn update_empty_session_configuration(
+        &mut self,
+        prompt_assembly: PromptAssemblySessionSnapshot,
+        session_workspace_tools: ToolExecutorRegistry,
+    ) {
+        self.update_empty_session_configuration(prompt_assembly, session_workspace_tools);
+    }
+
+    fn replace_conversation(&mut self, conversation: ProviderConversation) -> Result<(), String> {
+        self.replace_conversation(conversation)
+    }
+
+    #[cfg(test)]
+    fn has_pending_work(&self) -> bool {
+        self.has_pending_work()
     }
 }
 

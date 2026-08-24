@@ -12,9 +12,8 @@ impl AppRuntimeCoordinator {
         let project_dir = ProjectDir::from_work_dir(&header.work_dir);
         let active_session_id = self
             .components
-            .agent_runtime
+            .agent_port()
             .session_id()
-            .cloned()
             .or(Some(header.session_id));
         self.components.session_store_worker.list_sessions(
             views,
@@ -28,7 +27,7 @@ impl AppRuntimeCoordinator {
         &mut self,
         session_id: &str,
     ) -> Result<RuntimeCommandReceipt, String> {
-        if self.components.agent_runtime.is_busy() {
+        if self.components.agent_port().is_busy() {
             return Err("Cannot resume session while a request is running".to_string());
         }
         self.ensure_session_mutation_available("resume session")?;
@@ -162,9 +161,8 @@ impl AppRuntimeCoordinator {
     ) -> Result<RuntimeCommandReceipt, String> {
         let session_id = self
             .components
-            .agent_runtime
+            .agent_port()
             .session_id()
-            .cloned()
             .ok_or_else(|| "No active persisted session to preview".to_string())?;
         let views = self.session_views()?;
         self.components.session_store_worker.load_branch_preview(
@@ -188,15 +186,14 @@ impl AppRuntimeCoordinator {
         request_id: SessionLoadRequestId,
         leaf_id: &str,
     ) -> Result<RuntimeCommandReceipt, String> {
-        if self.components.agent_runtime.is_busy() {
+        if self.components.agent_port().is_busy() {
             return Err("Cannot switch branch while a request is running".to_string());
         }
         self.ensure_session_mutation_available("switch branch")?;
         let session_id = self
             .components
-            .agent_runtime
+            .agent_port()
             .session_id()
-            .cloned()
             .ok_or_else(|| "No active persisted session to switch branch".to_string())?;
         let views = self.session_views()?;
         let header = self.session_header()?;
@@ -214,15 +211,14 @@ impl AppRuntimeCoordinator {
         &mut self,
         entry_id: &str,
     ) -> Result<RuntimeCommandReceipt, String> {
-        if self.components.agent_runtime.is_busy() {
+        if self.components.agent_port().is_busy() {
             return Err("Cannot rewind session while a request is running".to_string());
         }
         self.ensure_session_mutation_available("rewind session")?;
         let session_id = self
             .components
-            .agent_runtime
+            .agent_port()
             .session_id()
-            .cloned()
             .ok_or_else(|| "No active persisted session to rewind".to_string())?;
         let views = self.session_views()?;
         let header = self.session_header()?;
@@ -240,8 +236,8 @@ impl AppRuntimeCoordinator {
         target: SessionTreeLoadTarget,
         request_id: SessionLoadRequestId,
     ) -> Result<Option<SessionId>, String> {
-        let Some(session_id) = self.components.agent_runtime.session_id().cloned() else {
-            if self.components.agent_runtime.is_history_empty() {
+        let Some(session_id) = self.components.agent_port().session_id() else {
+            if self.components.agent_port().is_history_empty() {
                 self.pending_runtime_events
                     .push(target.empty_tree_event(request_id));
                 return Ok(None);

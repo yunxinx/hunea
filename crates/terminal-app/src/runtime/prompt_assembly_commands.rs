@@ -16,7 +16,7 @@ enum PromptSessionConfigRefreshTarget {
 
 impl AppRuntimeCoordinator {
     fn prompt_session_config_refresh_target(&self) -> PromptSessionConfigRefreshTarget {
-        if self.components.agent_runtime.is_idle_empty_session() {
+        if self.components.agent_port().is_idle_empty_session() {
             PromptSessionConfigRefreshTarget::CurrentEmptySession
         } else {
             PromptSessionConfigRefreshTarget::NextNewSession
@@ -49,7 +49,7 @@ impl AppRuntimeCoordinator {
                     super::session_tools_for_manager(&tool_catalog, Some(manager));
                 let prompt_assembly = prompt_capability.session_snapshot();
                 self.components
-                    .agent_runtime
+                    .agent_port_mut()
                     .update_empty_session_configuration(
                         prompt_assembly,
                         session_workspace_tools.clone(),

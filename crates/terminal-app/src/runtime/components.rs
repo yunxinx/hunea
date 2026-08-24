@@ -8,7 +8,7 @@ use tool_runtime::ToolExecutorRegistry;
 
 use super::{
     AppRuntimeOptions,
-    agent::{AgentRuntime, NativeAgentRuntime},
+    agent::{AgentRuntime, AgentRuntimePort, NativeAgentRuntime},
     context::{
         ApprovalProviderCapability, CapabilityLease, ComponentActivationContext, LlmPortCapability,
         ModelCatalogCapability, PermissionPolicyCapability, PromptAssemblyCapability,
@@ -326,6 +326,14 @@ pub(super) struct RuntimeComponents {
 }
 
 impl RuntimeComponents {
+    pub(super) fn agent_port(&self) -> &dyn AgentRuntimePort {
+        &self.agent_runtime
+    }
+
+    pub(super) fn agent_port_mut(&mut self) -> &mut dyn AgentRuntimePort {
+        &mut self.agent_runtime
+    }
+
     pub(super) fn new(options: &mut AppRuntimeOptions) -> Result<Self, String> {
         let desired_plugins = builtin_desired_composition().map_err(|error| error.to_string())?;
         let plugin_catalog = builtin_plugin_catalog().map_err(|error| error.to_string())?;

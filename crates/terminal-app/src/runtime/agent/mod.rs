@@ -6,7 +6,11 @@ mod replay;
 #[cfg(test)]
 mod tests;
 
-use std::fmt;
+use std::{fmt, sync::Arc};
+
+use conversation_runtime::ProviderConversation;
+use session_store::SessionId;
+use tool_runtime::ToolExecutorRegistry;
 
 use runtime_domain::{
     context_budget::ContextWindowUsage,
@@ -305,4 +309,45 @@ pub(super) trait AgentRuntime {
 
     /// 幂等撤销 runtime 拥有的全部副作用并等待 producer quiescence。
     fn shutdown(&mut self) -> Result<(), AgentRuntimeError>;
+}
+
+/// Agent host 所消费的 capability port。
+///
+/// `NativeAgentRuntime` 是当前唯一 production projection；port 不拥有 worker、receiver、
+/// notifier 或 lifecycle disposer。host 通过它消费 Agent facts 与 session/configuration view，
+/// 使 coordinator 不需要知道 native loop 的具体实现。
+pub(super) trait AgentRuntimePort: AgentRuntime {
+    fn is_busy(&self) -> bool;
+
+    fn session_id(&self) -> Option<SessionId>;
+
+    fn is_history_empty(&self) -> bool;
+
+    fn is_idle_empty_session(&self) -> bool;
+
+    fn truncate_after_user_turns(
+        &mut self,
+        retained_user_turns: usize,
+    ) -> Result<Option<(SessionId, String)>, String>;
+
+    fn context_budget_snapshot(&self) -> AgentContextBudgetSnapshot;
+
+    fn update_empty_session_configuration(
+        &mut self,
+        prompt_assembly: crate::runtime::prompt_assembly::PromptAssemblySessionSnapshot,
+        session_workspace_tools: ToolExecutorRegistry,
+    );
+
+    fn replace_conversation(&mut self, conversation: ProviderConversation) -> Result<(), String>;
+
+    #[cfg(test)]
+    fn has_pending_work(&self) -> bool;
+}
+
+/// `/context` 与 host worker 之间传递的 Agent-owned immutable snapshot。
+pub(super) struct AgentContextBudgetSnapshot {
+    pub(super) items: Arc<[conversation_runtime::ConversationItem]>,
+    pub(super) prompt_prelude: Option<runtime_domain::prompt_assembly::PromptPreludeSnapshot>,
+    pub(super) upstream_context_tokens: Option<usize>,
+    pub(super) tool_definitions: Vec<conversation_runtime::ToolDefinition>,
 }

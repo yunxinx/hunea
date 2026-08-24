@@ -96,6 +96,16 @@ impl LifecycleExecutionError {
             Err(Self { failures })
         }
     }
+
+    fn executor_shutdown() -> Self {
+        Self {
+            failures: vec![LifecycleExecutionFailure {
+                component_id: "runtime_composition".to_string(),
+                operation: LifecycleExecutionOperation::Graph,
+                message: "component lifecycle executor is shut down".to_string(),
+            }],
+        }
+    }
 }
 
 impl fmt::Debug for LifecycleExecutionError {
@@ -193,6 +203,7 @@ impl ComponentLifecycleExecutor {
         definitions: impl IntoIterator<Item = ComponentDefinition>,
         callbacks: &mut impl ComponentLifecycleCallbacks,
     ) -> Result<(), LifecycleExecutionError> {
+        self.ensure_running()?;
         let mut reports = Vec::new();
         for definition in definitions {
             let component_id = definition.id.clone();
@@ -213,6 +224,7 @@ impl ComponentLifecycleExecutor {
         callbacks: &mut impl ComponentLifecycleCallbacks,
         mode: ComponentLifecycleMode,
     ) -> Result<(), LifecycleExecutionError> {
+        self.ensure_running()?;
         let report = self
             .graph
             .remove_capability(provider_component, capability)
@@ -257,6 +269,16 @@ impl ComponentLifecycleExecutor {
         callbacks: &mut impl ComponentLifecycleCallbacks,
         mode: ComponentLifecycleMode,
     ) -> Result<(), LifecycleExecutionError> {
+        self.ensure_running()?;
+        self.deactivate_components_inner(component_ids, callbacks, mode)
+    }
+
+    fn deactivate_components_inner(
+        &mut self,
+        component_ids: impl IntoIterator<Item = impl Into<String>>,
+        callbacks: &mut impl ComponentLifecycleCallbacks,
+        mode: ComponentLifecycleMode,
+    ) -> Result<(), LifecycleExecutionError> {
         let requested = component_ids
             .into_iter()
             .map(Into::into)
@@ -296,6 +318,7 @@ impl ComponentLifecycleExecutor {
         callbacks: &mut impl ComponentLifecycleCallbacks,
         mode: ComponentLifecycleMode,
     ) -> Result<(), LifecycleExecutionError> {
+        self.ensure_running()?;
         let requested = component_ids
             .into_iter()
             .map(Into::into)
@@ -338,7 +361,7 @@ impl ComponentLifecycleExecutor {
         self.is_shutdown = true;
         let component_ids = self.graph.deactivation_order();
         let mut failures = self
-            .deactivate_components(component_ids, callbacks, ComponentLifecycleMode::Shutdown)
+            .deactivate_components_inner(component_ids, callbacks, ComponentLifecycleMode::Shutdown)
             .err()
             .map(|error| error.failures)
             .unwrap_or_default();
@@ -350,6 +373,14 @@ impl ComponentLifecycleExecutor {
             });
         }
         LifecycleExecutionError::finish(failures)
+    }
+
+    fn ensure_running(&self) -> Result<(), LifecycleExecutionError> {
+        if self.is_shutdown {
+            Err(LifecycleExecutionError::executor_shutdown())
+        } else {
+            Ok(())
+        }
     }
 
     fn execute_report(
@@ -459,6 +490,13 @@ impl ComponentLifecycleExecutor {
                     operation: LifecycleExecutionOperation::Activation,
                     message,
                 });
+                if let Err(message) = callbacks.quiesce_component(&component_id, mode) {
+                    state.failures.push(LifecycleExecutionFailure {
+                        component_id: component_id.clone(),
+                        operation: LifecycleExecutionOperation::Quiescence,
+                        message,
+                    });
+                }
                 if let Some(message) = scope.dispose().error_message() {
                     state.failures.push(LifecycleExecutionFailure {
                         component_id: component_id.clone(),
@@ -606,6 +644,9 @@ fn rank(order: Vec<String>) -> BTreeMap<String, usize> {
         .map(|(index, component_id)| (component_id, index))
         .collect()
 }
+
+#[cfg(test)]
+mod property_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1042,7 +1083,7 @@ mod tests {
 
         assert_eq!(
             callbacks.snapshot(),
-            vec!["activate:database", "dispose:database"]
+            vec!["activate:database", "quiesce:database", "dispose:database"]
         );
         assert_eq!(
             executor.graph().state("database"),

@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex, Weak};
+use std::{
+    fmt,
+    sync::{Arc, Mutex, Weak},
+};
 
 use thiserror::Error;
 
@@ -53,16 +56,33 @@ pub(super) enum EffectScopeError {
     EntryIdExhausted,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(super) struct EffectDisposeFailure {
     pub(super) scope_owner: String,
     pub(super) effect_label: String,
     pub(super) message: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl fmt::Debug for EffectDisposeFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EffectDisposeFailure")
+            .field("scope_owner", &self.scope_owner)
+            .field("effect_label", &self.effect_label)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub(super) struct EffectDisposeReport {
     pub(super) failures: Vec<EffectDisposeFailure>,
+}
+
+impl fmt::Debug for EffectDisposeReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EffectDisposeReport")
+            .field("failures", &self.failures)
+            .finish()
+    }
 }
 
 impl EffectDisposeReport {
@@ -329,6 +349,9 @@ fn snapshot_state(state: &Arc<Mutex<EffectScopeState>>) -> Option<EffectScopeSna
         children,
     })
 }
+
+#[cfg(test)]
+mod property_tests;
 
 #[cfg(test)]
 mod tests {

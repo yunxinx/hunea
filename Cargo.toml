@@ -67,6 +67,7 @@ session-store = { path = "crates/session-store" }
 tool-runtime = { path = "crates/tool-runtime" }
 terminal-ui = { path = "crates/terminal-ui" }
 percent-encoding = "2"
+proptest = "1.11.0"
 pulldown-cmark = "0.13.4"
 ratatui = { version = "0.30.2", features = ["crossterm_0_29"] }
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls", "stream"] }

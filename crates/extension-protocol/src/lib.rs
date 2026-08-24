@@ -5,6 +5,7 @@
 
 use std::fmt;
 
+use provider_protocol::ConversationItem;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use thiserror::Error;
@@ -12,7 +13,7 @@ use thiserror::Error;
 /// Wire envelope 使用的固定 protocol name。
 pub const PROTOCOL_NAME: &str = "hunea-extension";
 /// 当前 wire protocol version。
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 /// 默认允许的最大 frame body 大小。
 pub const DEFAULT_MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 const MAX_HEADER_LINE_BYTES: usize = 8 * 1024;
@@ -26,6 +27,7 @@ pub enum ExtensionCapability {
     Progress,
     Cancel,
     StructuredErrors,
+    Hooks,
 }
 
 impl fmt::Debug for ExtensionCapability {
@@ -34,7 +36,7 @@ impl fmt::Debug for ExtensionCapability {
     }
 }
 
-/// 第一批协议 method，限定在初始化、tool 操作与关闭流程。
+/// 协议支持的初始化、tool、typed hook 与关闭 method。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ExtensionMethod {
     #[serde(rename = "initialize")]
@@ -45,6 +47,16 @@ pub enum ExtensionMethod {
     ToolsExecute,
     #[serde(rename = "tools.cancel")]
     ToolsCancel,
+    #[serde(rename = "hooks.list")]
+    HooksList,
+    #[serde(rename = "hooks.before_turn")]
+    HooksBeforeTurn,
+    #[serde(rename = "hooks.before_tool_execute")]
+    HooksBeforeToolExecute,
+    #[serde(rename = "hooks.after_tool_result")]
+    HooksAfterToolResult,
+    #[serde(rename = "hooks.cancel")]
+    HooksCancel,
     #[serde(rename = "shutdown")]
     Shutdown,
 }
@@ -57,6 +69,11 @@ impl ExtensionMethod {
             Self::ToolsList => "tools.list",
             Self::ToolsExecute => "tools.execute",
             Self::ToolsCancel => "tools.cancel",
+            Self::HooksList => "hooks.list",
+            Self::HooksBeforeTurn => "hooks.before_turn",
+            Self::HooksBeforeToolExecute => "hooks.before_tool_execute",
+            Self::HooksAfterToolResult => "hooks.after_tool_result",
+            Self::HooksCancel => "hooks.cancel",
             Self::Shutdown => "shutdown",
         }
     }
@@ -162,6 +179,20 @@ impl ExtensionRequest {
             }
             ExtensionMethod::ToolsExecute => self.decode_params::<ToolExecuteParams>()?.validate(),
             ExtensionMethod::ToolsCancel => self.decode_params::<ToolCancelParams>()?.validate(),
+            ExtensionMethod::HooksList => {
+                self.decode_params::<HooksListParams>()?;
+                Ok(())
+            }
+            ExtensionMethod::HooksBeforeTurn => {
+                self.decode_params::<BeforeTurnHookParams>()?.validate()
+            }
+            ExtensionMethod::HooksBeforeToolExecute => self
+                .decode_params::<BeforeToolExecuteHookParams>()?
+                .validate(),
+            ExtensionMethod::HooksAfterToolResult => self
+                .decode_params::<AfterToolResultHookParams>()?
+                .validate(),
+            ExtensionMethod::HooksCancel => self.decode_params::<HookCancelParams>()?.validate(),
             ExtensionMethod::Shutdown => {
                 self.decode_params::<ShutdownParams>()?;
                 Ok(())
@@ -174,9 +205,9 @@ impl fmt::Debug for ExtensionRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ExtensionRequest")
-            .field("protocol", &self.protocol)
+            .field("has_protocol", &!self.protocol.is_empty())
             .field("version", &self.version)
-            .field("request_id", &self.request_id)
+            .field("has_request_id", &!self.request_id.is_empty())
             .field("method", &self.method)
             .field("has_params", &true)
             .field("deadline_ms", &self.deadline_ms)
@@ -257,9 +288,9 @@ impl fmt::Debug for ExtensionResponse {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ExtensionResponse")
-            .field("protocol", &self.protocol)
+            .field("has_protocol", &!self.protocol.is_empty())
             .field("version", &self.version)
-            .field("request_id", &self.request_id)
+            .field("has_request_id", &!self.request_id.is_empty())
             .field("has_result", &self.result.is_some())
             .field("error_code", &self.error.as_ref().map(ExtensionError::code))
             .finish()
@@ -361,6 +392,16 @@ pub enum ProtocolValidationError {
     InvalidDeadline,
     #[error("capability is declared more than once")]
     DuplicateCapability,
+    #[error("hook id is invalid")]
+    InvalidHookId,
+    #[error("hook descriptor is declared more than once")]
+    DuplicateHookDescriptor,
+    #[error("hook conversation items are invalid")]
+    InvalidConversationItems,
+    #[error("hook tool call is invalid")]
+    InvalidHookToolCall,
+    #[error("hook tool result is invalid")]
+    InvalidHookToolResult,
     #[error("request params are invalid")]
     InvalidParams,
     #[error("response must contain exactly one result or error")]
@@ -416,7 +457,7 @@ impl fmt::Debug for InitializeResult {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("InitializeResult")
-            .field("protocol", &self.protocol)
+            .field("has_protocol", &!self.protocol.is_empty())
             .field("version", &self.version)
             .field("capability_count", &self.capabilities.len())
             .finish()
@@ -439,7 +480,7 @@ impl fmt::Debug for ToolDescriptor {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ToolDescriptor")
-            .field("name", &self.name)
+            .field("has_name", &!self.name.is_empty())
             .field("has_description", &self.description.is_some())
             .field("has_input_schema", &self.input_schema.is_some())
             .finish()
@@ -472,7 +513,7 @@ impl fmt::Debug for ToolExecuteParams {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ToolExecuteParams")
-            .field("name", &self.name)
+            .field("has_name", &!self.name.is_empty())
             .field("argument_kind", &json_kind(&self.arguments))
             .finish()
     }
@@ -489,7 +530,7 @@ impl ToolExecuteParams {
 }
 
 /// `tools.cancel` request params。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCancelParams {
     pub request_id: String,
 }
@@ -501,9 +542,400 @@ impl ToolCancelParams {
     }
 }
 
+impl fmt::Debug for ToolCancelParams {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ToolCancelParams")
+            .field("has_request_id", &!self.request_id.is_empty())
+            .finish()
+    }
+}
+
 /// `tools.cancel` success result。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCancelResult {
+    pub accepted: bool,
+}
+
+/// Typed hook phase；wire 不接受任意字符串 phase。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookPhase {
+    BeforeTurn,
+    BeforeToolExecute,
+    AfterToolResult,
+}
+
+/// Remote hook descriptor；timeout 与 cancellation grace 始终由 host 决定。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookDescriptor {
+    pub hook_id: String,
+    pub phase: HookPhase,
+    pub priority: i32,
+}
+
+impl HookDescriptor {
+    /// 验证可用于 deterministic registration 的 hook identity。
+    pub fn validate(&self) -> Result<(), ProtocolValidationError> {
+        validate_hook_id(&self.hook_id)
+    }
+}
+
+impl fmt::Debug for HookDescriptor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HookDescriptor")
+            .field("has_hook_id", &!self.hook_id.is_empty())
+            .field("phase", &self.phase)
+            .field("priority", &self.priority)
+            .finish()
+    }
+}
+
+/// `hooks.list` request params。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HooksListParams {}
+
+/// `hooks.list` success result。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HooksListResult {
+    pub hooks: Vec<HookDescriptor>,
+}
+
+impl HooksListResult {
+    /// 验证全部 descriptor，并拒绝同一 phase 内的 duplicate hook identity。
+    pub fn validate(&self) -> Result<(), ProtocolValidationError> {
+        let mut identities = std::collections::BTreeSet::new();
+        for descriptor in &self.hooks {
+            descriptor.validate()?;
+            if !identities.insert((descriptor.phase, descriptor.hook_id.as_str())) {
+                return Err(ProtocolValidationError::DuplicateHookDescriptor);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for HooksListResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HooksListResult")
+            .field("hook_count", &self.hooks.len())
+            .finish()
+    }
+}
+
+/// Hook gate 可以返回的封闭 rejection code。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookRejectionCode {
+    PolicyDenied,
+    UnsupportedOperation,
+}
+
+/// `hooks.before_turn` request params。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeforeTurnHookParams {
+    pub hook_id: String,
+    pub items: Vec<ConversationItem>,
+}
+
+impl BeforeTurnHookParams {
+    /// 验证 hook identity 与 provider-neutral conversation item 语义。
+    pub fn validate(&self) -> Result<(), ProtocolValidationError> {
+        validate_hook_id(&self.hook_id)?;
+        validate_conversation_items(&self.items)
+    }
+}
+
+impl fmt::Debug for BeforeTurnHookParams {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BeforeTurnHookParams")
+            .field("has_hook_id", &!self.hook_id.is_empty())
+            .field("item_count", &self.items.len())
+            .finish()
+    }
+}
+
+/// `hooks.before_turn` typed success result。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "decision", rename_all = "snake_case")]
+pub enum BeforeTurnHookResult {
+    Continue { items: Vec<ConversationItem> },
+    Reject { code: HookRejectionCode },
+}
+
+impl BeforeTurnHookResult {
+    /// 验证 transform output；continue 必须保留非空、语义合法的 item list。
+    pub fn validate(&self) -> Result<(), ProtocolValidationError> {
+        match self {
+            Self::Continue { items } => validate_conversation_items(items),
+            Self::Reject { .. } => Ok(()),
+        }
+    }
+}
+
+impl fmt::Debug for BeforeTurnHookResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Continue { items } => formatter
+                .debug_struct("Continue")
+                .field("item_count", &items.len())
+                .finish(),
+            Self::Reject { code } => formatter
+                .debug_struct("Reject")
+                .field("code", code)
+                .finish(),
+        }
+    }
+}
+
+/// Hook protocol 自有的 pure tool call DTO。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookToolCall {
+    pub call_id: String,
+    pub name: String,
+    pub arguments: Value,
+}
+
+impl HookToolCall {
+    /// 验证 correlation identity 与 tool name。
+    pub fn validate(&self) -> Result<(), ProtocolValidationError> {
+        validate_request_id(&self.call_id)
+            .map_err(|_| ProtocolValidationError::InvalidHookToolCall)?;
+        validate_tool_name(&self.name)
+    }
+}
+
+impl fmt::Debug for HookToolCall {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HookToolCall")
+            .field("has_call_id", &!self.call_id.is_empty())
+            .field("has_name", &!self.name.is_empty())
+            .field("argument_kind", &json_kind(&self.arguments))
+            .finish()
+    }
+}
+
+/// `hooks.before_tool_execute` request params。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeforeToolExecuteHookParams {
+    pub hook_id: String,
+    pub call: HookToolCall,
+}
+
+impl BeforeToolExecuteHookParams {
+    /// 验证 hook identity 与 parsed call DTO。
+    pub fn validate(&self) -> Result<(), ProtocolValidationError> {
+        validate_hook_id(&self.hook_id)?;
+        self.call.validate()
+    }
+}
+
+impl fmt::Debug for BeforeToolExecuteHookParams {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BeforeToolExecuteHookParams")
+            .field("has_hook_id", &!self.hook_id.is_empty())
+            .field("has_call", &true)
+            .finish()
+    }
+}
+
+/// `hooks.before_tool_execute` typed success result。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "decision", rename_all = "snake_case")]
+pub enum BeforeToolExecuteHookResult {
+    Continue,
+    Reject { code: HookRejectionCode },
+}
+
+/// Hook tool result 的控制语义。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookToolResultOutcome {
+    Success,
+    Error,
+    Terminate,
+}
+
+/// Hook tool result image 的 provider detail hint。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HookToolImageDetail {
+    High,
+    Original,
+}
+
+/// Hook protocol 自有的 pure tool result content DTO。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum HookToolResultContent {
+    Text {
+        text: String,
+    },
+    Image {
+        data_base64: String,
+        mime_type: String,
+        uri: Option<String>,
+        detail: Option<HookToolImageDetail>,
+    },
+}
+
+impl HookToolResultContent {
+    fn validate(&self) -> Result<(), ProtocolValidationError> {
+        match self {
+            Self::Text { .. } => Ok(()),
+            Self::Image {
+                data_base64,
+                mime_type,
+                ..
+            } if !data_base64.is_empty() && !mime_type.trim().is_empty() => Ok(()),
+            Self::Image { .. } => Err(ProtocolValidationError::InvalidHookToolResult),
+        }
+    }
+}
+
+impl fmt::Debug for HookToolResultContent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Text { text } => formatter
+                .debug_struct("Text")
+                .field("char_count", &text.chars().count())
+                .finish(),
+            Self::Image {
+                data_base64,
+                mime_type,
+                uri,
+                detail,
+            } => formatter
+                .debug_struct("Image")
+                .field("encoded_len", &data_base64.len())
+                .field("has_mime_type", &!mime_type.is_empty())
+                .field("has_uri", &uri.is_some())
+                .field("detail", detail)
+                .finish(),
+        }
+    }
+}
+
+/// Hook protocol 自有的完整 tool result DTO。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookToolResult {
+    pub call_id: String,
+    pub content: Vec<HookToolResultContent>,
+    pub outcome: HookToolResultOutcome,
+    pub display_content: Option<String>,
+    pub details: Option<Value>,
+}
+
+impl HookToolResult {
+    /// 验证 correlation identity 与结构化 content。
+    pub fn validate(&self) -> Result<(), ProtocolValidationError> {
+        validate_request_id(&self.call_id)
+            .map_err(|_| ProtocolValidationError::InvalidHookToolResult)?;
+        self.content
+            .iter()
+            .try_for_each(HookToolResultContent::validate)
+    }
+}
+
+impl fmt::Debug for HookToolResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HookToolResult")
+            .field("has_call_id", &!self.call_id.is_empty())
+            .field("content_count", &self.content.len())
+            .field("outcome", &self.outcome)
+            .field("has_display_content", &self.display_content.is_some())
+            .field("has_details", &self.details.is_some())
+            .finish()
+    }
+}
+
+/// `hooks.after_tool_result` request params。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AfterToolResultHookParams {
+    pub hook_id: String,
+    pub tool_name: String,
+    pub result: HookToolResult,
+}
+
+impl AfterToolResultHookParams {
+    /// 验证 hook、tool 与 call correlation identity。
+    pub fn validate(&self) -> Result<(), ProtocolValidationError> {
+        validate_hook_id(&self.hook_id)?;
+        validate_tool_name(&self.tool_name)?;
+        self.result.validate()
+    }
+}
+
+impl fmt::Debug for AfterToolResultHookParams {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AfterToolResultHookParams")
+            .field("has_hook_id", &!self.hook_id.is_empty())
+            .field("has_tool_name", &!self.tool_name.is_empty())
+            .field("outcome", &self.result.outcome)
+            .finish()
+    }
+}
+
+/// `hooks.after_tool_result` typed success result。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "decision", rename_all = "snake_case")]
+pub enum AfterToolResultHookResult {
+    Continue { result: HookToolResult },
+}
+
+impl AfterToolResultHookResult {
+    /// 验证 remote transform 返回的完整 tool result。
+    pub fn validate(&self) -> Result<(), ProtocolValidationError> {
+        match self {
+            Self::Continue { result } => result.validate(),
+        }
+    }
+}
+
+impl fmt::Debug for AfterToolResultHookResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Continue { result } => formatter
+                .debug_struct("Continue")
+                .field("outcome", &result.outcome)
+                .field("content_count", &result.content.len())
+                .finish(),
+        }
+    }
+}
+
+/// `hooks.cancel` request params。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookCancelParams {
+    pub request_id: String,
+}
+
+impl HookCancelParams {
+    /// 验证待取消 hook invocation 的 request identity。
+    pub fn validate(&self) -> Result<(), ProtocolValidationError> {
+        validate_request_id(&self.request_id)
+    }
+}
+
+impl fmt::Debug for HookCancelParams {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HookCancelParams")
+            .field("has_request_id", &!self.request_id.is_empty())
+            .finish()
+    }
+}
+
+/// `hooks.cancel` success result。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookCancelResult {
     pub accepted: bool,
 }
 
@@ -598,13 +1030,13 @@ impl fmt::Debug for ExtensionNotification {
                 total,
             } => formatter
                 .debug_struct("Progress")
-                .field("request_id", request_id)
+                .field("has_request_id", &!request_id.is_empty())
                 .field("completed", completed)
                 .field("has_total", &total.is_some())
                 .finish(),
             Self::Cancelled { request_id } => formatter
                 .debug_struct("Cancelled")
-                .field("request_id", request_id)
+                .field("has_request_id", &!request_id.is_empty())
                 .finish(),
         }
     }
@@ -776,6 +1208,41 @@ fn validate_capabilities(
         if capabilities[..index].contains(capability) {
             return Err(ProtocolValidationError::DuplicateCapability);
         }
+    }
+    Ok(())
+}
+
+fn validate_hook_id(hook_id: &str) -> Result<(), ProtocolValidationError> {
+    const MAX_HOOK_ID_BYTES: usize = 64;
+
+    let bytes = hook_id.as_bytes();
+    if hook_id.is_empty()
+        || hook_id.len() > MAX_HOOK_ID_BYTES
+        || !bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+        || !bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+        || bytes
+            .iter()
+            .any(|byte| !byte.is_ascii_lowercase() && !byte.is_ascii_digit() && *byte != b'-')
+        || bytes.windows(2).any(|pair| pair == b"--")
+    {
+        return Err(ProtocolValidationError::InvalidHookId);
+    }
+    Ok(())
+}
+
+fn validate_conversation_items(items: &[ConversationItem]) -> Result<(), ProtocolValidationError> {
+    if items.is_empty() || items.iter().any(|item| item.validate().is_err()) {
+        return Err(ProtocolValidationError::InvalidConversationItems);
+    }
+    Ok(())
+}
+
+fn validate_tool_name(name: &str) -> Result<(), ProtocolValidationError> {
+    if name.trim().is_empty()
+        || name.trim() != name
+        || !name.bytes().all(|byte| byte.is_ascii_graphic())
+    {
+        return Err(ProtocolValidationError::InvalidHookToolCall);
     }
     Ok(())
 }
@@ -1180,12 +1647,23 @@ mod tests {
     }
 
     #[test]
-    fn first_batch_methods_and_tool_dtos_have_stable_wire_names() {
+    fn protocol_v2_methods_and_tool_dtos_have_stable_wire_names() {
         let methods = [
             (ExtensionMethod::Initialize, "initialize"),
             (ExtensionMethod::ToolsList, "tools.list"),
             (ExtensionMethod::ToolsExecute, "tools.execute"),
             (ExtensionMethod::ToolsCancel, "tools.cancel"),
+            (ExtensionMethod::HooksList, "hooks.list"),
+            (ExtensionMethod::HooksBeforeTurn, "hooks.before_turn"),
+            (
+                ExtensionMethod::HooksBeforeToolExecute,
+                "hooks.before_tool_execute",
+            ),
+            (
+                ExtensionMethod::HooksAfterToolResult,
+                "hooks.after_tool_result",
+            ),
+            (ExtensionMethod::HooksCancel, "hooks.cancel"),
             (ExtensionMethod::Shutdown, "shutdown"),
         ];
         for (method, wire_name) in methods {
@@ -1230,6 +1708,344 @@ mod tests {
         assert_eq!(round_trip(&shutdown_params), shutdown_params);
         let shutdown_result = ShutdownResult { drained: true };
         assert_eq!(round_trip(&shutdown_result), shutdown_result);
+    }
+
+    #[test]
+    fn typed_hook_dtos_round_trip_and_validate() {
+        let descriptors = HooksListResult {
+            hooks: vec![
+                HookDescriptor {
+                    hook_id: "turn-policy".to_string(),
+                    phase: HookPhase::BeforeTurn,
+                    priority: -10,
+                },
+                HookDescriptor {
+                    hook_id: "tool-policy".to_string(),
+                    phase: HookPhase::BeforeToolExecute,
+                    priority: 0,
+                },
+                HookDescriptor {
+                    hook_id: "tool-policy".to_string(),
+                    phase: HookPhase::AfterToolResult,
+                    priority: 10,
+                },
+            ],
+        };
+        descriptors.validate().expect("descriptors should validate");
+        assert_eq!(round_trip(&HooksListParams::default()), HooksListParams {});
+        assert_eq!(round_trip(&descriptors), descriptors);
+
+        let items = vec![ConversationItem::text(
+            provider_protocol::Role::User,
+            "private instruction",
+        )];
+        let before_turn_params = BeforeTurnHookParams {
+            hook_id: "turn-policy".to_string(),
+            items: items.clone(),
+        };
+        before_turn_params
+            .validate()
+            .expect("params should validate");
+        assert_eq!(round_trip(&before_turn_params), before_turn_params);
+        let before_turn_result = BeforeTurnHookResult::Continue {
+            items: items.clone(),
+        };
+        before_turn_result
+            .validate()
+            .expect("result should validate");
+        assert_eq!(round_trip(&before_turn_result), before_turn_result);
+        assert_eq!(
+            round_trip(&BeforeTurnHookResult::Reject {
+                code: HookRejectionCode::PolicyDenied,
+            }),
+            BeforeTurnHookResult::Reject {
+                code: HookRejectionCode::PolicyDenied,
+            }
+        );
+
+        let call = HookToolCall {
+            call_id: "call-typed-1".to_string(),
+            name: "read_file".to_string(),
+            arguments: serde_json::json!({"path": "/private/path"}),
+        };
+        let before_tool_params = BeforeToolExecuteHookParams {
+            hook_id: "tool-policy".to_string(),
+            call,
+        };
+        before_tool_params
+            .validate()
+            .expect("params should validate");
+        assert_eq!(round_trip(&before_tool_params), before_tool_params);
+        assert_eq!(
+            round_trip(&BeforeToolExecuteHookResult::Continue),
+            BeforeToolExecuteHookResult::Continue
+        );
+        assert_eq!(
+            round_trip(&BeforeToolExecuteHookResult::Reject {
+                code: HookRejectionCode::UnsupportedOperation,
+            }),
+            BeforeToolExecuteHookResult::Reject {
+                code: HookRejectionCode::UnsupportedOperation,
+            }
+        );
+
+        let result = sample_hook_tool_result();
+        result.validate().expect("tool result should validate");
+        let after_result_params = AfterToolResultHookParams {
+            hook_id: "tool-policy".to_string(),
+            tool_name: "read_file".to_string(),
+            result: result.clone(),
+        };
+        after_result_params
+            .validate()
+            .expect("params should validate");
+        assert_eq!(round_trip(&after_result_params), after_result_params);
+        let after_result = AfterToolResultHookResult::Continue { result };
+        after_result.validate().expect("result should validate");
+        assert_eq!(round_trip(&after_result), after_result);
+
+        let cancel_params = HookCancelParams {
+            request_id: "hook-request-1".to_string(),
+        };
+        cancel_params.validate().expect("cancel should validate");
+        assert_eq!(round_trip(&cancel_params), cancel_params);
+        assert_eq!(
+            round_trip(&HookCancelResult { accepted: true }),
+            HookCancelResult { accepted: true }
+        );
+    }
+
+    #[test]
+    fn hook_request_validation_is_method_specific() {
+        let valid_requests = [
+            ExtensionRequest::new(
+                "req-hook-list",
+                ExtensionMethod::HooksList,
+                HooksListParams::default(),
+            )
+            .unwrap(),
+            ExtensionRequest::new(
+                "req-before-turn",
+                ExtensionMethod::HooksBeforeTurn,
+                BeforeTurnHookParams {
+                    hook_id: "turn-policy".to_string(),
+                    items: vec![ConversationItem::text(
+                        provider_protocol::Role::User,
+                        "secret",
+                    )],
+                },
+            )
+            .unwrap(),
+            ExtensionRequest::new(
+                "req-before-tool",
+                ExtensionMethod::HooksBeforeToolExecute,
+                BeforeToolExecuteHookParams {
+                    hook_id: "tool-policy".to_string(),
+                    call: HookToolCall {
+                        call_id: "call-1".to_string(),
+                        name: "read_file".to_string(),
+                        arguments: serde_json::json!({"secret": true}),
+                    },
+                },
+            )
+            .unwrap(),
+            ExtensionRequest::new(
+                "req-after-result",
+                ExtensionMethod::HooksAfterToolResult,
+                AfterToolResultHookParams {
+                    hook_id: "tool-policy".to_string(),
+                    tool_name: "read_file".to_string(),
+                    result: sample_hook_tool_result(),
+                },
+            )
+            .unwrap(),
+            ExtensionRequest::new(
+                "req-hook-cancel",
+                ExtensionMethod::HooksCancel,
+                HookCancelParams {
+                    request_id: "req-after-result".to_string(),
+                },
+            )
+            .unwrap(),
+        ];
+        for request in valid_requests {
+            request.validate().expect("hook request should validate");
+        }
+
+        let wrong_params = ExtensionRequest::new(
+            "req-wrong-shape",
+            ExtensionMethod::HooksBeforeTurn,
+            HooksListParams::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            wrong_params.validate(),
+            Err(ProtocolValidationError::InvalidParams)
+        );
+
+        let empty_items = BeforeTurnHookParams {
+            hook_id: "turn-policy".to_string(),
+            items: Vec::new(),
+        };
+        assert_eq!(
+            empty_items.validate(),
+            Err(ProtocolValidationError::InvalidConversationItems)
+        );
+
+        let invalid_item = ConversationItem::user(vec![provider_protocol::ContentBlock::ToolCall(
+            provider_protocol::ToolCall::new("call-private", "read_file", "{}"),
+        )]);
+        assert_eq!(
+            BeforeTurnHookResult::Continue {
+                items: vec![invalid_item]
+            }
+            .validate(),
+            Err(ProtocolValidationError::InvalidConversationItems)
+        );
+
+        let duplicate_descriptors = HooksListResult {
+            hooks: vec![
+                HookDescriptor {
+                    hook_id: "same-hook".to_string(),
+                    phase: HookPhase::BeforeTurn,
+                    priority: 0,
+                },
+                HookDescriptor {
+                    hook_id: "same-hook".to_string(),
+                    phase: HookPhase::BeforeTurn,
+                    priority: 1,
+                },
+            ],
+        };
+        assert_eq!(
+            duplicate_descriptors.validate(),
+            Err(ProtocolValidationError::DuplicateHookDescriptor)
+        );
+        assert_eq!(
+            HookDescriptor {
+                hook_id: "Unsafe--Hook".to_string(),
+                phase: HookPhase::BeforeTurn,
+                priority: 0,
+            }
+            .validate(),
+            Err(ProtocolValidationError::InvalidHookId)
+        );
+
+        let invalid_call = HookToolCall {
+            call_id: "call 1".to_string(),
+            name: " read_file ".to_string(),
+            arguments: Value::Null,
+        };
+        assert_eq!(
+            invalid_call.validate(),
+            Err(ProtocolValidationError::InvalidHookToolCall)
+        );
+        let invalid_result = HookToolResult {
+            call_id: "call-1".to_string(),
+            content: vec![HookToolResultContent::Image {
+                data_base64: String::new(),
+                mime_type: String::new(),
+                uri: None,
+                detail: None,
+            }],
+            outcome: HookToolResultOutcome::Success,
+            display_content: None,
+            details: None,
+        };
+        assert_eq!(
+            invalid_result.validate(),
+            Err(ProtocolValidationError::InvalidHookToolResult)
+        );
+    }
+
+    #[test]
+    fn hook_diagnostics_omit_all_delivery_and_remote_bodies() {
+        let params = BeforeTurnHookParams {
+            hook_id: "private-hook-id".to_string(),
+            items: vec![ConversationItem::text(
+                provider_protocol::Role::User,
+                "private instruction body",
+            )],
+        };
+        let call = BeforeToolExecuteHookParams {
+            hook_id: "private-call-hook".to_string(),
+            call: HookToolCall {
+                call_id: "private-call-id".to_string(),
+                name: "private-tool-name".to_string(),
+                arguments: serde_json::json!({
+                    "credential": "secret-token",
+                    "path": "/private/path",
+                    "endpoint": "https://private.invalid"
+                }),
+            },
+        };
+        let result = AfterToolResultHookParams {
+            hook_id: "private-result-hook".to_string(),
+            tool_name: "private-tool-name".to_string(),
+            result: sample_hook_tool_result(),
+        };
+        let values = [
+            format!("{params:?}"),
+            format!("{call:?}"),
+            format!("{result:?}"),
+            format!("{:?}", call.call),
+            format!("{:?}", result.result),
+            format!("{:?}", result.result.content[0]),
+            format!(
+                "{:?}",
+                BeforeTurnHookResult::Continue {
+                    items: params.items.clone()
+                }
+            ),
+            format!(
+                "{:?}",
+                AfterToolResultHookResult::Continue {
+                    result: result.result.clone()
+                }
+            ),
+        ];
+        for diagnostic in values {
+            for sentinel in [
+                "private instruction body",
+                "private-hook-id",
+                "private-call-hook",
+                "private-call-id",
+                "private-result-hook",
+                "private-tool-name",
+                "secret-token",
+                "/private/path",
+                "https://private.invalid",
+                "private-image-body",
+                "private-display-body",
+                "private-details-body",
+                "private-uri",
+            ] {
+                assert!(
+                    !diagnostic.contains(sentinel),
+                    "diagnostic leaked sentinel: {sentinel}"
+                );
+            }
+        }
+    }
+
+    fn sample_hook_tool_result() -> HookToolResult {
+        HookToolResult {
+            call_id: "call-typed-1".to_string(),
+            content: vec![
+                HookToolResultContent::Text {
+                    text: "private tool body".to_string(),
+                },
+                HookToolResultContent::Image {
+                    data_base64: "private-image-body".to_string(),
+                    mime_type: "image/png".to_string(),
+                    uri: Some("private-uri".to_string()),
+                    detail: Some(HookToolImageDetail::Original),
+                },
+            ],
+            outcome: HookToolResultOutcome::Success,
+            display_content: Some("private-display-body".to_string()),
+            details: Some(serde_json::json!({"private": "private-details-body"})),
+        }
     }
 
     fn round_trip<T>(value: &T) -> T
@@ -1306,6 +2122,89 @@ mod tests {
         )
         .expect("response should encode");
         assert!(!format!("{response:?}").contains("private result"));
+    }
+
+    #[test]
+    fn protocol_diagnostics_omit_remote_control_values() {
+        let request = ExtensionRequest::new(
+            "private-request-id",
+            ExtensionMethod::ToolsExecute,
+            ToolExecuteParams {
+                name: "private-tool-name".to_string(),
+                arguments: serde_json::json!({"credential": "private-credential"}),
+            },
+        )
+        .expect("request should encode");
+        let response =
+            ExtensionResponse::success("private-response-id", ShutdownResult { drained: true })
+                .expect("response should encode");
+        let descriptor = ToolDescriptor {
+            name: "/private/tool/path".to_string(),
+            description: Some("private-description".to_string()),
+            input_schema: Some(serde_json::json!({"endpoint": "private-endpoint"})),
+        };
+        let execute = ToolExecuteParams {
+            name: "private-execute-name".to_string(),
+            arguments: serde_json::json!({"credential": "private-execute-credential"}),
+        };
+        let cancel = ToolCancelParams {
+            request_id: "private-cancel-id".to_string(),
+        };
+        let progress = ExtensionNotification::Progress {
+            request_id: "private-progress-id".to_string(),
+            completed: 1,
+            total: Some(2),
+        };
+        let cancelled = ExtensionNotification::Cancelled {
+            request_id: "private-notification-id".to_string(),
+        };
+        let mut untrusted_request = serde_json::to_value(&request).expect("request should encode");
+        untrusted_request["protocol"] = serde_json::json!("private-request-protocol");
+        let untrusted_request: ExtensionRequest =
+            serde_json::from_value(untrusted_request).expect("request should decode");
+        let mut untrusted_response =
+            serde_json::to_value(&response).expect("response should encode");
+        untrusted_response["protocol"] = serde_json::json!("private-response-protocol");
+        let untrusted_response: ExtensionResponse =
+            serde_json::from_value(untrusted_response).expect("response should decode");
+        let initialize_result = InitializeResult {
+            protocol: "private-initialize-protocol".to_string(),
+            version: PROTOCOL_VERSION,
+            capabilities: Vec::new(),
+        };
+
+        let diagnostics = [
+            format!("{untrusted_request:?}"),
+            format!("{untrusted_response:?}"),
+            format!("{initialize_result:?}"),
+            format!("{descriptor:?}"),
+            format!("{execute:?}"),
+            format!("{cancel:?}"),
+            format!("{progress:?}"),
+            format!("{cancelled:?}"),
+        ];
+        for diagnostic in diagnostics {
+            for sentinel in [
+                "private-request-id",
+                "private-response-id",
+                "private-request-protocol",
+                "private-response-protocol",
+                "private-initialize-protocol",
+                "/private/tool/path",
+                "private-description",
+                "private-endpoint",
+                "private-execute-name",
+                "private-execute-credential",
+                "private-cancel-id",
+                "private-progress-id",
+                "private-notification-id",
+            ] {
+                assert!(
+                    !diagnostic.contains(sentinel),
+                    "diagnostic leaked sentinel: {sentinel}"
+                );
+            }
+        }
     }
 
     #[test]

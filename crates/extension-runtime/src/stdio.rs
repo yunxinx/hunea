@@ -19,9 +19,8 @@ use extension_protocol::{ExtensionRequest, ExtensionResponse, FrameCodec, FrameE
 use tokio::sync::oneshot;
 
 use super::{
-    ExtensionDiscoveryError, ExtensionRequestFuture, ExtensionRequestTransport,
-    ExtensionToolClient, ExtensionToolOptions, ExtensionToolSet, ExtensionToolSetSource,
-    ExtensionTransportError,
+    ExtensionBundle, ExtensionBundleSource, ExtensionClient, ExtensionDiscoveryError,
+    ExtensionOptions, ExtensionRequestFuture, ExtensionRequestTransport, ExtensionTransportError,
 };
 
 const DEFAULT_QUEUE_CAPACITY: usize = 64;
@@ -110,7 +109,7 @@ impl StdioTransportOptions {
 #[derive(Clone)]
 pub struct StdioExtensionSource {
     transport_options: StdioTransportOptions,
-    tool_options: ExtensionToolOptions,
+    extension_options: ExtensionOptions,
 }
 
 impl fmt::Debug for StdioExtensionSource {
@@ -118,29 +117,29 @@ impl fmt::Debug for StdioExtensionSource {
         formatter
             .debug_struct("StdioExtensionSource")
             .field("transport_options", &self.transport_options)
-            .field("tool_options", &self.tool_options)
+            .field("extension_options", &self.extension_options)
             .finish()
     }
 }
 
 impl StdioExtensionSource {
-    /// 创建由 host 完全控制 launch 与 tool policy 的 rediscovery source。
+    /// 创建由 host 完全控制 launch 与 extension policy 的 rediscovery source。
     pub fn new(
         transport_options: StdioTransportOptions,
-        tool_options: ExtensionToolOptions,
+        extension_options: ExtensionOptions,
     ) -> Self {
         Self {
             transport_options,
-            tool_options,
+            extension_options,
         }
     }
 
     /// 在 dedicated thread/runtime 中完成一次 blocking bridge，避免在现有 async runtime 中嵌套
-    /// `block_on`；返回的 set 会携带 source 以支持后续 dependency restore。
-    pub fn discover(&self) -> Result<ExtensionToolSet, ExtensionDiscoveryError> {
+    /// `block_on`；返回的 bundle 会携带 source 以支持后续 dependency restore。
+    pub fn discover(&self) -> Result<ExtensionBundle, ExtensionDiscoveryError> {
         let transport_options = self.transport_options.clone();
-        let tool_options = self.tool_options;
-        let source = Arc::new(self.clone()) as Arc<dyn ExtensionToolSetSource>;
+        let extension_options = self.extension_options;
+        let source = Arc::new(self.clone()) as Arc<dyn ExtensionBundleSource>;
         let join = thread::Builder::new()
             .name("hunea-extension-stdio-discovery".to_string())
             .spawn(move || {
@@ -155,10 +154,10 @@ impl StdioExtensionSource {
                         StdioExtensionTransport::spawn(transport_options).map_err(|_| {
                             ExtensionDiscoveryError::Transport(ExtensionTransportError::Unavailable)
                         })?;
-                    ExtensionToolClient::new(transport, tool_options)
+                    ExtensionClient::new(transport, extension_options)
                         .discover()
                         .await
-                        .map(|set| set.with_rediscovery_source(source))
+                        .map(|bundle| bundle.with_rediscovery_source(source))
                 })
             })
             .map_err(|_| {
@@ -169,8 +168,8 @@ impl StdioExtensionSource {
     }
 }
 
-impl ExtensionToolSetSource for StdioExtensionSource {
-    fn discover(&self) -> Result<ExtensionToolSet, ExtensionDiscoveryError> {
+impl ExtensionBundleSource for StdioExtensionSource {
+    fn discover(&self) -> Result<ExtensionBundle, ExtensionDiscoveryError> {
         StdioExtensionSource::discover(self)
     }
 }

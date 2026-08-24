@@ -1,6 +1,7 @@
 use std::{fmt, time::Duration};
 
 const MAX_HOOK_ID_LEN: usize = 64;
+const DEFAULT_CANCELLATION_GRACE: Duration = Duration::from_millis(100);
 
 /// `HookOwnerId` 是 diagnostics-safe 的 hook owner identity。
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -152,6 +153,7 @@ impl HookPriority {
 pub struct HookRegistrationOptions {
     priority: HookPriority,
     timeout: Duration,
+    cancellation_grace: Duration,
 }
 
 impl HookRegistrationOptions {
@@ -163,7 +165,30 @@ impl HookRegistrationOptions {
         if timeout.is_zero() {
             return Err(HookRegistrationOptionsError::ZeroTimeout);
         }
-        Ok(Self { priority, timeout })
+        Ok(Self {
+            priority,
+            timeout,
+            cancellation_grace: DEFAULT_CANCELLATION_GRACE,
+        })
+    }
+
+    /// 创建显式 cancellation grace 的选项；external adapter 用它绑定 host policy。
+    pub fn try_new_with_cancellation_grace(
+        priority: HookPriority,
+        timeout: Duration,
+        cancellation_grace: Duration,
+    ) -> Result<Self, HookRegistrationOptionsError> {
+        if timeout.is_zero() {
+            return Err(HookRegistrationOptionsError::ZeroTimeout);
+        }
+        if cancellation_grace.is_zero() {
+            return Err(HookRegistrationOptionsError::ZeroCancellationGrace);
+        }
+        Ok(Self {
+            priority,
+            timeout,
+            cancellation_grace,
+        })
     }
 
     /// 返回稳定 priority。
@@ -175,6 +200,11 @@ impl HookRegistrationOptions {
     pub const fn timeout(self) -> Duration {
         self.timeout
     }
+
+    /// 返回 cancellation 后继续 poll hook cleanup 的最大时间。
+    pub const fn cancellation_grace(self) -> Duration {
+        self.cancellation_grace
+    }
 }
 
 /// Hook registration options 的封闭校验错误。
@@ -182,6 +212,8 @@ impl HookRegistrationOptions {
 pub enum HookRegistrationOptionsError {
     #[error("hook_timeout_must_be_non_zero")]
     ZeroTimeout,
+    #[error("hook_cancellation_grace_must_be_non_zero")]
+    ZeroCancellationGrace,
 }
 
 #[cfg(test)]
@@ -206,5 +238,29 @@ mod tests {
             HookRegistrationOptions::try_new(HookPriority::default(), Duration::ZERO),
             Err(HookRegistrationOptionsError::ZeroTimeout)
         );
+        assert_eq!(
+            HookRegistrationOptions::try_new_with_cancellation_grace(
+                HookPriority::default(),
+                Duration::from_secs(1),
+                Duration::ZERO,
+            ),
+            Err(HookRegistrationOptionsError::ZeroCancellationGrace)
+        );
+    }
+
+    #[test]
+    fn default_and_explicit_cancellation_grace_are_stable() {
+        let default =
+            HookRegistrationOptions::try_new(HookPriority::default(), Duration::from_secs(1))
+                .unwrap();
+        assert_eq!(default.cancellation_grace(), Duration::from_millis(100));
+
+        let explicit = HookRegistrationOptions::try_new_with_cancellation_grace(
+            HookPriority::default(),
+            Duration::from_secs(1),
+            Duration::from_millis(25),
+        )
+        .unwrap();
+        assert_eq!(explicit.cancellation_grace(), Duration::from_millis(25));
     }
 }

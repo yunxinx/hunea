@@ -20,6 +20,7 @@ fn extension_protocol_stays_below_runtime_implementation_layers() {
         })
         .collect();
     let allowed = BTreeSet::from([
+        "provider-protocol".to_string(),
         "serde".to_string(),
         "serde_json".to_string(),
         "thiserror".to_string(),

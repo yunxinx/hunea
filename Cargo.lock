@@ -904,6 +904,7 @@ dependencies = [
 name = "extension-protocol"
 version = "0.12.1-alpha.4"
 dependencies = [
+ "provider-protocol",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -913,7 +914,9 @@ dependencies = [
 name = "extension-runtime"
 version = "0.12.1-alpha.4"
 dependencies = [
+ "extension-hook-runtime",
  "extension-protocol",
+ "provider-protocol",
  "serde",
  "serde_json",
  "thiserror 2.0.20",

@@ -28,7 +28,7 @@ use std::{
 };
 
 use conversation_runtime::models as provider_models;
-use extension_runtime::ExtensionToolSet;
+use extension_runtime::ExtensionBundle;
 use runtime_domain::{
     model_catalog::{ModelProviderRefreshEvent, ModelSelection, ProviderSyncRequest},
     prompt_assembly::PromptAssemblyManagerSnapshot,
@@ -117,8 +117,8 @@ pub(crate) struct AppRuntimeOptions {
     pub(crate) initial_prompt_assembly: Option<PromptAssemblyManagerSnapshot>,
     pub(crate) dynamic_environment_observer:
         Arc<dyn crate::dynamic_environment::DynamicEnvironmentObserver>,
-    /// Host-prepared extension set；`None` keeps the default composition unchanged.
-    pub(crate) extension_tool_set: Option<ExtensionToolSet>,
+    /// Host-prepared extension bundle；`None` keeps the default composition unchanged.
+    pub(crate) extension_bundle: Option<ExtensionBundle>,
 }
 
 /// `AppRuntimeCoordinator` 负责把 TUI runtime command 连接到对话运行时。
@@ -142,7 +142,7 @@ impl Default for AppRuntimeOptions {
             initial_prompt_assembly: None,
             dynamic_environment_observer:
                 crate::dynamic_environment::default_dynamic_environment_observer(),
-            extension_tool_set: None,
+            extension_bundle: None,
         }
     }
 }
@@ -157,8 +157,8 @@ impl AppRuntimeCoordinator {
             next_agent_turn_id: 1,
             prompt_assembly_edit_session: None,
         };
-        if let Some(tool_set) = coordinator.options.extension_tool_set.take() {
-            coordinator.mount_extension_tool_set(tool_set)?;
+        if let Some(bundle) = coordinator.options.extension_bundle.take() {
+            coordinator.mount_extension_bundle(bundle)?;
         }
         coordinator.components.validate_context_alignment()?;
         coordinator
@@ -168,9 +168,9 @@ impl AppRuntimeCoordinator {
         Ok(coordinator)
     }
 
-    /// 将 host 已完成 discovery 的 extension tool set 交给 component lifecycle。
-    pub fn mount_extension_tool_set(&mut self, tool_set: ExtensionToolSet) -> Result<(), String> {
-        self.components.mount_extension_tool_set(tool_set)
+    /// 将 host 已完成 discovery 的 extension bundle 交给 component lifecycle。
+    pub fn mount_extension_bundle(&mut self, bundle: ExtensionBundle) -> Result<(), String> {
+        self.components.mount_extension_bundle(bundle)
     }
 
     fn handle_runtime_command(

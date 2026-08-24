@@ -5,7 +5,7 @@ use std::{
 
 use conversation_runtime::ModelRefreshWorker;
 use extension_hook_runtime::ExtensionHookRegistry;
-use extension_runtime::{ExtensionToolMount, ExtensionToolSet, ExtensionToolSetSource};
+use extension_runtime::{ExtensionBundle, ExtensionBundleSource, ExtensionMount};
 use runtime_domain::event_notifier::{RuntimeEventBinding, RuntimeEventNotifier};
 use tool_runtime::{ToolCatalog, ToolExecutorRegistry, ToolRegistration};
 
@@ -102,7 +102,7 @@ const AGENT_RUNTIME_COMPONENT: &str = "agent_runtime";
 const MODEL_REFRESH_COMPONENT: &str = "model_refresh";
 const CONTEXT_BUDGET_COMPONENT: &str = "context_budget";
 const UI_RUNTIME_BRIDGE_COMPONENT: &str = "ui_runtime_bridge";
-const EXTERNAL_EXTENSION_COMPONENT: &str = "external_extension_tools";
+const EXTERNAL_EXTENSION_COMPONENT: &str = "externalextension";
 
 const APPROVAL_PROVIDER_PLUGIN: &str = "terminal-approval-provider";
 const LLM_PORT_PLUGIN: &str = "openai-compatible-provider-catalog";
@@ -116,7 +116,7 @@ const NATIVE_AGENT_RUNTIME_PLUGIN: &str = "native-agent-loop";
 const MODEL_REFRESH_PLUGIN: &str = "model-refresh";
 const CONTEXT_BUDGET_PLUGIN: &str = "context-budget";
 const UI_RUNTIME_BRIDGE_PLUGIN: &str = "terminal-ui-runtime-adapter";
-const EXTERNAL_EXTENSION_PLUGIN: &str = "stdio-extension-tools";
+const EXTERNAL_EXTENSION_PLUGIN: &str = "out-of-process-extension";
 const EXTENSION_HOOKS_PLUGIN: &str = "typed-extension-hooks";
 
 type RuntimePluginActivation = for<'a> fn(
@@ -453,8 +453,9 @@ fn builtin_plugin_catalog_with_agent_factory(
             RuntimeComponents::quiesce_noop,
         ),
         runtime_plugin_factory(
-            builtin_descriptor(EXTERNAL_EXTENSION_PLUGIN, "External extension tools")
-                .requires(TOOL_CATALOG.capability),
+            builtin_descriptor(EXTERNAL_EXTENSION_PLUGIN, "External extension")
+                .requires(TOOL_CATALOG.capability)
+                .requires(EXTENSION_HOOKS.capability),
             RuntimeComponents::activate_external_extension,
             RuntimeComponents::quiesce_external_extension,
         ),
@@ -476,8 +477,8 @@ struct ComponentActivationStaging {
     prompt_registration: Option<PromptRegistration>,
     session_backend_registration: Option<SessionBackendRegistration>,
     runtime_wake: Option<RuntimeWake>,
-    extension_tool_set: Option<ExtensionToolSet>,
-    extension_source: Option<Arc<dyn ExtensionToolSetSource>>,
+    extension_bundle: Option<ExtensionBundle>,
+    extension_source: Option<Arc<dyn ExtensionBundleSource>>,
     is_session_backend_replacement: bool,
 }
 
@@ -651,8 +652,8 @@ pub(super) struct RuntimeComponents {
     session_backend_views: Option<SessionBackendViews>,
     pub(super) session_store_worker: SessionStoreWorker,
     pub(super) context_budget_worker: ContextBudgetWorker,
-    extension_mount: Option<Arc<Mutex<ExtensionToolMount>>>,
-    extension_source: Option<Arc<dyn ExtensionToolSetSource>>,
+    extension_mount: Option<Arc<Mutex<ExtensionMount>>>,
+    extension_source: Option<Arc<dyn ExtensionBundleSource>>,
     runtime_event_notifier: RuntimeEventNotifier,
     activation_staging: ComponentActivationStaging,
     plugin_loader: PluginCompositionLoader<RuntimePluginImplementation>,
@@ -861,7 +862,7 @@ impl RuntimeComponents {
                 prompt_registration: Some(prompt_registration),
                 session_backend_registration,
                 runtime_wake: None,
-                extension_tool_set: None,
+                extension_bundle: None,
                 extension_source: None,
                 is_session_backend_replacement: false,
             },
@@ -887,18 +888,15 @@ impl RuntimeComponents {
         Ok(components)
     }
 
-    /// 将已完成 handshake 的 extension tool set 接入 lifecycle。
+    /// 将已完成 handshake 的 extension bundle 接入 lifecycle。
     ///
     /// discovery/stdio 启动在 async 边界外完成；此处只接收 opaque set，并让 graph 决定
     /// `tool_catalog` 缺失时的 Pending 状态。默认 composition 不包含该 component。
-    pub(super) fn mount_extension_tool_set(
-        &mut self,
-        tool_set: ExtensionToolSet,
-    ) -> Result<(), String> {
+    pub(super) fn mount_extension_bundle(&mut self, bundle: ExtensionBundle) -> Result<(), String> {
         if self.is_shutdown {
             return Err("Runtime components are shut down".to_string());
         }
-        let source = tool_set
+        let source = bundle
             .rediscovery_source()
             .ok_or_else(|| "external extension discovery source is not available".to_string())?;
         if self
@@ -906,14 +904,14 @@ impl RuntimeComponents {
             .implementation(EXTERNAL_EXTENSION_COMPONENT)
             .is_some()
         {
-            return self.replace_extension_tool_set(tool_set);
+            return self.replace_extension_bundle(bundle);
         }
-        self.activation_staging.extension_tool_set = Some(tool_set);
+        self.activation_staging.extension_bundle = Some(bundle);
         self.activation_staging.extension_source = Some(source);
         let desired = match self.desired_with_external_extension(true) {
             Ok(desired) => desired,
             Err(error) => {
-                self.activation_staging.extension_tool_set.take();
+                self.activation_staging.extension_bundle.take();
                 self.activation_staging.extension_source.take();
                 return Err(error);
             }
@@ -924,7 +922,7 @@ impl RuntimeComponents {
         {
             Ok(reconciliation) => reconciliation,
             Err(error) => {
-                self.activation_staging.extension_tool_set.take();
+                self.activation_staging.extension_bundle.take();
                 self.activation_staging.extension_source.take();
                 return Err(error.to_string());
             }
@@ -937,24 +935,24 @@ impl RuntimeComponents {
             ComponentLifecycleMode::Reconfigure,
         );
         if result.is_err() {
-            self.activation_staging.extension_tool_set.take();
+            self.activation_staging.extension_bundle.take();
             self.activation_staging.extension_source.take();
         }
         result
     }
 
     /// 先撤销旧 extension component，再接入 fresh set；两个 generation 不会并存。
-    pub(super) fn replace_extension_tool_set(
+    pub(super) fn replace_extension_bundle(
         &mut self,
-        tool_set: ExtensionToolSet,
+        bundle: ExtensionBundle,
     ) -> Result<(), String> {
-        self.remove_extension_tool_set()?;
-        self.mount_extension_tool_set(tool_set)
+        self.remove_extension_bundle()?;
+        self.mount_extension_bundle(bundle)
     }
 
     /// 从 desired composition 移除 extension component，并执行其 effect inverse。
-    pub(super) fn remove_extension_tool_set(&mut self) -> Result<(), String> {
-        self.activation_staging.extension_tool_set.take();
+    pub(super) fn remove_extension_bundle(&mut self) -> Result<(), String> {
+        self.activation_staging.extension_bundle.take();
         self.activation_staging.extension_source.take();
         if self
             .plugins
@@ -1619,8 +1617,11 @@ impl RuntimeComponents {
         let catalog = context
             .require::<ToolCatalogCapability>()
             .map_err(|error| error.to_string())?;
-        let tool_set = match self.activation_staging.extension_tool_set.take() {
-            Some(tool_set) => tool_set,
+        let hooks = context
+            .require::<ExtensionHookRegistryCapability>()
+            .map_err(|error| error.to_string())?;
+        let bundle = match self.activation_staging.extension_bundle.take() {
+            Some(bundle) => bundle,
             None => {
                 let source = self.extension_source.clone().ok_or_else(|| {
                     "external extension activation source is not available".to_string()
@@ -1634,16 +1635,16 @@ impl RuntimeComponents {
             .activation_staging
             .extension_source
             .take()
-            .or_else(|| tool_set.rediscovery_source())
+            .or_else(|| bundle.rediscovery_source())
             .ok_or_else(|| "external extension discovery source is not available".to_string())?;
-        let mount = tool_set
-            .mount(&catalog, EXTERNAL_EXTENSION_COMPONENT)
+        let mount = bundle
+            .mount(&catalog, &hooks, EXTERNAL_EXTENSION_COMPONENT)
             .map_err(|error| error.to_string())?;
         let mount = Arc::new(Mutex::new(mount));
         self.extension_source = Some(Arc::clone(&source));
         let disposer = Arc::clone(&mount);
         scope
-            .register("extension_tool_mount", move || {
+            .register("extension_mount", move || {
                 disposer
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2272,7 +2273,9 @@ mod tests {
         sync::{
             Mutex,
             atomic::{AtomicBool, AtomicUsize, Ordering},
+            mpsc,
         },
+        time::Duration,
     };
 
     use super::*;
@@ -2283,12 +2286,13 @@ mod tests {
         HookRegistrationOptions,
     };
     use extension_protocol::{
-        ExtensionCapability, ExtensionMethod, ExtensionRequest, ExtensionResponse,
-        InitializeResult, ToolDescriptor, ToolsListResult,
+        BeforeTurnHookParams, BeforeTurnHookResult, ExtensionCapability, ExtensionMethod,
+        ExtensionRequest, ExtensionResponse, HookCancelResult, HookDescriptor, HookPhase,
+        HooksListResult, InitializeResult, ToolDescriptor, ToolsListResult,
     };
     use extension_runtime::{
-        ExtensionDiscoveryError, ExtensionRequestFuture, ExtensionRequestTransport,
-        ExtensionToolClient, ExtensionToolOptions, ExtensionToolSetSource, ExtensionTransportError,
+        ExtensionBundleSource, ExtensionClient, ExtensionDiscoveryError, ExtensionOptions,
+        ExtensionRequestFuture, ExtensionRequestTransport, ExtensionTransportError,
     };
     use runtime_domain::agent::{
         AgentCommand, AgentCommandReceipt, AgentEvent, AgentEventKind, AgentId, AgentRuntime,
@@ -2350,6 +2354,7 @@ mod tests {
                         capabilities: vec![
                             ExtensionCapability::Cancel,
                             ExtensionCapability::StructuredErrors,
+                            ExtensionCapability::Hooks,
                         ],
                     },
                 ),
@@ -2363,7 +2368,32 @@ mod tests {
                         }],
                     },
                 ),
-                _ => unreachable!("component mount only discovers extension tools"),
+                ExtensionMethod::HooksList => ExtensionResponse::success(
+                    request.request_id().to_string(),
+                    HooksListResult {
+                        hooks: vec![HookDescriptor {
+                            hook_id: "external-hook".to_string(),
+                            phase: HookPhase::BeforeTurn,
+                            priority: 0,
+                        }],
+                    },
+                ),
+                ExtensionMethod::HooksBeforeTurn => {
+                    let params = request
+                        .decode_params::<BeforeTurnHookParams>()
+                        .expect("hook params should decode");
+                    ExtensionResponse::success(
+                        request.request_id().to_string(),
+                        BeforeTurnHookResult::Continue {
+                            items: params.items,
+                        },
+                    )
+                }
+                ExtensionMethod::HooksCancel => ExtensionResponse::success(
+                    request.request_id().to_string(),
+                    HookCancelResult { accepted: true },
+                ),
+                _ => unreachable!("static extension only serves discovery and before_turn"),
             }
             .expect("static extension response should encode");
             Box::pin(async move { Ok(response) })
@@ -2381,8 +2411,8 @@ mod tests {
         discoveries: Arc<AtomicUsize>,
     }
 
-    impl ExtensionToolSetSource for StaticExtensionSource {
-        fn discover(&self) -> Result<extension_runtime::ExtensionToolSet, ExtensionDiscoveryError> {
+    impl ExtensionBundleSource for StaticExtensionSource {
+        fn discover(&self) -> Result<extension_runtime::ExtensionBundle, ExtensionDiscoveryError> {
             self.discoveries.fetch_add(1, Ordering::SeqCst);
             let transport = StaticExtensionTransport {
                 shutdowns: Arc::clone(&self.shutdowns),
@@ -2394,15 +2424,15 @@ mod tests {
                     ExtensionDiscoveryError::Transport(ExtensionTransportError::Unavailable)
                 })?
                 .block_on(
-                    ExtensionToolClient::new(transport, ExtensionToolOptions::default()).discover(),
+                    ExtensionClient::new(transport, ExtensionOptions::default()).discover(),
                 )?;
             Ok(set.with_rediscovery_source(Arc::new(self.clone())))
         }
     }
 
-    fn discovered_extension_set(
+    fn discovered_extension_bundle(
         transport: StaticExtensionTransport,
-    ) -> extension_runtime::ExtensionToolSet {
+    ) -> extension_runtime::ExtensionBundle {
         let source = Arc::new(StaticExtensionSource {
             shutdowns: Arc::clone(&transport.shutdowns),
             discoveries: Arc::new(AtomicUsize::new(0)),
@@ -2411,11 +2441,141 @@ mod tests {
             .enable_all()
             .build()
             .expect("test runtime should build")
-            .block_on(
-                ExtensionToolClient::new(transport, ExtensionToolOptions::default()).discover(),
-            )
+            .block_on(ExtensionClient::new(transport, ExtensionOptions::default()).discover())
             .expect("static extension discovery should succeed")
             .with_rediscovery_source(source)
+    }
+
+    struct BlockingHookState {
+        hook_waiter: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+        hook_started: Mutex<Option<mpsc::Sender<String>>>,
+        cancel_targets: Mutex<Vec<String>>,
+        shutdowns: AtomicUsize,
+    }
+
+    #[derive(Clone)]
+    struct BlockingHookTransport {
+        state: Arc<BlockingHookState>,
+    }
+
+    impl ExtensionRequestTransport for BlockingHookTransport {
+        fn request(&self, request: ExtensionRequest) -> ExtensionRequestFuture<'_> {
+            let request_id = request.request_id().to_string();
+            match request.method() {
+                ExtensionMethod::Initialize => {
+                    let response = ExtensionResponse::success(
+                        request_id,
+                        InitializeResult {
+                            protocol: extension_protocol::PROTOCOL_NAME.to_string(),
+                            version: extension_protocol::PROTOCOL_VERSION,
+                            capabilities: vec![
+                                ExtensionCapability::Cancel,
+                                ExtensionCapability::StructuredErrors,
+                                ExtensionCapability::Hooks,
+                            ],
+                        },
+                    )
+                    .expect("response should encode");
+                    Box::pin(async move { Ok(response) })
+                }
+                ExtensionMethod::ToolsList => {
+                    let response = ExtensionResponse::success(
+                        request_id,
+                        ToolsListResult { tools: Vec::new() },
+                    )
+                    .expect("response should encode");
+                    Box::pin(async move { Ok(response) })
+                }
+                ExtensionMethod::HooksList => {
+                    let response = ExtensionResponse::success(
+                        request_id,
+                        HooksListResult {
+                            hooks: vec![HookDescriptor {
+                                hook_id: "external-hook".to_string(),
+                                phase: HookPhase::BeforeTurn,
+                                priority: 0,
+                            }],
+                        },
+                    )
+                    .expect("response should encode");
+                    Box::pin(async move { Ok(response) })
+                }
+                ExtensionMethod::HooksBeforeTurn => {
+                    let params = request
+                        .decode_params::<BeforeTurnHookParams>()
+                        .expect("params should decode");
+                    let waiter = self
+                        .state
+                        .hook_waiter
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take()
+                        .expect("one hook waiter should be configured");
+                    if let Some(started) = self
+                        .state
+                        .hook_started
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take()
+                    {
+                        let _ = started.send(request_id.clone());
+                    }
+                    Box::pin(async move {
+                        let _ = waiter.await;
+                        ExtensionResponse::success(
+                            request_id,
+                            BeforeTurnHookResult::Continue {
+                                items: params.items,
+                            },
+                        )
+                        .map_err(|_| ExtensionTransportError::Protocol)
+                    })
+                }
+                ExtensionMethod::HooksCancel => {
+                    let params = request
+                        .decode_params::<extension_protocol::HookCancelParams>()
+                        .expect("cancel params should decode");
+                    self.state
+                        .cancel_targets
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(params.request_id);
+                    let response =
+                        ExtensionResponse::success(request_id, HookCancelResult { accepted: true })
+                            .expect("response should encode");
+                    Box::pin(async move { Ok(response) })
+                }
+                _ => unreachable!("blocking fixture only serves before_turn lifecycle"),
+            }
+        }
+
+        fn shutdown(&self) -> Result<(), ExtensionTransportError> {
+            self.state.shutdowns.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[derive(Clone)]
+    struct BlockingHookSource {
+        state: Arc<BlockingHookState>,
+    }
+
+    impl ExtensionBundleSource for BlockingHookSource {
+        fn discover(&self) -> Result<extension_runtime::ExtensionBundle, ExtensionDiscoveryError> {
+            let transport = BlockingHookTransport {
+                state: Arc::clone(&self.state),
+            };
+            let bundle = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|_| {
+                    ExtensionDiscoveryError::Transport(ExtensionTransportError::Unavailable)
+                })?
+                .block_on(
+                    ExtensionClient::new(transport, ExtensionOptions::default()).discover(),
+                )?;
+            Ok(bundle.with_rediscovery_source(Arc::new(self.clone())))
+        }
     }
 
     fn agent_system_prompt(components: &RuntimeComponents) -> Option<String> {
@@ -3360,11 +3520,24 @@ mod tests {
         let first_transport = StaticExtensionTransport::default();
         let first_shutdowns = Arc::clone(&first_transport.shutdowns);
         components
-            .mount_extension_tool_set(discovered_extension_set(first_transport))
+            .mount_extension_bundle(discovered_extension_bundle(first_transport))
             .expect("extension should activate after tool catalog is available");
         assert_eq!(
             components.external_extension_state(),
             Some(ComponentState::Active)
+        );
+        let external_definition = components
+            .lifecycle
+            .components()
+            .into_iter()
+            .find(|snapshot| snapshot.id == EXTERNAL_EXTENSION_COMPONENT)
+            .expect("external component should be present");
+        assert_eq!(
+            external_definition.required,
+            [
+                EXTENSION_HOOKS.capability.to_string(),
+                TOOL_CATALOG.capability.to_string(),
+            ]
         );
         assert!(
             components
@@ -3373,14 +3546,20 @@ mod tests {
                 .iter()
                 .any(|definition| definition.name == "extension_echo")
         );
+        assert_eq!(components.extension_hooks.snapshot().len(), 1);
+        assert_eq!(
+            components.extension_hooks.snapshot()[0].owner.as_str(),
+            EXTERNAL_EXTENSION_COMPONENT
+        );
 
         let second_transport = StaticExtensionTransport::default();
         let second_shutdowns = Arc::clone(&second_transport.shutdowns);
         components
-            .mount_extension_tool_set(discovered_extension_set(second_transport))
+            .mount_extension_bundle(discovered_extension_bundle(second_transport))
             .expect("a fresh mount should replace the old generation");
         assert_eq!(first_shutdowns.load(Ordering::SeqCst), 1);
         assert_eq!(second_shutdowns.load(Ordering::SeqCst), 0);
+        assert_eq!(components.extension_hooks.snapshot().len(), 1);
         assert_eq!(
             components
                 .tool_catalog
@@ -3392,10 +3571,11 @@ mod tests {
         );
 
         components
-            .remove_extension_tool_set()
+            .remove_extension_bundle()
             .expect("remove should dispose extension effects");
         assert_eq!(components.external_extension_state(), None);
         assert_eq!(second_shutdowns.load(Ordering::SeqCst), 1);
+        assert!(components.extension_hooks.snapshot().is_empty());
         assert!(
             components
                 .tool_catalog
@@ -3406,6 +3586,70 @@ mod tests {
     }
 
     #[test]
+    fn external_extension_activation_collision_rolls_back_all_new_authority() {
+        let mut options = options_with_provider();
+        let mut components =
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+        let existing = components
+            .extension_hooks
+            .register_before_turn(
+                HookOwnerId::try_new(EXTERNAL_EXTENSION_COMPONENT).unwrap(),
+                HookId::try_new("external-hook").unwrap(),
+                hook_registration_options(),
+                Arc::new(|payload: BeforeTurnPayload, _| async move {
+                    Ok(BeforeTurnDecision::Continue(payload))
+                }),
+            )
+            .expect("collision fixture should register");
+        let transport = StaticExtensionTransport::default();
+        let shutdowns = Arc::clone(&transport.shutdowns);
+
+        let error = components
+            .mount_extension_bundle(discovered_extension_bundle(transport))
+            .expect_err("hook collision should fail activation");
+
+        assert!(!error.is_empty());
+        assert!(!error.contains("external-hook"));
+        assert_eq!(shutdowns.load(Ordering::SeqCst), 1);
+        assert_eq!(components.extension_hooks.snapshot().len(), 1);
+        assert!(
+            components
+                .tool_catalog
+                .definitions()
+                .iter()
+                .all(|definition| definition.name != "extension_echo")
+        );
+        assert!(components.extension_mount.is_none());
+        assert!(components.extension_source.is_none());
+        drop(existing);
+    }
+
+    #[test]
+    fn external_extension_shutdown_reverses_hooks_tools_and_transport() {
+        let mut options = options_with_provider();
+        let mut components =
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+        let transport = StaticExtensionTransport::default();
+        let shutdowns = Arc::clone(&transport.shutdowns);
+        components
+            .mount_extension_bundle(discovered_extension_bundle(transport))
+            .expect("extension should activate");
+        let old_hooks = components.extension_hooks.clone();
+        assert_eq!(old_hooks.snapshot().len(), 1);
+
+        components.shutdown().expect("shutdown should succeed");
+
+        assert!(old_hooks.snapshot().is_empty());
+        assert!(components.extension_hooks.snapshot().is_empty());
+        assert!(components.tool_catalog.definitions().is_empty());
+        assert_eq!(shutdowns.load(Ordering::SeqCst), 1);
+        components
+            .shutdown()
+            .expect("repeated shutdown should remain idempotent");
+        assert_eq!(shutdowns.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn external_extension_rediscoveries_after_tool_catalog_generation_reset() {
         let mut options = options_with_provider();
         let source = Arc::new(StaticExtensionSource::default());
@@ -3413,7 +3657,7 @@ mod tests {
             RuntimeComponents::new(&mut options).expect("runtime components should initialize");
 
         components
-            .mount_extension_tool_set(source.discover().expect("initial discovery should succeed"))
+            .mount_extension_bundle(source.discover().expect("initial discovery should succeed"))
             .expect("extension should activate from a source-backed set");
         assert_eq!(source.discoveries.load(Ordering::SeqCst), 1);
 
@@ -3436,6 +3680,167 @@ mod tests {
                 .count(),
             1
         );
+        assert_eq!(components.extension_hooks.snapshot().len(), 1);
+    }
+
+    #[test]
+    fn external_extension_reacts_to_hook_provider_remove_and_restore() {
+        let mut options = options_with_provider();
+        let source = Arc::new(StaticExtensionSource::default());
+        let mut components =
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+        components
+            .mount_extension_bundle(source.discover().expect("initial discovery should succeed"))
+            .expect("extension should activate");
+        let desired_with_extension = components.plugin_loader.desired().clone();
+        let old_registry = components.extension_hooks.clone();
+        assert_eq!(old_registry.snapshot().len(), 1);
+        let removal_trace = Arc::new(Mutex::new(Vec::new()));
+        components.plugin_transaction_trace = Some(Arc::clone(&removal_trace));
+
+        let without_hooks = desired_without_extension_hooks_for_test(&desired_with_extension);
+        components
+            .reconcile_plugin_composition(
+                &options,
+                without_hooks,
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect("hook provider removal should leave consumers pending");
+
+        assert_eq!(
+            components.external_extension_state(),
+            Some(ComponentState::Pending)
+        );
+        assert_eq!(source.discoveries.load(Ordering::SeqCst), 1);
+        assert_eq!(source.shutdowns.load(Ordering::SeqCst), 1);
+        assert!(old_registry.snapshot().is_empty());
+        assert!(
+            components
+                .tool_catalog
+                .definitions()
+                .iter()
+                .all(|definition| definition.name != "extension_echo")
+        );
+        let removal_trace = removal_trace
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let quiesce_extension = removal_trace
+            .iter()
+            .position(|event| event == "quiesce:externalextension")
+            .expect("external extension should quiesce");
+        let quiesce_provider = removal_trace
+            .iter()
+            .position(|event| event == "quiesce:extension_hooks")
+            .expect("hook provider should quiesce");
+        assert!(quiesce_extension < quiesce_provider);
+        drop(removal_trace);
+
+        let restoration_trace = Arc::new(Mutex::new(Vec::new()));
+        components.plugin_transaction_trace = Some(Arc::clone(&restoration_trace));
+        components
+            .reconcile_plugin_composition(
+                &options,
+                desired_with_extension,
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect("fresh hook provider should restore external extension");
+        components.plugin_transaction_trace = None;
+
+        assert_eq!(
+            components.external_extension_state(),
+            Some(ComponentState::Active)
+        );
+        assert_eq!(source.discoveries.load(Ordering::SeqCst), 2);
+        assert_eq!(source.shutdowns.load(Ordering::SeqCst), 1);
+        assert_eq!(components.extension_hooks.snapshot().len(), 1);
+        assert_eq!(
+            components
+                .tool_catalog
+                .definitions()
+                .iter()
+                .filter(|definition| definition.name == "extension_echo")
+                .count(),
+            1
+        );
+        let restoration_trace = restoration_trace
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let activate_provider = restoration_trace
+            .iter()
+            .position(|event| event == "activate:extension_hooks")
+            .expect("hook provider should activate");
+        let activate_extension = restoration_trace
+            .iter()
+            .position(|event| event == "activate:externalextension")
+            .expect("external extension should reactivate");
+        assert!(activate_provider < activate_extension);
+    }
+
+    #[test]
+    fn external_extension_remove_cancels_in_flight_hook_before_transport_shutdown() {
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let (started_tx, started_rx) = mpsc::channel();
+        let state = Arc::new(BlockingHookState {
+            hook_waiter: Mutex::new(Some(release_rx)),
+            hook_started: Mutex::new(Some(started_tx)),
+            cancel_targets: Mutex::new(Vec::new()),
+            shutdowns: AtomicUsize::new(0),
+        });
+        let source = Arc::new(BlockingHookSource {
+            state: Arc::clone(&state),
+        });
+        let mut options = options_with_provider();
+        let mut components =
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+        components
+            .mount_extension_bundle(source.discover().expect("discovery should succeed"))
+            .expect("extension should activate");
+        let registry = components.extension_hooks.clone();
+        let dispatch = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("dispatch runtime should build")
+                .block_on(
+                    registry.dispatch_before_turn(
+                        BeforeTurnPayload::try_new(vec![
+                            provider_protocol::ConversationItem::text(
+                                provider_protocol::Role::User,
+                                "private",
+                            ),
+                        ])
+                        .expect("payload should validate"),
+                        &tokio_util::sync::CancellationToken::new(),
+                    ),
+                )
+        });
+        let invocation_request_id = started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("remote hook should enter transport");
+
+        components
+            .remove_extension_bundle()
+            .expect("remove should reverse the component");
+        let error = dispatch
+            .join()
+            .expect("dispatch thread should join")
+            .expect_err("disposed hook must not deliver a result");
+
+        assert_eq!(
+            error.kind(),
+            extension_hook_runtime::HookDispatchErrorKind::RegistrationDisposed
+        );
+        assert!(release_tx.send(()).is_err());
+        assert_eq!(
+            *state
+                .cancel_targets
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            [invocation_request_id]
+        );
+        assert_eq!(state.shutdowns.load(Ordering::SeqCst), 1);
+        assert!(components.extension_hooks.snapshot().is_empty());
+        assert_eq!(components.external_extension_state(), None);
     }
 
     #[test]
@@ -3445,7 +3850,7 @@ mod tests {
         let mut components =
             RuntimeComponents::new(&mut options).expect("runtime components should initialize");
         components
-            .mount_extension_tool_set(source.discover().expect("initial discovery should succeed"))
+            .mount_extension_bundle(source.discover().expect("initial discovery should succeed"))
             .expect("extension should activate from a source-backed set");
 
         components

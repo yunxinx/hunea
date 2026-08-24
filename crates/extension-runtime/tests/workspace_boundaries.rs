@@ -19,6 +19,7 @@ fn extension_runtime_stays_transport_neutral() {
         })
         .collect::<BTreeSet<_>>();
     let allowed = BTreeSet::from([
+        "extension-hook-runtime".to_string(),
         "extension-protocol".to_string(),
         "tool-runtime".to_string(),
         "serde".to_string(),

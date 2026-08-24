@@ -1,12 +1,14 @@
 use std::path::PathBuf;
 
+use extension_hook_runtime::{BeforeTurnPayload, ExtensionHookRegistry};
 use extension_protocol::{
     ExtensionMethod, ExtensionRequest, InitializeParams, ToolExecuteParams, ToolsListParams,
 };
 use extension_runtime::{
-    ExtensionRequestTransport, ExtensionToolClient, ExtensionToolOptions, ExtensionTransportError,
+    ExtensionClient, ExtensionOptions, ExtensionRequestTransport, ExtensionTransportError,
     StdioExtensionTransport, StdioTransportOptions,
 };
+use provider_protocol::{ConversationItem, Role};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 use tool_runtime::{ToolCall, ToolExecutor};
@@ -30,11 +32,12 @@ fn fixture_options(mode: &str) -> StdioTransportOptions {
 async fn stdio_transport_runs_extension_tools_through_catalog() {
     let transport = StdioExtensionTransport::spawn(fixture_options("normal"))
         .expect("fixture transport should spawn");
-    let client = ExtensionToolClient::new(transport, ExtensionToolOptions::default());
+    let client = ExtensionClient::new(transport, ExtensionOptions::default());
     let set = client.discover().await.expect("handshake should succeed");
     let catalog = tool_runtime::ToolCatalog::default();
+    let hooks = ExtensionHookRegistry::new();
     let _mount = set
-        .mount(&catalog, "stdio-extension")
+        .mount(&catalog, &hooks, "stdio-extension")
         .expect("mount should succeed");
     let result = catalog
         .snapshot()
@@ -44,6 +47,17 @@ async fn stdio_transport_runs_extension_tools_through_catalog() {
         )
         .await;
     assert_eq!(result.text_content(), "stdio-ok");
+
+    let output = hooks
+        .dispatch_before_turn(
+            BeforeTurnPayload::try_new(vec![ConversationItem::text(Role::User, "private")])
+                .expect("payload should validate"),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("stdio hook should continue");
+    assert_eq!(output.items().len(), 2);
+    assert_eq!(output.items()[0], output.items()[1]);
 }
 
 #[tokio::test(flavor = "current_thread")]

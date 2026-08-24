@@ -173,6 +173,7 @@ impl ExtensionHookRegistry {
                 hook_id: key.hook_id.clone(),
                 priority: registration.options.priority(),
                 timeout: registration.options.timeout(),
+                cancellation_grace: registration.options.cancellation_grace(),
             })
             .collect::<Vec<_>>();
         snapshots.sort_by(|left, right| left.dispatch_order().cmp(&right.dispatch_order()));
@@ -343,20 +344,21 @@ async fn await_hook<T>(
     let outcome = tokio::select! {
         biased;
         _ = caller_cancellation.cancelled() => {
-            invocation_cancellation.cancel();
-            return Err(entry.error(HookDispatchErrorKind::CallerCancelled));
+            HookDispatchErrorKind::CallerCancelled
         }
         _ = entry.cancellation.cancelled() => {
-            invocation_cancellation.cancel();
-            return Err(entry.error(HookDispatchErrorKind::RegistrationDisposed));
+            HookDispatchErrorKind::RegistrationDisposed
         }
         _ = &mut timeout => {
-            invocation_cancellation.cancel();
-            return Err(entry.error(HookDispatchErrorKind::TimedOut));
+            HookDispatchErrorKind::TimedOut
         }
-        outcome = &mut future => outcome,
+        outcome = &mut future => {
+            return outcome.map_err(|kind| entry.error(HookDispatchErrorKind::Failed(kind)));
+        }
     };
-    outcome.map_err(|kind| entry.error(HookDispatchErrorKind::Failed(kind)))
+    invocation_cancellation.cancel();
+    let _ = tokio::time::timeout(entry.options.cancellation_grace(), &mut future).await;
+    Err(entry.error(outcome))
 }
 
 /// 一个 registration 的 redacted inspection snapshot。
@@ -372,6 +374,8 @@ pub struct HookRegistrationSnapshot {
     pub priority: crate::HookPriority,
     /// 单次 invocation 的 timeout。
     pub timeout: std::time::Duration,
+    /// Cancellation 后允许 hook 完成 cleanup 的最大时间。
+    pub cancellation_grace: std::time::Duration,
 }
 
 impl HookRegistrationSnapshot {
@@ -824,6 +828,72 @@ mod tests {
         assert!(!diagnostic.contains("instruction-secret"));
         assert!(!later_ran.load(Ordering::SeqCst));
         drop((registration, later));
+    }
+
+    #[tokio::test]
+    async fn cancellation_grace_polls_cleanup_without_replacing_timeout_error() {
+        let registry = ExtensionHookRegistry::new();
+        let cleanup_finished = Arc::new(AtomicBool::new(false));
+        let cleanup_finished_for_hook = Arc::clone(&cleanup_finished);
+        let registration = registry
+            .register_before_turn(
+                owner("cleanup-owner"),
+                hook_id("cleanup"),
+                HookRegistrationOptions::try_new_with_cancellation_grace(
+                    HookPriority::default(),
+                    Duration::from_millis(5),
+                    Duration::from_millis(50),
+                )
+                .unwrap(),
+                Arc::new(
+                    move |payload: BeforeTurnPayload, cancellation: CancellationToken| {
+                        let cleanup_finished = Arc::clone(&cleanup_finished_for_hook);
+                        async move {
+                            cancellation.cancelled().await;
+                            cleanup_finished.store(true, Ordering::SeqCst);
+                            Ok(BeforeTurnDecision::Continue(payload))
+                        }
+                    },
+                ),
+            )
+            .unwrap();
+
+        let error = registry
+            .dispatch_before_turn(turn_payload("private"), &CancellationToken::new())
+            .await
+            .expect_err("timeout should remain the dispatch result");
+
+        assert_eq!(error.kind(), HookDispatchErrorKind::TimedOut);
+        assert!(cleanup_finished.load(Ordering::SeqCst));
+        drop(registration);
+    }
+
+    #[tokio::test]
+    async fn cancellation_grace_drops_hook_that_ignores_cancellation() {
+        let registry = ExtensionHookRegistry::new();
+        let registration = registry
+            .register_before_turn(
+                owner("bounded-owner"),
+                hook_id("ignores-cancel"),
+                HookRegistrationOptions::try_new_with_cancellation_grace(
+                    HookPriority::default(),
+                    Duration::from_millis(5),
+                    Duration::from_millis(10),
+                )
+                .unwrap(),
+                Arc::new(|_: BeforeTurnPayload, _| async move { std::future::pending().await }),
+            )
+            .unwrap();
+
+        let cancellation = CancellationToken::new();
+        let dispatch = registry.dispatch_before_turn(turn_payload("private"), &cancellation);
+        let error = tokio::time::timeout(Duration::from_millis(500), dispatch)
+            .await
+            .expect("timeout plus grace must stay bounded")
+            .expect_err("hook should time out");
+
+        assert_eq!(error.kind(), HookDispatchErrorKind::TimedOut);
+        drop(registration);
     }
 
     #[tokio::test]

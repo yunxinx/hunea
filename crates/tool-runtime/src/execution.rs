@@ -123,6 +123,21 @@ impl fmt::Display for ToolResultContentBlocks {
 }
 
 impl ToolResult {
+    /// `from_content` 从完整结构化内容与单一 outcome 创建工具结果。
+    pub fn from_content(
+        call_id: impl Into<String>,
+        content: Vec<ToolResultContent>,
+        outcome: ToolResultOutcome,
+    ) -> Self {
+        Self {
+            call_id: call_id.into(),
+            content: content.into(),
+            display_content: None,
+            outcome,
+            details: None,
+        }
+    }
+
     /// `success` 创建成功工具结果。
     pub fn success(call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self::success_content(call_id, vec![ToolResultContent::Text(content.into())])
@@ -130,13 +145,7 @@ impl ToolResult {
 
     /// `success_content` 创建带结构化内容的成功工具结果。
     pub fn success_content(call_id: impl Into<String>, content: Vec<ToolResultContent>) -> Self {
-        Self {
-            call_id: call_id.into(),
-            content: content.into(),
-            display_content: None,
-            outcome: ToolResultOutcome::Success,
-            details: None,
-        }
+        Self::from_content(call_id, content, ToolResultOutcome::Success)
     }
 
     /// `error` 创建失败工具结果。
@@ -241,6 +250,31 @@ mod tests {
         assert_eq!(terminate.outcome(), ToolResultOutcome::Terminate);
         assert!(!terminate.is_error());
         assert!(terminate.terminates());
+    }
+
+    #[test]
+    fn from_content_preserves_structured_blocks_for_every_outcome() {
+        for outcome in [
+            ToolResultOutcome::Success,
+            ToolResultOutcome::Error,
+            ToolResultOutcome::Terminate,
+        ] {
+            let result = ToolResult::from_content(
+                "call-1",
+                vec![ToolResultContent::Image {
+                    data_base64: "encoded".to_string(),
+                    mime_type: "image/png".to_string(),
+                    uri: Some("memory://image".to_string()),
+                    detail: Some(ToolImageDetail::Original),
+                }],
+                outcome,
+            );
+            assert_eq!(result.outcome(), outcome);
+            assert!(matches!(
+                result.content().as_slice(),
+                [ToolResultContent::Image { .. }]
+            ));
+        }
     }
 
     #[test]

@@ -6,8 +6,10 @@ use std::{
 };
 
 use extension_protocol::{
-    ExtensionCapability, ExtensionMethod, ExtensionRequest, ExtensionResponse, FrameCodec,
-    InitializeResult, ToolContent, ToolDescriptor, ToolExecuteResult, ToolsListResult,
+    BeforeTurnHookParams, BeforeTurnHookResult, ExtensionCapability, ExtensionMethod,
+    ExtensionRequest, ExtensionResponse, FrameCodec, HookCancelResult, HookDescriptor, HookPhase,
+    HooksListResult, InitializeResult, ToolContent, ToolDescriptor, ToolExecuteResult,
+    ToolsListResult,
 };
 use serde_json::json;
 
@@ -74,6 +76,7 @@ fn main() {
                     capabilities: vec![
                         ExtensionCapability::Cancel,
                         ExtensionCapability::StructuredErrors,
+                        ExtensionCapability::Hooks,
                     ],
                 },
             ),
@@ -103,6 +106,39 @@ fn main() {
                 request_id,
                 extension_protocol::ToolCancelResult { accepted: true },
             ),
+            ExtensionMethod::HooksList => ExtensionResponse::success(
+                request_id,
+                HooksListResult {
+                    hooks: vec![HookDescriptor {
+                        hook_id: "stdio-hook".to_string(),
+                        phase: HookPhase::BeforeTurn,
+                        priority: 0,
+                    }],
+                },
+            ),
+            ExtensionMethod::HooksBeforeTurn => {
+                let params = request
+                    .decode_params::<BeforeTurnHookParams>()
+                    .expect("fixture hook params should decode");
+                let mut items = params.items;
+                if let Some(first) = items.first().cloned() {
+                    items.push(first);
+                }
+                ExtensionResponse::success(request_id, BeforeTurnHookResult::Continue { items })
+            }
+            ExtensionMethod::HooksCancel => {
+                ExtensionResponse::success(request_id, HookCancelResult { accepted: true })
+            }
+            ExtensionMethod::HooksBeforeToolExecute | ExtensionMethod::HooksAfterToolResult => {
+                Ok(ExtensionResponse::failure(
+                    request_id,
+                    extension_protocol::ExtensionError::new(
+                        extension_protocol::ExtensionErrorCode::CapabilityDenied,
+                        "hooks are unavailable",
+                        false,
+                    ),
+                ))
+            }
             ExtensionMethod::Shutdown => {
                 let response = ExtensionResponse::success(
                     request_id,

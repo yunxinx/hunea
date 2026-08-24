@@ -18,8 +18,14 @@ use crate::{
 };
 
 /// `AgentId` 标识一个由 runtime host 管理的 Agent handle。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AgentId(u64);
+
+impl fmt::Debug for AgentId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AgentId")
+    }
+}
 
 impl AgentId {
     /// 主 Agent 的稳定 handle。
@@ -29,16 +35,32 @@ impl AgentId {
     pub const fn new(value: u64) -> Self {
         Self(value)
     }
+
+    /// 返回跨进程协议使用的稳定数值 identity。
+    pub const fn get(self) -> u64 {
+        self.0
+    }
 }
 
 /// `AgentTurnId` 标识一次 Agent turn，避免事件依赖“唯一活跃 worker”的隐式假设。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AgentTurnId(u64);
+
+impl fmt::Debug for AgentTurnId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AgentTurnId")
+    }
+}
 
 impl AgentTurnId {
     /// 从 host 分配的数值创建 turn identity。
     pub const fn new(value: u64) -> Self {
         Self(value)
+    }
+
+    /// 返回跨进程协议使用的稳定数值 identity。
+    pub const fn get(self) -> u64 {
+        self.0
     }
 }
 
@@ -144,7 +166,7 @@ impl AgentTurnRequest {
 impl fmt::Debug for AgentTurnRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AgentTurnRequest")
-            .field("target", &self.target())
+            .field("has_target", &true)
             .field("delivery", &self.delivery)
             .field("controls", &self.controls)
             .finish()
@@ -174,31 +196,27 @@ pub enum AgentCommand {
 impl fmt::Debug for AgentCommand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::SubmitTurn {
-                agent_id,
-                turn_id,
-                request,
-            } => f
+            Self::SubmitTurn { request, .. } => f
                 .debug_struct("SubmitTurn")
-                .field("agent_id", agent_id)
-                .field("turn_id", turn_id)
+                .field("has_agent_id", &true)
+                .field("has_turn_id", &true)
                 .field("request", request)
                 .finish(),
-            Self::Interrupt { agent_id, target } => f
+            Self::Interrupt { target, .. } => f
                 .debug_struct("Interrupt")
-                .field("agent_id", agent_id)
-                .field("target", target)
+                .field("has_agent_id", &true)
+                .field("has_target", &target.is_some())
                 .finish(),
             Self::RespondPermission {
-                agent_id,
                 target,
                 request_id,
                 option_id,
+                ..
             } => f
                 .debug_struct("RespondPermission")
-                .field("agent_id", agent_id)
-                .field("target", target)
-                .field("request_id", request_id)
+                .field("has_agent_id", &true)
+                .field("has_target", &target.is_some())
+                .field("has_request_id", &!request_id.is_empty())
                 .field("has_option", &option_id.is_some())
                 .finish(),
         }
@@ -206,7 +224,7 @@ impl fmt::Debug for AgentCommand {
 }
 
 /// `AgentCommandReceipt` 只确认命令已原子准入；异步执行结果通过 `AgentEvent` 交付。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum AgentCommandReceipt {
     Accepted,
     TurnStarted {
@@ -219,8 +237,21 @@ pub enum AgentCommandReceipt {
     },
 }
 
+impl fmt::Debug for AgentCommandReceipt {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Accepted => formatter.write_str("Accepted"),
+            Self::TurnStarted { .. } => formatter.write_str("TurnStarted"),
+            Self::Interrupted { target } => formatter
+                .debug_struct("Interrupted")
+                .field("has_target", &target.is_some())
+                .finish(),
+        }
+    }
+}
+
 /// `AgentEvent` 是带显式 Agent/turn identity 的事实 envelope。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AgentEvent {
     pub agent_id: AgentId,
     pub turn_id: AgentTurnId,
@@ -228,8 +259,19 @@ pub struct AgentEvent {
     pub kind: AgentEventKind,
 }
 
+impl fmt::Debug for AgentEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentEvent")
+            .field("has_agent_id", &(self.agent_id.get() != 0))
+            .field("has_turn_id", &(self.turn_id.get() != 0))
+            .field("kind", &self.kind)
+            .finish()
+    }
+}
+
 /// `AgentEventKind` 只包含 Agent turn/progress/tool/permission/terminal 事实。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum AgentEventKind {
     SystemMessage {
         message: String,
@@ -279,6 +321,29 @@ pub enum AgentEventKind {
     TurnInterrupted,
 }
 
+impl fmt::Debug for AgentEventKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            Self::SystemMessage { .. } => "SystemMessage",
+            Self::Retrying { .. } => "Retrying",
+            Self::OutputTokenEstimate { .. } => "OutputTokenEstimate",
+            Self::InputTokenEstimate { .. } => "InputTokenEstimate",
+            Self::Thinking { .. } => "Thinking",
+            Self::AssistantDelta { .. } => "AssistantDelta",
+            Self::ReasoningDelta { .. } => "ReasoningDelta",
+            Self::ToolActivityStarted { .. } => "ToolActivityStarted",
+            Self::ToolActivityUpdated { .. } => "ToolActivityUpdated",
+            Self::TerminalUpdated { .. } => "TerminalUpdated",
+            Self::PermissionRequested { .. } => "PermissionRequested",
+            Self::PreparationWarning { .. } => "PreparationWarning",
+            Self::TurnFinished { .. } => "TurnFinished",
+            Self::TurnFailed { .. } => "TurnFailed",
+            Self::TurnInterrupted => "TurnInterrupted",
+        };
+        formatter.write_str(name)
+    }
+}
+
 impl AgentEventKind {
     /// 判断 event 是否结束当前 turn。
     pub const fn is_terminal(&self) -> bool {
@@ -319,8 +384,11 @@ pub trait AgentRuntime: Send {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentEventKind, AgentId, AgentTurnId, AgentTurnRequest};
-    use crate::session::{ConversationTurnRequest, TranscriptUserMessage};
+    use super::{AgentCommand, AgentEventKind, AgentId, AgentTurnId, AgentTurnRequest};
+    use crate::session::{
+        ConversationTurnRequest, RuntimePermissionOption, RuntimePermissionOptionKind,
+        RuntimePermissionRequest, RuntimeTarget, TranscriptUserMessage,
+    };
 
     #[test]
     fn request_debug_keeps_delivery_and_control_bodies_out_of_diagnostics() {
@@ -354,5 +422,45 @@ mod tests {
         assert_eq!(event.agent_id, AgentId::MAIN);
         assert_eq!(event.turn_id, AgentTurnId::new(9));
         assert!(event.kind.is_terminal());
+    }
+
+    #[test]
+    fn agent_command_and_event_debug_omit_delivery_and_correlation_bodies() {
+        let command = AgentCommand::RespondPermission {
+            agent_id: AgentId::MAIN,
+            target: Some(RuntimeTarget::provider("secret-provider", "secret-model")),
+            request_id: "secret-permission-id".to_string(),
+            option_id: Some("secret-option-id".to_string()),
+        };
+        let event = super::AgentEvent {
+            agent_id: AgentId::new(41),
+            turn_id: AgentTurnId::new(42),
+            target: RuntimeTarget::provider("secret-provider", "secret-model"),
+            kind: AgentEventKind::PermissionRequested {
+                request: RuntimePermissionRequest::new(
+                    "secret-permission-id",
+                    Some("secret permission body".to_string()),
+                    vec![RuntimePermissionOption::new(
+                        "secret-option-id",
+                        "secret option body",
+                        RuntimePermissionOptionKind::AllowOnce,
+                    )],
+                ),
+            },
+        };
+        let debug = format!("{command:?}\n{event:?}");
+
+        for forbidden in [
+            "secret-permission-id",
+            "secret-option-id",
+            "secret permission body",
+            "secret option body",
+            "secret-provider",
+            "secret-model",
+            "41",
+            "42",
+        ] {
+            assert!(!debug.contains(forbidden), "leaked {forbidden}");
+        }
     }
 }

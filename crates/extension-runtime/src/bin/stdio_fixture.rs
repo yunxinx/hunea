@@ -7,11 +7,12 @@ use std::{
 
 use extension_protocol::{
     BeforeTurnHookParams, BeforeTurnHookResult, ExtensionCapability, ExtensionMethod,
-    ExtensionRequest, ExtensionResponse, FrameCodec, HookCancelResult, HookDescriptor, HookPhase,
+    ExtensionRequest, ExtensionResponse, HookCancelResult, HookDescriptor, HookPhase,
     HooksListResult, InitializeResult, ToolContent, ToolDescriptor, ToolExecuteResult,
     ToolsListResult,
 };
 use serde_json::json;
+use stdio_framing::FrameCodec;
 
 fn main() {
     let mode = std::env::args().nth(1).unwrap_or_default();

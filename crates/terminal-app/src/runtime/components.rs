@@ -51,6 +51,9 @@ use runtime_domain::runtime_wake::RuntimeWake;
 #[cfg(test)]
 use super::agent::{ReplayFixture, ReplayLifecycleProbe};
 
+#[cfg(test)]
+use agent_kernel_runtime::{AgentKernelSource, ExternalAgentRuntimeOptions};
+
 #[derive(Clone, Copy)]
 struct CapabilityOwner {
     component_id: &'static str,
@@ -295,6 +298,18 @@ fn replay_agent_replacement_factory(
         builtin_descriptor(plugin_type, "Replay Agent loop")
             .requires(RUNTIME_EVENT_STREAM.capability),
         AgentRuntimeFactory::replay(fixture, lifecycle_probe),
+    )
+}
+
+#[cfg(test)]
+fn external_agent_replacement_factory(
+    plugin_type: &'static str,
+    source: Arc<dyn AgentKernelSource>,
+) -> PluginFactory<RuntimePluginImplementation> {
+    agent_runtime_plugin_factory(
+        builtin_descriptor(plugin_type, "External Agent kernel")
+            .requires(RUNTIME_EVENT_STREAM.capability),
+        AgentRuntimeFactory::external(source, ExternalAgentRuntimeOptions::default()),
     )
 }
 
@@ -2269,6 +2284,7 @@ impl Drop for RuntimeComponents {
 mod tests {
     use std::{
         future::Future,
+        num::NonZeroUsize,
         pin::Pin,
         sync::{
             Mutex,
@@ -2281,6 +2297,17 @@ mod tests {
     use super::*;
     use crate::runtime::agent::{AgentRuntimeActivity, AgentSessionRestore};
     use crate::runtime::lifecycle::{ComponentDefinition, ComponentState};
+    use agent_kernel_protocol::{
+        AgentKernelCapability, AgentKernelCommand, AgentKernelCommandParams,
+        AgentKernelCommandReceipt, AgentKernelCommandResult, AgentKernelEvent,
+        AgentKernelEventKind, AgentKernelEventNotification, AgentKernelInitializeParams,
+        AgentKernelInitializeResult, AgentKernelMethod, AgentKernelRequest, AgentKernelResponse,
+        AgentKernelShutdownResult,
+    };
+    use agent_kernel_runtime::{
+        AgentKernelConnectError, AgentKernelConnection, AgentKernelEventSink,
+        AgentKernelEventStream, AgentKernelRequestTransport, AgentKernelTransportError,
+    };
     use extension_hook_runtime::{
         BeforeTurnDecision, BeforeTurnPayload, HookId, HookOwnerId, HookPriority,
         HookRegistrationOptions,
@@ -2301,6 +2328,190 @@ mod tests {
     use runtime_domain::prompt_assembly::{
         PromptPreludeSection, PromptSourceKind, PromptSourceOrigin,
     };
+
+    #[derive(Default)]
+    struct ComponentKernelSource {
+        connect_count: AtomicUsize,
+        generations: Mutex<Vec<Arc<ComponentKernelGeneration>>>,
+    }
+
+    struct ComponentKernelGeneration {
+        event_sender: Mutex<Option<AgentKernelEventSink>>,
+        commands: Mutex<Vec<AgentKernelCommandParams>>,
+        shutdowns: AtomicUsize,
+    }
+
+    struct ComponentKernelTransport {
+        generation: Arc<ComponentKernelGeneration>,
+    }
+
+    impl ComponentKernelSource {
+        fn generation(&self, index: usize) -> Arc<ComponentKernelGeneration> {
+            Arc::clone(
+                self.generations
+                    .lock()
+                    .expect("kernel generations")
+                    .get(index)
+                    .expect("kernel generation should exist"),
+            )
+        }
+    }
+
+    impl AgentKernelSource for ComponentKernelSource {
+        fn connect(&self) -> Result<AgentKernelConnection, AgentKernelConnectError> {
+            let (event_sender, event_receiver) = AgentKernelEventStream::bounded(
+                NonZeroUsize::new(16).expect("literal event capacity is non-zero"),
+            );
+            let generation = Arc::new(ComponentKernelGeneration {
+                event_sender: Mutex::new(Some(event_sender)),
+                commands: Mutex::new(Vec::new()),
+                shutdowns: AtomicUsize::new(0),
+            });
+            self.connect_count.fetch_add(1, Ordering::SeqCst);
+            self.generations
+                .lock()
+                .expect("kernel generations")
+                .push(Arc::clone(&generation));
+            Ok(AgentKernelConnection::new(
+                ComponentKernelTransport { generation },
+                event_receiver,
+            ))
+        }
+    }
+
+    impl AgentKernelRequestTransport for ComponentKernelTransport {
+        fn request(
+            &self,
+            request: AgentKernelRequest,
+        ) -> Result<AgentKernelResponse, AgentKernelTransportError> {
+            if self
+                .generation
+                .event_sender
+                .lock()
+                .expect("kernel event sender")
+                .is_none()
+            {
+                return Err(AgentKernelTransportError::ShutDown);
+            }
+            let request_id = request.request_id().to_string();
+            match request.method() {
+                AgentKernelMethod::Initialize => {
+                    request
+                        .decode_params::<AgentKernelInitializeParams>()
+                        .map_err(|_| AgentKernelTransportError::Protocol)?;
+                    AgentKernelResponse::success(
+                        request_id,
+                        AgentKernelInitializeResult {
+                            protocol: agent_kernel_protocol::PROTOCOL_NAME.to_string(),
+                            version: agent_kernel_protocol::PROTOCOL_VERSION,
+                            capabilities: vec![
+                                AgentKernelCapability::Events,
+                                AgentKernelCapability::Interrupt,
+                                AgentKernelCapability::PermissionResponse,
+                                AgentKernelCapability::StructuredErrors,
+                            ],
+                            accepted_host_capabilities: Vec::new(),
+                        },
+                    )
+                    .map_err(|_| AgentKernelTransportError::Protocol)
+                }
+                AgentKernelMethod::AgentCommand => {
+                    let params = request
+                        .decode_params::<AgentKernelCommandParams>()
+                        .map_err(|_| AgentKernelTransportError::Protocol)?;
+                    self.generation
+                        .commands
+                        .lock()
+                        .expect("kernel commands")
+                        .push(params.clone());
+                    let receipt = match &params.command {
+                        AgentKernelCommand::SubmitTurn {
+                            turn_id, request, ..
+                        } => AgentKernelCommandReceipt::TurnStarted {
+                            turn_id: *turn_id,
+                            target: request.target.clone(),
+                            activity_label: request.target.model_id.clone(),
+                        },
+                        AgentKernelCommand::Interrupt { target, .. } => {
+                            AgentKernelCommandReceipt::Interrupted {
+                                target: target.clone(),
+                            }
+                        }
+                        AgentKernelCommand::RespondPermission { .. } => {
+                            AgentKernelCommandReceipt::Accepted
+                        }
+                    };
+                    AgentKernelResponse::success(
+                        request_id,
+                        AgentKernelCommandResult {
+                            command_id: params.command_id,
+                            receipt,
+                        },
+                    )
+                    .map_err(|_| AgentKernelTransportError::Protocol)
+                }
+                AgentKernelMethod::Shutdown => AgentKernelResponse::success(
+                    request_id,
+                    AgentKernelShutdownResult { drained: true },
+                )
+                .map_err(|_| AgentKernelTransportError::Protocol),
+            }
+        }
+
+        fn shutdown(&self) -> Result<(), AgentKernelTransportError> {
+            if self
+                .generation
+                .event_sender
+                .lock()
+                .expect("kernel event sender")
+                .take()
+                .is_some()
+            {
+                self.generation.shutdowns.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+    }
+
+    impl ComponentKernelGeneration {
+        fn send_delta(&self, sequence: u64, command_index: usize, content: &str) -> bool {
+            let command = self
+                .commands
+                .lock()
+                .expect("kernel commands")
+                .get(command_index)
+                .cloned()
+                .expect("kernel command should exist");
+            let AgentKernelCommand::SubmitTurn {
+                agent_id,
+                turn_id,
+                request,
+            } = command.command
+            else {
+                panic!("expected submit command")
+            };
+            self.event_sender
+                .lock()
+                .expect("kernel event sender")
+                .as_ref()
+                .is_some_and(|sender| {
+                    sender
+                        .send(AgentKernelEventNotification::new(
+                            sequence,
+                            command.command_id,
+                            AgentKernelEvent {
+                                agent_id,
+                                turn_id,
+                                target: request.target,
+                                kind: AgentKernelEventKind::AssistantDelta {
+                                    content: content.to_string(),
+                                },
+                            },
+                        ))
+                        .is_ok()
+                })
+        }
+    }
 
     fn manager_with_section(
         reference_id: &str,
@@ -3060,6 +3271,20 @@ mod tests {
 
     fn desired_with_runtime_event_plugin(plugin_type: &'static str) -> DesiredPluginComposition {
         desired_with_runtime_event_plugin_in_order(plugin_type, false)
+    }
+
+    fn desired_with_runtime_event_plugin_from(
+        current: &DesiredPluginComposition,
+        plugin_type: &'static str,
+    ) -> DesiredPluginComposition {
+        DesiredPluginComposition::try_new(current.iter().map(|(component_id, current_type)| {
+            if component_id.as_str() == RUNTIME_EVENT_STREAM.component_id {
+                (component_id.as_str(), builtin_plugin_type(plugin_type))
+            } else {
+                (component_id.as_str(), current_type.clone())
+            }
+        }))
+        .expect("runtime event replacement desired state should validate")
     }
 
     fn desired_with_runtime_event_plugin_in_order(
@@ -4282,6 +4507,189 @@ mod tests {
         components
             .validate_context_alignment()
             .expect("Native restoration should keep graph and Context aligned");
+    }
+
+    #[test]
+    fn external_agent_replacement_reacts_to_event_stream_generations() {
+        const EXTERNAL_AGENT: &str = "external-agent-kernel";
+        const FRESH_EVENT_STREAM: &str = "fresh-event-stream-for-external-agent";
+        let source = Arc::new(ComponentKernelSource::default());
+        let kernel_source: Arc<dyn AgentKernelSource> = source.clone();
+        let external_catalog = PluginFactoryCatalog::try_new([external_agent_replacement_factory(
+            EXTERNAL_AGENT,
+            kernel_source,
+        )])
+        .expect("external Agent catalog should validate");
+        let mut options = AppRuntimeOptions::default();
+        let mut components =
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+        assert!(components.agent_session().is_ok());
+
+        components
+            .reconcile_plugin_composition_with_catalog(
+                &options,
+                &external_catalog,
+                desired_with_agent_plugin_for_test(Some(EXTERNAL_AGENT)),
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect("external Agent should replace Native");
+        assert_eq!(source.connect_count.load(Ordering::SeqCst), 1);
+        let session_error = match components.agent_session() {
+            Ok(_) => panic!("external Agent must not fabricate session capability"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            session_error,
+            "Agent adapter does not provide session capability"
+        );
+        let external_component = components
+            .lifecycle
+            .components()
+            .into_iter()
+            .find(|component| component.id == AGENT_RUNTIME_COMPONENT)
+            .expect("Agent component should remain declared");
+        assert_eq!(
+            external_component.required,
+            [RUNTIME_EVENT_STREAM.capability]
+        );
+        assert!(external_component.optional.is_empty());
+
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let captured = Arc::clone(&wakes);
+        let _binding = components.runtime_event_notifier.bind_callback(move || {
+            captured.fetch_add(1, Ordering::SeqCst);
+        });
+        components
+            .agent_port_mut()
+            .dispatch(AgentCommand::SubmitTurn {
+                agent_id: AgentId::MAIN,
+                turn_id: AgentTurnId::new(71),
+                request: Box::new(AgentTurnRequest::from_conversation_request(
+                    runtime_domain::session::ConversationTurnRequest::new_user_text(
+                        "external",
+                        "kernel",
+                        "old generation delivery",
+                    ),
+                )),
+            })
+            .expect("external Agent turn should be admitted");
+        let old_generation = source.generation(0);
+        assert!(old_generation.send_delta(1, 0, "old queued fact"));
+        for _ in 0..200 {
+            if wakes.load(Ordering::SeqCst) > 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+
+        let event_catalog = PluginFactoryCatalog::try_new([runtime_event_replacement_factory(
+            FRESH_EVENT_STREAM,
+            RuntimeComponents::activate_runtime_event_stream,
+        )])
+        .expect("runtime event replacement catalog should validate");
+        let desired = desired_with_runtime_event_plugin_from(
+            components.plugin_loader.desired(),
+            FRESH_EVENT_STREAM,
+        );
+        components
+            .reconcile_plugin_composition_with_catalog(
+                &options,
+                &event_catalog,
+                desired,
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect("event-stream replacement should reactivate external Agent");
+        assert_eq!(old_generation.shutdowns.load(Ordering::SeqCst), 1);
+        assert_eq!(source.connect_count.load(Ordering::SeqCst), 2);
+        assert!(components.agent_port_mut().drain_events().is_empty());
+        assert!(!old_generation.send_delta(2, 0, "stale old fact"));
+
+        components
+            .agent_port_mut()
+            .dispatch(AgentCommand::SubmitTurn {
+                agent_id: AgentId::MAIN,
+                turn_id: AgentTurnId::new(72),
+                request: Box::new(AgentTurnRequest::from_conversation_request(
+                    runtime_domain::session::ConversationTurnRequest::new_user_text(
+                        "external",
+                        "kernel",
+                        "fresh generation delivery",
+                    ),
+                )),
+            })
+            .expect("fresh external generation should admit a turn");
+        let fresh_generation = source.generation(1);
+        let fresh_wake_baseline = wakes.load(Ordering::SeqCst);
+        assert!(fresh_generation.send_delta(1, 0, "fresh fact"));
+        for _ in 0..200 {
+            if wakes.load(Ordering::SeqCst) > fresh_wake_baseline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(matches!(
+            components.agent_port_mut().drain_events().as_slice(),
+            [AgentEvent {
+                kind: AgentEventKind::AssistantDelta { content },
+                ..
+            }] if content == "fresh fact"
+        ));
+
+        let native_catalog = builtin_plugin_catalog().expect("Native catalog should validate");
+        components
+            .reconcile_plugin_composition_with_catalog(
+                &options,
+                &native_catalog,
+                desired_with_agent_plugin_for_test(Some(NATIVE_AGENT_RUNTIME_PLUGIN)),
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect("Native Agent should replace external Agent");
+        assert_eq!(fresh_generation.shutdowns.load(Ordering::SeqCst), 1);
+        assert_eq!(source.connect_count.load(Ordering::SeqCst), 2);
+        assert!(components.agent_session().is_ok());
+        assert_eq!(
+            components
+                .plugin_descriptor_snapshots()
+                .into_iter()
+                .find(|snapshot| snapshot.component_id == AGENT_RUNTIME_COMPONENT)
+                .expect("Agent descriptor should remain visible")
+                .plugin_type,
+            NATIVE_AGENT_RUNTIME_PLUGIN
+        );
+        components
+            .validate_context_alignment()
+            .expect("Native restoration should align graph and Context");
+    }
+
+    #[test]
+    fn external_agent_shutdown_reverses_connection_once() {
+        const EXTERNAL_AGENT: &str = "external-agent-kernel-shutdown";
+        let source = Arc::new(ComponentKernelSource::default());
+        let kernel_source: Arc<dyn AgentKernelSource> = source.clone();
+        let catalog = PluginFactoryCatalog::try_new([external_agent_replacement_factory(
+            EXTERNAL_AGENT,
+            kernel_source,
+        )])
+        .expect("external Agent catalog should validate");
+        let mut options = AppRuntimeOptions::default();
+        let mut components =
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+        components
+            .reconcile_plugin_composition_with_catalog(
+                &options,
+                &catalog,
+                desired_with_agent_plugin_for_test(Some(EXTERNAL_AGENT)),
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect("external Agent should replace Native");
+        let generation = source.generation(0);
+
+        components.shutdown().expect("component shutdown");
+        components.shutdown().expect("repeated component shutdown");
+        assert_eq!(generation.shutdowns.load(Ordering::SeqCst), 1);
+        assert_eq!(source.connect_count.load(Ordering::SeqCst), 1);
+        assert!(components.agent_port_mut().drain_events().is_empty());
     }
 
     #[test]

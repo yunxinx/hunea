@@ -1,5 +1,8 @@
 [workspace]
 members = [
+    "crates/stdio-framing",
+    "crates/agent-kernel-protocol",
+    "crates/agent-kernel-runtime",
     "crates/provider-protocol",
     "crates/extension-protocol",
     "crates/extension-hook-runtime",
@@ -63,6 +66,9 @@ tool-loop-runtime = { path = "crates/tool-loop-runtime" }
 extension-protocol = { path = "crates/extension-protocol" }
 extension-hook-runtime = { path = "crates/extension-hook-runtime" }
 extension-runtime = { path = "crates/extension-runtime" }
+agent-kernel-protocol = { path = "crates/agent-kernel-protocol" }
+agent-kernel-runtime = { path = "crates/agent-kernel-runtime" }
+stdio-framing = { path = "crates/stdio-framing" }
 provider-protocol = { path = "crates/provider-protocol" }
 openai-compat-provider = { path = "crates/openai-compat-provider" }
 terminal-app = { path = "crates/terminal-app" }

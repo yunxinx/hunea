@@ -12,6 +12,7 @@ path = "src/bin/stdio_fixture.rs"
 [dependencies]
 extension-hook-runtime.workspace = true
 extension-protocol.workspace = true
+stdio-framing.workspace = true
 tool-runtime.workspace = true
 serde.workspace = true
 serde_json.workspace = true

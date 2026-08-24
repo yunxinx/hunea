@@ -1,5 +1,6 @@
 //! Agent loop 的内部可替换契约。
 
+mod external;
 mod native;
 #[cfg(test)]
 mod replay;
@@ -7,6 +8,8 @@ mod replay;
 mod tests;
 
 use std::{fmt, path::PathBuf, sync::Arc};
+
+use agent_kernel_runtime::{AgentKernelSource, ExternalAgentRuntimeOptions};
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -250,6 +253,25 @@ impl AgentRuntimeFactory {
         grants: AgentRuntimeConstructionGrants,
     ) -> Result<Box<dyn AgentRuntimePort>, String> {
         (self.construct)(grants).map_err(|_| AGENT_RUNTIME_CONSTRUCTION_FAILED.to_string())
+    }
+
+    /// 为 host 显式提供的 kernel source 创建 construction authority。
+    ///
+    /// 默认 composition 不调用该入口；source discovery 与 trust policy 不属于本层。
+    #[allow(dead_code)]
+    pub(super) fn external(
+        source: Arc<dyn AgentKernelSource>,
+        options: ExternalAgentRuntimeOptions,
+    ) -> Self {
+        Self::new(move |grants| {
+            if grants.payload_count() != 0 {
+                return Err("External Agent received undeclared construction grants".to_string());
+            }
+            Ok(Box::new(external::ExternalAgentRuntimeAdapter::new(
+                Arc::clone(&source),
+                options,
+            )))
+        })
     }
 
     #[cfg(test)]

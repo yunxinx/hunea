@@ -1,0 +1,21 @@
+[package]
+name = "agent-kernel-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "agent-kernel-stdio-fixture"
+path = "src/bin/stdio_fixture.rs"
+
+[dependencies]
+agent-kernel-protocol.workspace = true
+provider-protocol.workspace = true
+runtime-domain.workspace = true
+serde_json.workspace = true
+stdio-framing.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+libc.workspace = true

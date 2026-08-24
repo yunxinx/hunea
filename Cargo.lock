@@ -18,6 +18,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "agent-kernel-protocol"
+version = "0.12.1-alpha.4"
+dependencies = [
+ "provider-protocol",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "agent-kernel-runtime"
+version = "0.12.1-alpha.4"
+dependencies = [
+ "agent-kernel-protocol",
+ "libc",
+ "provider-protocol",
+ "runtime-domain",
+ "serde_json",
+ "stdio-framing",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -919,6 +942,7 @@ dependencies = [
  "provider-protocol",
  "serde",
  "serde_json",
+ "stdio-framing",
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
@@ -3277,6 +3301,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
+name = "stdio-framing"
+version = "0.12.1-alpha.4"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3435,6 +3468,8 @@ dependencies = [
 name = "terminal-app"
 version = "0.12.1-alpha.4"
 dependencies = [
+ "agent-kernel-protocol",
+ "agent-kernel-runtime",
  "app-config",
  "color-eyre",
  "conversation-runtime",

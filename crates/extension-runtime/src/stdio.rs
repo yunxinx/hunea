@@ -15,7 +15,8 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use extension_protocol::{ExtensionRequest, ExtensionResponse, FrameCodec, FrameError};
+use extension_protocol::{ExtensionRequest, ExtensionResponse};
+use stdio_framing::{FrameCodec, FrameError};
 use tokio::sync::oneshot;
 
 use super::{

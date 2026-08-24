@@ -6,6 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+agent-kernel-runtime.workspace = true
 color-eyre.workspace = true
 app-config.workspace = true
 runtime-domain.workspace = true
@@ -30,6 +31,7 @@ yaml_serde.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+agent-kernel-protocol.workspace = true
 extension-protocol.workspace = true
 libc.workspace = true
 proptest.workspace = true

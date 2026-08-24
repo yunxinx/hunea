@@ -2,16 +2,16 @@ use std::sync::{Arc, RwLock, mpsc};
 
 type RuntimeEventCallback = dyn Fn() + Send + Sync + 'static;
 
-/// `RuntimeEventNotifier` 把 worker receiver 的就绪状态通知给外层事件循环。
+/// 把 worker receiver 的就绪状态通知给外层事件循环。
 ///
 /// payload 仍由各 worker 自己的 channel 持有；该类型只负责 wake，避免把调用方的
-/// event-loop 类型反向引入 conversation runtime。
+/// event-loop 类型反向引入 runtime domain。
 #[derive(Clone, Default)]
 pub struct RuntimeEventNotifier {
     callback: Arc<RwLock<Option<Arc<RuntimeEventCallback>>>>,
 }
 
-/// `RuntimeEventBinding` 拥有一次 wake callback 注册，并在释放时撤销该 effect。
+/// 拥有一次 wake callback 注册，并在释放时撤销该 effect。
 ///
 /// 新 callback 替换旧 callback 后，释放旧 binding 不会误删新注册。
 #[must_use = "必须持有 binding，wake callback 才保持注册"]
@@ -26,7 +26,7 @@ pub struct RuntimeEventExitNotification {
     notifier: RuntimeEventNotifier,
 }
 
-/// `NotifyingSender` 保证 payload 成功入队后才通知外层事件循环。
+/// 保证 payload 成功入队后才通知外层事件循环。
 #[derive(Clone)]
 pub struct NotifyingSender<T> {
     sender: mpsc::Sender<T>,
@@ -34,16 +34,19 @@ pub struct NotifyingSender<T> {
 }
 
 impl<T> NotifyingSender<T> {
+    /// 创建一个把 payload channel 与共享 notifier 绑定的 sender。
     pub fn new(sender: mpsc::Sender<T>, notifier: RuntimeEventNotifier) -> Self {
         Self { sender, notifier }
     }
 
+    /// 先发送 payload，且只在发送成功后触发 wake callback。
     pub fn send(&self, payload: T) -> Result<(), mpsc::SendError<T>> {
         self.sender.send(payload)?;
         self.notifier.notify();
         Ok(())
     }
 
+    /// 创建一个在 sender 所属 worker scope 退出时触发 wake 的 guard。
     pub fn notify_on_drop(&self) -> RuntimeEventExitNotification {
         self.notifier.notify_on_drop()
     }

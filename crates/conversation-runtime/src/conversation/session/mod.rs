@@ -14,6 +14,7 @@ use tokio::sync::mpsc as tokio_mpsc;
 use tokio_util::sync::CancellationToken;
 
 use runtime_domain::{
+    event_notifier::{NotifyingSender, RuntimeEventNotifier},
     request_policy::RuntimeRequestPolicy,
     session::{ConversationEvent, RuntimeTarget},
 };
@@ -23,7 +24,6 @@ use tool_runtime::{SharedToolPermissionHandler, ToolExecutorRegistry};
 use super::{
     PersistedConversationItem, TurnExecutionError, turn::run_prepared_conversation_with_progress,
 };
-use crate::{NotifyingSender, RuntimeEventNotifier};
 use crate::{PreparedConversationRequest, ProviderClientLease};
 
 mod cancellation;

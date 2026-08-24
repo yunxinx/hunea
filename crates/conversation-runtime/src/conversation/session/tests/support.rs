@@ -41,9 +41,10 @@ pub(super) use super::super::{
 };
 pub(super) use crate::{
     ConversationResponse, PreparedConversationRequest, PreparedTurnOptions, ProviderClientLease,
-    ProviderConversation, ProviderKind, ProviderPromptCachePolicy, RuntimeEventNotifier,
+    ProviderConversation, ProviderKind, ProviderPromptCachePolicy,
     conversation::PersistedConversationItem,
 };
+pub(super) use runtime_domain::event_notifier::RuntimeEventNotifier;
 
 pub(super) fn fake_provider_lease() -> ProviderClientLease {
     ProviderClientLease::new(

@@ -77,7 +77,7 @@ async fn conversation_worker_reports_interrupted_when_pre_cancelled() {
     cancellation.cancel();
     let (sender, receiver) = mpsc::channel();
     let (wake_sender, wake_receiver) = mpsc::channel();
-    let notifier = crate::RuntimeEventNotifier::default();
+    let notifier = runtime_domain::event_notifier::RuntimeEventNotifier::default();
     let _wake_binding = notifier.bind_callback(move || {
         let _ = wake_sender.send(());
     });

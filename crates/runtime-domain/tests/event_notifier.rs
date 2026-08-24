@@ -3,7 +3,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-use conversation_runtime::{NotifyingSender, RuntimeEventBinding, RuntimeEventNotifier};
+use runtime_domain::event_notifier::{NotifyingSender, RuntimeEventBinding, RuntimeEventNotifier};
 
 #[test]
 fn notifier_is_silent_until_a_callback_is_bound() {

@@ -6,11 +6,10 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 
 use super::context_budget::{ContextBudgetProbe, build_context_budget_snapshot_with_cancellation};
-use conversation_runtime::{
-    ConversationItem, NotifyingSender, RuntimeEventNotifier, ToolDefinition,
-};
+use conversation_runtime::{ConversationItem, ToolDefinition};
 use runtime_domain::{
     context_budget::{ContextBudgetSnapshot, ContextTokenLimit},
+    event_notifier::{NotifyingSender, RuntimeEventNotifier},
     prompt_assembly::PromptPreludeSnapshot,
     provider::ProviderKind,
     session::{ContextBudgetLoadErrorPayload, RuntimeEvent, SessionLoadRequestId},
@@ -590,7 +589,7 @@ mod tests {
     #[test]
     fn context_budget_result_wakes_after_the_payload_is_queued() {
         let (wake_sender, wake_receiver) = mpsc::channel();
-        let notifier = conversation_runtime::RuntimeEventNotifier::default();
+        let notifier = runtime_domain::event_notifier::RuntimeEventNotifier::default();
         let _wake_binding = notifier.bind_callback(move || {
             let _ = wake_sender.send(());
         });
@@ -678,9 +677,10 @@ mod tests {
 
     #[test]
     fn disconnected_context_budget_worker_clears_active_request_and_reports_failure() {
-        let mut worker =
-            ContextBudgetWorker::new(conversation_runtime::RuntimeEventNotifier::default())
-                .expect("worker should initialize");
+        let mut worker = ContextBudgetWorker::new(
+            runtime_domain::event_notifier::RuntimeEventNotifier::default(),
+        )
+        .expect("worker should initialize");
         let (result_tx, result_rx) = mpsc::channel();
         drop(result_tx);
         worker.result_rx = result_rx;

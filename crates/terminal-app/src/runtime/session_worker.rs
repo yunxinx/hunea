@@ -6,10 +6,12 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use conversation_runtime::{NotifyingSender, RuntimeEventNotifier};
-use runtime_domain::session::{
-    MessageHistoryEntryId, PromptAssemblyCommandFailureKind, RuntimeEvent, SessionLoadRequestId,
-    SessionPickerRow, SessionResumePayload, SessionTreePayload,
+use runtime_domain::{
+    event_notifier::{NotifyingSender, RuntimeEventNotifier},
+    session::{
+        MessageHistoryEntryId, PromptAssemblyCommandFailureKind, RuntimeEvent,
+        SessionLoadRequestId, SessionPickerRow, SessionResumePayload, SessionTreePayload,
+    },
 };
 use session_store::{
     MessageHistoryStore, ProjectDir, PromptAssemblyStore, SessionCatalogStore, SessionFlushStore,
@@ -967,7 +969,7 @@ mod tests {
         mpsc,
     };
 
-    use conversation_runtime::RuntimeEventNotifier;
+    use runtime_domain::event_notifier::RuntimeEventNotifier;
 
     use super::*;
 

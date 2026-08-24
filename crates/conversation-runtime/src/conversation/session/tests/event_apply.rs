@@ -17,7 +17,7 @@ fn conversation_runtime_clears_receiver_after_terminal_event() {
         pending_user_entry_id: None,
         session_items: Vec::new(),
         upstream_context_tokens: None,
-        event_notifier: RuntimeEventNotifier::default(),
+        event_notifier: runtime_domain::event_notifier::RuntimeEventNotifier::default(),
     };
 
     assert_eq!(

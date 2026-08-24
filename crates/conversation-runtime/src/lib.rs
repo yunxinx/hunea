@@ -1,5 +1,4 @@
 pub mod conversation;
-mod event_notifier;
 mod llm;
 pub mod models;
 
@@ -11,9 +10,6 @@ pub use conversation::{
 pub use conversation::{
     PreparedConversationRequest, PreparedTurnOptions, ProviderConversation,
     ProviderConversationError,
-};
-pub use event_notifier::{
-    NotifyingSender, RuntimeEventBinding, RuntimeEventExitNotification, RuntimeEventNotifier,
 };
 pub(crate) use llm::ProviderProgress;
 pub use llm::ProviderRequestError;

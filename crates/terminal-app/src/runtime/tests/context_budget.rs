@@ -3,7 +3,7 @@ use super::support::*;
 #[test]
 fn context_budget_worker_shutdown_stops_accepting_new_commands() {
     let mut worker = super::super::context_budget_worker::ContextBudgetWorker::new(
-        conversation_runtime::RuntimeEventNotifier::default(),
+        runtime_domain::event_notifier::RuntimeEventNotifier::default(),
     )
     .expect("context budget worker should initialize");
 

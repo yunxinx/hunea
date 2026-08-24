@@ -3,10 +3,13 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use runtime_domain::model_catalog::ModelProviderRefreshEvent;
+use runtime_domain::{
+    event_notifier::{NotifyingSender, RuntimeEventNotifier},
+    model_catalog::ModelProviderRefreshEvent,
+};
 
 use super::ProviderSyncRequest;
-use crate::{NotifyingSender, ProviderClientLease, RuntimeEventNotifier};
+use crate::ProviderClientLease;
 
 /// 模型列表请求的 HTTP idle timeout 与 total timeout 上限。
 pub const MODEL_LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
@@ -194,7 +197,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::RuntimeEventNotifier;
+    use runtime_domain::event_notifier::RuntimeEventNotifier;
 
     #[test]
     fn refresh_worker_lists_models_and_wakes_after_the_event_is_available() {

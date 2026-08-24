@@ -1,7 +1,9 @@
 use std::{collections::VecDeque, sync::Arc};
 
-use conversation_runtime::RuntimeEventNotifier;
-use runtime_domain::session::{RuntimePermissionRequest, RuntimeTarget};
+use runtime_domain::{
+    event_notifier::RuntimeEventNotifier,
+    session::{RuntimePermissionRequest, RuntimeTarget},
+};
 
 use super::{
     AgentCommand, AgentCommandReceipt, AgentEvent, AgentEventKind, AgentId, AgentRuntime,

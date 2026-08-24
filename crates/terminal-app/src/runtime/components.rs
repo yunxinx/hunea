@@ -3,7 +3,8 @@ use std::{num::NonZeroU32, sync::Arc};
 #[cfg(test)]
 use std::sync::Mutex;
 
-use conversation_runtime::{ModelRefreshWorker, RuntimeEventBinding, RuntimeEventNotifier};
+use conversation_runtime::ModelRefreshWorker;
+use runtime_domain::event_notifier::{RuntimeEventBinding, RuntimeEventNotifier};
 use tool_runtime::ToolExecutorRegistry;
 
 use super::{

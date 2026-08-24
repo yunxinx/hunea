@@ -83,6 +83,31 @@ fn runtime_domain_has_no_frontend_or_runtime_crate_dependencies() {
     }
 }
 
+#[test]
+fn event_notifier_has_one_domain_owner() {
+    let workspace = workspace_root();
+    let conversation_runtime = workspace.join("crates/conversation-runtime");
+    let runtime_domain = workspace.join("crates/runtime-domain/src/event_notifier.rs");
+
+    assert!(
+        runtime_domain.is_file(),
+        "runtime-domain should own the event notifier implementation"
+    );
+    assert!(
+        !conversation_runtime.join("src/event_notifier.rs").exists(),
+        "conversation-runtime must not retain a second notifier implementation"
+    );
+    let conversation_lib = fs::read_to_string(conversation_runtime.join("src/lib.rs"))
+        .expect("conversation-runtime lib is readable");
+    assert!(
+        !conversation_lib.contains("RuntimeEventNotifier")
+            && !conversation_lib.contains("NotifyingSender")
+            && !conversation_lib.contains("RuntimeEventBinding")
+            && !conversation_lib.contains("RuntimeEventExitNotification"),
+        "conversation-runtime must not re-export domain notifier types"
+    );
+}
+
 fn workspace_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()

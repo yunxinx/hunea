@@ -9,8 +9,7 @@ use std::{
     sync::{Arc, Mutex, Weak},
 };
 
-use conversation_runtime::RuntimeEventNotifier;
-use runtime_domain::runtime_wake::RuntimeWake;
+use runtime_domain::{event_notifier::RuntimeEventNotifier, runtime_wake::RuntimeWake};
 
 use super::{
     effect_scope::EffectScope,
@@ -299,7 +298,7 @@ impl RuntimeContext {
     }
 
     pub(super) fn event_stream_lease(
-        value: conversation_runtime::RuntimeEventNotifier,
+        value: RuntimeEventNotifier,
         provider_component: &str,
     ) -> CapabilityLease<RuntimeEventStreamCapability> {
         let context = Self::default();
@@ -515,7 +514,7 @@ impl RuntimeContext {
 #[cfg(test)]
 impl RuntimeContext {
     pub(super) fn test_event_stream_lease(
-        value: conversation_runtime::RuntimeEventNotifier,
+        value: RuntimeEventNotifier,
     ) -> CapabilityLease<RuntimeEventStreamCapability> {
         Self::event_stream_lease(value, "test_runtime_event_stream")
     }

@@ -1,6 +1,7 @@
 pub mod context_budget;
 pub mod dynamic_environment;
 pub mod envinfo;
+pub mod event_notifier;
 pub mod model_catalog;
 pub mod model_context_limit;
 mod model_family;

@@ -5,12 +5,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-use conversation_runtime::RuntimeEventNotifier;
 use provider_protocol::{
     ConversationItem, FinishReason, ModelDescriptor, PromptCompletion, PromptRequest,
     ProviderCapabilities, ProviderClient, ProviderError, ProviderFuture, Role, StreamEvent,
     StreamEventSink,
 };
+use runtime_domain::event_notifier::RuntimeEventNotifier;
 use runtime_domain::{
     prompt_assembly::PromptSourceOrigin,
     session::{

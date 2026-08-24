@@ -7,7 +7,7 @@ use std::{
 };
 
 #[cfg(test)]
-use conversation_runtime::RuntimeEventNotifier;
+use runtime_domain::event_notifier::RuntimeEventNotifier;
 use runtime_domain::session::{
     RuntimePermissionOption, RuntimePermissionOptionKind, RuntimePermissionRequest,
 };

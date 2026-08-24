@@ -1,13 +1,12 @@
 use std::{collections::VecDeque, path::Path, sync::Arc};
 
-use conversation_runtime::{
-    ConversationWorker, PreparedTurnOptions, ProviderConversation, RuntimeEventNotifier,
-};
+use conversation_runtime::{ConversationWorker, PreparedTurnOptions, ProviderConversation};
 use runtime_domain::{
     context_budget::ContextWindowUsage,
     dynamic_environment::{
         DynamicEnvironmentSessionConfig, enabled_dynamic_environment_sources_for_session_config,
     },
+    event_notifier::RuntimeEventNotifier,
     model_catalog::ModelSelection,
     prompt_assembly::PromptAssemblyManagerSnapshot,
     request_policy::RuntimeRequestPolicy,

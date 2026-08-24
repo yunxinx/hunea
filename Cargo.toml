@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/provider-protocol",
+    "crates/extension-protocol",
     "crates/session-store",
     "crates/openai-compat-provider",
     "crates/tool-loop-runtime",

@@ -888,6 +888,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "extension-protocol"
+version = "0.12.1-alpha.4"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "eyre"
 version = "0.6.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"

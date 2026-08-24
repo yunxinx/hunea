@@ -2,7 +2,8 @@ use provider_protocol::ConversationItem;
 use runtime_domain::session::TranscriptReplayItem;
 
 use crate::{
-    ResolveError, ResolvedSessionItem, ResolvedSessionState, SessionEntry, SessionEntryKind,
+    ResolveError, ResolvedConversationState, ResolvedSessionItem, ResolvedSessionState,
+    SessionEntry, SessionEntryKind,
 };
 
 use super::{
@@ -15,6 +16,7 @@ pub fn resolve(
     leaf_id: &str,
 ) -> Result<Vec<ConversationItem>, ResolveError> {
     Ok(resolve_state(entries, leaf_id)?
+        .conversation
         .items
         .into_iter()
         .map(|item| item.item)
@@ -80,9 +82,11 @@ fn resolve_state_from_path(path: &[&SessionEntry]) -> Result<ResolvedSessionStat
     }
 
     Ok(ResolvedSessionState {
-        items: resolved_items,
+        conversation: ResolvedConversationState {
+            items: resolved_items,
+            latest_config,
+        },
         transcript,
-        latest_config,
     })
 }
 

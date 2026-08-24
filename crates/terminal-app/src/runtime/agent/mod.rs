@@ -8,8 +8,7 @@ mod tests;
 
 use std::{fmt, sync::Arc};
 
-use conversation_runtime::ProviderConversation;
-use session_store::SessionId;
+use session_store::{ResolvedConversationState, SessionHeader, SessionId, SessionPort};
 use tool_runtime::ToolExecutorRegistry;
 
 use runtime_domain::{
@@ -338,10 +337,63 @@ pub(super) trait AgentRuntimePort: AgentRuntime {
         session_workspace_tools: ToolExecutorRegistry,
     );
 
-    fn replace_conversation(&mut self, conversation: ProviderConversation) -> Result<(), String>;
+    fn restore_session(&mut self, restore: AgentSessionRestore) -> Result<(), String>;
 
     #[cfg(test)]
     fn has_pending_work(&self) -> bool;
+}
+
+/// Host 交给当前 Agent adapter 的 framework-neutral session restore value。
+pub(super) struct AgentSessionRestore {
+    session_port: Arc<dyn SessionPort>,
+    header: SessionHeader,
+    session_id: SessionId,
+    conversation: ResolvedConversationState,
+}
+
+impl AgentSessionRestore {
+    pub(super) fn new(
+        session_port: Arc<dyn SessionPort>,
+        header: SessionHeader,
+        session_id: SessionId,
+        conversation: ResolvedConversationState,
+    ) -> Self {
+        Self {
+            session_port,
+            header,
+            session_id,
+            conversation,
+        }
+    }
+
+    fn into_parts(
+        self,
+    ) -> (
+        Arc<dyn SessionPort>,
+        SessionHeader,
+        SessionId,
+        ResolvedConversationState,
+    ) {
+        (
+            self.session_port,
+            self.header,
+            self.session_id,
+            self.conversation,
+        )
+    }
+}
+
+impl fmt::Debug for AgentSessionRestore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AgentSessionRestore")
+            .field("session_id", &self.session_id)
+            .field("item_count", &self.conversation.items.len())
+            .field(
+                "has_latest_config",
+                &self.conversation.latest_config.is_some(),
+            )
+            .finish()
+    }
 }
 
 /// `/context` 与 host worker 之间传递的 Agent-owned immutable snapshot。

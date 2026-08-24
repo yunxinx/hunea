@@ -164,6 +164,11 @@ impl PermissionPolicy {
         lock(&self.state).is_active
     }
 
+    #[cfg(test)]
+    pub(super) fn context_generation_for_test(&self) -> u64 {
+        lock(&self.state).context_generation
+    }
+
     /// 注册一个 approval provider；duplicate 在 identity 分配与 mutation 前拒绝。
     pub(super) fn register(
         &self,

@@ -11,7 +11,8 @@ use runtime_domain::{
     },
 };
 use session_store::{
-    ConfigSnapshot, ResolvedSessionState, SessionHeader, SessionId, SessionPort, SessionStoreError,
+    ConfigSnapshot, ResolvedConversationState, SessionHeader, SessionId, SessionPort,
+    SessionStoreError,
 };
 
 mod history;
@@ -191,7 +192,7 @@ impl ProviderConversation {
             store,
             header_template,
             None,
-            &ResolvedSessionState::default(),
+            ResolvedConversationState::default(),
         ))
     }
 
@@ -201,7 +202,7 @@ impl ProviderConversation {
         store: Arc<dyn SessionPort>,
         header_template: SessionHeader,
         session_id: Option<SessionId>,
-        restored_state: &ResolvedSessionState,
+        restored_state: ResolvedConversationState,
     ) -> Result<Self, ProviderConversationError> {
         Ok(Self::from_resolved_session_port(
             store,
@@ -215,32 +216,42 @@ impl ProviderConversation {
         store: Arc<dyn SessionPort>,
         header_template: SessionHeader,
         session_id: Option<SessionId>,
-        restored_state: &ResolvedSessionState,
+        restored_state: ResolvedConversationState,
     ) -> Self {
-        let persisted_history = restored_state
-            .items
-            .iter()
+        let ResolvedConversationState {
+            items,
+            latest_config,
+        } = restored_state;
+        let persisted_history = items
+            .into_iter()
             .map(|entry| PersistedConversationItem {
-                entry_id: Some(entry.entry_id.clone()),
-                item: entry.item.clone(),
+                entry_id: Some(entry.entry_id),
+                item: entry.item,
             })
             .collect::<Vec<_>>();
+        let (
+            system_prompt,
+            prompt_prelude,
+            dynamic_environment_session_config,
+            dynamic_environment_observations,
+        ) = match latest_config {
+            Some(config) => {
+                let system_prompt = restored_effective_system_prompt(&config);
+                (
+                    system_prompt,
+                    config.prompt_prelude,
+                    config.dynamic_environment_session_config,
+                    config.dynamic_environment_observations,
+                )
+            }
+            None => (None, None, None, Vec::new()),
+        };
 
         Self {
-            system_prompt: restored_effective_system_prompt(restored_state),
-            prompt_prelude: restored_state
-                .latest_config
-                .as_ref()
-                .and_then(|config| config.prompt_prelude.clone()),
-            dynamic_environment_session_config: restored_state
-                .latest_config
-                .as_ref()
-                .and_then(|config| config.dynamic_environment_session_config.clone()),
-            dynamic_environment_observations: restored_state
-                .latest_config
-                .as_ref()
-                .map(|config| config.dynamic_environment_observations.clone())
-                .unwrap_or_default(),
+            system_prompt,
+            prompt_prelude,
+            dynamic_environment_session_config,
+            dynamic_environment_observations,
             persisted_history,
             pending_user_items: Vec::new(),
             pending_dynamic_environment_observations: None,
@@ -493,8 +504,7 @@ fn normalize_system_prompt(prompt: String) -> Option<String> {
     (!prompt.is_empty()).then_some(prompt)
 }
 
-fn restored_effective_system_prompt(restored_state: &ResolvedSessionState) -> Option<String> {
-    let config = restored_state.latest_config.as_ref()?;
+fn restored_effective_system_prompt(config: &ConfigSnapshot) -> Option<String> {
     config
         .prompt_prelude
         .as_ref()

@@ -540,6 +540,7 @@ fn persist_turn_start_keeps_provider_message_in_items_and_transcript_projection_
 
     assert_eq!(
         restored
+            .conversation
             .items
             .iter()
             .map(|item| item.item.clone())

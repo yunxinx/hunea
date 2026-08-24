@@ -22,7 +22,8 @@ use tool_runtime::{ToolDefinition, ToolExecutorRegistry};
 
 use super::{
     AgentCommand, AgentCommandReceipt, AgentContextBudgetSnapshot, AgentEvent, AgentEventKind,
-    AgentId, AgentRuntime, AgentRuntimeError, AgentRuntimePort, AgentTurnId, AgentTurnRequest,
+    AgentId, AgentRuntime, AgentRuntimeError, AgentRuntimePort, AgentSessionRestore, AgentTurnId,
+    AgentTurnRequest,
 };
 use crate::prompt_assembly::{
     AttachedPromptMessageAssembly, ManualSkillPromptUse, PromptAssemblyWorkspace,
@@ -293,7 +294,7 @@ impl NativeAgentRuntime {
         self.session_workspace_tools = session_workspace_tools;
     }
 
-    pub(crate) fn replace_conversation(
+    fn install_restored_conversation(
         &mut self,
         conversation: ProviderConversation,
     ) -> Result<(), String> {
@@ -303,8 +304,9 @@ impl NativeAgentRuntime {
         self.pending_turn = None;
         self.active_turn = None;
         self.pending_events.clear();
-        worker_result?;
+        let _ = self.provider_conversation.rollback_pending_user();
         self.permission_policy.clear_context();
+        worker_result?;
         self.provider_conversation = conversation;
         Ok(())
     }
@@ -327,6 +329,11 @@ impl NativeAgentRuntime {
     #[cfg(test)]
     pub(crate) fn permission_provider_id_for_test(&self) -> &str {
         &self.permission_provider_id
+    }
+
+    #[cfg(test)]
+    pub(crate) fn permission_context_generation_for_test(&self) -> u64 {
+        self.permission_policy.context_generation_for_test()
     }
 
     #[cfg(test)]
@@ -940,8 +947,16 @@ impl AgentRuntimePort for NativeAgentRuntime {
         self.update_empty_session_configuration(prompt_assembly, session_workspace_tools);
     }
 
-    fn replace_conversation(&mut self, conversation: ProviderConversation) -> Result<(), String> {
-        self.replace_conversation(conversation)
+    fn restore_session(&mut self, restore: AgentSessionRestore) -> Result<(), String> {
+        let (session_port, header, session_id, conversation_state) = restore.into_parts();
+        let conversation = ProviderConversation::with_resolved_session_port(
+            session_port,
+            header,
+            Some(session_id),
+            conversation_state,
+        )
+        .map_err(|error| error.to_string())?;
+        self.install_restored_conversation(conversation)
     }
 
     #[cfg(test)]

@@ -6,7 +6,7 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use conversation_runtime::{NotifyingSender, ProviderConversation, RuntimeEventNotifier};
+use conversation_runtime::{NotifyingSender, RuntimeEventNotifier};
 use runtime_domain::session::{
     MessageHistoryEntryId, PromptAssemblyCommandFailureKind, RuntimeEvent, SessionLoadRequestId,
     SessionPickerRow, SessionResumePayload, SessionTreePayload,
@@ -18,9 +18,9 @@ use session_store::{
 };
 
 use super::{
-    session_branch_tree_payload, session_picker_row_from_meta, session_port::SessionBackendViews,
-    session_preview_payload, session_resume_payload, session_tree_load::SessionTreeLoadConsumer,
-    session_tree_payload,
+    agent::AgentSessionRestore, session_branch_tree_payload, session_picker_row_from_meta,
+    session_port::SessionBackendViews, session_preview_payload, session_resume_payload,
+    session_tree_load::SessionTreeLoadConsumer, session_tree_payload,
 };
 
 const SESSION_SHUTDOWN_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -40,11 +40,11 @@ pub(super) enum SessionStoreWorkerEvent {
         is_mutation: bool,
     },
     Restored {
-        conversation: ProviderConversation,
+        restore: AgentSessionRestore,
         payload: SessionResumePayload,
     },
     RestoredWithTree {
-        conversation: ProviderConversation,
+        restore: AgentSessionRestore,
         resume_payload: SessionResumePayload,
         tree_request_id: SessionLoadRequestId,
         tree_payload: SessionTreePayload,
@@ -652,11 +652,8 @@ async fn handle_session_command(command: SessionStoreCommand) -> SessionStoreWor
             store,
             header,
             session_id,
-        } => match restore_conversation(store, header, session_id, None).await {
-            Ok((conversation, payload)) => SessionStoreWorkerEvent::Restored {
-                conversation,
-                payload,
-            },
+        } => match prepare_session_restore(store, header, session_id, None).await {
+            Ok((restore, payload)) => SessionStoreWorkerEvent::Restored { restore, payload },
             Err(message) => failed(message, true),
         },
         SessionStoreCommand::LoadSessionTree {
@@ -721,9 +718,9 @@ async fn handle_session_command(command: SessionStoreCommand) -> SessionStoreWor
             request_id,
             leaf_id,
         } => match switch_branch(port, tree, lifecycle, header, session_id, leaf_id).await {
-            Ok((conversation, resume_payload, tree_payload)) => {
+            Ok((restore, resume_payload, tree_payload)) => {
                 SessionStoreWorkerEvent::RestoredWithTree {
-                    conversation,
+                    restore,
                     resume_payload,
                     tree_request_id: request_id,
                     tree_payload,
@@ -744,10 +741,7 @@ async fn handle_session_command(command: SessionStoreCommand) -> SessionStoreWor
             session_id,
             entry_id,
         } => match select_entry_rewind(port, tree, lifecycle, header, session_id, entry_id).await {
-            Ok(Some((conversation, payload))) => SessionStoreWorkerEvent::Restored {
-                conversation,
-                payload,
-            },
+            Ok(Some((restore, payload))) => SessionStoreWorkerEvent::Restored { restore, payload },
             Ok(None) => SessionStoreWorkerEvent::Noop,
             Err(message) => failed(message, true),
         },
@@ -877,25 +871,27 @@ async fn list_session_rows(
         .collect())
 }
 
-async fn restore_conversation(
+async fn prepare_session_restore(
     store: Arc<dyn SessionPort>,
     header: SessionHeader,
     session_id: SessionId,
     leaf_id: Option<&str>,
-) -> Result<(ProviderConversation, SessionResumePayload), String> {
+) -> Result<(AgentSessionRestore, SessionResumePayload), String> {
     let restored_state = store
         .load_session(&session_id, leaf_id)
         .await
         .map_err(|error| error.to_string())?;
-    let conversation = ProviderConversation::with_resolved_session_port(
-        store,
-        header,
-        Some(session_id.clone()),
-        &restored_state,
-    )
-    .map_err(|error| error.to_string())?;
-    let payload = session_resume_payload(session_id, restored_state);
-    Ok((conversation, payload))
+    let session_store::ResolvedSessionState {
+        conversation,
+        transcript,
+    } = restored_state;
+    let payload = session_resume_payload(
+        session_id.clone(),
+        transcript,
+        conversation.latest_config.as_ref(),
+    );
+    let restore = AgentSessionRestore::new(store, header, session_id, conversation);
+    Ok((restore, payload))
 }
 
 async fn switch_branch(
@@ -907,14 +903,14 @@ async fn switch_branch(
     leaf_id: String,
 ) -> Result<
     (
-        ProviderConversation,
+        AgentSessionRestore,
         SessionResumePayload,
         SessionTreePayload,
     ),
     String,
 > {
-    let (conversation, resume_payload) =
-        restore_conversation(port, header, session_id.clone(), Some(&leaf_id)).await?;
+    let (restore, resume_payload) =
+        prepare_session_restore(port, header, session_id.clone(), Some(&leaf_id)).await?;
     let tree_snapshot = tree
         .load_session_tree_for_leaf(&session_id, &leaf_id)
         .await
@@ -923,11 +919,7 @@ async fn switch_branch(
         .set_leaf(&session_id, Some(&leaf_id))
         .await
         .map_err(|error| error.to_string())?;
-    Ok((
-        conversation,
-        resume_payload,
-        session_tree_payload(tree_snapshot),
-    ))
+    Ok((restore, resume_payload, session_tree_payload(tree_snapshot)))
 }
 
 async fn select_entry_rewind(
@@ -937,7 +929,7 @@ async fn select_entry_rewind(
     header: SessionHeader,
     session_id: SessionId,
     entry_id: String,
-) -> Result<Option<(ProviderConversation, SessionResumePayload)>, String> {
+) -> Result<Option<(AgentSessionRestore, SessionResumePayload)>, String> {
     let snapshot = tree
         .load_session_tree(&session_id)
         .await
@@ -951,13 +943,13 @@ async fn select_entry_rewind(
         return Ok(None);
     };
     let rewind_target_id = rewind_target_id.to_string();
-    let (conversation, payload) =
-        restore_conversation(port, header, session_id.clone(), Some(&rewind_target_id)).await?;
+    let (restore, payload) =
+        prepare_session_restore(port, header, session_id.clone(), Some(&rewind_target_id)).await?;
     lifecycle
         .set_leaf(&session_id, Some(&rewind_target_id))
         .await
         .map_err(|error| error.to_string())?;
-    Ok(Some((conversation, payload)))
+    Ok(Some((restore, payload)))
 }
 
 fn failed(message: String, is_mutation: bool) -> SessionStoreWorkerEvent {

@@ -232,12 +232,36 @@ pub struct ResolvedSessionItem {
     pub item: ConversationItem,
 }
 
-/// 恢复 session 时返回的完整状态。
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct ResolvedSessionState {
+/// 恢复 Agent conversation 所需的 continuation state。
+#[derive(Clone, PartialEq, Eq, Default)]
+pub struct ResolvedConversationState {
     pub items: Vec<ResolvedSessionItem>,
-    pub transcript: Vec<TranscriptReplayItem>,
     pub latest_config: Option<ConfigSnapshot>,
+}
+
+impl std::fmt::Debug for ResolvedConversationState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedConversationState")
+            .field("item_count", &self.items.len())
+            .field("has_latest_config", &self.latest_config.is_some())
+            .finish()
+    }
+}
+
+/// 恢复 session 时返回的 Agent continuation 与 TUI transcript delivery。
+#[derive(Clone, PartialEq, Eq, Default)]
+pub struct ResolvedSessionState {
+    pub conversation: ResolvedConversationState,
+    pub transcript: Vec<TranscriptReplayItem>,
+}
+
+impl std::fmt::Debug for ResolvedSessionState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedSessionState")
+            .field("conversation", &self.conversation)
+            .field("transcript_item_count", &self.transcript.len())
+            .finish()
+    }
 }
 
 mod session_tree;
@@ -454,7 +478,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ConfigSnapshot, ProjectDir, SHORT_ENTRY_ID_HEX_LEN, SessionEntry, SessionEntryKind,
+        ConfigSnapshot, ProjectDir, ResolvedConversationState, ResolvedSessionItem,
+        ResolvedSessionState, SHORT_ENTRY_ID_HEX_LEN, SessionEntry, SessionEntryKind,
         SessionHeader, SessionId, generate_entry_id, generate_entry_id_with, hunea_dir,
         session_filename, short_entry_id,
     };
@@ -581,6 +606,44 @@ mod tests {
 
             assert_eq!(decoded, entry);
         }
+    }
+
+    #[test]
+    fn resolved_session_debug_redacts_conversation_and_transcript_content() {
+        let sentinel = "private-session-restore-content";
+        let state = ResolvedSessionState {
+            conversation: ResolvedConversationState {
+                items: vec![ResolvedSessionItem {
+                    entry_id: "private-entry-id".to_string(),
+                    item: ConversationItem::text(Role::User, sentinel),
+                }],
+                latest_config: Some(ConfigSnapshot {
+                    provider_id: "private-provider".to_string(),
+                    model: "private-model".to_string(),
+                    system_prompt: Some("private-instruction".to_string()),
+                    prompt_prelude: None,
+                    dynamic_environment_session_config: None,
+                    dynamic_environment_observations: Vec::new(),
+                }),
+            },
+            transcript: vec![TranscriptReplayItem::Message {
+                role: runtime_domain::session::TranscriptReplayRole::User,
+                content: sentinel.to_string(),
+            }],
+        };
+
+        let debug = format!("{state:?}");
+        for private in [
+            sentinel,
+            "private-entry-id",
+            "private-provider",
+            "private-model",
+            "private-instruction",
+        ] {
+            assert!(!debug.contains(private), "resolved state leaked {private}");
+        }
+        assert!(debug.contains("item_count: 1"));
+        assert!(debug.contains("transcript_item_count: 1"));
     }
 
     #[test]

@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use conversation_runtime::{ProviderConversation, RuntimeEventNotifier};
+use conversation_runtime::RuntimeEventNotifier;
 use provider_protocol::{
     ConversationItem, FinishReason, ModelDescriptor, PromptCompletion, PromptRequest,
     ProviderCapabilities, ProviderClient, ProviderError, ProviderFuture, Role, StreamEvent,
@@ -27,7 +27,7 @@ use tool_runtime::{
 
 use super::{
     AgentCommand, AgentEvent, AgentEventKind, AgentId, AgentRuntime, AgentRuntimeError,
-    AgentRuntimePort, AgentTurnId, AgentTurnRequest, NativeAgentRuntime,
+    AgentRuntimePort, AgentSessionRestore, AgentTurnId, AgentTurnRequest, NativeAgentRuntime,
 };
 use crate::runtime::{
     AppRuntimeOptions,
@@ -56,15 +56,19 @@ fn native_runtime_projects_host_operations_through_agent_port() {
     assert!(!port.has_pending_work());
     assert!(port.drain_events().is_empty());
 
-    let mut restored = ProviderConversation::new();
-    restored
-        .append_items(vec![ConversationItem::text(Role::User, "restored")])
-        .expect("restored conversation fixture should accept history");
-    port.replace_conversation(restored)
-        .expect("host port should install a restored conversation");
+    let (session_id, restore) = restore_fixture(
+        vec![session_store::ResolvedSessionItem {
+            entry_id: "restored-user".to_string(),
+            item: ConversationItem::text(Role::User, "restored"),
+        }],
+        None,
+    );
+    port.restore_session(restore)
+        .expect("host port should restore Agent session state");
 
     assert!(!port.is_history_empty());
     assert!(!port.is_idle_empty_session());
+    assert_eq!(port.session_id(), Some(session_id));
     assert_eq!(port.context_budget_snapshot().items.len(), 1);
 
     port.shutdown()
@@ -78,6 +82,30 @@ fn native_runtime_projects_host_operations_through_agent_port() {
         }),
         Err(AgentRuntimeError::Disposed)
     ));
+}
+
+fn restore_fixture(
+    items: Vec<session_store::ResolvedSessionItem>,
+    latest_config: Option<session_store::ConfigSnapshot>,
+) -> (session_store::SessionId, AgentSessionRestore) {
+    let session_id = session_store::SessionId::new();
+    let restore = AgentSessionRestore::new(
+        std::sync::Arc::new(session_store::InMemorySessionStore::new()),
+        session_store::SessionHeader {
+            session_id: session_id.clone(),
+            work_dir: std::path::PathBuf::from("/agent-port-restore"),
+            session_name: None,
+            initial_model: "fixture-model".to_string(),
+            git_head: None,
+            cli_version: None,
+        },
+        session_id.clone(),
+        session_store::ResolvedConversationState {
+            items,
+            latest_config,
+        },
+    );
+    (session_id, restore)
 }
 
 impl Deref for NativeRuntimeFixture {
@@ -109,6 +137,13 @@ fn permission_policy_fixture(
 }
 
 fn native_runtime(event_notifier: RuntimeEventNotifier) -> NativeRuntimeFixture {
+    native_runtime_with_llm_port(event_notifier, crate::runtime::llm_port::LlmPort::new())
+}
+
+fn native_runtime_with_llm_port(
+    event_notifier: RuntimeEventNotifier,
+    llm_port: crate::runtime::llm_port::LlmPort,
+) -> NativeRuntimeFixture {
     let (permission_policy, approval_registration) =
         permission_policy_fixture(event_notifier.clone());
     let runtime = NativeAgentRuntime::new_for_test(
@@ -125,7 +160,7 @@ fn native_runtime(event_notifier: RuntimeEventNotifier) -> NativeRuntimeFixture 
         PromptAssemblySessionSnapshot::default(),
         None,
         event_notifier,
-        crate::runtime::llm_port::LlmPort::new(),
+        llm_port,
         permission_policy,
         TERMINAL_APPROVAL_PROVIDER_ID,
     )
@@ -219,6 +254,51 @@ impl ProviderClient for NativeFailureProvider {
 
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities::chat_completions()
+    }
+}
+
+struct NativePanicProvider;
+
+impl ProviderClient for NativePanicProvider {
+    fn stream_prompt<'a>(
+        &'a self,
+        _request: &'a PromptRequest,
+        _sink: &'a mut (dyn StreamEventSink + Send),
+    ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
+        Box::pin(async { panic!("injected native provider panic") })
+    }
+
+    fn list_models<'a>(
+        &'a self,
+    ) -> ProviderFuture<'a, Result<Vec<ModelDescriptor>, ProviderError>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::chat_completions()
+    }
+}
+
+struct NativePanicFactory;
+
+impl crate::runtime::llm_port::ProviderClientFactory for NativePanicFactory {
+    fn create_client(
+        &self,
+        _idle_timeout: Duration,
+    ) -> Result<std::sync::Arc<dyn ProviderClient>, crate::runtime::llm_port::LlmPortError> {
+        Ok(std::sync::Arc::new(NativePanicProvider))
+    }
+
+    fn provider_kind(&self) -> runtime_domain::provider::ProviderKind {
+        runtime_domain::provider::ProviderKind::OpenAiCompatible
+    }
+
+    fn prompt_cache_policy(&self) -> conversation_runtime::ProviderPromptCachePolicy {
+        conversation_runtime::ProviderPromptCachePolicy::Disabled
+    }
+
+    fn adapter_kind(&self) -> &'static str {
+        "native-panic-fixture"
     }
 }
 
@@ -825,6 +905,90 @@ fn provider_failure_is_redacted_before_runtime_event_projection() {
 }
 
 #[test]
+fn native_restore_cleanup_failure_reverts_turn_effects_without_installing_candidate() {
+    let llm_port = crate::runtime::llm_port::LlmPort::new();
+    let _registration = llm_port
+        .register(
+            "native-panic-test",
+            "panic-fixture",
+            std::sync::Arc::new(NativePanicFactory),
+        )
+        .expect("panic fixture provider should register");
+    let notifier = RuntimeEventNotifier::default();
+    let (exit_sender, exit_receiver) = mpsc::channel();
+    let _binding = notifier.bind_callback(move || {
+        let _ = exit_sender.send(());
+    });
+    let mut runtime = native_runtime_with_llm_port(notifier, llm_port);
+    let permission_context_generation = runtime.permission_context_generation_for_test();
+    let port: &mut dyn AgentRuntimePort = &mut *runtime;
+    port.dispatch(AgentCommand::SubmitTurn {
+        agent_id: AgentId::MAIN,
+        turn_id: AgentTurnId::new(20),
+        request: Box::new(AgentTurnRequest::from_conversation_request(
+            ConversationTurnRequest::new(
+                "panic-fixture",
+                "fixture-model",
+                ConversationItem::text(Role::User, "must be rolled back"),
+            ),
+        )),
+    })
+    .expect("panic fixture turn should be admitted before its worker exits");
+    exit_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("panicked worker should wake the runtime consumer on exit");
+
+    let (candidate_session_id, restore) = restore_fixture(
+        vec![session_store::ResolvedSessionItem {
+            entry_id: "candidate-user".to_string(),
+            item: ConversationItem::text(Role::User, "candidate history"),
+        }],
+        None,
+    );
+    let error = port
+        .restore_session(restore)
+        .expect_err("worker cleanup failure must reject the candidate restore");
+
+    assert_eq!(error, "conversation worker thread panicked");
+    assert_ne!(port.session_id(), Some(candidate_session_id));
+    assert!(port.session_id().is_none());
+    assert!(port.is_history_empty());
+    assert!(!port.is_busy());
+    assert!(!port.has_pending_work());
+    assert!(port.drain_events().is_empty());
+    assert_eq!(
+        runtime.permission_context_generation_for_test(),
+        permission_context_generation + 1,
+        "cleanup failure must still clear the permission context"
+    );
+    runtime
+        .shutdown()
+        .expect("failed restore must still leave a quiescent disposable owner");
+}
+
+#[test]
+fn agent_session_restore_debug_redacts_instruction_and_provider_state() {
+    let sentinel = "private-restore-instruction";
+    let (_session_id, restore) = restore_fixture(
+        Vec::new(),
+        Some(session_store::ConfigSnapshot {
+            provider_id: "private-provider".to_string(),
+            model: "private-model".to_string(),
+            system_prompt: Some(sentinel.to_string()),
+            prompt_prelude: None,
+            dynamic_environment_session_config: None,
+            dynamic_environment_observations: Vec::new(),
+        }),
+    );
+
+    let debug = format!("{restore:?}");
+    for private in [sentinel, "private-provider", "private-model"] {
+        assert!(!debug.contains(private), "restore Debug leaked {private}");
+    }
+    assert!(debug.contains("has_latest_config: true"));
+}
+
+#[test]
 fn shared_identity_and_terminal_contract_runs_for_native_and_replay() {
     let mut native = native_runtime(RuntimeEventNotifier::default());
     let native_port: &mut dyn AgentRuntimePort = &mut *native;
@@ -1191,10 +1355,21 @@ fn contract_module_does_not_import_terminal_or_native_worker_types() {
     for prohibited in [
         ["Conversation", "Worker"].concat(),
         ["LoopEvent", "Waker"].concat(),
+        ["Provider", "Conversation"].concat(),
     ] {
         assert!(
             !source.contains(&prohibited),
             "Agent contract must not expose {prohibited}"
         );
     }
+}
+
+#[test]
+fn session_worker_does_not_construct_native_provider_conversation() {
+    let source = include_str!("../session_worker.rs");
+    let prohibited = ["Provider", "Conversation"].concat();
+    assert!(
+        !source.contains(&prohibited),
+        "session worker must pass framework-neutral restore state"
+    );
 }

@@ -454,7 +454,7 @@ fn persisted_conversation_loads_resolved_history_for_prepare_turn() {
         store_trait,
         sample_header(&work_dir, "qwen3"),
         Some(session_id),
-        &restored_state,
+        restored_state.conversation,
     )
     .expect("persisted conversation should load history");
 
@@ -530,7 +530,7 @@ fn persisted_conversation_restores_latest_system_prompt_snapshot() {
         store_trait,
         sample_header(&work_dir, "qwen3"),
         Some(session_id),
-        &restored_state,
+        restored_state.conversation,
     )
     .expect("persisted conversation should load config");
 
@@ -581,7 +581,7 @@ fn persisted_conversation_restores_prompt_prelude_snapshot() {
         store_trait,
         sample_header(&work_dir, "qwen3"),
         Some(session_id),
-        &restored_state,
+        restored_state.conversation,
     )
     .expect("persisted conversation should load config");
 
@@ -628,7 +628,7 @@ fn persisted_conversation_restores_dynamic_environment_session_config() {
         store_trait,
         sample_header(&work_dir, "qwen3"),
         Some(session_id),
-        &restored_state,
+        restored_state.conversation,
     )
     .expect("persisted conversation should load config");
 
@@ -656,13 +656,13 @@ fn truncate_after_user_turns_branches_within_existing_session() {
     }
     let restored_state =
         block_on_session(store.load_session(&session_id, None)).expect("session state should load");
-    let first_assistant_entry_id = restored_state.items[1].entry_id.clone();
+    let first_assistant_entry_id = restored_state.conversation.items[1].entry_id.clone();
     let store_trait: Arc<dyn SessionStore> = store;
     let mut session = ProviderConversation::with_resolved_session_port(
         store_trait,
         sample_header(&work_dir, "qwen3"),
         Some(session_id.clone()),
-        &restored_state,
+        restored_state.conversation,
     )
     .expect("persisted conversation should initialize");
 

@@ -317,18 +317,28 @@ fn session_picker_row_from_meta(meta: SessionMeta) -> SessionPickerRow {
 
 fn session_resume_payload(
     session_id: SessionId,
-    restored_state: ResolvedSessionState,
+    transcript: Vec<runtime_domain::session::TranscriptReplayItem>,
+    latest_config: Option<&session_store::ConfigSnapshot>,
 ) -> SessionResumePayload {
-    let ResolvedSessionState {
-        transcript,
-        latest_config,
-        ..
-    } = restored_state;
-    let restored_model = restored_model_selection(latest_config.as_ref());
+    let restored_model = restored_model_selection(latest_config);
     SessionResumePayload {
         session_id: session_id.to_string(),
         transcript,
         restored_model,
+    }
+}
+
+fn project_session_restore_result(
+    events: &mut Vec<RuntimeEvent>,
+    restore_result: Result<(), String>,
+    success_events: impl IntoIterator<Item = RuntimeEvent>,
+) {
+    match restore_result {
+        Ok(()) => events.extend(success_events),
+        Err(message) => events.push(RuntimeEvent::Failed {
+            target: None,
+            message,
+        }),
     }
 }
 
@@ -488,47 +498,34 @@ impl AppRuntimeCoordinator {
         for event in self.components.session_store_worker.drain_events() {
             match event {
                 SessionStoreWorkerEvent::Runtime { event, .. } => events.push(event),
-                SessionStoreWorkerEvent::Restored {
-                    conversation,
-                    payload,
-                } => {
-                    if let Err(message) = self
-                        .components
-                        .agent_port_mut()
-                        .replace_conversation(conversation)
-                    {
-                        events.push(RuntimeEvent::Failed {
-                            target: None,
-                            message,
-                        });
-                    } else {
-                        events.push(RuntimeEvent::SessionResumed { payload });
-                    }
+                SessionStoreWorkerEvent::Restored { restore, payload } => {
+                    let restore_result = self.components.agent_port_mut().restore_session(restore);
+                    project_session_restore_result(
+                        events,
+                        restore_result,
+                        [RuntimeEvent::SessionResumed { payload }],
+                    );
                 }
                 SessionStoreWorkerEvent::RestoredWithTree {
-                    conversation,
+                    restore,
                     resume_payload,
                     tree_request_id,
                     tree_payload,
                 } => {
-                    if let Err(message) = self
-                        .components
-                        .agent_port_mut()
-                        .replace_conversation(conversation)
-                    {
-                        events.push(RuntimeEvent::Failed {
-                            target: None,
-                            message,
-                        });
-                    } else {
-                        events.push(RuntimeEvent::SessionResumed {
-                            payload: resume_payload,
-                        });
-                        events.push(RuntimeEvent::SessionTreeLoaded {
-                            request_id: tree_request_id,
-                            payload: tree_payload,
-                        });
-                    }
+                    let restore_result = self.components.agent_port_mut().restore_session(restore);
+                    project_session_restore_result(
+                        events,
+                        restore_result,
+                        [
+                            RuntimeEvent::SessionResumed {
+                                payload: resume_payload,
+                            },
+                            RuntimeEvent::SessionTreeLoaded {
+                                request_id: tree_request_id,
+                                payload: tree_payload,
+                            },
+                        ],
+                    );
                 }
                 SessionStoreWorkerEvent::Noop => {}
                 SessionStoreWorkerEvent::Failed { message, .. } => {

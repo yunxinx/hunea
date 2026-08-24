@@ -63,13 +63,14 @@ async fn assert_session_port_contract(
         .expect("contract session should load for resume");
     assert_eq!(
         restored
+            .conversation
             .items
             .into_iter()
             .map(|item| item.item)
             .collect::<Vec<_>>(),
         expected_items
     );
-    assert_eq!(restored.latest_config, Some(expected_config));
+    assert_eq!(restored.conversation.latest_config, Some(expected_config));
     assert_eq!(restored.transcript, vec![expected_transcript]);
 
     let missing_session_id = session_store::SessionId::new();

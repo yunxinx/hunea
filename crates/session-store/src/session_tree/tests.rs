@@ -108,6 +108,7 @@ fn resolve_state_returns_explicit_transcript_replay_items() {
 
     assert_eq!(
         resolved
+            .conversation
             .items
             .iter()
             .map(|item| item.item.text_content())

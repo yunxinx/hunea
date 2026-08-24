@@ -169,6 +169,38 @@ fn failed_resume_preserves_the_current_approval_context() {
 }
 
 #[test]
+fn rejected_restore_projects_no_resume_or_tree_success() {
+    let mut events = Vec::new();
+    super::super::project_session_restore_result(
+        &mut events,
+        Err("conversation worker thread panicked".to_string()),
+        [
+            RuntimeEvent::SessionResumed {
+                payload: SessionResumePayload {
+                    session_id: "rejected-session".to_string(),
+                    transcript: Vec::new(),
+                    restored_model: None,
+                },
+            },
+            RuntimeEvent::SessionTreeLoaded {
+                request_id: request_id(90),
+                payload: SessionTreePayload {
+                    rows: Vec::new(),
+                    current_row_id: None,
+                },
+            },
+        ],
+    );
+
+    assert_eq!(events.len(), 1);
+    assert!(matches!(
+        events.as_slice(),
+        [RuntimeEvent::Failed { target: None, message }]
+            if message == "conversation worker thread panicked"
+    ));
+}
+
+#[test]
 fn resume_session_payload_does_not_label_reasoning_as_system() {
     let work_dir = temp_test_dir("resume-session-reasoning-work");
     let store = Arc::new(InMemorySessionStore::new());

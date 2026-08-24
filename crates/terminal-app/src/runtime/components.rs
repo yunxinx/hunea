@@ -140,13 +140,12 @@ impl RuntimePluginImplementation {
         }
     }
 
-    fn agent_runtime(
-        factory: AgentRuntimeFactory,
-        activate: RuntimePluginActivation,
-        quiesce: RuntimePluginQuiescence,
-    ) -> Self {
+    fn agent_runtime(factory: AgentRuntimeFactory) -> Self {
         Self {
-            lifecycle: RuntimePluginLifecycle { activate, quiesce },
+            lifecycle: RuntimePluginLifecycle {
+                activate: RuntimeComponents::activate_agent_runtime,
+                quiesce: RuntimeComponents::quiesce_agent_runtime,
+            },
             kind: RuntimePluginImplementationKind::AgentRuntime(factory),
         }
     }
@@ -206,6 +205,20 @@ fn desired_builtin(
     (component_id, builtin_plugin_type(plugin_type))
 }
 
+fn agent_runtime_descriptor(
+    plugin_type: &'static str,
+    display_name: &'static str,
+) -> PluginDescriptorBuilder {
+    builtin_descriptor(plugin_type, display_name)
+        .requires(RUNTIME_EVENT_STREAM.capability)
+        .requires(LLM_PORT.capability)
+        .requires(MODEL_CATALOG.capability)
+        .requires(PERMISSION_POLICY.capability)
+        .requires(PROMPT_ASSEMBLY.capability)
+        .requires(TOOL_CATALOG.capability)
+        .observes(SESSION_PERSISTENCE.capability)
+}
+
 fn builtin_desired_composition() -> Result<DesiredPluginComposition, PluginCatalogError> {
     DesiredPluginComposition::try_new([
         desired_builtin(APPROVAL_PROVIDER.component_id, APPROVAL_PROVIDER_PLUGIN),
@@ -243,10 +256,8 @@ fn runtime_plugin_factory(
 fn agent_runtime_plugin_factory(
     descriptor: PluginDescriptorBuilder,
     factory: AgentRuntimeFactory,
-    activate: RuntimePluginActivation,
-    quiesce: RuntimePluginQuiescence,
 ) -> PluginFactory<RuntimePluginImplementation> {
-    let implementation = RuntimePluginImplementation::agent_runtime(factory, activate, quiesce);
+    let implementation = RuntimePluginImplementation::agent_runtime(factory);
     PluginFactory::new(
         descriptor
             .build()
@@ -321,17 +332,8 @@ fn builtin_plugin_catalog_with_agent_factory(
             RuntimeComponents::quiesce_prompt_assembly,
         ),
         agent_runtime_plugin_factory(
-            builtin_descriptor(NATIVE_AGENT_RUNTIME_PLUGIN, "Native agent loop")
-                .requires(RUNTIME_EVENT_STREAM.capability)
-                .requires(LLM_PORT.capability)
-                .requires(MODEL_CATALOG.capability)
-                .requires(PERMISSION_POLICY.capability)
-                .requires(PROMPT_ASSEMBLY.capability)
-                .requires(TOOL_CATALOG.capability)
-                .observes(SESSION_PERSISTENCE.capability),
+            agent_runtime_descriptor(NATIVE_AGENT_RUNTIME_PLUGIN, "Native agent loop"),
             agent_runtime_factory,
-            RuntimeComponents::activate_native_agent_runtime,
-            RuntimeComponents::quiesce_native_agent_runtime,
         ),
         runtime_plugin_factory(
             builtin_descriptor(MODEL_REFRESH_PLUGIN, "Model refresh")
@@ -382,6 +384,23 @@ struct ComponentActivationStaging {
 struct PreparedPluginCommit {
     desired: DesiredPluginComposition,
     reconciliation: PreparedPluginReconciliation<RuntimePluginImplementation>,
+    agent_runtime: PreparedAgentRuntimeCommit,
+}
+
+enum PreparedAgentRuntimeCommit {
+    Keep,
+    Replace(Box<PreparedAgentRuntimeReplacement>),
+}
+
+struct PreparedAgentRuntimeReplacement {
+    mount: Option<AgentRuntimeMount>,
+    candidate: Option<Box<dyn AgentRuntimePort>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentPluginReconciliation {
+    Keep,
+    Replace,
 }
 
 /// `RuntimeComponents` 是 coordinator 的长期 runtime owner。
@@ -407,20 +426,42 @@ pub(super) struct RuntimeComponents {
     plugin_loader: PluginCompositionLoader<RuntimePluginImplementation>,
     plugins: PluginComposition<RuntimePluginImplementation>,
     prepared_plugin_commit: Option<PreparedPluginCommit>,
+    is_agent_replacement_activating: bool,
     #[cfg(test)]
     plugin_transaction_trace: Option<Arc<Mutex<Vec<String>>>>,
     pub(super) lifecycle: ComponentLifecycleExecutor,
     is_shutdown: bool,
+    shutdown_lifecycle_error: Option<String>,
 }
 
 fn construct_agent_runtime(
+    implementation: &RuntimePluginImplementation,
+    mount: AgentRuntimeMount,
+) -> Result<Box<dyn AgentRuntimePort>, String> {
+    implementation.construct_agent_runtime(mount)
+}
+
+fn construct_committed_agent_runtime(
     plugins: &PluginComposition<RuntimePluginImplementation>,
     mount: AgentRuntimeMount,
 ) -> Result<Box<dyn AgentRuntimePort>, String> {
-    plugins
+    let implementation = plugins
         .implementation(NATIVE_AGENT_RUNTIME_COMPONENT)
-        .ok_or_else(|| "Agent component has no committed plugin implementation".to_string())?
-        .construct_agent_runtime(mount)
+        .ok_or_else(|| "Agent component has no committed plugin implementation".to_string())?;
+    construct_agent_runtime(implementation, mount)
+}
+
+fn classify_agent_plugin_reconciliation(
+    observed: Option<&PluginTypeId>,
+    desired: Option<&PluginTypeId>,
+) -> Result<AgentPluginReconciliation, String> {
+    match (observed, desired) {
+        (Some(observed), Some(desired)) if observed == desired => {
+            Ok(AgentPluginReconciliation::Keep)
+        }
+        (Some(_), Some(_)) => Ok(AgentPluginReconciliation::Replace),
+        _ => Err("Runtime composition must contain exactly one Agent plugin".to_string()),
+    }
 }
 
 impl RuntimeComponents {
@@ -507,7 +548,7 @@ impl RuntimeComponents {
         let session_store_worker = SessionStoreWorker::new(RuntimeEventNotifier::default());
         let context_budget_worker = ContextBudgetWorker::new(RuntimeEventNotifier::default())
             .map_err(|error| error.to_string())?;
-        let agent_runtime = construct_agent_runtime(
+        let agent_runtime = construct_committed_agent_runtime(
             &plugins,
             AgentRuntimeMount::new(
                 options,
@@ -550,10 +591,12 @@ impl RuntimeComponents {
             plugin_loader,
             plugins,
             prepared_plugin_commit: None,
+            is_agent_replacement_activating: false,
             #[cfg(test)]
             plugin_transaction_trace: None,
             lifecycle: ComponentLifecycleExecutor::default(),
             is_shutdown: false,
+            shutdown_lifecycle_error: None,
         };
         if let Err(error) = components.initialize_lifecycle(has_session_backend) {
             let error = match components.shutdown() {
@@ -591,38 +634,41 @@ impl RuntimeComponents {
     #[allow(dead_code)]
     fn reconcile_plugin_composition(
         &mut self,
+        options: &AppRuntimeOptions,
         desired: DesiredPluginComposition,
         mode: ComponentLifecycleMode,
     ) -> Result<(), String> {
         if self.is_shutdown {
             return Err("Runtime components are shut down".to_string());
         }
-        self.validate_agent_plugin_identity(&desired)?;
+        let agent_runtime = self.prepare_agent_runtime_commit(options, &desired)?;
         let reconciliation = self
             .plugin_loader
             .prepare_reconciliation(&desired, &self.plugins)
             .map_err(|error| error.to_string())?;
-        self.commit_prepared_plugin_reconciliation(desired, reconciliation, mode)
+        self.commit_prepared_plugin_reconciliation(desired, reconciliation, agent_runtime, mode)
     }
 
     #[cfg(test)]
     fn reconcile_plugin_composition_with_catalog(
         &mut self,
+        options: &AppRuntimeOptions,
         catalog: &PluginFactoryCatalog<RuntimePluginImplementation>,
         desired: DesiredPluginComposition,
         mode: ComponentLifecycleMode,
     ) -> Result<(), String> {
-        self.validate_agent_plugin_identity(&desired)?;
+        let agent_runtime = self.prepare_agent_runtime_commit(options, &desired)?;
         let reconciliation = catalog
             .prepare_reconciliation(&desired, &self.plugins)
             .map_err(|error| error.to_string())?;
-        self.commit_prepared_plugin_reconciliation(desired, reconciliation, mode)
+        self.commit_prepared_plugin_reconciliation(desired, reconciliation, agent_runtime, mode)
     }
 
-    fn validate_agent_plugin_identity(
+    fn prepare_agent_runtime_commit(
         &self,
+        options: &AppRuntimeOptions,
         desired: &DesiredPluginComposition,
-    ) -> Result<(), String> {
+    ) -> Result<PreparedAgentRuntimeCommit, String> {
         let desired_type = desired
             .iter()
             .find(|(component_id, _)| component_id.as_str() == NATIVE_AGENT_RUNTIME_COMPONENT)
@@ -632,13 +678,14 @@ impl RuntimeComponents {
             .iter()
             .find(|(component_id, _)| component_id.as_str() == NATIVE_AGENT_RUNTIME_COMPONENT)
             .map(|(_, plugin_type)| plugin_type);
-        if desired_type == observed_type && desired_type.is_some() {
-            Ok(())
-        } else {
-            Err(
-                "Agent plugin identity replacement requires an adapter replacement transaction"
-                    .to_string(),
-            )
+        match classify_agent_plugin_reconciliation(observed_type, desired_type)? {
+            AgentPluginReconciliation::Keep => Ok(PreparedAgentRuntimeCommit::Keep),
+            AgentPluginReconciliation::Replace => Ok(PreparedAgentRuntimeCommit::Replace(
+                Box::new(PreparedAgentRuntimeReplacement {
+                    mount: Some(self.agent_runtime_mount(options, self.current_session_port())),
+                    candidate: None,
+                }),
+            )),
         }
     }
 
@@ -646,6 +693,7 @@ impl RuntimeComponents {
         &mut self,
         desired: DesiredPluginComposition,
         reconciliation: PreparedPluginReconciliation<RuntimePluginImplementation>,
+        agent_runtime: PreparedAgentRuntimeCommit,
         mode: ComponentLifecycleMode,
     ) -> Result<(), String> {
         let definitions = reconciliation.definitions();
@@ -653,18 +701,12 @@ impl RuntimeComponents {
         self.prepared_plugin_commit = Some(PreparedPluginCommit {
             desired,
             reconciliation,
+            agent_runtime,
         });
-        let result = self
-            .with_lifecycle(|lifecycle, components| {
-                lifecycle.reconcile_definitions_with_commit(definitions, components, mode)
-            })
-            .map_err(|error| format!("{error:?}"));
-        if result.is_err() {
-            // 未 publication 的 fresh instances 在所有 pre-commit error 上由 transaction owner
-            // 逆序释放；旧 plugin authority 与旧 graph 保持不变。
-            self.prepared_plugin_commit.take();
-        }
-        result
+        self.with_lifecycle(|lifecycle, components| {
+            lifecycle.reconcile_definitions_with_commit(definitions, components, mode)
+        })
+        .map_err(|error| format!("{error:?}"))
     }
 
     pub(super) fn bind_runtime_wake(&mut self, wake: RuntimeWake) -> Result<(), String> {
@@ -841,7 +883,7 @@ impl RuntimeComponents {
         );
         // 旧 adapter 完全 quiescent 后才请 committed plugin 构造新 generation；失败时
         // capability 保持 removed，所有尚未发布的 fresh registrations 由 Drop 逆向撤销。
-        let fresh_agent_runtime = construct_agent_runtime(
+        let fresh_agent_runtime = construct_committed_agent_runtime(
             &self.plugins,
             AgentRuntimeMount::new(
                 options,
@@ -963,18 +1005,32 @@ impl RuntimeComponents {
         options: &AppRuntimeOptions,
         session_port: Option<Arc<dyn session_store::SessionPort>>,
     ) -> Result<Box<dyn AgentRuntimePort>, String> {
-        construct_agent_runtime(
+        construct_committed_agent_runtime(
             &self.plugins,
-            AgentRuntimeMount::new(
-                options,
-                self.session_workspace_tools.clone(),
-                self.tool_catalog.definitions(),
-                self.prompt_assembly.session_snapshot(),
-                session_port,
-                self.llm_port.clone(),
-                self.permission_policy.clone(),
-                self.permission_provider_id.clone(),
-            ),
+            self.agent_runtime_mount(options, session_port),
+        )
+    }
+
+    fn current_session_port(&self) -> Option<Arc<dyn session_store::SessionPort>> {
+        self.session_backend_views
+            .as_ref()
+            .map(|views| Arc::clone(&views.port))
+    }
+
+    fn agent_runtime_mount(
+        &self,
+        options: &AppRuntimeOptions,
+        session_port: Option<Arc<dyn session_store::SessionPort>>,
+    ) -> AgentRuntimeMount {
+        AgentRuntimeMount::new(
+            options,
+            self.session_workspace_tools.clone(),
+            self.tool_catalog.definitions(),
+            self.prompt_assembly.session_snapshot(),
+            session_port,
+            self.llm_port.clone(),
+            self.permission_policy.clone(),
+            self.permission_provider_id.clone(),
         )
     }
 
@@ -1037,7 +1093,7 @@ impl RuntimeComponents {
         let fresh_registration = fresh_policy
             .register(owner, provider_id.clone(), factory)
             .map_err(|error| error.to_string())?;
-        let fresh_agent_runtime = match construct_agent_runtime(
+        let fresh_agent_runtime = match construct_committed_agent_runtime(
             &self.plugins,
             AgentRuntimeMount::new(
                 options,
@@ -1234,7 +1290,7 @@ impl RuntimeComponents {
         Ok(ComponentActivationOutcome::Ready)
     }
 
-    fn activate_native_agent_runtime(
+    fn activate_agent_runtime(
         &mut self,
         _scope: &EffectScope,
         context: &mut ComponentActivationContext<'_>,
@@ -1244,6 +1300,7 @@ impl RuntimeComponents {
             .require::<RuntimeEventStreamCapability>()
             .map_err(|error| error.to_string())?;
         self.agent_runtime.activate(event_stream)?;
+        self.is_agent_replacement_activating = false;
         Ok(ComponentActivationOutcome::Ready)
     }
 
@@ -1275,12 +1332,23 @@ impl RuntimeComponents {
         Ok(ComponentActivationOutcome::Ready)
     }
 
-    fn quiesce_native_agent_runtime(&mut self, mode: ComponentLifecycleMode) -> Result<(), String> {
+    fn quiesce_agent_runtime(&mut self, mode: ComponentLifecycleMode) -> Result<(), String> {
         match mode {
-            ComponentLifecycleMode::Shutdown => self.agent_runtime.shutdown(),
-            _ => self.agent_runtime.suspend(),
+            ComponentLifecycleMode::Shutdown => self
+                .agent_runtime
+                .shutdown()
+                .map_err(|_| "Agent adapter failed to shut down".to_string()),
+            _ => self
+                .agent_runtime
+                .suspend()
+                .map_err(|_| "Agent adapter failed to suspend".to_string()),
         }
-        .map_err(|error| error.to_string())
+    }
+
+    fn finalize_agent_runtime_replacement(&mut self) -> Result<(), String> {
+        self.agent_runtime
+            .shutdown()
+            .map_err(|_| "Agent adapter failed to finalize for replacement".to_string())
     }
 
     fn quiesce_model_refresh(&mut self, mode: ComponentLifecycleMode) -> Result<(), String> {
@@ -1353,31 +1421,99 @@ impl RuntimeComponents {
     }
 
     pub(super) fn shutdown(&mut self) -> Result<(), String> {
-        if self.is_shutdown {
-            return Ok(());
+        if !self.is_shutdown {
+            self.is_shutdown = true;
+            self.shutdown_lifecycle_error = self
+                .with_lifecycle(|lifecycle, components| lifecycle.shutdown(components))
+                .err()
+                .map(|error| format!("{error:?}"));
         }
-        self.is_shutdown = true;
-        let shutdown_error = self
-            .with_lifecycle(|lifecycle, components| lifecycle.shutdown(components))
+        let agent_error = self
+            .agent_runtime
+            .shutdown()
             .err()
-            .map(|error| error.to_string());
-        match shutdown_error {
-            None => Ok(()),
-            Some(error) => Err(error),
+            .map(|_| "Agent runtime finalization failed".to_string());
+        self.is_agent_replacement_activating = false;
+        match (self.shutdown_lifecycle_error.clone(), agent_error) {
+            (None, None) => Ok(()),
+            (Some(error), None) | (None, Some(error)) => Err(error),
+            (Some(lifecycle), Some(agent)) => Err(format!("{lifecycle}; {agent}")),
         }
     }
 }
 
 impl ComponentLifecycleCallbacks for RuntimeComponents {
+    fn prepare_authority(&mut self) -> Result<(), String> {
+        let is_agent_replacement = self
+            .prepared_plugin_commit
+            .as_ref()
+            .is_some_and(|prepared| {
+                matches!(
+                    &prepared.agent_runtime,
+                    PreparedAgentRuntimeCommit::Replace(_)
+                )
+            });
+        if is_agent_replacement {
+            self.finalize_agent_runtime_replacement()?;
+        }
+        {
+            let prepared = self
+                .prepared_plugin_commit
+                .as_mut()
+                .ok_or_else(|| "plugin authority preparation is missing".to_string())?;
+            match &mut prepared.agent_runtime {
+                PreparedAgentRuntimeCommit::Keep => {}
+                PreparedAgentRuntimeCommit::Replace(replacement) => {
+                    if replacement.candidate.is_some() {
+                        return Err("Agent adapter candidate is already prepared".to_string());
+                    }
+                    let mount = replacement
+                        .mount
+                        .take()
+                        .ok_or_else(|| "Agent adapter mount is no longer available".to_string())?;
+                    let implementation = prepared
+                        .reconciliation
+                        .prospective_implementation(&self.plugins, NATIVE_AGENT_RUNTIME_COMPONENT)
+                        .ok_or_else(|| {
+                            "Agent replacement has no prospective plugin implementation".to_string()
+                        })?;
+                    replacement.candidate = Some(construct_agent_runtime(implementation, mount)?);
+                }
+            }
+        }
+        #[cfg(test)]
+        self.record_plugin_transaction_event("prepare:authority");
+        Ok(())
+    }
+
     fn commit_authority(&mut self) {
-        let prepared = self
+        let mut prepared = self
             .prepared_plugin_commit
             .take()
             .expect("plugin authority commit must have a prepared composition");
+        let candidate = match &mut prepared.agent_runtime {
+            PreparedAgentRuntimeCommit::Keep => None,
+            PreparedAgentRuntimeCommit::Replace(replacement) => Some(
+                replacement
+                    .candidate
+                    .take()
+                    .expect("Agent replacement must prepare its adapter before authority commit"),
+            ),
+        };
         self.plugins.commit_reconciliation(prepared.reconciliation);
         self.plugin_loader.commit_desired(prepared.desired);
+        if let Some(candidate) = candidate {
+            self.agent_runtime = candidate;
+            self.is_agent_replacement_activating = true;
+        }
         #[cfg(test)]
         self.record_plugin_transaction_event("authority:commit");
+    }
+
+    fn abort_authority(&mut self) {
+        self.prepared_plugin_commit.take();
+        #[cfg(test)]
+        self.record_plugin_transaction_event("authority:abort");
     }
 
     fn activate_component(
@@ -1409,7 +1545,25 @@ impl ComponentLifecycleCallbacks for RuntimeComponents {
             .ok_or_else(|| format!("component `{component_id}` has no prepared plugin instance"))?;
         #[cfg(test)]
         self.record_plugin_transaction_event(format!("quiesce:{component_id}"));
-        implementation.quiesce(self, mode)
+        let plugin_result = implementation.quiesce(self, mode);
+        let finalization_result = if component_id == NATIVE_AGENT_RUNTIME_COMPONENT
+            && self.is_agent_replacement_activating
+        {
+            self.finalize_agent_runtime_replacement()
+        } else {
+            Ok(())
+        };
+        if finalization_result.is_ok()
+            && component_id == NATIVE_AGENT_RUNTIME_COMPONENT
+            && self.is_agent_replacement_activating
+        {
+            self.is_agent_replacement_activating = false;
+        }
+        match (plugin_result, finalization_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(plugin), Err(finalization)) => Err(format!("{plugin}; {finalization}")),
+        }
     }
 }
 
@@ -1591,14 +1745,72 @@ mod tests {
 
     struct RecordingAgentRuntime {
         lifecycle_trace: Arc<Mutex<Vec<&'static str>>>,
+        activation_failure: bool,
+        shutdown_failures_remaining: usize,
+        shutdown_calls: Option<Arc<AtomicUsize>>,
+        drop_count: Option<Arc<AtomicUsize>>,
+        owned_mount: Option<AgentRuntimeMount>,
         is_shutdown: bool,
+        is_finalized: bool,
     }
 
     impl RecordingAgentRuntime {
         fn new(lifecycle_trace: Arc<Mutex<Vec<&'static str>>>) -> Self {
             Self {
                 lifecycle_trace,
+                activation_failure: false,
+                shutdown_failures_remaining: 0,
+                shutdown_calls: None,
+                drop_count: None,
+                owned_mount: None,
                 is_shutdown: true,
+                is_finalized: false,
+            }
+        }
+
+        fn with_shutdown_failure(lifecycle_trace: Arc<Mutex<Vec<&'static str>>>) -> Self {
+            Self {
+                lifecycle_trace,
+                activation_failure: false,
+                shutdown_failures_remaining: usize::MAX,
+                shutdown_calls: None,
+                drop_count: None,
+                owned_mount: None,
+                is_shutdown: true,
+                is_finalized: false,
+            }
+        }
+
+        fn with_shutdown_counter(
+            lifecycle_trace: Arc<Mutex<Vec<&'static str>>>,
+            shutdown_calls: Arc<AtomicUsize>,
+        ) -> Self {
+            Self {
+                lifecycle_trace,
+                activation_failure: true,
+                shutdown_failures_remaining: 0,
+                shutdown_calls: Some(shutdown_calls),
+                drop_count: None,
+                owned_mount: None,
+                is_shutdown: true,
+                is_finalized: false,
+            }
+        }
+
+        fn with_abort_probes(
+            lifecycle_trace: Arc<Mutex<Vec<&'static str>>>,
+            mount: AgentRuntimeMount,
+            drop_count: Arc<AtomicUsize>,
+        ) -> Self {
+            Self {
+                lifecycle_trace,
+                activation_failure: false,
+                shutdown_failures_remaining: 0,
+                shutdown_calls: None,
+                drop_count: Some(drop_count),
+                owned_mount: Some(mount),
+                is_shutdown: true,
+                is_finalized: false,
             }
         }
 
@@ -1629,11 +1841,23 @@ mod tests {
         }
 
         fn shutdown(&mut self) -> Result<(), AgentRuntimeError> {
-            if !self.is_shutdown {
+            if let Some(shutdown_calls) = &self.shutdown_calls {
+                shutdown_calls.fetch_add(1, Ordering::SeqCst);
+            }
+            if !self.is_finalized {
                 self.record("shutdown");
                 self.is_shutdown = true;
+                self.is_finalized = true;
             }
-            Ok(())
+            if self.shutdown_failures_remaining > 0 {
+                self.shutdown_failures_remaining -= 1;
+                self.is_finalized = false;
+                Err(AgentRuntimeError::Shutdown(
+                    "SENSITIVE_AGENT_CLEANUP_FAILURE".to_string(),
+                ))
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -1642,8 +1866,12 @@ mod tests {
             &mut self,
             _event_stream: CapabilityLease<RuntimeEventStreamCapability>,
         ) -> Result<(), String> {
+            if self.activation_failure {
+                return Err("SENSITIVE_AGENT_ACTIVATION_FAILURE".to_string());
+            }
             self.record("activate");
             self.is_shutdown = false;
+            self.is_finalized = false;
             Ok(())
         }
 
@@ -1700,6 +1928,25 @@ mod tests {
 
         fn has_pending_work(&self) -> bool {
             false
+        }
+    }
+
+    impl Drop for RecordingAgentRuntime {
+        fn drop(&mut self) {
+            let _ = self.owned_mount.take();
+            if let Some(drop_count) = &self.drop_count {
+                drop_count.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    struct DropCounter {
+        count: Arc<AtomicUsize>,
+    }
+
+    impl Drop for DropCounter {
+        fn drop(&mut self) {
+            self.count.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -1783,6 +2030,11 @@ mod tests {
         let optional_factory = ["Option<Agent", "RuntimeFactory>"].concat();
         let old_mount_check = ["native_mount", "_check"].concat();
         let old_fresh_helper = ["fresh_native_", "agent_runtime"].concat();
+        let old_replacement_guard = [
+            "Agent plugin identity replacement requires an adapter ",
+            "replacement transaction",
+        ]
+        .concat();
 
         assert_eq!(
             production_source
@@ -1800,10 +2052,23 @@ mod tests {
         assert!(!production_source.contains(&optional_factory));
         assert!(!production_source.contains(&old_mount_check));
         assert!(!production_source.contains(&old_fresh_helper));
+        assert!(!production_source.contains(&old_replacement_guard));
         assert_eq!(native_source.matches(&native_factory_definition).count(), 1);
         assert_eq!(native_source.matches(&native_construction).count(), 1);
         assert_eq!(native_source.matches(&erased_native_owner).count(), 1);
         assert_eq!(native_source.matches(&concrete_materialization).count(), 1);
+        assert_eq!(
+            production_source
+                .matches("activate: RuntimeComponents::activate_agent_runtime")
+                .count(),
+            1
+        );
+        assert_eq!(
+            production_source
+                .matches("quiesce: RuntimeComponents::quiesce_agent_runtime")
+                .count(),
+            1
+        );
         for forbidden in [
             ["downcast", "_ref"].concat(),
             ["downcast", "_mut"].concat(),
@@ -1823,18 +2088,65 @@ mod tests {
                 .count(),
             1
         );
+        let agent_quiescence_source = production_source
+            .split_once("fn quiesce_agent_runtime(")
+            .and_then(|(_, tail)| tail.split_once("fn finalize_agent_runtime_replacement("))
+            .map(|(method, _)| method)
+            .expect("Agent quiescence must remain host-owned");
+        assert_eq!(agent_quiescence_source.matches(".suspend()").count(), 1);
+        assert_eq!(agent_quiescence_source.matches(".shutdown()").count(), 1);
+
+        let agent_finalization_source = production_source
+            .split_once("fn finalize_agent_runtime_replacement(")
+            .and_then(|(_, tail)| tail.split_once("fn quiesce_model_refresh("))
+            .map(|(method, _)| method)
+            .expect("Agent replacement must retain a mandatory finalization stage");
+        assert_eq!(agent_finalization_source.matches(".shutdown()").count(), 1);
+
+        let prepare_authority_source = production_source
+            .split_once("fn prepare_authority(&mut self) -> Result<(), String> {")
+            .and_then(|(_, tail)| tail.split_once("fn commit_authority(&mut self) {"))
+            .map(|(method, _)| method)
+            .expect("authority preparation should remain a distinct callback stage");
         assert_eq!(
-            production_source
-                .matches("self.agent_runtime.suspend()")
+            prepare_authority_source
+                .matches(".prospective_implementation(")
                 .count(),
             1
         );
         assert_eq!(
-            production_source
-                .matches("self.agent_runtime.shutdown()")
+            prepare_authority_source
+                .matches("construct_agent_runtime(implementation, mount)?")
                 .count(),
             1
         );
+        let finalization_position = prepare_authority_source
+            .find("self.finalize_agent_runtime_replacement()?")
+            .expect("authority preparation must finalize the old Agent");
+        let construction_position = prepare_authority_source
+            .find("construct_agent_runtime(implementation, mount)?")
+            .expect("authority preparation must construct the fresh Agent");
+        assert!(
+            finalization_position < construction_position,
+            "old Agent finalization must precede candidate construction"
+        );
+
+        let commit_authority_source = production_source
+            .split_once("fn commit_authority(&mut self) {")
+            .and_then(|(_, tail)| tail.split_once("fn abort_authority(&mut self) {"))
+            .map(|(method, _)| method)
+            .expect("authority commit should remain a distinct callback stage");
+        assert!(!commit_authority_source.contains("construct_agent_runtime("));
+        for publication in [
+            "self.plugins.commit_reconciliation(prepared.reconciliation)",
+            "self.plugin_loader.commit_desired(prepared.desired)",
+            "self.agent_runtime = candidate",
+        ] {
+            assert!(
+                commit_authority_source.contains(publication),
+                "authority commit must publish {publication}"
+            );
+        }
     }
 
     fn desired_with_runtime_event_plugin(plugin_type: &'static str) -> DesiredPluginComposition {
@@ -1907,6 +2219,34 @@ mod tests {
                 RuntimeComponents::activate_runtime_event_stream,
                 RuntimeComponents::quiesce_noop,
             ))
+        })
+    }
+
+    fn agent_replacement_factory(
+        plugin_type: &'static str,
+        factory: AgentRuntimeFactory,
+    ) -> PluginFactory<RuntimePluginImplementation> {
+        agent_runtime_plugin_factory(
+            agent_runtime_descriptor(plugin_type, "Replacement Agent loop"),
+            factory,
+        )
+    }
+
+    fn traced_agent_replacement_factory(
+        plugin_type: &'static str,
+        factory: AgentRuntimeFactory,
+        trace: Arc<Mutex<Vec<String>>>,
+    ) -> PluginFactory<RuntimePluginImplementation> {
+        let descriptor = agent_runtime_descriptor(plugin_type, "Traced replacement Agent loop")
+            .build()
+            .expect("traced Agent descriptor should validate");
+        let implementation = RuntimePluginImplementation::agent_runtime(factory);
+        PluginFactory::new(descriptor, move || {
+            trace
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(format!("prepare:{plugin_type}"));
+            Ok(implementation.clone())
         })
     }
 
@@ -2014,7 +2354,19 @@ mod tests {
     }
 
     #[test]
-    fn agent_plugin_identity_changes_are_rejected_before_runtime_mutation() {
+    fn agent_plugin_add_and_remove_are_rejected_before_runtime_mutation() {
+        let agent_type = builtin_plugin_type(NATIVE_AGENT_RUNTIME_PLUGIN);
+        assert_eq!(
+            classify_agent_plugin_reconciliation(None, Some(&agent_type))
+                .expect_err("Agent Add needs an absent-slot product contract"),
+            "Runtime composition must contain exactly one Agent plugin"
+        );
+        assert_eq!(
+            classify_agent_plugin_reconciliation(Some(&agent_type), None)
+                .expect_err("Agent Remove needs an absent-slot product contract"),
+            "Runtime composition must contain exactly one Agent plugin"
+        );
+
         let mut options = AppRuntimeOptions::default();
         let mut components =
             RuntimeComponents::new(&mut options).expect("runtime components should initialize");
@@ -2025,25 +2377,533 @@ mod tests {
         let old_context = components.lifecycle.context_snapshots();
         let old_scopes = components.effect_scope_snapshots();
 
-        for desired in [
-            desired_with_agent_plugin(Some("alternate-agent-loop")),
-            desired_with_agent_plugin(None),
-        ] {
-            let error = components
-                .reconcile_plugin_composition(desired, ComponentLifecycleMode::Reconfigure)
-                .expect_err("Agent plugin identity changes require a later transaction stage");
+        let error = components
+            .reconcile_plugin_composition(
+                &options,
+                desired_with_agent_plugin(None),
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect_err("Agent Remove must fail before runtime mutation");
 
-            assert_eq!(
-                error,
-                "Agent plugin identity replacement requires an adapter replacement transaction"
-            );
-            assert_eq!(components.plugin_descriptor_snapshots(), old_descriptors);
-            assert_eq!(components.plugin_loader.desired(), &old_desired);
-            assert_eq!(components.lifecycle.components(), old_components);
-            assert_eq!(components.lifecycle.capabilities(), old_capabilities);
-            assert_eq!(components.lifecycle.context_snapshots(), old_context);
-            assert_eq!(components.effect_scope_snapshots(), old_scopes);
-        }
+        assert_eq!(
+            error,
+            "Runtime composition must contain exactly one Agent plugin"
+        );
+        assert_eq!(components.plugin_descriptor_snapshots(), old_descriptors);
+        assert_eq!(components.plugin_loader.desired(), &old_desired);
+        assert_eq!(components.lifecycle.components(), old_components);
+        assert_eq!(components.lifecycle.capabilities(), old_capabilities);
+        assert_eq!(components.lifecycle.context_snapshots(), old_context);
+        assert_eq!(components.effect_scope_snapshots(), old_scopes);
+    }
+
+    #[test]
+    fn agent_plugin_replacement_constructs_after_cleanup_and_commits_matching_authority() {
+        const ALTERNATE_AGENT: &str = "alternate-agent-loop";
+        let mut options = AppRuntimeOptions::default();
+        let old_lifecycle_trace = Arc::new(Mutex::new(Vec::new()));
+        let old_factory_trace = Arc::clone(&old_lifecycle_trace);
+        let mut components = RuntimeComponents::new_with_agent_runtime_factory(
+            &mut options,
+            AgentRuntimeFactory::new(move |_mount| {
+                Ok(Box::new(RecordingAgentRuntime::new(Arc::clone(
+                    &old_factory_trace,
+                ))))
+            }),
+        )
+        .expect("runtime components should initialize through the old Agent plugin");
+        let transaction_trace = Arc::new(Mutex::new(Vec::new()));
+        components.plugin_transaction_trace = Some(Arc::clone(&transaction_trace));
+        let lifecycle_trace = Arc::new(Mutex::new(Vec::new()));
+        let factory_lifecycle_trace = Arc::clone(&lifecycle_trace);
+        let factory_transaction_trace = Arc::clone(&transaction_trace);
+        let constructions = Arc::new(AtomicUsize::new(0));
+        let observed_constructions = Arc::clone(&constructions);
+        let catalog = PluginFactoryCatalog::try_new([traced_agent_replacement_factory(
+            ALTERNATE_AGENT,
+            AgentRuntimeFactory::new(move |_mount| {
+                observed_constructions.fetch_add(1, Ordering::SeqCst);
+                factory_transaction_trace
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(format!("construct:{ALTERNATE_AGENT}"));
+                Ok(Box::new(RecordingAgentRuntime::new(Arc::clone(
+                    &factory_lifecycle_trace,
+                ))))
+            }),
+            Arc::clone(&transaction_trace),
+        )])
+        .expect("replacement Agent catalog should validate");
+
+        components
+            .reconcile_plugin_composition_with_catalog(
+                &options,
+                &catalog,
+                desired_with_agent_plugin(Some(ALTERNATE_AGENT)),
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect("Agent replacement should commit and activate");
+        components.plugin_transaction_trace = None;
+
+        assert_eq!(constructions.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *old_lifecycle_trace
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ["activate", "suspend", "shutdown"],
+            "Agent replacement must finally dispose the old adapter before construction"
+        );
+        assert_eq!(
+            *transaction_trace
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            [
+                format!("prepare:{ALTERNATE_AGENT}"),
+                format!("quiesce:{NATIVE_AGENT_RUNTIME_COMPONENT}"),
+                format!("construct:{ALTERNATE_AGENT}"),
+                "prepare:authority".to_string(),
+                "authority:commit".to_string(),
+                format!("activate:{NATIVE_AGENT_RUNTIME_COMPONENT}"),
+            ]
+        );
+        assert_eq!(
+            *lifecycle_trace
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ["activate"]
+        );
+        assert_eq!(
+            components
+                .plugin_descriptor_snapshots()
+                .into_iter()
+                .find(|snapshot| snapshot.component_id == NATIVE_AGENT_RUNTIME_COMPONENT)
+                .expect("Agent descriptor should remain visible")
+                .plugin_type,
+            ALTERNATE_AGENT
+        );
+        assert_eq!(
+            components
+                .plugin_loader
+                .desired()
+                .iter()
+                .find(|(component_id, _)| {
+                    component_id.as_str() == NATIVE_AGENT_RUNTIME_COMPONENT
+                })
+                .expect("desired composition should retain Agent slot")
+                .1
+                .as_str(),
+            ALTERNATE_AGENT
+        );
+        assert_eq!(
+            components.lifecycle.state(NATIVE_AGENT_RUNTIME_COMPONENT),
+            Some(ComponentState::Active)
+        );
+        components
+            .validate_context_alignment()
+            .expect("fresh Agent plugin, graph, and Context should align");
+    }
+
+    #[test]
+    fn agent_plugin_cleanup_failure_aborts_before_candidate_construction() {
+        const ALTERNATE_AGENT: &str = "alternate-agent-loop";
+        let mut options = AppRuntimeOptions::default();
+        let old_lifecycle_trace = Arc::new(Mutex::new(Vec::new()));
+        let startup_trace = Arc::clone(&old_lifecycle_trace);
+        let mut components = RuntimeComponents::new_with_agent_runtime_factory(
+            &mut options,
+            AgentRuntimeFactory::new(move |_mount| {
+                Ok(Box::new(RecordingAgentRuntime::with_shutdown_failure(
+                    Arc::clone(&startup_trace),
+                )))
+            }),
+        )
+        .expect("runtime should initialize through the injected Agent plugin factory");
+        let constructions = Arc::new(AtomicUsize::new(0));
+        let observed_constructions = Arc::clone(&constructions);
+        let catalog = PluginFactoryCatalog::try_new([agent_replacement_factory(
+            ALTERNATE_AGENT,
+            AgentRuntimeFactory::new(move |_mount| {
+                observed_constructions.fetch_add(1, Ordering::SeqCst);
+                Ok(Box::new(RecordingAgentRuntime::new(Arc::new(Mutex::new(
+                    Vec::new(),
+                )))))
+            }),
+        )])
+        .expect("replacement Agent catalog should validate");
+
+        let error = components
+            .reconcile_plugin_composition_with_catalog(
+                &options,
+                &catalog,
+                desired_with_agent_plugin(Some(ALTERNATE_AGENT)),
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect_err("old Agent cleanup failure must block candidate construction");
+
+        assert_eq!(constructions.load(Ordering::SeqCst), 0);
+        assert!(!error.contains("SENSITIVE_AGENT_CLEANUP_FAILURE"));
+        assert_eq!(
+            *old_lifecycle_trace
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ["activate", "suspend", "shutdown"]
+        );
+        assert_eq!(
+            components
+                .plugin_descriptor_snapshots()
+                .into_iter()
+                .find(|snapshot| snapshot.component_id == NATIVE_AGENT_RUNTIME_COMPONENT)
+                .expect("old Agent descriptor should remain visible")
+                .plugin_type,
+            NATIVE_AGENT_RUNTIME_PLUGIN
+        );
+        assert_ne!(
+            components.lifecycle.state(NATIVE_AGENT_RUNTIME_COMPONENT),
+            Some(ComponentState::Active)
+        );
+
+        let retry_error = components
+            .reconcile_plugin_composition_with_catalog(
+                &options,
+                &catalog,
+                desired_with_agent_plugin(Some(ALTERNATE_AGENT)),
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect_err("retry must not bypass incomplete old Agent finalization");
+        assert!(!retry_error.contains("SENSITIVE_AGENT_CLEANUP_FAILURE"));
+        assert_eq!(constructions.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            *old_lifecycle_trace
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ["activate", "suspend", "shutdown", "shutdown"]
+        );
+    }
+
+    #[test]
+    fn stale_graph_commit_drops_the_actual_agent_replacement_transaction() {
+        const ALTERNATE_AGENT: &str = "alternate-agent-stale";
+        let mut options = AppRuntimeOptions::default();
+        let observer = Arc::clone(&options.dynamic_environment_observer);
+        let mut components =
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+        let observer_owner_count = Arc::strong_count(&observer);
+        let old_descriptors = components.plugin_descriptor_snapshots();
+        let old_desired = components.plugin_loader.desired().clone();
+        let candidate_drops = Arc::new(AtomicUsize::new(0));
+        let implementation_drops = Arc::new(AtomicUsize::new(0));
+        let prepared_candidate_drops = Arc::clone(&candidate_drops);
+        let prepared_implementation_drops = Arc::clone(&implementation_drops);
+        let catalog = PluginFactoryCatalog::try_new([PluginFactory::new(
+            agent_runtime_descriptor(ALTERNATE_AGENT, "Stale replacement Agent")
+                .build()
+                .expect("replacement Agent descriptor should validate"),
+            move || {
+                let implementation_drop = DropCounter {
+                    count: Arc::clone(&prepared_implementation_drops),
+                };
+                let constructor_candidate_drops = Arc::clone(&prepared_candidate_drops);
+                Ok(RuntimePluginImplementation::agent_runtime(
+                    AgentRuntimeFactory::new(move |mount| {
+                        let _implementation_owner = &implementation_drop;
+                        Ok(Box::new(RecordingAgentRuntime::with_abort_probes(
+                            Arc::new(Mutex::new(Vec::new())),
+                            mount,
+                            Arc::clone(&constructor_candidate_drops),
+                        )))
+                    }),
+                ))
+            },
+        )])
+        .expect("replacement Agent catalog should validate");
+        let desired = desired_with_agent_plugin(Some(ALTERNATE_AGENT));
+        let agent_runtime = components
+            .prepare_agent_runtime_commit(&options, &desired)
+            .expect("Agent replacement mount should prepare");
+        assert_eq!(Arc::strong_count(&observer), observer_owner_count + 1);
+        let reconciliation = catalog
+            .prepare_reconciliation(&desired, &components.plugins)
+            .expect("fresh Agent plugin should prepare");
+        let prepared_graph = components
+            .lifecycle
+            .prepare_definition_reconciliation(reconciliation.definitions())
+            .expect("replacement graph should preflight");
+        let retirement_order = prepared_graph.retirement_order().to_vec();
+        components.prepared_plugin_commit = Some(PreparedPluginCommit {
+            desired,
+            reconciliation,
+            agent_runtime,
+        });
+        components
+            .with_lifecycle(|lifecycle, components| {
+                lifecycle.deactivate_components(
+                    retirement_order,
+                    components,
+                    ComponentLifecycleMode::Reconfigure,
+                )
+            })
+            .expect("old Agent effects should retire before candidate construction");
+        components
+            .prepare_authority()
+            .expect("fresh Agent adapter should prepare after cleanup");
+
+        assert_eq!(candidate_drops.load(Ordering::SeqCst), 0);
+        assert_eq!(implementation_drops.load(Ordering::SeqCst), 0);
+        assert_eq!(Arc::strong_count(&observer), observer_owner_count + 1);
+        components
+            .lifecycle
+            .declare(ComponentDefinition::new("unexpected_component"))
+            .expect("test mutation should stale the prepared graph");
+
+        let error = components
+            .with_lifecycle(|lifecycle, components| {
+                lifecycle.commit_prepared_graph_for_test(prepared_graph, components)
+            })
+            .expect_err("stale graph commit must abort the real host transaction");
+
+        assert!(!format!("{error:?}").contains(ALTERNATE_AGENT));
+        assert!(components.prepared_plugin_commit.is_none());
+        assert_eq!(candidate_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(implementation_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(Arc::strong_count(&observer), observer_owner_count);
+        assert_eq!(components.plugin_descriptor_snapshots(), old_descriptors);
+        assert_eq!(components.plugin_loader.desired(), &old_desired);
+    }
+
+    #[test]
+    fn failed_agent_plugin_construction_keeps_old_authority_and_retry_can_commit() {
+        const ALTERNATE_AGENT: &str = "alternate-agent-loop";
+        let mut options = AppRuntimeOptions::default();
+        let mut components =
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+        let old_desired = components.plugin_loader.desired().clone();
+        let constructions = Arc::new(AtomicUsize::new(0));
+        let observed_constructions = Arc::clone(&constructions);
+        let lifecycle_trace = Arc::new(Mutex::new(Vec::new()));
+        let factory_lifecycle_trace = Arc::clone(&lifecycle_trace);
+        let catalog = PluginFactoryCatalog::try_new([agent_replacement_factory(
+            ALTERNATE_AGENT,
+            AgentRuntimeFactory::new(move |_mount| {
+                if observed_constructions.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Err("SENSITIVE_AGENT_CONSTRUCTION_FAILURE".to_string())
+                } else {
+                    Ok(Box::new(RecordingAgentRuntime::new(Arc::clone(
+                        &factory_lifecycle_trace,
+                    ))))
+                }
+            }),
+        )])
+        .expect("replacement Agent catalog should validate");
+        let desired = desired_with_agent_plugin(Some(ALTERNATE_AGENT));
+
+        let error = components
+            .reconcile_plugin_composition_with_catalog(
+                &options,
+                &catalog,
+                desired.clone(),
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect_err("first Agent candidate construction should fail");
+
+        assert_eq!(constructions.load(Ordering::SeqCst), 1);
+        assert!(error.contains("authority_preparation"));
+        assert!(!error.contains("SENSITIVE_AGENT_CONSTRUCTION_FAILURE"));
+        assert_eq!(components.plugin_loader.desired(), &old_desired);
+        assert_eq!(
+            components
+                .plugin_descriptor_snapshots()
+                .into_iter()
+                .find(|snapshot| snapshot.component_id == NATIVE_AGENT_RUNTIME_COMPONENT)
+                .expect("old Agent descriptor should remain visible")
+                .plugin_type,
+            NATIVE_AGENT_RUNTIME_PLUGIN
+        );
+        assert_eq!(
+            components.lifecycle.state(NATIVE_AGENT_RUNTIME_COMPONENT),
+            Some(ComponentState::Pending),
+            "old Agent effects must stay removed after candidate failure"
+        );
+
+        components
+            .reconcile_plugin_composition_with_catalog(
+                &options,
+                &catalog,
+                desired,
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect("retry should construct and publish the fresh Agent");
+
+        assert_eq!(constructions.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            *lifecycle_trace
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ["activate"]
+        );
+        assert_eq!(
+            components.lifecycle.state(NATIVE_AGENT_RUNTIME_COMPONENT),
+            Some(ComponentState::Active)
+        );
+        assert_eq!(
+            components
+                .plugin_descriptor_snapshots()
+                .into_iter()
+                .find(|snapshot| snapshot.component_id == NATIVE_AGENT_RUNTIME_COMPONENT)
+                .expect("fresh Agent descriptor should be visible")
+                .plugin_type,
+            ALTERNATE_AGENT
+        );
+    }
+
+    #[test]
+    fn failed_fresh_agent_activation_keeps_fresh_plugin_and_adapter_authority() {
+        const ALTERNATE_AGENT: &str = "alternate-agent-rejected";
+        let mut options = AppRuntimeOptions::default();
+        let mut components =
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+        let constructions = Arc::new(AtomicUsize::new(0));
+        let observed_constructions = Arc::clone(&constructions);
+        let shutdown_calls = Arc::new(AtomicUsize::new(0));
+        let observed_shutdown_calls = Arc::clone(&shutdown_calls);
+        let lifecycle_trace = Arc::new(Mutex::new(Vec::new()));
+        let factory_lifecycle_trace = Arc::clone(&lifecycle_trace);
+        let catalog = PluginFactoryCatalog::try_new([agent_replacement_factory(
+            ALTERNATE_AGENT,
+            AgentRuntimeFactory::new(move |_mount| {
+                observed_constructions.fetch_add(1, Ordering::SeqCst);
+                Ok(Box::new(RecordingAgentRuntime::with_shutdown_counter(
+                    Arc::clone(&factory_lifecycle_trace),
+                    Arc::clone(&observed_shutdown_calls),
+                )))
+            }),
+        )])
+        .expect("replacement Agent catalog should validate");
+
+        let error = components
+            .reconcile_plugin_composition_with_catalog(
+                &options,
+                &catalog,
+                desired_with_agent_plugin(Some(ALTERNATE_AGENT)),
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect_err("fresh Agent activation rejection should be reported");
+
+        assert_eq!(constructions.load(Ordering::SeqCst), 1);
+        assert!(!error.contains("SENSITIVE_AGENT_ACTIVATION_FAILURE"));
+        assert_eq!(
+            components
+                .plugin_descriptor_snapshots()
+                .into_iter()
+                .find(|snapshot| snapshot.component_id == NATIVE_AGENT_RUNTIME_COMPONENT)
+                .expect("fresh Agent descriptor should remain authoritative")
+                .plugin_type,
+            ALTERNATE_AGENT
+        );
+        assert_eq!(
+            components
+                .plugin_loader
+                .desired()
+                .iter()
+                .find(|(component_id, _)| {
+                    component_id.as_str() == NATIVE_AGENT_RUNTIME_COMPONENT
+                })
+                .expect("fresh desired Agent should remain committed")
+                .1
+                .as_str(),
+            ALTERNATE_AGENT
+        );
+        assert_eq!(
+            components.lifecycle.state(NATIVE_AGENT_RUNTIME_COMPONENT),
+            Some(ComponentState::Failed)
+        );
+        assert_eq!(
+            shutdown_calls.load(Ordering::SeqCst),
+            1,
+            "failed fresh activation must finally dispose the unpublished effects of its adapter"
+        );
+        assert!(
+            *lifecycle_trace
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                == ["shutdown"],
+            "rejected activation must finally dispose the candidate adapter"
+        );
+        assert!(!components.agent_port().is_idle_empty_session());
+    }
+
+    #[test]
+    fn repeated_shutdown_never_reports_success_after_incomplete_agent_cleanup() {
+        let mut options = AppRuntimeOptions::default();
+        let lifecycle_trace = Arc::new(Mutex::new(Vec::new()));
+        let factory_trace = Arc::clone(&lifecycle_trace);
+        let mut components = RuntimeComponents::new_with_agent_runtime_factory(
+            &mut options,
+            AgentRuntimeFactory::new(move |_mount| {
+                Ok(Box::new(RecordingAgentRuntime::with_shutdown_failure(
+                    Arc::clone(&factory_trace),
+                )))
+            }),
+        )
+        .expect("runtime should activate through the failing shutdown fixture");
+
+        let first = components
+            .shutdown()
+            .expect_err("incomplete Agent cleanup must fail shutdown");
+        let second = components
+            .shutdown()
+            .expect_err("repeated shutdown must preserve the cleanup failure");
+
+        assert!(!first.contains("SENSITIVE_AGENT_CLEANUP_FAILURE"));
+        assert!(!second.contains("SENSITIVE_AGENT_CLEANUP_FAILURE"));
+        assert!(components.is_shutdown);
+        let cached_lifecycle_error = components
+            .shutdown_lifecycle_error
+            .as_deref()
+            .expect("first shutdown failure must remain observable");
+        assert!(first.contains(cached_lifecycle_error));
+        assert!(second.contains(cached_lifecycle_error));
+        assert_eq!(
+            *lifecycle_trace
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ["activate", "shutdown", "shutdown", "shutdown"]
+        );
+    }
+
+    #[test]
+    fn agent_plugin_keep_reuses_the_current_adapter_during_dependency_replacement() {
+        const FRESH_EVENT_PLUGIN: &str = "runtime-event-stream-agent-keep";
+        let constructions = Arc::new(AtomicUsize::new(0));
+        let observed_constructions = Arc::clone(&constructions);
+        let mut options = AppRuntimeOptions::default();
+        let mut components = RuntimeComponents::new_with_agent_runtime_factory(
+            &mut options,
+            AgentRuntimeFactory::new(move |mount| {
+                observed_constructions.fetch_add(1, Ordering::SeqCst);
+                construct_native_agent_runtime(mount)
+            }),
+        )
+        .expect("runtime should initialize through the injected Agent plugin factory");
+        let catalog = PluginFactoryCatalog::try_new([runtime_event_replacement_factory(
+            FRESH_EVENT_PLUGIN,
+            RuntimeComponents::activate_runtime_event_stream,
+        )])
+        .expect("replacement runtime event catalog should validate");
+
+        components
+            .reconcile_plugin_composition_with_catalog(
+                &options,
+                &catalog,
+                desired_with_runtime_event_plugin(FRESH_EVENT_PLUGIN),
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect("dependency replacement should reactivate the kept Agent");
+
+        assert_eq!(constructions.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            components.lifecycle.state(NATIVE_AGENT_RUNTIME_COMPONENT),
+            Some(ComponentState::Active)
+        );
     }
 
     #[test]
@@ -2084,6 +2944,7 @@ mod tests {
 
         components
             .reconcile_plugin_composition_with_catalog(
+                &options,
                 &catalog,
                 desired_with_runtime_event_plugin(FRESH_PLUGIN),
                 ComponentLifecycleMode::Reconfigure,
@@ -2140,6 +3001,7 @@ mod tests {
 
             components
                 .reconcile_plugin_composition_with_catalog(
+                    &options,
                     &catalog,
                     desired_with_runtime_event_plugin_in_order(FRESH_PLUGIN, reverse),
                     ComponentLifecycleMode::Reconfigure,
@@ -2203,6 +3065,7 @@ mod tests {
             .expect("replacement catalog should validate");
             components
                 .reconcile_plugin_composition_with_catalog(
+                    &options,
                     &catalog,
                     desired_with_runtime_event_plugin(plugin_type),
                     ComponentLifecycleMode::Reconfigure,
@@ -2254,6 +3117,7 @@ mod tests {
 
         components
             .reconcile_plugin_composition(
+                &options,
                 DesiredPluginComposition::try_new(desired_without_wake)
                     .expect("removal desired state should validate"),
                 ComponentLifecycleMode::Reconfigure,
@@ -2268,6 +3132,7 @@ mod tests {
 
         components
             .reconcile_plugin_composition(
+                &options,
                 builtin_desired_composition().expect("builtin desired state should validate"),
                 ComponentLifecycleMode::Reconfigure,
             )
@@ -2315,6 +3180,7 @@ mod tests {
 
         let error = components
             .reconcile_plugin_composition_with_catalog(
+                &options,
                 &catalog,
                 desired_with_runtime_event_plugin(FAILING_PLUGIN),
                 ComponentLifecycleMode::Reconfigure,
@@ -2350,6 +3216,7 @@ mod tests {
 
         let error = components
             .reconcile_plugin_composition_with_catalog(
+                &options,
                 &catalog,
                 desired_with_runtime_event_plugin(INVALID_PLUGIN),
                 ComponentLifecycleMode::Reconfigure,
@@ -2378,6 +3245,7 @@ mod tests {
 
         let error = components
             .reconcile_plugin_composition_with_catalog(
+                &options,
                 &catalog,
                 desired_with_runtime_event_plugin(FAILING_PLUGIN),
                 ComponentLifecycleMode::Reconfigure,

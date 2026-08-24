@@ -14,6 +14,7 @@ use crate::runtime::lifecycle::{
 const ACTIVATION_SENTINEL: &str = "ACTIVATION_SECRET";
 const QUIESCENCE_SENTINEL: &str = "QUIESCENCE_SECRET";
 const DISPOSER_SENTINEL: &str = "DISPOSER_SECRET";
+const AUTHORITY_PREPARATION_SENTINEL: &str = "AUTHORITY_PREPARATION_SECRET";
 const RESOURCE_EFFECT: &str = "resource";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -132,6 +133,37 @@ enum DeactivationFailureKind {
     Disposal,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthorityScenario {
+    Success,
+    GraphPreflightFailure,
+    QuiescenceFailure,
+    DisposalFailure,
+    PreparationFailure,
+    StaleGraphCommit,
+    ActivationFailure,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum AuthorityTransactionStatus {
+    #[default]
+    Idle,
+    Prepared,
+    Committed,
+    Aborted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct AuthorityState {
+    status: AuthorityTransactionStatus,
+    has_unpublished_authority: bool,
+    preparation_should_fail: bool,
+    preparations: usize,
+    commits: usize,
+    aborts: usize,
+    generation: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct ResourceKey {
     component: TestComponent,
@@ -169,6 +201,7 @@ struct CallbackState {
     activation_failures: BTreeSet<TestComponent>,
     quiescence_failures: BTreeSet<TestComponent>,
     disposal_failures: BTreeSet<TestComponent>,
+    authority: AuthorityState,
 }
 
 #[derive(Default)]
@@ -208,13 +241,61 @@ impl PropertyCallbacks {
         state.disposal_failures.clear();
     }
 
+    fn begin_authority_transaction(&self) {
+        let mut state = lock_callback_state(&self.state);
+        assert!(
+            !state.authority.has_unpublished_authority,
+            "property model cannot overlap authority transactions"
+        );
+        state.authority.status = AuthorityTransactionStatus::Idle;
+        state.authority.has_unpublished_authority = true;
+        state.authority.preparation_should_fail = false;
+    }
+
+    fn arm_authority_preparation_failure(&self) {
+        lock_callback_state(&self.state)
+            .authority
+            .preparation_should_fail = true;
+    }
+
     fn snapshot(&self) -> CallbackState {
         lock_callback_state(&self.state).clone()
     }
 }
 
 impl ComponentLifecycleCallbacks for PropertyCallbacks {
-    fn commit_authority(&mut self) {}
+    fn prepare_authority(&mut self) -> Result<(), String> {
+        let mut state = lock_callback_state(&self.state);
+        assert!(state.authority.has_unpublished_authority);
+        assert_eq!(state.authority.status, AuthorityTransactionStatus::Idle);
+        state.authority.preparations += 1;
+        state.authority.status = AuthorityTransactionStatus::Prepared;
+        if state.authority.preparation_should_fail {
+            Err(AUTHORITY_PREPARATION_SENTINEL.to_string())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn abort_authority(&mut self) {
+        let mut state = lock_callback_state(&self.state);
+        state.authority.aborts += 1;
+        if state.authority.has_unpublished_authority {
+            state.authority.has_unpublished_authority = false;
+            state.authority.status = AuthorityTransactionStatus::Aborted;
+            state.authority.preparation_should_fail = false;
+        }
+    }
+
+    fn commit_authority(&mut self) {
+        let mut state = lock_callback_state(&self.state);
+        assert!(state.authority.has_unpublished_authority);
+        assert_eq!(state.authority.status, AuthorityTransactionStatus::Prepared);
+        state.authority.has_unpublished_authority = false;
+        state.authority.status = AuthorityTransactionStatus::Committed;
+        state.authority.commits += 1;
+        state.authority.generation += 1;
+    }
 
     fn activate_component(
         &mut self,
@@ -368,6 +449,19 @@ fn definitions() -> Vec<ComponentDefinition> {
     ]
 }
 
+fn replacement_definitions_for_generation(generation: usize) -> Vec<ComponentDefinition> {
+    definitions()
+        .into_iter()
+        .map(|definition| {
+            if definition.id == TestComponent::AlphaSource.as_str() {
+                definition.implemented_by(format!("replacement-alpha-source-{generation}"))
+            } else {
+                definition
+            }
+        })
+        .collect()
+}
+
 fn provider_strategy() -> impl Strategy<Value = ProviderRoot> {
     prop_oneof![Just(ProviderRoot::Alpha), Just(ProviderRoot::Beta)]
 }
@@ -387,6 +481,18 @@ fn deactivation_failure_strategy() -> impl Strategy<Value = DeactivationFailureK
     prop_oneof![
         Just(DeactivationFailureKind::Quiescence),
         Just(DeactivationFailureKind::Disposal),
+    ]
+}
+
+fn authority_scenario_strategy() -> impl Strategy<Value = AuthorityScenario> {
+    prop_oneof![
+        Just(AuthorityScenario::Success),
+        Just(AuthorityScenario::GraphPreflightFailure),
+        Just(AuthorityScenario::QuiescenceFailure),
+        Just(AuthorityScenario::DisposalFailure),
+        Just(AuthorityScenario::PreparationFailure),
+        Just(AuthorityScenario::StaleGraphCommit),
+        Just(AuthorityScenario::ActivationFailure),
     ]
 }
 
@@ -948,9 +1054,165 @@ fn assert_stable_boundary(
 }
 
 fn assert_redacted_debug(diagnostic: &str) -> TestCaseResult {
-    for sentinel in [ACTIVATION_SENTINEL, QUIESCENCE_SENTINEL, DISPOSER_SENTINEL] {
+    for sentinel in [
+        ACTIVATION_SENTINEL,
+        QUIESCENCE_SENTINEL,
+        DISPOSER_SENTINEL,
+        AUTHORITY_PREPARATION_SENTINEL,
+    ] {
         prop_assert!(!diagnostic.contains(sentinel));
     }
+    Ok(())
+}
+
+fn execute_authority_scenario(
+    scenario: AuthorityScenario,
+    desired: Vec<ComponentDefinition>,
+    sequence: usize,
+    executor: &mut ComponentLifecycleExecutor,
+    callbacks: &mut PropertyCallbacks,
+) -> Result<(), LifecycleExecutionError> {
+    callbacks.begin_authority_transaction();
+
+    match scenario {
+        AuthorityScenario::GraphPreflightFailure => executor.reconcile_definitions_with_commit(
+            [
+                ComponentDefinition::new("duplicate"),
+                ComponentDefinition::new("duplicate"),
+            ],
+            callbacks,
+            ComponentLifecycleMode::Reconfigure,
+        ),
+        AuthorityScenario::QuiescenceFailure => {
+            callbacks.arm_quiescence_failure(TestComponent::AlphaSource);
+            executor.reconcile_definitions_with_commit(
+                desired,
+                callbacks,
+                ComponentLifecycleMode::Reconfigure,
+            )
+        }
+        AuthorityScenario::DisposalFailure => {
+            callbacks.arm_disposal_failure(TestComponent::AlphaSource);
+            executor.reconcile_definitions_with_commit(
+                desired,
+                callbacks,
+                ComponentLifecycleMode::Reconfigure,
+            )
+        }
+        AuthorityScenario::PreparationFailure => {
+            callbacks.arm_authority_preparation_failure();
+            executor.reconcile_definitions_with_commit(
+                desired,
+                callbacks,
+                ComponentLifecycleMode::Reconfigure,
+            )
+        }
+        AuthorityScenario::ActivationFailure => {
+            callbacks.arm_activation_failure(TestComponent::AlphaSource);
+            executor.reconcile_definitions_with_commit(
+                desired,
+                callbacks,
+                ComponentLifecycleMode::Reconfigure,
+            )
+        }
+        AuthorityScenario::Success => executor.reconcile_definitions_with_commit(
+            desired,
+            callbacks,
+            ComponentLifecycleMode::Reconfigure,
+        ),
+        AuthorityScenario::StaleGraphCommit => {
+            let prepared = match executor.graph.prepare_definition_reconciliation(desired) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    callbacks.abort_authority();
+                    return Err(LifecycleExecutionError::graph("runtime_composition", error));
+                }
+            };
+            let retirement_order = prepared.retirement_order().to_vec();
+            if let Err(error) = executor.deactivate_components(
+                retirement_order,
+                callbacks,
+                ComponentLifecycleMode::Reconfigure,
+            ) {
+                callbacks.abort_authority();
+                return Err(error);
+            }
+            if let Err(message) = callbacks.prepare_authority() {
+                callbacks.abort_authority();
+                return Err(LifecycleExecutionError::authority_preparation(message));
+            }
+            executor
+                .graph
+                .declare(ComponentDefinition::new(format!(
+                    "unexpected_component_{sequence}"
+                )))
+                .expect("unique test mutation should stale the prepared graph");
+            executor
+                .commit_prepared_graph(prepared, callbacks, true)
+                .map(|_| ())
+        }
+    }
+}
+
+fn exercise_authority_sequence(
+    scenarios: &[AuthorityScenario],
+    executor: &mut ComponentLifecycleExecutor,
+    callbacks: &mut PropertyCallbacks,
+) -> TestCaseResult {
+    for (sequence, scenario) in scenarios.iter().copied().enumerate() {
+        let before = callbacks.snapshot().authority;
+        let before_alpha_epoch = executor
+            .graph()
+            .epoch(TestComponent::AlphaSource.as_str())
+            .expect("authority provider should retain its epoch tombstone");
+        let result = execute_authority_scenario(
+            scenario,
+            replacement_definitions_for_generation(sequence + 1),
+            sequence,
+            executor,
+            callbacks,
+        );
+        if let Err(error) = &result {
+            assert_redacted_debug(&format!("{error:?}"))?;
+        }
+
+        let after = callbacks.snapshot().authority;
+        let commit_delta = after.commits - before.commits;
+        let abort_delta = after.aborts - before.aborts;
+        prop_assert!(commit_delta <= 1);
+        prop_assert!(abort_delta <= 1);
+        prop_assert_eq!(commit_delta + abort_delta, 1);
+        prop_assert!(after.preparations - before.preparations <= 1);
+        prop_assert!(!after.has_unpublished_authority);
+        prop_assert_eq!(after.generation, after.commits as u64);
+        prop_assert_eq!(
+            after.status,
+            if commit_delta == 1 {
+                AuthorityTransactionStatus::Committed
+            } else {
+                AuthorityTransactionStatus::Aborted
+            }
+        );
+        let after_alpha_epoch = executor
+            .graph()
+            .epoch(TestComponent::AlphaSource.as_str())
+            .expect("authority provider should retain its epoch tombstone");
+        prop_assert!(after_alpha_epoch >= before_alpha_epoch);
+        prop_assert_eq!(after_alpha_epoch - before_alpha_epoch, commit_delta as u64);
+        if result.is_ok() {
+            prop_assert_eq!(commit_delta, 1);
+        }
+    }
+
+    let terminal = callbacks.snapshot().authority;
+    callbacks.abort_authority();
+    callbacks.abort_authority();
+    let after_repeated_abort = callbacks.snapshot().authority;
+    prop_assert_eq!(after_repeated_abort.status, terminal.status);
+    prop_assert_eq!(after_repeated_abort.commits, terminal.commits);
+    prop_assert_eq!(after_repeated_abort.generation, terminal.generation);
+    prop_assert!(!after_repeated_abort.has_unpublished_authority);
+    prop_assert_eq!(after_repeated_abort.aborts, terminal.aborts + 2);
     Ok(())
 }
 
@@ -967,6 +1229,26 @@ fn lock_callback_state(
     state
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[test]
+fn shutdown_aborts_pending_authority_once() {
+    let mut executor = ComponentLifecycleExecutor::default();
+    let mut callbacks = PropertyCallbacks::default();
+    callbacks.begin_authority_transaction();
+
+    executor
+        .shutdown(&mut callbacks)
+        .expect("empty composition should shut down");
+    let after_shutdown = callbacks.snapshot().authority;
+    assert_eq!(after_shutdown.status, AuthorityTransactionStatus::Aborted);
+    assert_eq!(after_shutdown.aborts, 1);
+    assert!(!after_shutdown.has_unpublished_authority);
+
+    executor
+        .shutdown(&mut callbacks)
+        .expect("repeated shutdown should be a no-op");
+    assert_eq!(callbacks.snapshot().authority, after_shutdown);
 }
 
 proptest! {
@@ -1022,6 +1304,23 @@ proptest! {
             (executor_snapshot(&executor), callbacks.snapshot()),
             before_repeat,
         );
+    }
+
+    #[test]
+    fn definition_transactions_preserve_authority_state_machine(
+        scenarios in prop::collection::vec(authority_scenario_strategy(), 1..17),
+    ) {
+        let mut executor = ComponentLifecycleExecutor::default();
+        let mut callbacks = PropertyCallbacks::default();
+        executor
+            .reconcile_definitions(
+                definitions(),
+                &mut callbacks,
+                ComponentLifecycleMode::Initial,
+            )
+            .expect("fixed acyclic graph must activate");
+
+        exercise_authority_sequence(&scenarios, &mut executor, &mut callbacks)?;
     }
 
     #[test]

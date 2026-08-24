@@ -819,6 +819,32 @@ impl<I> PreparedPluginReconciliation<I> {
     pub(super) fn definitions(&self) -> Vec<ComponentDefinition> {
         self.definitions.clone()
     }
+
+    /// 返回 commit 后指定 slot 将使用的 implementation，但不转移或发布任何 authority。
+    pub(super) fn prospective_implementation<'a>(
+        &'a self,
+        observed: &'a PluginComposition<I>,
+        component_id: &str,
+    ) -> Option<&'a I> {
+        let desired_type = self
+            .desired
+            .entries
+            .iter()
+            .find_map(|(desired_id, desired_type)| {
+                (desired_id.as_str() == component_id).then_some(desired_type)
+            })?;
+        if let Some(fresh) = self
+            .fresh_instances
+            .iter()
+            .find(|instance| instance.component_id.as_str() == component_id)
+        {
+            return Some(&fresh.implementation);
+        }
+
+        let observed_instance = observed.instances.get(component_id)?;
+        (&observed_instance.descriptor.type_id == desired_type)
+            .then_some(&observed_instance.implementation)
+    }
 }
 
 impl<I> Drop for PreparedPluginReconciliation<I> {
@@ -1354,13 +1380,17 @@ mod tests {
 
     #[test]
     fn prepared_reconciliation_reuses_keep_and_constructs_only_add_replace() {
-        let observed_catalog =
-            PluginFactoryCatalog::try_new([factory("stable", 1), factory("previous", 2)])
-                .expect("observed catalog should validate");
+        let observed_catalog = PluginFactoryCatalog::try_new([
+            factory("stable", 1),
+            factory("previous", 2),
+            factory("retired", 5),
+        ])
+        .expect("observed catalog should validate");
         let mut observed = observed_catalog
             .instantiate(&desired([
                 ("keep_slot", "stable"),
                 ("replace_slot", "previous"),
+                ("remove_slot", "retired"),
             ]))
             .expect("observed composition should prepare");
         let constructions = Arc::new(Mutex::new(Vec::new()));
@@ -1401,6 +1431,46 @@ mod tests {
         );
         assert_eq!(observed.implementation("keep_slot"), Some(&1));
         assert_eq!(observed.implementation("replace_slot"), Some(&2));
+        assert_eq!(
+            prepared.prospective_implementation(&observed, "keep_slot"),
+            Some(&1)
+        );
+        assert_eq!(
+            prepared.prospective_implementation(&observed, "replace_slot"),
+            Some(&3)
+        );
+        assert_eq!(
+            prepared.prospective_implementation(&observed, "add_slot"),
+            Some(&4)
+        );
+        assert_eq!(
+            prepared.prospective_implementation(&observed, "remove_slot"),
+            None
+        );
+        assert_eq!(
+            prepared.prospective_implementation(&observed, "unknown_slot"),
+            None
+        );
+
+        let mut incomplete_prepared = target_catalog
+            .prepare_reconciliation(&desired, &observed)
+            .expect("second target composition should prepare");
+        let replacement_index = incomplete_prepared
+            .fresh_instances
+            .iter()
+            .position(|instance| instance.component_id.as_str() == "replace_slot")
+            .expect("replace slot should own a fresh instance");
+        drop(
+            incomplete_prepared
+                .fresh_instances
+                .remove(replacement_index),
+        );
+        assert_eq!(
+            incomplete_prepared.prospective_implementation(&observed, "replace_slot"),
+            None,
+            "a damaged Replace must not fall back to the old implementation"
+        );
+        drop(incomplete_prepared);
 
         observed.commit_reconciliation(prepared);
         assert_eq!(observed.implementation("keep_slot"), Some(&1));

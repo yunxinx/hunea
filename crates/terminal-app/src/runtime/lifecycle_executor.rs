@@ -13,7 +13,8 @@ use super::{
     effect_scope::{EffectScope, EffectScopeSnapshot},
     lifecycle::{
         ActivationToken, CapabilityKey, ComponentDefinition, ComponentFailureReason,
-        ComponentGraph, ComponentGraphError, DeactivationToken, ReconciliationReport,
+        ComponentGraph, ComponentGraphError, DeactivationToken, PreparedDefinitionReconciliation,
+        ReconciliationReport,
     },
 };
 
@@ -52,13 +53,20 @@ pub(super) trait ComponentLifecycleCallbacks {
         mode: ComponentLifecycleMode,
     ) -> Result<(), String>;
 
-    /// 在 graph definition commit 成功后发布 coordinator-owned authority。
+    /// 在 old cleanup 完成后准备尚未发布、可丢弃的 coordinator-owned authority。
+    fn prepare_authority(&mut self) -> Result<(), String>;
+
+    /// 在 graph definition commit 成功后发布已准备的 coordinator-owned authority。
     fn commit_authority(&mut self);
+
+    /// 丢弃当前尚未发布的 authority preparation；重复调用必须安全。
+    fn abort_authority(&mut self);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LifecycleExecutionOperation {
     Graph,
+    AuthorityPreparation,
     Activation,
     Quiescence,
     EffectDisposal,
@@ -68,6 +76,7 @@ impl LifecycleExecutionOperation {
     const fn as_str(self) -> &'static str {
         match self {
             Self::Graph => "graph",
+            Self::AuthorityPreparation => "authority_preparation",
             Self::Activation => "activation",
             Self::Quiescence => "quiescence",
             Self::EffectDisposal => "effect_disposal",
@@ -111,6 +120,16 @@ impl LifecycleExecutionError {
                 component_id: "runtime_composition".to_string(),
                 operation: LifecycleExecutionOperation::Graph,
                 message: "component lifecycle executor is shut down".to_string(),
+            }],
+        }
+    }
+
+    fn authority_preparation(message: String) -> Self {
+        Self {
+            failures: vec![LifecycleExecutionFailure {
+                component_id: "runtime_composition".to_string(),
+                operation: LifecycleExecutionOperation::AuthorityPreparation,
+                message,
             }],
         }
     }
@@ -257,11 +276,21 @@ impl ComponentLifecycleExecutor {
         mode: ComponentLifecycleMode,
         should_commit_authority: bool,
     ) -> Result<(), LifecycleExecutionError> {
-        self.ensure_running()?;
-        let prepared = self
-            .graph
-            .prepare_definition_reconciliation(definitions)
-            .map_err(|error| LifecycleExecutionError::graph("runtime_composition", error))?;
+        if let Err(error) = self.ensure_running() {
+            if should_commit_authority {
+                callbacks.abort_authority();
+            }
+            return Err(error);
+        }
+        let prepared = match self.graph.prepare_definition_reconciliation(definitions) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                if should_commit_authority {
+                    callbacks.abort_authority();
+                }
+                return Err(LifecycleExecutionError::graph("runtime_composition", error));
+            }
+        };
         let retirement_order = prepared.retirement_order().to_vec();
         let mut failures = Vec::new();
 
@@ -282,18 +311,51 @@ impl ComponentLifecycleExecutor {
                 failures.extend(error.failures);
             }
         }
-        LifecycleExecutionError::finish(failures)?;
+        if let Err(error) = LifecycleExecutionError::finish(failures) {
+            if should_commit_authority {
+                callbacks.abort_authority();
+            }
+            return Err(error);
+        }
 
-        let activation_order = self
-            .graph
-            .commit_definition_reconciliation(prepared)
-            .map_err(|error| LifecycleExecutionError::graph("runtime_composition", error))?;
-        // Graph commit 已完成所有 fallible validation；authority switch 是同一 coordinator
-        // critical section 中的 infallible publication，随后才允许 fresh callbacks 执行。
+        if should_commit_authority && let Err(message) = callbacks.prepare_authority() {
+            callbacks.abort_authority();
+            return Err(LifecycleExecutionError::authority_preparation(message));
+        }
+
+        let activation_order =
+            self.commit_prepared_graph(prepared, callbacks, should_commit_authority)?;
+        // Candidate preparation 与 graph commit 已完成全部 fallible work；authority switch 是
+        // 同一 coordinator critical section 中的 infallible publication，随后才允许 fresh callbacks。
         if should_commit_authority {
             callbacks.commit_authority();
         }
         self.activate_components(activation_order, callbacks, mode)
+    }
+
+    fn commit_prepared_graph(
+        &mut self,
+        prepared: PreparedDefinitionReconciliation,
+        callbacks: &mut impl ComponentLifecycleCallbacks,
+        should_commit_authority: bool,
+    ) -> Result<Vec<String>, LifecycleExecutionError> {
+        self.graph
+            .commit_definition_reconciliation(prepared)
+            .map_err(|error| {
+                if should_commit_authority {
+                    callbacks.abort_authority();
+                }
+                LifecycleExecutionError::graph("runtime_composition", error)
+            })
+    }
+
+    #[cfg(test)]
+    pub(super) fn commit_prepared_graph_for_test(
+        &mut self,
+        prepared: PreparedDefinitionReconciliation,
+        callbacks: &mut impl ComponentLifecycleCallbacks,
+    ) -> Result<Vec<String>, LifecycleExecutionError> {
+        self.commit_prepared_graph(prepared, callbacks, true)
     }
 
     #[cfg(test)]
@@ -456,6 +518,7 @@ impl ComponentLifecycleExecutor {
             return Ok(());
         }
         self.is_shutdown = true;
+        callbacks.abort_authority();
         let component_ids = self.graph.deactivation_order();
         let mut failures = self
             .deactivate_components_inner(component_ids, callbacks, ComponentLifecycleMode::Shutdown)
@@ -830,6 +893,10 @@ mod tests {
         events: Arc<Mutex<Vec<String>>>,
         authority: Option<Arc<Mutex<String>>>,
         authority_after_commit: Option<String>,
+        authority_preparation_failure: bool,
+        authority_preparations: usize,
+        authority_commits: usize,
+        authority_aborts: usize,
         publishers: BTreeSet<String>,
         activation_failures: BTreeSet<String>,
         quiescence_failures: BTreeSet<String>,
@@ -877,7 +944,17 @@ mod tests {
     }
 
     impl ComponentLifecycleCallbacks for FakeCallbacks {
+        fn prepare_authority(&mut self) -> Result<(), String> {
+            self.authority_preparations += 1;
+            if self.authority_preparation_failure {
+                Err("AUTHORITY_PREPARATION_SECRET".to_string())
+            } else {
+                Ok(())
+            }
+        }
+
         fn commit_authority(&mut self) {
+            self.authority_commits += 1;
             if let (Some(authority), Some(next)) =
                 (&self.authority, self.authority_after_commit.take())
             {
@@ -885,6 +962,10 @@ mod tests {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
             }
+        }
+
+        fn abort_authority(&mut self) {
+            self.authority_aborts += 1;
         }
 
         fn activate_component(
@@ -975,6 +1056,9 @@ mod tests {
             callbacks.snapshot(),
             vec!["activate:database", "activate:service", "activate:ui"]
         );
+        assert_eq!(callbacks.authority_preparations, 0);
+        assert_eq!(callbacks.authority_commits, 0);
+        assert_eq!(callbacks.authority_aborts, 0);
         assert_eq!(executor.graph().state("ui"), Some(ComponentState::Active));
         assert_eq!(executor.scope_snapshots().len(), 3);
 
@@ -1062,6 +1146,30 @@ mod tests {
                 "activate:ui:fresh",
             ]
         );
+        assert_eq!(callbacks.authority_preparations, 1);
+        assert_eq!(callbacks.authority_commits, 1);
+        assert_eq!(callbacks.authority_aborts, 0);
+    }
+
+    #[test]
+    fn graph_preflight_failure_aborts_unpublished_authority() {
+        let mut executor = ComponentLifecycleExecutor::default();
+        let mut callbacks = FakeCallbacks::default();
+
+        executor
+            .reconcile_definitions_with_commit(
+                [
+                    ComponentDefinition::new("duplicate"),
+                    ComponentDefinition::new("duplicate"),
+                ],
+                &mut callbacks,
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect_err("invalid graph must abort before cleanup or authority preparation");
+
+        assert_eq!(callbacks.authority_preparations, 0);
+        assert_eq!(callbacks.authority_commits, 0);
+        assert_eq!(callbacks.authority_aborts, 1);
     }
 
     #[test]
@@ -1100,6 +1208,9 @@ mod tests {
             .expect_err("cleanup failure must block commit");
 
         assert_eq!(*authority.lock().unwrap(), "old");
+        assert_eq!(callbacks.authority_preparations, 0);
+        assert_eq!(callbacks.authority_commits, 0);
+        assert_eq!(callbacks.authority_aborts, 1);
         assert!(!format!("{error:?}").contains("QUIESCENCE_SECRET"));
         assert_eq!(executor.graph().state("storage"), None);
     }
@@ -1145,6 +1256,9 @@ mod tests {
             .expect_err("effect disposal failure must block commit");
 
         assert_eq!(*authority.lock().unwrap(), "old");
+        assert_eq!(callbacks.authority_preparations, 0);
+        assert_eq!(callbacks.authority_commits, 0);
+        assert_eq!(callbacks.authority_aborts, 1);
         assert_eq!(executor.graph().state("storage"), None);
         assert!(
             callbacks
@@ -1152,6 +1266,80 @@ mod tests {
                 .iter()
                 .all(|event| !event.starts_with("activate:storage"))
         );
+    }
+
+    #[test]
+    fn authority_preparation_failure_aborts_after_cleanup_before_graph_commit() {
+        let authority = Arc::new(Mutex::new("old".to_string()));
+        let mut executor = ComponentLifecycleExecutor::default();
+        let mut callbacks = FakeCallbacks {
+            authority: Some(Arc::clone(&authority)),
+            publishers: ["database", "storage", "service"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            ..FakeCallbacks::default()
+        };
+        executor
+            .reconcile_definitions(
+                definitions(),
+                &mut callbacks,
+                ComponentLifecycleMode::Initial,
+            )
+            .expect("initial composition should activate");
+        callbacks.authority_after_commit = Some("fresh".to_string());
+        callbacks.authority_preparation_failure = true;
+
+        let error = executor
+            .reconcile_definitions_with_commit(
+                storage_definitions(),
+                &mut callbacks,
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect_err("authority preparation failure must abort before graph commit");
+
+        assert_eq!(*authority.lock().unwrap(), "old");
+        assert_eq!(callbacks.authority_preparations, 1);
+        assert_eq!(callbacks.authority_commits, 0);
+        assert_eq!(callbacks.authority_aborts, 1);
+        assert!(!format!("{error:?}").contains("AUTHORITY_PREPARATION_SECRET"));
+        assert_eq!(executor.graph().state("storage"), None);
+        assert_eq!(
+            executor.graph().state("database"),
+            Some(ComponentState::Pending)
+        );
+    }
+
+    #[test]
+    fn stale_graph_commit_aborts_already_prepared_authority() {
+        let mut executor = ComponentLifecycleExecutor::default();
+        let mut callbacks = FakeCallbacks::publishing(&["database", "service"]);
+        executor
+            .reconcile_definitions(
+                definitions(),
+                &mut callbacks,
+                ComponentLifecycleMode::Initial,
+            )
+            .expect("initial composition should activate");
+        let prepared = executor
+            .graph
+            .prepare_definition_reconciliation(storage_definitions())
+            .expect("replacement graph should preflight");
+        callbacks
+            .prepare_authority()
+            .expect("test authority should prepare");
+        executor
+            .graph
+            .declare(ComponentDefinition::new("unexpected"))
+            .expect("test mutation should stale the prepared graph");
+
+        executor
+            .commit_prepared_graph(prepared, &mut callbacks, true)
+            .expect_err("stale graph commit must abort prepared authority");
+
+        assert_eq!(callbacks.authority_preparations, 1);
+        assert_eq!(callbacks.authority_commits, 0);
+        assert_eq!(callbacks.authority_aborts, 1);
     }
 
     #[test]

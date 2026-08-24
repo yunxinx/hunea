@@ -201,7 +201,8 @@ impl PluginDescriptor {
     }
 
     fn definition(&self, component_id: impl Into<String>) -> ComponentDefinition {
-        let mut definition = ComponentDefinition::new(component_id);
+        let mut definition =
+            ComponentDefinition::new(component_id).implemented_by(self.type_id.as_str());
         for key in &self.required {
             definition = definition.requires(key.clone());
         }
@@ -628,6 +629,78 @@ impl<I> PluginFactoryCatalog<I> {
         })
     }
 
+    /// 只构造 `Add`/`Replace` target；`Keep` instance 继续由 observed composition 持有。
+    pub(super) fn prepare_reconciliation(
+        &self,
+        desired: &DesiredPluginComposition,
+        observed: &PluginComposition<I>,
+    ) -> Result<PreparedPluginReconciliation<I>, PluginCatalogError> {
+        let observed_identity = observed.observed();
+        let plan = self.plan_reconciliation(desired, &observed_identity)?;
+        let mut definitions = Vec::with_capacity(desired.entries.len());
+        let mut fresh_instances = Vec::new();
+
+        for action in plan.actions() {
+            match action {
+                PluginReconciliationAction::Keep { component_id, .. } => {
+                    let instance = observed
+                        .instances
+                        .get(component_id)
+                        .expect("Keep identity must reference the observed composition");
+                    definitions.push(
+                        instance
+                            .descriptor
+                            .definition(component_id.as_str().to_string()),
+                    );
+                }
+                PluginReconciliationAction::Add {
+                    component_id,
+                    plugin_type,
+                }
+                | PluginReconciliationAction::Replace {
+                    component_id,
+                    to: plugin_type,
+                    ..
+                } => {
+                    let factory = self
+                        .factories
+                        .get(plugin_type)
+                        .expect("target factories were resolved during planning");
+                    let implementation = match (factory.construct)() {
+                        Ok(implementation) => implementation,
+                        Err(source) => {
+                            while let Some(instance) = fresh_instances.pop() {
+                                drop(instance);
+                            }
+                            return Err(PluginCatalogError::ConstructionFailed {
+                                component_id: component_id.clone(),
+                                plugin_type: plugin_type.clone(),
+                                source,
+                            });
+                        }
+                    };
+                    definitions.push(
+                        factory
+                            .descriptor
+                            .definition(component_id.as_str().to_string()),
+                    );
+                    fresh_instances.push(PluginInstance {
+                        component_id: component_id.clone(),
+                        descriptor: factory.descriptor.clone(),
+                        implementation,
+                    });
+                }
+                PluginReconciliationAction::Remove { .. } => {}
+            }
+        }
+
+        Ok(PreparedPluginReconciliation {
+            desired: desired.clone(),
+            definitions,
+            fresh_instances,
+        })
+    }
+
     pub(super) fn plan_reconciliation(
         &self,
         desired: &DesiredPluginComposition,
@@ -695,12 +768,57 @@ struct PluginInstance<I> {
     implementation: I,
 }
 
-/// `PluginComposition` 是已完整 prepare、尚未 publication 的 immutable instance 集合。
+/// `PreparedPluginReconciliation` 在 commit 前只拥有 fresh instance，不接管 live `Keep`。
+pub(super) struct PreparedPluginReconciliation<I> {
+    desired: DesiredPluginComposition,
+    definitions: Vec<ComponentDefinition>,
+    fresh_instances: Vec<PluginInstance<I>>,
+}
+
+impl<I> PreparedPluginReconciliation<I> {
+    pub(super) fn definitions(&self) -> Vec<ComponentDefinition> {
+        self.definitions.clone()
+    }
+}
+
+impl<I> Drop for PreparedPluginReconciliation<I> {
+    fn drop(&mut self) {
+        while let Some(instance) = self.fresh_instances.pop() {
+            drop(instance);
+        }
+    }
+}
+
+/// `PluginComposition` 是唯一 live instance authority；startup prepare 后由 transaction 原子更新。
 pub(super) struct PluginComposition<I> {
     instances: BTreeMap<PluginComponentId, PluginInstance<I>>,
 }
 
 impl<I> PluginComposition<I> {
+    /// 在 lifecycle commit point 合并 observed `Keep` 与 prepared `Add`/`Replace` instance。
+    pub(super) fn commit_reconciliation(&mut self, mut prepared: PreparedPluginReconciliation<I>) {
+        let mut observed = std::mem::take(&mut self.instances);
+        let mut fresh = std::mem::take(&mut prepared.fresh_instances)
+            .into_iter()
+            .map(|instance| (instance.component_id.clone(), instance))
+            .collect::<BTreeMap<_, _>>();
+        let mut committed = BTreeMap::new();
+
+        for component_id in prepared.desired.entries.keys() {
+            let instance = fresh.remove(component_id).unwrap_or_else(|| {
+                observed
+                    .remove(component_id)
+                    .expect("desired slot must be observed Keep or prepared Add/Replace")
+            });
+            committed.insert(component_id.clone(), instance);
+        }
+        for (_, instance) in observed.into_iter().rev() {
+            drop(instance);
+        }
+        debug_assert!(fresh.is_empty());
+        self.instances = committed;
+    }
+
     pub(super) fn definitions(&self) -> Vec<ComponentDefinition> {
         self.instances
             .values()
@@ -743,6 +861,17 @@ impl<I> PluginComposition<I> {
                 (component_id.clone(), instance.descriptor.type_id.clone())
             }));
         observed
+    }
+}
+
+impl<I> Drop for PluginComposition<I> {
+    fn drop(&mut self) {
+        // construction 按 component id 排序；显式逆序释放使未 publication composition 的
+        // disposal 顺序同样稳定。
+        let instances = std::mem::take(&mut self.instances);
+        for (_, instance) in instances.into_iter().rev() {
+            drop(instance);
+        }
     }
 }
 
@@ -835,6 +964,7 @@ mod tests {
             composition.definitions(),
             vec![
                 ComponentDefinition::new("main_agent")
+                    .implemented_by("agent")
                     .requires("llm")
                     .observes("metrics")
                     .provides("agent")
@@ -1183,6 +1313,62 @@ mod tests {
     }
 
     #[test]
+    fn prepared_reconciliation_reuses_keep_and_constructs_only_add_replace() {
+        let observed_catalog =
+            PluginFactoryCatalog::try_new([factory("stable", 1), factory("previous", 2)])
+                .expect("observed catalog should validate");
+        let mut observed = observed_catalog
+            .instantiate(&desired([
+                ("keep_slot", "stable"),
+                ("replace_slot", "previous"),
+            ]))
+            .expect("observed composition should prepare");
+        let constructions = Arc::new(Mutex::new(Vec::new()));
+        let replacement_constructions = Arc::clone(&constructions);
+        let addition_constructions = Arc::clone(&constructions);
+        let target_catalog = PluginFactoryCatalog::try_new([
+            PluginFactory::new(descriptor("replacement"), move || {
+                replacement_constructions
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push("replacement");
+                Ok(3)
+            }),
+            PluginFactory::new(descriptor("addition"), move || {
+                addition_constructions
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push("addition");
+                Ok(4)
+            }),
+        ])
+        .expect("target catalog should validate");
+        let desired = desired([
+            ("replace_slot", "replacement"),
+            ("keep_slot", "stable"),
+            ("add_slot", "addition"),
+        ]);
+
+        let prepared = target_catalog
+            .prepare_reconciliation(&desired, &observed)
+            .expect("target composition should prepare");
+
+        assert_eq!(
+            *constructions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec!["addition", "replacement"]
+        );
+        assert_eq!(observed.implementation("keep_slot"), Some(&1));
+        assert_eq!(observed.implementation("replace_slot"), Some(&2));
+
+        observed.commit_reconciliation(prepared);
+        assert_eq!(observed.implementation("keep_slot"), Some(&1));
+        assert_eq!(observed.implementation("replace_slot"), Some(&3));
+        assert_eq!(observed.implementation("add_slot"), Some(&4));
+    }
+
+    #[test]
     fn observed_and_plan_debug_omit_descriptor_and_implementation_internals() {
         struct SensitiveImplementation;
 
@@ -1295,6 +1481,76 @@ mod tests {
                 .to_string()
                 .contains("SENSITIVE_FACTORY_SOURCE_SENTINEL")
         );
+    }
+
+    #[test]
+    fn unpublished_composition_drop_is_reverse_and_complete() {
+        let drops = Arc::new(Mutex::new(Vec::new()));
+        let first_drops = Arc::clone(&drops);
+        let second_drops = Arc::clone(&drops);
+        let catalog = PluginFactoryCatalog::try_new([
+            PluginFactory::new(descriptor("first"), move || {
+                Ok(DropProbe {
+                    name: "first",
+                    drops: Arc::clone(&first_drops),
+                })
+            }),
+            PluginFactory::new(descriptor("second"), move || {
+                Ok(DropProbe {
+                    name: "second",
+                    drops: Arc::clone(&second_drops),
+                })
+            }),
+        ])
+        .expect("catalog should validate");
+
+        let composition = catalog
+            .instantiate(&desired([("a", "first"), ("b", "second")]))
+            .expect("composition should prepare");
+        drop(composition);
+
+        assert_eq!(
+            *drops
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec!["second", "first"]
+        );
+    }
+
+    #[test]
+    fn abandoned_reconciliation_drops_fresh_instances_without_touching_observed() {
+        let drops = Arc::new(Mutex::new(Vec::new()));
+        let old_drops = Arc::clone(&drops);
+        let observed_catalog =
+            PluginFactoryCatalog::try_new([PluginFactory::new(descriptor("old"), move || {
+                Ok(DropProbe {
+                    name: "old",
+                    drops: Arc::clone(&old_drops),
+                })
+            })])
+            .expect("observed catalog should validate");
+        let observed = observed_catalog
+            .instantiate(&desired([("slot", "old")]))
+            .expect("observed composition should prepare");
+        let fresh_drops = Arc::clone(&drops);
+        let target_catalog =
+            PluginFactoryCatalog::try_new([PluginFactory::new(descriptor("fresh"), move || {
+                Ok(DropProbe {
+                    name: "fresh",
+                    drops: Arc::clone(&fresh_drops),
+                })
+            })])
+            .expect("target catalog should validate");
+        let prepared = target_catalog
+            .prepare_reconciliation(&desired([("slot", "fresh")]), &observed)
+            .expect("replacement should prepare");
+
+        assert!(drops.lock().unwrap().is_empty());
+        drop(prepared);
+        assert_eq!(*drops.lock().unwrap(), vec!["fresh"]);
+        assert!(observed.implementation("slot").is_some());
+        drop(observed);
+        assert_eq!(*drops.lock().unwrap(), vec!["fresh", "old"]);
     }
 
     #[test]

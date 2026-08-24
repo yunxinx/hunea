@@ -1,5 +1,8 @@
 use std::{num::NonZeroU32, sync::Arc};
 
+#[cfg(test)]
+use std::sync::Mutex;
+
 use conversation_runtime::{ModelRefreshWorker, RuntimeEventBinding, RuntimeEventNotifier};
 use tool_runtime::ToolExecutorRegistry;
 
@@ -27,7 +30,7 @@ use super::{
     plugin::{
         DesiredPluginComposition, PluginCatalogError, PluginComposition, PluginDescriptor,
         PluginDescriptorBuilder, PluginDescriptorSnapshot, PluginFactory, PluginFactoryCatalog,
-        PluginReloadPolicy, PluginTrust, PluginTypeId,
+        PluginReloadPolicy, PluginTrust, PluginTypeId, PreparedPluginReconciliation,
     },
     prompt_assembly::{PromptAssembly, PromptRegistration},
     session_port::{SessionBackendRegistration, SessionBackendViews, SessionPortHost},
@@ -172,10 +175,9 @@ fn runtime_plugin_factory(
     )
 }
 
-fn builtin_plugin_composition()
--> Result<PluginComposition<RuntimePluginImplementation>, PluginCatalogError> {
-    let desired = builtin_desired_composition()?;
-    let catalog = PluginFactoryCatalog::try_new([
+fn builtin_plugin_catalog()
+-> Result<PluginFactoryCatalog<RuntimePluginImplementation>, PluginCatalogError> {
+    PluginFactoryCatalog::try_new([
         runtime_plugin_factory(
             builtin_descriptor(APPROVAL_PROVIDER_PLUGIN, "Terminal approval provider")
                 .provides(APPROVAL_PROVIDER.capability),
@@ -267,9 +269,14 @@ fn builtin_plugin_composition()
             RuntimeComponents::activate_ui_runtime_bridge,
             RuntimeComponents::quiesce_noop,
         ),
-    ])?;
+    ])
+}
 
-    catalog.instantiate(&desired)
+#[cfg(test)]
+fn builtin_plugin_composition()
+-> Result<PluginComposition<RuntimePluginImplementation>, PluginCatalogError> {
+    let desired = builtin_desired_composition()?;
+    builtin_plugin_catalog()?.instantiate(&desired)
 }
 
 #[derive(Default)]
@@ -281,6 +288,11 @@ struct ComponentActivationStaging {
     session_backend_registration: Option<SessionBackendRegistration>,
     runtime_wake: Option<RuntimeWake>,
     is_session_backend_replacement: bool,
+}
+
+struct PreparedPluginCommit {
+    desired: DesiredPluginComposition,
+    reconciliation: PreparedPluginReconciliation<RuntimePluginImplementation>,
 }
 
 /// `RuntimeComponents` 是 coordinator 的长期 runtime owner。
@@ -303,14 +315,23 @@ pub(super) struct RuntimeComponents {
     pub(super) context_budget_worker: ContextBudgetWorker,
     runtime_event_notifier: RuntimeEventNotifier,
     activation_staging: ComponentActivationStaging,
+    plugin_catalog: PluginFactoryCatalog<RuntimePluginImplementation>,
+    desired_plugins: DesiredPluginComposition,
     plugins: PluginComposition<RuntimePluginImplementation>,
+    prepared_plugin_commit: Option<PreparedPluginCommit>,
+    #[cfg(test)]
+    plugin_transaction_trace: Option<Arc<Mutex<Vec<String>>>>,
     pub(super) lifecycle: ComponentLifecycleExecutor,
     is_shutdown: bool,
 }
 
 impl RuntimeComponents {
     pub(super) fn new(options: &mut AppRuntimeOptions) -> Result<Self, String> {
-        let plugins = builtin_plugin_composition().map_err(|error| error.to_string())?;
+        let desired_plugins = builtin_desired_composition().map_err(|error| error.to_string())?;
+        let plugin_catalog = builtin_plugin_catalog().map_err(|error| error.to_string())?;
+        let plugins = plugin_catalog
+            .instantiate(&desired_plugins)
+            .map_err(|error| error.to_string())?;
         let runtime_event_notifier = RuntimeEventNotifier::default();
         let permission_policy = PermissionPolicy::new();
         let approval_registration = permission_policy
@@ -382,7 +403,12 @@ impl RuntimeComponents {
                 runtime_wake: None,
                 is_session_backend_replacement: false,
             },
+            plugin_catalog,
+            desired_plugins,
             plugins,
+            prepared_plugin_commit: None,
+            #[cfg(test)]
+            plugin_transaction_trace: None,
             lifecycle: ComponentLifecycleExecutor::default(),
             is_shutdown: false,
         };
@@ -412,6 +438,65 @@ impl RuntimeComponents {
             )
         })
         .map_err(|error| error.to_string())
+    }
+
+    /// 在旧 component effects 完整退役后，原子切换 prepared plugin 与 desired definitions。
+    ///
+    /// `PluginFactoryCatalog::prepare_reconciliation` 只产生尚未 publication 的 fresh instances；
+    /// lifecycle executor 的 commit hook 在 graph preflight、old cleanup 与 graph commit 全部
+    /// 成功后才发布它。任何 pre-commit error 都只会 drop fresh composition，保留当前 authority。
+    #[allow(dead_code)]
+    fn reconcile_plugin_composition(
+        &mut self,
+        desired: DesiredPluginComposition,
+        mode: ComponentLifecycleMode,
+    ) -> Result<(), String> {
+        if self.is_shutdown {
+            return Err("Runtime components are shut down".to_string());
+        }
+        let reconciliation = self
+            .plugin_catalog
+            .prepare_reconciliation(&desired, &self.plugins)
+            .map_err(|error| error.to_string())?;
+        self.commit_prepared_plugin_reconciliation(desired, reconciliation, mode)
+    }
+
+    #[cfg(test)]
+    fn reconcile_plugin_composition_with_catalog(
+        &mut self,
+        catalog: &PluginFactoryCatalog<RuntimePluginImplementation>,
+        desired: DesiredPluginComposition,
+        mode: ComponentLifecycleMode,
+    ) -> Result<(), String> {
+        let reconciliation = catalog
+            .prepare_reconciliation(&desired, &self.plugins)
+            .map_err(|error| error.to_string())?;
+        self.commit_prepared_plugin_reconciliation(desired, reconciliation, mode)
+    }
+
+    fn commit_prepared_plugin_reconciliation(
+        &mut self,
+        desired: DesiredPluginComposition,
+        reconciliation: PreparedPluginReconciliation<RuntimePluginImplementation>,
+        mode: ComponentLifecycleMode,
+    ) -> Result<(), String> {
+        let definitions = reconciliation.definitions();
+        debug_assert!(self.prepared_plugin_commit.is_none());
+        self.prepared_plugin_commit = Some(PreparedPluginCommit {
+            desired,
+            reconciliation,
+        });
+        let result = self
+            .with_lifecycle(|lifecycle, components| {
+                lifecycle.reconcile_definitions_with_commit(definitions, components, mode)
+            })
+            .map_err(|error| format!("{error:?}"));
+        if result.is_err() {
+            // 未 publication 的 fresh instances 在所有 pre-commit error 上由 transaction owner
+            // 逆序释放；旧 plugin authority 与旧 graph 保持不变。
+            self.prepared_plugin_commit.take();
+        }
+        result
     }
 
     pub(super) fn bind_runtime_wake(&mut self, wake: RuntimeWake) -> Result<(), String> {
@@ -529,6 +614,16 @@ impl RuntimeComponents {
         let result = operation(&mut lifecycle, self);
         self.lifecycle = lifecycle;
         result
+    }
+
+    #[cfg(test)]
+    fn record_plugin_transaction_event(&self, event: impl Into<String>) {
+        if let Some(trace) = &self.plugin_transaction_trace {
+            trace
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(event.into());
+        }
     }
 
     pub(super) fn reset_after_clear(&mut self, options: &AppRuntimeOptions) -> Result<(), String> {
@@ -1138,6 +1233,17 @@ impl RuntimeComponents {
 }
 
 impl ComponentLifecycleCallbacks for RuntimeComponents {
+    fn commit_authority(&mut self) {
+        let prepared = self
+            .prepared_plugin_commit
+            .take()
+            .expect("plugin authority commit must have a prepared composition");
+        self.plugins.commit_reconciliation(prepared.reconciliation);
+        self.desired_plugins = prepared.desired;
+        #[cfg(test)]
+        self.record_plugin_transaction_event("authority:commit");
+    }
+
     fn activate_component(
         &mut self,
         component_id: &str,
@@ -1150,6 +1256,8 @@ impl ComponentLifecycleCallbacks for RuntimeComponents {
             .implementation(component_id)
             .copied()
             .ok_or_else(|| format!("component `{component_id}` has no prepared plugin instance"))?;
+        #[cfg(test)]
+        self.record_plugin_transaction_event(format!("activate:{component_id}"));
         (implementation.activate)(self, scope, context, mode)
     }
 
@@ -1163,6 +1271,8 @@ impl ComponentLifecycleCallbacks for RuntimeComponents {
             .implementation(component_id)
             .copied()
             .ok_or_else(|| format!("component `{component_id}` has no prepared plugin instance"))?;
+        #[cfg(test)]
+        self.record_plugin_transaction_event(format!("quiesce:{component_id}"));
         (implementation.quiesce)(self, mode)
     }
 }
@@ -1281,7 +1391,10 @@ mod tests {
     use std::{
         future::Future,
         pin::Pin,
-        sync::atomic::{AtomicBool, Ordering},
+        sync::{
+            Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
     };
 
     use super::*;
@@ -1326,6 +1439,74 @@ mod tests {
         }
     }
 
+    fn desired_with_runtime_event_plugin(plugin_type: &'static str) -> DesiredPluginComposition {
+        desired_with_runtime_event_plugin_in_order(plugin_type, false)
+    }
+
+    fn desired_with_runtime_event_plugin_in_order(
+        plugin_type: &'static str,
+        reverse: bool,
+    ) -> DesiredPluginComposition {
+        let desired = builtin_desired_composition().expect("builtin desired state should validate");
+        let mut entries = desired
+            .iter()
+            .map(|(component_id, current_type)| {
+                let plugin_type = if component_id.as_str() == RUNTIME_EVENT_STREAM.component_id {
+                    builtin_plugin_type(plugin_type)
+                } else {
+                    current_type.clone()
+                };
+                (component_id.as_str(), plugin_type)
+            })
+            .collect::<Vec<_>>();
+        if reverse {
+            entries.reverse();
+        }
+        DesiredPluginComposition::try_new(entries)
+            .expect("replacement desired state should validate")
+    }
+
+    fn runtime_event_replacement_factory(
+        plugin_type: &'static str,
+        activate: RuntimePluginActivation,
+    ) -> PluginFactory<RuntimePluginImplementation> {
+        runtime_plugin_factory(
+            builtin_descriptor(plugin_type, "Replacement runtime event stream")
+                .provides(RUNTIME_EVENT_STREAM.capability),
+            activate,
+            RuntimeComponents::quiesce_noop,
+        )
+    }
+
+    fn traced_runtime_event_replacement_factory(
+        plugin_type: &'static str,
+        trace: Arc<Mutex<Vec<String>>>,
+    ) -> PluginFactory<RuntimePluginImplementation> {
+        let descriptor = builtin_descriptor(plugin_type, "Traced runtime event stream")
+            .provides(RUNTIME_EVENT_STREAM.capability)
+            .build()
+            .expect("traced descriptor should validate");
+        PluginFactory::new(descriptor, move || {
+            trace
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(format!("prepare:{plugin_type}"));
+            Ok(RuntimePluginImplementation {
+                activate: RuntimeComponents::activate_runtime_event_stream,
+                quiesce: RuntimeComponents::quiesce_noop,
+            })
+        })
+    }
+
+    fn reject_runtime_event_activation(
+        _components: &mut RuntimeComponents,
+        _scope: &EffectScope,
+        _context: &mut ComponentActivationContext<'_>,
+        _mode: ComponentLifecycleMode,
+    ) -> Result<ComponentActivationOutcome, String> {
+        Err("SENSITIVE_REPLACEMENT_ACTIVATION".to_string())
+    }
+
     #[test]
     fn builtin_plugin_descriptors_define_the_exact_default_graph() {
         let composition =
@@ -1362,21 +1543,26 @@ mod tests {
             composition.definitions(),
             vec![
                 ComponentDefinition::new(APPROVAL_PROVIDER.component_id)
+                    .implemented_by(APPROVAL_PROVIDER_PLUGIN)
                     .provides(APPROVAL_PROVIDER.capability),
                 ComponentDefinition::new(CONTEXT_BUDGET_COMPONENT)
+                    .implemented_by(CONTEXT_BUDGET_PLUGIN)
                     .requires(RUNTIME_EVENT_STREAM.capability)
                     .requires(LLM_PORT.capability)
                     .requires(MODEL_CATALOG.capability)
                     .requires(PROMPT_ASSEMBLY.capability)
                     .requires(TOOL_CATALOG.capability),
                 ComponentDefinition::new(LLM_PORT.component_id)
+                    .implemented_by(LLM_PORT_PLUGIN)
                     .provides(LLM_PORT.capability)
                     .provides(MODEL_CATALOG.capability),
                 ComponentDefinition::new(MODEL_REFRESH_COMPONENT)
+                    .implemented_by(MODEL_REFRESH_PLUGIN)
                     .requires(RUNTIME_EVENT_STREAM.capability)
                     .requires(LLM_PORT.capability)
                     .requires(MODEL_CATALOG.capability),
                 ComponentDefinition::new(NATIVE_AGENT_RUNTIME_COMPONENT)
+                    .implemented_by(NATIVE_AGENT_RUNTIME_PLUGIN)
                     .requires(RUNTIME_EVENT_STREAM.capability)
                     .requires(LLM_PORT.capability)
                     .requires(MODEL_CATALOG.capability)
@@ -1385,23 +1571,30 @@ mod tests {
                     .requires(TOOL_CATALOG.capability)
                     .observes(SESSION_PERSISTENCE.capability),
                 ComponentDefinition::new(PERMISSION_POLICY.component_id)
+                    .implemented_by(PERMISSION_POLICY_PLUGIN)
                     .requires(APPROVAL_PROVIDER.capability)
                     .requires(RUNTIME_EVENT_STREAM.capability)
                     .provides(PERMISSION_POLICY.capability),
                 ComponentDefinition::new(PROMPT_ASSEMBLY.component_id)
+                    .implemented_by(PROMPT_ASSEMBLY_PLUGIN)
                     .requires(TOOL_CATALOG.capability)
                     .observes(SESSION_PERSISTENCE.capability)
                     .provides(PROMPT_ASSEMBLY.capability),
                 ComponentDefinition::new(RUNTIME_EVENT_STREAM.component_id)
+                    .implemented_by(RUNTIME_EVENT_STREAM_PLUGIN)
                     .provides(RUNTIME_EVENT_STREAM.capability),
                 ComponentDefinition::new(RUNTIME_WAKE.component_id)
+                    .implemented_by(RUNTIME_WAKE_PLUGIN)
                     .provides(RUNTIME_WAKE.capability),
                 ComponentDefinition::new(SESSION_PERSISTENCE.component_id)
+                    .implemented_by(SESSION_PERSISTENCE_PLUGIN)
                     .requires(RUNTIME_EVENT_STREAM.capability)
                     .provides(SESSION_PERSISTENCE.capability),
                 ComponentDefinition::new(TOOL_CATALOG.component_id)
+                    .implemented_by(TOOL_CATALOG_PLUGIN)
                     .provides(TOOL_CATALOG.capability),
                 ComponentDefinition::new(UI_RUNTIME_BRIDGE_COMPONENT)
+                    .implemented_by(UI_RUNTIME_BRIDGE_PLUGIN)
                     .requires(RUNTIME_EVENT_STREAM.capability)
                     .requires(RUNTIME_WAKE.capability),
             ]
@@ -1424,6 +1617,299 @@ mod tests {
         assert_eq!(
             error,
             "component `unregistered_component` has no prepared plugin instance"
+        );
+    }
+
+    #[test]
+    fn plugin_replacement_switches_actual_authority_and_preserves_alignment() {
+        const FRESH_PLUGIN: &str = "runtime-event-stream-v2";
+        let mut options = AppRuntimeOptions::default();
+        let mut components =
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+        let old_generation = components
+            .lifecycle
+            .capability(&CapabilityKey::from(RUNTIME_EVENT_STREAM.capability))
+            .expect("runtime event stream should be active")
+            .generation;
+        let catalog = PluginFactoryCatalog::try_new([runtime_event_replacement_factory(
+            FRESH_PLUGIN,
+            RuntimeComponents::activate_runtime_event_stream,
+        )])
+        .expect("replacement catalog should validate");
+
+        components
+            .reconcile_plugin_composition_with_catalog(
+                &catalog,
+                desired_with_runtime_event_plugin(FRESH_PLUGIN),
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect("replacement should commit and activate");
+
+        let descriptor = components
+            .plugin_descriptor_snapshots()
+            .into_iter()
+            .find(|snapshot| snapshot.component_id == RUNTIME_EVENT_STREAM.component_id)
+            .expect("replacement descriptor should be visible");
+        assert_eq!(descriptor.plugin_type, FRESH_PLUGIN);
+        assert!(
+            components
+                .lifecycle
+                .capability(&CapabilityKey::from(RUNTIME_EVENT_STREAM.capability))
+                .expect("fresh runtime event stream should be active")
+                .generation
+                > old_generation
+        );
+        components
+            .validate_context_alignment()
+            .expect("plugin, graph, and typed Context should align");
+    }
+
+    #[test]
+    fn plugin_transaction_trace_is_stable_for_reordered_desired_input() {
+        fn run(reverse: bool) -> Vec<String> {
+            const FRESH_PLUGIN: &str = "runtime-event-stream-traced";
+            let trace = Arc::new(Mutex::new(Vec::new()));
+            let mut options = AppRuntimeOptions::default();
+            let mut components =
+                RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+            components.plugin_transaction_trace = Some(Arc::clone(&trace));
+            let catalog =
+                PluginFactoryCatalog::try_new([traced_runtime_event_replacement_factory(
+                    FRESH_PLUGIN,
+                    Arc::clone(&trace),
+                )])
+                .expect("traced catalog should validate");
+
+            components
+                .reconcile_plugin_composition_with_catalog(
+                    &catalog,
+                    desired_with_runtime_event_plugin_in_order(FRESH_PLUGIN, reverse),
+                    ComponentLifecycleMode::Reconfigure,
+                )
+                .expect("traced replacement should commit");
+            let snapshot = trace
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            components.plugin_transaction_trace = None;
+            snapshot
+        }
+
+        let forward = run(false);
+        let reverse = run(true);
+        assert_eq!(forward, reverse);
+        let authority_index = forward
+            .iter()
+            .position(|event| event == "authority:commit")
+            .expect("authority switch should be observable");
+        assert!(
+            forward[..authority_index]
+                .iter()
+                .all(|event| event.starts_with("prepare:") || event.starts_with("quiesce:"))
+        );
+        assert!(
+            forward[authority_index + 1..]
+                .iter()
+                .all(|event| event.starts_with("activate:"))
+        );
+    }
+
+    #[test]
+    fn repeated_plugin_replacements_reject_a_stale_old_token() {
+        use crate::runtime::lifecycle::ComponentGraphError;
+
+        fn stale_token(
+            components: &RuntimeComponents,
+            component_id: &str,
+        ) -> crate::runtime::lifecycle::DeactivationToken {
+            let mut graph = components.lifecycle.graph().clone();
+            graph
+                .suspend(component_id)
+                .expect("active component should produce a stale token")
+                .deactivation_requests
+                .into_iter()
+                .find(|token| token.component_id() == component_id)
+                .expect("component deactivation token should exist")
+        }
+
+        let mut options = AppRuntimeOptions::default();
+        let mut components =
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+        let stale = stale_token(&components, RUNTIME_EVENT_STREAM.component_id);
+
+        for plugin_type in ["runtime-event-stream-v2", "runtime-event-stream-v3"] {
+            let catalog = PluginFactoryCatalog::try_new([runtime_event_replacement_factory(
+                plugin_type,
+                RuntimeComponents::activate_runtime_event_stream,
+            )])
+            .expect("replacement catalog should validate");
+            components
+                .reconcile_plugin_composition_with_catalog(
+                    &catalog,
+                    desired_with_runtime_event_plugin(plugin_type),
+                    ComponentLifecycleMode::Reconfigure,
+                )
+                .expect("replacement should commit");
+        }
+
+        assert!(matches!(
+            components.lifecycle.complete_deactivation(stale),
+            Err(ComponentGraphError::StaleDeactivation { component_id, .. })
+                if component_id == RUNTIME_EVENT_STREAM.component_id
+        ));
+        assert_eq!(
+            components
+                .plugin_descriptor_snapshots()
+                .into_iter()
+                .find(|snapshot| snapshot.component_id == RUNTIME_EVENT_STREAM.component_id)
+                .expect("fresh descriptor should remain authoritative")
+                .plugin_type,
+            "runtime-event-stream-v3"
+        );
+    }
+
+    #[test]
+    fn plugin_remove_then_add_rejects_the_removed_generation_token() {
+        use crate::runtime::lifecycle::ComponentGraphError;
+
+        let mut options = AppRuntimeOptions::default();
+        let mut components =
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+        let mut graph = components.lifecycle.graph().clone();
+        let stale = graph
+            .suspend(RUNTIME_WAKE.component_id)
+            .expect("runtime wake should produce a stale token")
+            .deactivation_requests
+            .into_iter()
+            .find(|token| token.component_id() == RUNTIME_WAKE.component_id)
+            .expect("runtime wake deactivation token should exist");
+        let builtin_desired =
+            builtin_desired_composition().expect("builtin desired state should validate");
+        let desired_without_wake = builtin_desired
+            .iter()
+            .filter(|(component_id, _)| {
+                component_id.as_str() != RUNTIME_WAKE.component_id
+                    && component_id.as_str() != UI_RUNTIME_BRIDGE_COMPONENT
+            })
+            .map(|(component_id, plugin_type)| (component_id.as_str(), plugin_type.clone()))
+            .collect::<Vec<_>>();
+
+        components
+            .reconcile_plugin_composition(
+                DesiredPluginComposition::try_new(desired_without_wake)
+                    .expect("removal desired state should validate"),
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect("remove transaction should commit");
+        assert!(
+            components
+                .lifecycle
+                .state(RUNTIME_WAKE.component_id)
+                .is_none()
+        );
+
+        components
+            .reconcile_plugin_composition(
+                builtin_desired_composition().expect("builtin desired state should validate"),
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect("add transaction should commit");
+        assert!(
+            components
+                .lifecycle
+                .state(RUNTIME_WAKE.component_id)
+                .is_some()
+        );
+        assert!(matches!(
+            components.lifecycle.complete_deactivation(stale),
+            Err(ComponentGraphError::StaleDeactivation { component_id, .. })
+                if component_id == RUNTIME_WAKE.component_id
+        ));
+    }
+
+    #[test]
+    fn plugin_factory_failure_preserves_live_runtime_authority() {
+        const FAILING_PLUGIN: &str = "runtime-event-stream-failing";
+        let mut options = AppRuntimeOptions::default();
+        let mut components =
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+        let old_descriptors = components.plugin_descriptor_snapshots();
+        let old_components = components.lifecycle.components();
+        let old_capabilities = components.lifecycle.capabilities();
+        let old_context = components.lifecycle.context_snapshots();
+        let old_scopes = components.effect_scope_snapshots();
+        let constructions = Arc::new(Mutex::new(0_u32));
+        let observed_constructions = Arc::clone(&constructions);
+        let catalog = PluginFactoryCatalog::try_new([PluginFactory::new(
+            builtin_descriptor(FAILING_PLUGIN, "Failing runtime event stream")
+                .provides(RUNTIME_EVENT_STREAM.capability)
+                .build()
+                .expect("failing descriptor should validate"),
+            move || {
+                *observed_constructions
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+                Err("SENSITIVE_FACTORY_FAILURE".to_string().into())
+            },
+        )])
+        .expect("failing catalog should validate");
+
+        let error = components
+            .reconcile_plugin_composition_with_catalog(
+                &catalog,
+                desired_with_runtime_event_plugin(FAILING_PLUGIN),
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect_err("factory failure should abort before lifecycle mutation");
+
+        assert_eq!(*constructions.lock().unwrap(), 1);
+        assert!(!error.contains("SENSITIVE_FACTORY_FAILURE"));
+        assert_eq!(components.plugin_descriptor_snapshots(), old_descriptors);
+        assert_eq!(components.lifecycle.components(), old_components);
+        assert_eq!(components.lifecycle.capabilities(), old_capabilities);
+        assert_eq!(components.lifecycle.context_snapshots(), old_context);
+        assert_eq!(components.effect_scope_snapshots(), old_scopes);
+    }
+
+    #[test]
+    fn fresh_plugin_activation_failure_keeps_fresh_authority() {
+        const FAILING_PLUGIN: &str = "runtime-event-stream-rejected";
+        let mut options = AppRuntimeOptions::default();
+        let mut components =
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+        let catalog = PluginFactoryCatalog::try_new([runtime_event_replacement_factory(
+            FAILING_PLUGIN,
+            reject_runtime_event_activation,
+        )])
+        .expect("replacement catalog should validate");
+
+        let error = components
+            .reconcile_plugin_composition_with_catalog(
+                &catalog,
+                desired_with_runtime_event_plugin(FAILING_PLUGIN),
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect_err("fresh activation failure should be reported");
+
+        assert!(!format!("{error:?}").contains("SENSITIVE_REPLACEMENT_ACTIVATION"));
+        let descriptor = components
+            .plugin_descriptor_snapshots()
+            .into_iter()
+            .find(|snapshot| snapshot.component_id == RUNTIME_EVENT_STREAM.component_id)
+            .expect("fresh descriptor should remain authoritative");
+        assert_eq!(descriptor.plugin_type, FAILING_PLUGIN);
+        assert_eq!(
+            components
+                .lifecycle
+                .state(RUNTIME_EVENT_STREAM.component_id),
+            Some(ComponentState::Failed)
+        );
+        assert!(
+            components
+                .lifecycle
+                .context_snapshots()
+                .iter()
+                .all(|snapshot| snapshot.key != RUNTIME_EVENT_STREAM.capability)
         );
     }
 

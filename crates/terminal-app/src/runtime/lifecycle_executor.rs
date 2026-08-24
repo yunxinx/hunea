@@ -51,6 +51,9 @@ pub(super) trait ComponentLifecycleCallbacks {
         component_id: &str,
         mode: ComponentLifecycleMode,
     ) -> Result<(), String>;
+
+    /// 在 graph definition commit 成功后发布 coordinator-owned authority。
+    fn commit_authority(&mut self);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,11 +226,36 @@ impl ComponentLifecycleExecutor {
     }
 
     /// 把完整 desired definition set 作为一个 preflight/retire/commit/activate transaction 执行。
+    #[allow(dead_code)]
     pub(super) fn reconcile_definitions(
         &mut self,
         definitions: impl IntoIterator<Item = ComponentDefinition>,
         callbacks: &mut impl ComponentLifecycleCallbacks,
         mode: ComponentLifecycleMode,
+    ) -> Result<(), LifecycleExecutionError> {
+        self.reconcile_definitions_inner(definitions, callbacks, mode, false)
+    }
+
+    /// 执行 definition transaction，并在 graph commit 与 fresh activation 之间切换外部 authority。
+    ///
+    /// callback host 的 `commit_authority` 只在所有 old cleanup 成功且 graph commit 成功后调用；
+    /// 因此 fresh plugin instance 在此之前不会接收 lifecycle callback，cleanup 失败也不会留下
+    /// 半切换状态。
+    pub(super) fn reconcile_definitions_with_commit(
+        &mut self,
+        definitions: impl IntoIterator<Item = ComponentDefinition>,
+        callbacks: &mut impl ComponentLifecycleCallbacks,
+        mode: ComponentLifecycleMode,
+    ) -> Result<(), LifecycleExecutionError> {
+        self.reconcile_definitions_inner(definitions, callbacks, mode, true)
+    }
+
+    fn reconcile_definitions_inner(
+        &mut self,
+        definitions: impl IntoIterator<Item = ComponentDefinition>,
+        callbacks: &mut impl ComponentLifecycleCallbacks,
+        mode: ComponentLifecycleMode,
+        should_commit_authority: bool,
     ) -> Result<(), LifecycleExecutionError> {
         self.ensure_running()?;
         let prepared = self
@@ -260,6 +288,11 @@ impl ComponentLifecycleExecutor {
             .graph
             .commit_definition_reconciliation(prepared)
             .map_err(|error| LifecycleExecutionError::graph("runtime_composition", error))?;
+        // Graph commit 已完成所有 fallible validation；authority switch 是同一 coordinator
+        // critical section 中的 infallible publication，随后才允许 fresh callbacks 执行。
+        if should_commit_authority {
+            callbacks.commit_authority();
+        }
         self.activate_components(activation_order, callbacks, mode)
     }
 
@@ -795,6 +828,8 @@ mod tests {
     #[derive(Default)]
     struct FakeCallbacks {
         events: Arc<Mutex<Vec<String>>>,
+        authority: Option<Arc<Mutex<String>>>,
+        authority_after_commit: Option<String>,
         publishers: BTreeSet<String>,
         activation_failures: BTreeSet<String>,
         quiescence_failures: BTreeSet<String>,
@@ -825,9 +860,33 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone()
         }
+
+        fn record_lifecycle(&self, phase: &str, component_id: &str) {
+            let event = self
+                .authority
+                .as_ref()
+                .map(|authority| {
+                    let authority = authority
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    format!("{phase}:{component_id}:{authority}")
+                })
+                .unwrap_or_else(|| format!("{phase}:{component_id}"));
+            self.record(event);
+        }
     }
 
     impl ComponentLifecycleCallbacks for FakeCallbacks {
+        fn commit_authority(&mut self) {
+            if let (Some(authority), Some(next)) =
+                (&self.authority, self.authority_after_commit.take())
+            {
+                *authority
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
+            }
+        }
+
         fn activate_component(
             &mut self,
             component_id: &str,
@@ -835,7 +894,7 @@ mod tests {
             context: &mut ComponentActivationContext<'_>,
             _mode: ComponentLifecycleMode,
         ) -> Result<ComponentActivationOutcome, String> {
-            self.record(format!("activate:{component_id}"));
+            self.record_lifecycle("activate", component_id);
             let events = Arc::clone(&self.events);
             let disposed_component = component_id.to_string();
             let should_fail_disposal = self.disposal_failures.contains(component_id);
@@ -870,7 +929,7 @@ mod tests {
             component_id: &str,
             _mode: ComponentLifecycleMode,
         ) -> Result<(), String> {
-            self.record(format!("quiesce:{component_id}"));
+            self.record_lifecycle("quiesce", component_id);
             if self.quiescence_failures.contains(component_id) {
                 Err("QUIESCENCE_SECRET".to_string())
             } else {
@@ -953,6 +1012,194 @@ mod tests {
         );
         assert_eq!(executor.graph().state("ui"), Some(ComponentState::Pending));
         assert!(executor.scope_snapshots().is_empty());
+    }
+
+    #[test]
+    fn authority_switch_happens_after_old_cleanup_before_fresh_activation() {
+        let authority = Arc::new(Mutex::new("old".to_string()));
+        let mut executor = ComponentLifecycleExecutor::default();
+        let mut callbacks = FakeCallbacks {
+            authority: Some(Arc::clone(&authority)),
+            publishers: ["database", "storage", "service"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            ..FakeCallbacks::default()
+        };
+        executor
+            .reconcile_definitions(
+                definitions(),
+                &mut callbacks,
+                ComponentLifecycleMode::Initial,
+            )
+            .expect("initial composition should activate");
+        callbacks
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        callbacks.authority_after_commit = Some("fresh".to_string());
+
+        executor
+            .reconcile_definitions_with_commit(
+                storage_definitions(),
+                &mut callbacks,
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect("fresh composition should activate");
+
+        assert_eq!(
+            callbacks.snapshot(),
+            vec![
+                "quiesce:ui:old",
+                "dispose:ui",
+                "quiesce:service:old",
+                "dispose:service",
+                "quiesce:database:old",
+                "dispose:database",
+                "activate:storage:fresh",
+                "activate:service:fresh",
+                "activate:ui:fresh",
+            ]
+        );
+    }
+
+    #[test]
+    fn cleanup_failure_blocks_authority_switch() {
+        let authority = Arc::new(Mutex::new("old".to_string()));
+        let mut executor = ComponentLifecycleExecutor::default();
+        let mut callbacks = FakeCallbacks {
+            authority: Some(Arc::clone(&authority)),
+            publishers: ["database", "storage", "service"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            ..FakeCallbacks::default()
+        };
+        executor
+            .reconcile_definitions(
+                definitions(),
+                &mut callbacks,
+                ComponentLifecycleMode::Initial,
+            )
+            .expect("initial composition should activate");
+        callbacks
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        callbacks.authority_after_commit = Some("fresh".to_string());
+        callbacks.quiescence_failures.insert("service".to_string());
+
+        let error = executor
+            .reconcile_definitions_with_commit(
+                storage_definitions(),
+                &mut callbacks,
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect_err("cleanup failure must block commit");
+
+        assert_eq!(*authority.lock().unwrap(), "old");
+        assert!(!format!("{error:?}").contains("QUIESCENCE_SECRET"));
+        assert_eq!(executor.graph().state("storage"), None);
+    }
+
+    #[test]
+    fn effect_disposal_failure_blocks_authority_switch() {
+        let authority = Arc::new(Mutex::new("old".to_string()));
+        let mut executor = ComponentLifecycleExecutor::default();
+        let mut callbacks = FakeCallbacks {
+            authority: Some(Arc::clone(&authority)),
+            publishers: ["database", "storage", "service"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            ..FakeCallbacks::default()
+        };
+        executor
+            .reconcile_definitions(
+                definitions(),
+                &mut callbacks,
+                ComponentLifecycleMode::Initial,
+            )
+            .expect("initial composition should activate");
+        callbacks
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        callbacks.authority_after_commit = Some("fresh".to_string());
+        executor
+            .component_scopes
+            .get("service")
+            .expect("active service should own a scope")
+            .register("failing_cleanup", || Err("DISPOSER_SECRET".to_string()))
+            .expect("test disposer should register");
+
+        executor
+            .reconcile_definitions_with_commit(
+                storage_definitions(),
+                &mut callbacks,
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect_err("effect disposal failure must block commit");
+
+        assert_eq!(*authority.lock().unwrap(), "old");
+        assert_eq!(executor.graph().state("storage"), None);
+        assert!(
+            callbacks
+                .snapshot()
+                .iter()
+                .all(|event| !event.starts_with("activate:storage"))
+        );
+    }
+
+    #[test]
+    fn fresh_activation_failure_keeps_new_authority() {
+        let authority = Arc::new(Mutex::new("old".to_string()));
+        let mut executor = ComponentLifecycleExecutor::default();
+        let mut callbacks = FakeCallbacks {
+            authority: Some(Arc::clone(&authority)),
+            publishers: ["database", "storage", "service"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            ..FakeCallbacks::default()
+        };
+        executor
+            .reconcile_definitions(
+                definitions(),
+                &mut callbacks,
+                ComponentLifecycleMode::Initial,
+            )
+            .expect("initial composition should activate");
+        callbacks
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        callbacks.authority_after_commit = Some("fresh".to_string());
+        callbacks.activation_failures.insert("storage".to_string());
+
+        executor
+            .reconcile_definitions_with_commit(
+                storage_definitions(),
+                &mut callbacks,
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect_err("fresh activation failure should be reported");
+
+        assert_eq!(*authority.lock().unwrap(), "fresh");
+        assert_eq!(
+            executor.graph().state("storage"),
+            Some(ComponentState::Failed)
+        );
+        assert!(
+            callbacks
+                .snapshot()
+                .iter()
+                .any(|event| event == "activate:storage:fresh")
+        );
     }
 
     #[test]

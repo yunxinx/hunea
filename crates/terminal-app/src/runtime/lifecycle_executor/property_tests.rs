@@ -214,6 +214,8 @@ impl PropertyCallbacks {
 }
 
 impl ComponentLifecycleCallbacks for PropertyCallbacks {
+    fn commit_authority(&mut self) {}
+
     fn activate_component(
         &mut self,
         component_id: &str,

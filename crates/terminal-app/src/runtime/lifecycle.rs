@@ -56,6 +56,7 @@ impl ComponentState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ComponentDefinition {
     pub(super) id: String,
+    implementation_id: Option<String>,
     pub(super) required: BTreeSet<CapabilityKey>,
     pub(super) optional: BTreeSet<CapabilityKey>,
     pub(super) provides: BTreeSet<CapabilityKey>,
@@ -65,10 +66,17 @@ impl ComponentDefinition {
     pub(super) fn new(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
+            implementation_id: None,
             required: BTreeSet::new(),
             optional: BTreeSet::new(),
             provides: BTreeSet::new(),
         }
+    }
+
+    /// implementation identity 参与 definition equality，但不进入 runtime inspection。
+    pub(super) fn implemented_by(mut self, implementation_id: impl Into<String>) -> Self {
+        self.implementation_id = Some(implementation_id.into());
+        self
     }
 
     pub(super) fn requires(mut self, key: impl Into<CapabilityKey>) -> Self {

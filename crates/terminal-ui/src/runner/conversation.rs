@@ -78,7 +78,7 @@ pub(super) fn run_send_conversation_turn_effect(
     request: ConversationTurnRequest,
 ) {
     match runtime_coordinator
-        .dispatch_runtime_command_port(RuntimeCommand::submit_conversation_turn(request))
+        .dispatch_runtime_command(RuntimeCommand::submit_conversation_turn(request))
     {
         Ok(RuntimeCommandReceipt::ConversationStarted { activity_label }) => {
             model.show_stream_activity(activity_label);

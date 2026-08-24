@@ -26,7 +26,7 @@ pub(super) fn run_refresh_model_provider_effect(
     runtime_coordinator: &mut impl ModelRuntimePort,
     request: ProviderSyncRequest,
 ) {
-    if let Err(message) = runtime_coordinator.refresh_model_provider_port(request) {
+    if let Err(message) = runtime_coordinator.refresh_model_provider(request) {
         model.show_toast(ToastSeverity::Error, message);
     }
 }
@@ -36,7 +36,7 @@ pub(super) fn persist_selected_model(
     runtime_coordinator: &mut impl ModelRuntimePort,
     selection: &ModelSelection,
 ) {
-    if let Err(message) = runtime_coordinator.persist_selected_model_port(selection) {
+    if let Err(message) = runtime_coordinator.persist_selected_model(selection) {
         model.show_toast(ToastSeverity::Error, message);
     }
 }

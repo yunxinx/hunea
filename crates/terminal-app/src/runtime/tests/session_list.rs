@@ -136,7 +136,7 @@ fn list_sessions_dispatch_does_not_wait_for_store_io() {
         RuntimeCommandReceipt::Accepted
     );
     assert!(
-        RuntimePort::drain_runtime_events(&mut coordinator).is_empty(),
+        RuntimeEventPort::drain_runtime_events(&mut coordinator).is_empty(),
         "no result event should be available before store IO completes"
     );
     list_release_tx

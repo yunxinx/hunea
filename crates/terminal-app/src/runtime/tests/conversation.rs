@@ -105,7 +105,7 @@ fn shutdown_is_idempotent_with_session_persistence_enabled() {
         .shutdown()
         .expect("repeated shutdown should remain a no-op");
 
-    let error = RuntimePort::bind_runtime_wake(
+    let error = RuntimeEventPort::bind_runtime_wake(
         &mut coordinator,
         runtime_domain::runtime_wake::RuntimeWake::new(|| {}),
     )
@@ -172,7 +172,7 @@ fn unknown_provider_failure_rolls_back_pending_user() {
 
     let mut events = Vec::new();
     for _ in 0..50 {
-        events.extend(RuntimePort::drain_runtime_events(&mut coordinator));
+        events.extend(RuntimeEventPort::drain_runtime_events(&mut coordinator));
         if events
             .iter()
             .any(|event| matches!(event, RuntimeEvent::Failed { .. }))
@@ -594,7 +594,7 @@ fn manual_skill_mentions_emit_synthetic_skill_usage_events_before_worker_failure
         })
         .expect("conversation should start");
 
-    let events = RuntimePort::drain_runtime_events(&mut coordinator);
+    let events = RuntimeEventPort::drain_runtime_events(&mut coordinator);
     assert!(
         matches!(
             events.first(),

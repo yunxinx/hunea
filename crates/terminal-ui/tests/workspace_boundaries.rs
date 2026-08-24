@@ -39,9 +39,22 @@ fn tui_runtime_port_hides_concrete_runtime_implementations() {
     let runtime_port = include_str!("../src/runner/runtime_port.rs");
     let crate_root = include_str!("../src/lib.rs");
 
+    for port in [
+        "pub trait RuntimeEventPort",
+        "pub trait RuntimeCommandPort",
+        "pub trait ModelRuntimePort",
+        "pub trait PromptRuntimePort",
+    ] {
+        assert!(
+            runtime_port.contains(port),
+            "terminal-ui should own the narrow runtime port {port}"
+        );
+    }
     assert!(
-        runtime_port.contains("pub trait UiRuntimePort"),
-        "terminal-ui should own the runtime port consumed by its runner"
+        !runtime_port.contains("pub trait UiRuntimePort")
+            && !runtime_port.contains(": UiRuntimePort")
+            && !runtime_port.contains("UiRuntimePort::"),
+        "terminal-ui must not retain an aggregate forwarding runtime port"
     );
     assert!(
         runtime_port.contains("pub use runtime_domain::runtime_wake::RuntimeWake"),
@@ -54,7 +67,7 @@ fn tui_runtime_port_hides_concrete_runtime_implementations() {
     for concrete_type in ["ConversationWorker", "ProviderClient", "SessionStore"] {
         assert!(
             !runtime_port.contains(concrete_type),
-            "UiRuntimePort must not expose concrete runtime type {concrete_type}"
+            "narrow runtime ports must not expose concrete runtime type {concrete_type}"
         );
     }
     assert!(

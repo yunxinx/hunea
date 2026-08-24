@@ -28,7 +28,9 @@ pub(super) use session_store::{
     SessionEntryKind, SessionFlushStore, SessionHeader, SessionId, SessionLifecycleStore,
     SessionStore, SessionStoreError, session_filename,
 };
-pub(super) use terminal_ui::UiRuntimePort as RuntimePort;
+pub(super) use terminal_ui::{
+    ModelRuntimePort, PromptRuntimePort, RuntimeCommandPort, RuntimeEventPort,
+};
 
 pub(super) fn runtime_coordinator(options: AppRuntimeOptions) -> AppRuntimeCoordinator {
     AppRuntimeCoordinator::new(options).expect("runtime coordinator should initialize")
@@ -311,7 +313,7 @@ pub(super) fn wait_for_runtime_events(
     expected: &str,
 ) -> Vec<RuntimeEvent> {
     for _ in 0..100 {
-        let events = RuntimePort::drain_runtime_events(coordinator);
+        let events = RuntimeEventPort::drain_runtime_events(coordinator);
         if !events.is_empty() {
             return events;
         }
@@ -322,7 +324,7 @@ pub(super) fn wait_for_runtime_events(
 
 pub(super) fn wait_for_runtime_idle(coordinator: &mut AppRuntimeCoordinator) {
     for _ in 0..100 {
-        let events = RuntimePort::drain_runtime_events(coordinator);
+        let events = RuntimeEventPort::drain_runtime_events(coordinator);
         assert!(
             events.is_empty(),
             "runtime should not emit events while waiting for no-op command: {events:?}"
@@ -337,7 +339,7 @@ pub(super) fn wait_for_runtime_idle(coordinator: &mut AppRuntimeCoordinator) {
 
 pub(super) fn assert_no_runtime_events(coordinator: &mut AppRuntimeCoordinator, message: &str) {
     assert_eq!(
-        RuntimePort::drain_runtime_events(coordinator),
+        RuntimeEventPort::drain_runtime_events(coordinator),
         Vec::<RuntimeEvent>::new(),
         "{message}"
     );
@@ -349,7 +351,7 @@ pub(super) fn wait_for_runtime_event<T>(
     expected: &str,
 ) -> T {
     for _ in 0..100 {
-        for event in RuntimePort::drain_runtime_events(coordinator) {
+        for event in RuntimeEventPort::drain_runtime_events(coordinator) {
             if let Some(value) = select(event) {
                 return value;
             }

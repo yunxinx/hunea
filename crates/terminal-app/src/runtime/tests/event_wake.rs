@@ -34,7 +34,7 @@ fn model_refresh_completion_notifies_the_coordinator_consumer() {
             let _ = wake_sender.send(());
         });
 
-    RuntimePort::refresh_model_provider(
+    ModelRuntimePort::refresh_model_provider(
         &mut coordinator,
         ProviderSyncRequest {
             provider_id: "local".to_string(),
@@ -46,7 +46,7 @@ fn model_refresh_completion_notifies_the_coordinator_consumer() {
         .recv_timeout(Duration::from_secs(1))
         .expect("refresh completion should wake the coordinator consumer");
     assert_eq!(
-        RuntimePort::drain_model_provider_refresh_events(&mut coordinator).len(),
+        ModelRuntimePort::drain_model_provider_refresh_events(&mut coordinator).len(),
         1
     );
 }
@@ -107,7 +107,7 @@ fn deferred_event_does_not_skip_ready_worker_payloads() {
         });
     let context_request_id = request_id(91);
 
-    RuntimePort::dispatch_runtime_command(
+    RuntimeCommandPort::dispatch_runtime_command(
         &mut coordinator,
         RuntimeCommand::LoadContextBudgetSnapshot {
             request_id: context_request_id,
@@ -125,7 +125,7 @@ fn deferred_event_does_not_skip_ready_worker_payloads() {
     };
     coordinator.defer_runtime_event_until_next_render(deferred.clone());
 
-    let events = RuntimePort::drain_runtime_events(&mut coordinator);
+    let events = RuntimeEventPort::drain_runtime_events(&mut coordinator);
 
     assert_eq!(events.first(), Some(&deferred));
     assert!(events.iter().any(|event| matches!(

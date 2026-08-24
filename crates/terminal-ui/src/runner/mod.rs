@@ -32,7 +32,7 @@ pub(crate) use input::TerminalInputCoalescing;
 use input::{TerminalInputAction, coalesced_input_actions_with_options};
 use loop_event_pump::{LoopEvent, LoopEventPump};
 use model_refresh::apply_model_provider_refresh_event;
-pub use runtime_port::{NoopUiRuntimePort, UiRuntimePort};
+pub use runtime_port::NoopUiRuntimePort;
 pub(crate) use terminal::TerminalMouseModePreference;
 use terminal::{TerminalMouseMode, TerminalSession};
 
@@ -65,11 +65,17 @@ pub fn run_with_options(
 }
 
 /// `run_with_runtime_coordinator` 启动由外部 runtime port 驱动的交互式 TUI。
-pub fn run_with_runtime_coordinator(
+pub fn run_with_runtime_coordinator<R>(
     startup_banner_options: StartupBannerOptions,
     options: ModelOptions,
-    runtime_coordinator: &mut impl UiRuntimePort,
-) -> Result<Model> {
+    runtime_coordinator: &mut R,
+) -> Result<Model>
+where
+    R: runtime_port::RuntimeEventPort
+        + runtime_port::RuntimeCommandPort
+        + runtime_port::ModelRuntimePort
+        + runtime_port::PromptRuntimePort,
+{
     spawn_markdown_highlighting_prewarm();
     let keyboard_enhancement = options.keyboard_enhancement;
     let mut model = Model::new_with_options(startup_banner_options, options);
@@ -95,19 +101,19 @@ pub fn run_with_runtime_coordinator(
 
     let mut loop_events = LoopEventPump::start()?;
     let runtime_waker = loop_events.waker();
-    runtime_port::RuntimeEventPort::bind_runtime_wake_port(
+    runtime_port::RuntimeEventPort::bind_runtime_wake(
         runtime_coordinator,
         RuntimeWake::new(move || runtime_waker.wake()),
     )
     .map_err(color_eyre::eyre::Report::msg)?;
 
-    if let Err(message) = runtime_port::RuntimeCommandPort::dispatch_runtime_command_port(
+    if let Err(message) = runtime_port::RuntimeCommandPort::dispatch_runtime_command(
         runtime_coordinator,
         RuntimeCommand::LoadMessageHistoryStartupCache,
     ) {
         model.show_toast(crate::toast::ToastSeverity::Error, message);
     }
-    if let Err(message) = runtime_port::RuntimeCommandPort::dispatch_runtime_command_port(
+    if let Err(message) = runtime_port::RuntimeCommandPort::dispatch_runtime_command(
         runtime_coordinator,
         RuntimeCommand::CheckPromptAssemblyMissingSources,
     ) {
@@ -296,12 +302,12 @@ where
 {
     let mut changed = false;
 
-    for event in runtime_coordinator.drain_runtime_events_port() {
+    for event in runtime_coordinator.drain_runtime_events() {
         model.apply_runtime_event(event);
         changed = true;
     }
 
-    for event in runtime_coordinator.drain_model_provider_refresh_events_port() {
+    for event in runtime_coordinator.drain_model_provider_refresh_events() {
         apply_model_provider_refresh_event(model, event);
         changed = true;
     }

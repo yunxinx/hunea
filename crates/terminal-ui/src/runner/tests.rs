@@ -13,7 +13,9 @@ use super::input::{
 use super::*;
 use runtime_domain::runtime_wake::RuntimeWake;
 
-use super::UiRuntimePort;
+use super::runtime_port::{
+    ModelRuntimePort, PromptRuntimePort, RuntimeCommandPort, RuntimeEventPort,
+};
 use crate::{
     AppEffect, AppEvent, ReasoningDisplayMode, Sender, StatusLineItem,
     runtime::RuntimeEventApply,
@@ -26,7 +28,9 @@ use crossterm::event::{
 };
 use ratatui::style::Color;
 use runtime_domain::context_budget::ContextTokenLimit;
-use runtime_domain::model_catalog::ProviderSyncRequest;
+use runtime_domain::model_catalog::{
+    ModelProviderRefreshEvent, ModelSelection, ProviderSyncRequest,
+};
 use runtime_domain::request_policy::RuntimeRequestPolicy;
 use runtime_domain::session::{
     ConversationEvent, ConversationResponse, ConversationTurnRequest, ProviderRequestMetrics,
@@ -76,7 +80,7 @@ fn context_limit(value: usize) -> ContextTokenLimit {
     ContextTokenLimit::try_from(value).expect("fixture limit should be valid")
 }
 
-impl UiRuntimePort for TestUiRuntimePort {
+impl RuntimeEventPort for TestUiRuntimePort {
     fn bind_runtime_wake(&mut self, wake: RuntimeWake) -> Result<(), String> {
         self.runtime_wake = Some(wake);
         Ok(())
@@ -85,7 +89,9 @@ impl UiRuntimePort for TestUiRuntimePort {
     fn drain_runtime_events(&mut self) -> Vec<RuntimeEvent> {
         std::mem::take(&mut self.runtime_events)
     }
+}
 
+impl RuntimeCommandPort for TestUiRuntimePort {
     fn dispatch_runtime_command(
         &mut self,
         command: RuntimeCommand,
@@ -181,8 +187,37 @@ impl UiRuntimePort for TestUiRuntimePort {
             }
         }
     }
+}
+
+impl ModelRuntimePort for TestUiRuntimePort {
+    fn drain_model_provider_refresh_events(&mut self) -> Vec<ModelProviderRefreshEvent> {
+        Vec::new()
+    }
+
+    fn persist_selected_model(&mut self, _selection: &ModelSelection) -> Result<(), String> {
+        Ok(())
+    }
 
     fn refresh_model_provider(&mut self, _request: ProviderSyncRequest) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+impl PromptRuntimePort for TestUiRuntimePort {
+    fn begin_prompt_assembly_edit(
+        &mut self,
+    ) -> Result<runtime_domain::prompt_assembly::PromptAssemblyManagerSnapshot, String> {
+        Err("Prompt assembly editing is not available".to_string())
+    }
+
+    fn apply_prompt_assembly_edit_mutation(
+        &mut self,
+        _mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation,
+    ) -> Result<runtime_domain::prompt_assembly::PromptAssemblyManagerSnapshot, String> {
+        Err("Prompt assembly editing is not available".to_string())
+    }
+
+    fn commit_prompt_assembly_edit(&mut self) -> Result<(), String> {
         Ok(())
     }
 }
@@ -217,14 +252,16 @@ fn replay_runtime_port_keeps_control_metadata_separate_from_delivery_content() {
     let target = RuntimeTarget::provider("local", "qwen3");
     let wake_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let wake_count_for_callback = std::sync::Arc::clone(&wake_count);
-    runtime
-        .bind_runtime_wake(RuntimeWake::new(move || {
+    RuntimeEventPort::bind_runtime_wake(
+        &mut runtime,
+        RuntimeWake::new(move || {
             wake_count_for_callback.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        }))
-        .expect("replay port should accept a wake binding");
+        }),
+    )
+    .expect("replay port should accept a wake binding");
 
     runtime.publish_delivery(target.clone(), "assistant delivery");
-    let events = runtime.drain_runtime_events();
+    let events = RuntimeEventPort::drain_runtime_events(&mut runtime);
 
     assert_eq!(wake_count.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert_eq!(runtime.delivery_content, vec!["assistant delivery"]);
@@ -259,8 +296,8 @@ fn replay_runtime_port_drains_all_ready_events_in_publication_order() {
         ..TestUiRuntimePort::default()
     };
 
-    let first = runtime.drain_runtime_events();
-    let second = runtime.drain_runtime_events();
+    let first = RuntimeEventPort::drain_runtime_events(&mut runtime);
+    let second = RuntimeEventPort::drain_runtime_events(&mut runtime);
 
     assert_eq!(first.len(), 3);
     assert!(matches!(
@@ -278,12 +315,14 @@ fn replay_runtime_port_exposes_sync_receipts_for_accept_reject_and_interrupt() {
     let target = request.target();
 
     assert_eq!(
-        runtime
-            .dispatch_runtime_command(RuntimeCommand::SubmitConversationTurn {
+        RuntimeCommandPort::dispatch_runtime_command(
+            &mut runtime,
+            RuntimeCommand::SubmitConversationTurn {
                 target: target.clone(),
                 request: Box::new(request),
-            })
-            .expect("first turn should be accepted"),
+            },
+        )
+        .expect("first turn should be accepted"),
         RuntimeCommandReceipt::ConversationStarted {
             activity_label: "qwen3".to_string(),
         }
@@ -291,32 +330,39 @@ fn replay_runtime_port_exposes_sync_receipts_for_accept_reject_and_interrupt() {
 
     let duplicate_request = ConversationTurnRequest::new_user_text("local", "qwen3", "duplicate");
     assert_eq!(
-        runtime.dispatch_runtime_command(RuntimeCommand::SubmitConversationTurn {
-            target: duplicate_request.target(),
-            request: Box::new(duplicate_request),
-        }),
+        RuntimeCommandPort::dispatch_runtime_command(
+            &mut runtime,
+            RuntimeCommand::SubmitConversationTurn {
+                target: duplicate_request.target(),
+                request: Box::new(duplicate_request),
+            }
+        ),
         Err("Chat request is already running".to_string())
     );
 
     assert_eq!(
-        runtime
-            .dispatch_runtime_command(RuntimeCommand::Interrupt {
+        RuntimeCommandPort::dispatch_runtime_command(
+            &mut runtime,
+            RuntimeCommand::Interrupt {
                 target: Some(target.clone()),
-            })
-            .expect("running turn should be interruptible"),
+            }
+        )
+        .expect("running turn should be interruptible"),
         RuntimeCommandReceipt::Interrupted {
             target: Some(target)
         }
     );
     assert!(runtime.conversation_interrupted);
     assert_eq!(
-        runtime
-            .dispatch_runtime_command(RuntimeCommand::RespondPermission {
+        RuntimeCommandPort::dispatch_runtime_command(
+            &mut runtime,
+            RuntimeCommand::RespondPermission {
                 target: None,
                 request_id: "permission-1".to_string(),
                 option_id: None,
-            })
-            .expect("permission response should be accepted"),
+            }
+        )
+        .expect("permission response should be accepted"),
         RuntimeCommandReceipt::Accepted
     );
 }
@@ -326,11 +372,13 @@ fn replay_runtime_port_rejects_late_events_after_reset_without_waking() {
     let mut runtime = TestUiRuntimePort::default();
     let wake_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let wake_count_for_callback = std::sync::Arc::clone(&wake_count);
-    runtime
-        .bind_runtime_wake(RuntimeWake::new(move || {
+    RuntimeEventPort::bind_runtime_wake(
+        &mut runtime,
+        RuntimeWake::new(move || {
             wake_count_for_callback.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        }))
-        .expect("replay port should accept a wake binding");
+        }),
+    )
+    .expect("replay port should accept a wake binding");
     let stale_epoch = runtime.runtime_epoch;
     runtime.publish_event(RuntimeEvent::AssistantDelta {
         target: RuntimeTarget::provider("local", "qwen3"),
@@ -338,8 +386,7 @@ fn replay_runtime_port_rejects_late_events_after_reset_without_waking() {
     });
     assert_eq!(wake_count.load(std::sync::atomic::Ordering::SeqCst), 1);
 
-    runtime
-        .dispatch_runtime_command(RuntimeCommand::Reset)
+    RuntimeCommandPort::dispatch_runtime_command(&mut runtime, RuntimeCommand::Reset)
         .expect("reset should be accepted");
     runtime.publish_event_for_epoch(
         stale_epoch,
@@ -349,7 +396,7 @@ fn replay_runtime_port_rejects_late_events_after_reset_without_waking() {
         },
     );
 
-    assert!(runtime.drain_runtime_events().is_empty());
+    assert!(RuntimeEventPort::drain_runtime_events(&mut runtime).is_empty());
     assert_eq!(
         wake_count.load(std::sync::atomic::Ordering::SeqCst),
         1,
@@ -398,9 +445,11 @@ fn open_copy_picker_effect_dispatches_copy_picker_tree_load() {
 fn unrelated_runtime_commands_do_not_inject_context_budget_events() {
     let mut runtime_coordinator = TestUiRuntimePort::default();
 
-    runtime_coordinator
-        .dispatch_runtime_command(RuntimeCommand::ListSessions)
-        .expect("list sessions should be accepted");
+    RuntimeCommandPort::dispatch_runtime_command(
+        &mut runtime_coordinator,
+        RuntimeCommand::ListSessions,
+    )
+    .expect("list sessions should be accepted");
 
     assert!(
         runtime_coordinator.runtime_events.is_empty(),
@@ -2047,9 +2096,11 @@ fn record_message_history_dispatch_failure_reverts_blind_recall_cache() {
 fn truncate_conversation_command_records_retained_turns() {
     let mut runtime_coordinator = TestUiRuntimePort::default();
 
-    runtime_coordinator
-        .dispatch_runtime_command(RuntimeCommand::truncate_conversation(2))
-        .expect("truncate command should be accepted");
+    RuntimeCommandPort::dispatch_runtime_command(
+        &mut runtime_coordinator,
+        RuntimeCommand::truncate_conversation(2),
+    )
+    .expect("truncate command should be accepted");
 
     assert_eq!(
         runtime_coordinator.conversation_retained_user_turns,
@@ -2485,9 +2536,11 @@ fn apply_effect_if_needed_for_test(
     effect: Option<AppEffect>,
 ) {
     if model.take_context_budget_cancellation_request() {
-        runtime_coordinator
-            .dispatch_runtime_command(RuntimeCommand::CancelContextBudgetSnapshot)
-            .expect("context budget cancel should be accepted in tests");
+        RuntimeCommandPort::dispatch_runtime_command(
+            runtime_coordinator,
+            RuntimeCommand::CancelContextBudgetSnapshot,
+        )
+        .expect("context budget cancel should be accepted in tests");
     }
 
     match effect {

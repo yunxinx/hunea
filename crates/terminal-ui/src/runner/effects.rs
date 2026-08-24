@@ -20,7 +20,7 @@ pub(crate) fn dispatch_record_message_history(
 ) {
     let limit = model.message_history_limit;
     if let Err(message) =
-        runtime_coordinator.dispatch_runtime_command_port(RuntimeCommand::RecordMessageHistory {
+        runtime_coordinator.dispatch_runtime_command(RuntimeCommand::RecordMessageHistory {
             entry_id,
             text,
             limit,
@@ -105,7 +105,7 @@ where
             Ok(())
         }
         AppEffect::BeginPromptAssemblyEdit => {
-            match runtime_coordinator.begin_prompt_assembly_edit_port() {
+            match runtime_coordinator.begin_prompt_assembly_edit() {
                 Ok(snapshot) => {
                     model.prompt_assembly = snapshot;
                     model.sync_prompt_overlay_state();
@@ -119,7 +119,7 @@ where
             Ok(())
         }
         AppEffect::ApplyPromptAssemblyEditMutation { mutation } => {
-            match runtime_coordinator.apply_prompt_assembly_edit_mutation_port(mutation) {
+            match runtime_coordinator.apply_prompt_assembly_edit_mutation(mutation) {
                 Ok(snapshot) => {
                     model.prompt_assembly = snapshot;
                     model.sync_prompt_overlay_state();
@@ -222,8 +222,8 @@ fn dispatch_context_budget_cancellation_if_needed(
         return;
     }
 
-    if let Err(message) = runtime_coordinator
-        .dispatch_runtime_command_port(RuntimeCommand::CancelContextBudgetSnapshot)
+    if let Err(message) =
+        runtime_coordinator.dispatch_runtime_command(RuntimeCommand::CancelContextBudgetSnapshot)
     {
         model.show_toast(ToastSeverity::Error, message);
     }
@@ -237,7 +237,7 @@ fn dispatch_prompt_assembly_commit_if_needed(
         return;
     }
 
-    if let Err(message) = runtime_coordinator.commit_prompt_assembly_edit_port() {
+    if let Err(message) = runtime_coordinator.commit_prompt_assembly_edit() {
         model.show_toast(ToastSeverity::Error, message);
     }
 }
@@ -248,7 +248,7 @@ pub(super) fn run_switch_branch_effect(
     leaf_id: &str,
 ) {
     let request_id = model.next_session_load_request_id();
-    match runtime_coordinator.dispatch_runtime_command_port(RuntimeCommand::SwitchBranch {
+    match runtime_coordinator.dispatch_runtime_command(RuntimeCommand::SwitchBranch {
         request_id,
         leaf_id: leaf_id.to_string(),
     }) {
@@ -263,7 +263,7 @@ pub(super) fn run_open_copy_picker_effect(
 ) {
     let request_id = model.open_copy_picker_loading();
     if let Err(message) = runtime_coordinator
-        .dispatch_runtime_command_port(RuntimeCommand::LoadCopyPickerTree { request_id })
+        .dispatch_runtime_command(RuntimeCommand::LoadCopyPickerTree { request_id })
     {
         model.show_copy_picker_error(&message);
     }
@@ -281,12 +281,12 @@ pub(super) fn run_open_context_budget_effect(
         return;
     };
     let request_id = model.open_context_budget_loading();
-    if let Err(message) = runtime_coordinator.dispatch_runtime_command_port(
-        RuntimeCommand::LoadContextBudgetSnapshot {
+    if let Err(message) =
+        runtime_coordinator.dispatch_runtime_command(RuntimeCommand::LoadContextBudgetSnapshot {
             request_id,
             selection,
-        },
-    ) {
+        })
+    {
         model.show_context_budget_error(
             request_id,
             runtime_domain::session::ContextBudgetLoadErrorPayload::RuntimeInternal {
@@ -302,7 +302,7 @@ pub(crate) fn run_open_message_history_picker_effect(
 ) {
     let request_id = model.open_message_history_picker_loading();
     if let Err(message) = runtime_coordinator
-        .dispatch_runtime_command_port(RuntimeCommand::LoadMessageHistoryPickerRows { request_id })
+        .dispatch_runtime_command(RuntimeCommand::LoadMessageHistoryPickerRows { request_id })
     {
         model.show_message_history_picker_error(request_id, &message);
     }
@@ -313,8 +313,8 @@ pub(super) fn run_open_branch_tree_effect(
     runtime_coordinator: &mut impl RuntimeCommandPort,
 ) {
     let request_id = model.open_entry_tree_branch_tree_loading();
-    if let Err(message) = runtime_coordinator
-        .dispatch_runtime_command_port(RuntimeCommand::LoadBranchTree { request_id })
+    if let Err(message) =
+        runtime_coordinator.dispatch_runtime_command(RuntimeCommand::LoadBranchTree { request_id })
     {
         model.show_entry_tree_branch_tree_error(&message);
     }
@@ -327,7 +327,7 @@ pub(super) fn run_open_branch_preview_effect(
     branch_row_id: String,
 ) {
     if let Err(message) =
-        runtime_coordinator.dispatch_runtime_command_port(RuntimeCommand::LoadBranchPreview {
+        runtime_coordinator.dispatch_runtime_command(RuntimeCommand::LoadBranchPreview {
             request_id,
             branch_row_id,
         })
@@ -341,7 +341,7 @@ fn run_simple_runtime_command_effect(
     runtime_coordinator: &mut impl RuntimeCommandPort,
     command: RuntimeCommand,
 ) {
-    if let Err(message) = runtime_coordinator.dispatch_runtime_command_port(command) {
+    if let Err(message) = runtime_coordinator.dispatch_runtime_command(command) {
         model.show_toast(ToastSeverity::Error, message);
     }
 }
@@ -352,7 +352,7 @@ fn run_truncate_conversation_effect(
     retained_user_turns: usize,
 ) {
     if let Err(message) = runtime_coordinator
-        .dispatch_runtime_command_port(RuntimeCommand::truncate_conversation(retained_user_turns))
+        .dispatch_runtime_command(RuntimeCommand::truncate_conversation(retained_user_turns))
     {
         model.show_toast(ToastSeverity::Error, message);
     }
@@ -366,7 +366,7 @@ fn run_respond_runtime_permission_effect(
     option_id: Option<String>,
 ) {
     if let Err(message) =
-        runtime_coordinator.dispatch_runtime_command_port(RuntimeCommand::RespondPermission {
+        runtime_coordinator.dispatch_runtime_command(RuntimeCommand::RespondPermission {
             target: Some(target),
             request_id: request_id.to_string(),
             option_id,
@@ -377,14 +377,14 @@ fn run_respond_runtime_permission_effect(
 }
 
 pub(super) fn reset_runtime_session_after_clear(runtime_coordinator: &mut impl RuntimeCommandPort) {
-    let _ = runtime_coordinator.dispatch_runtime_command_port(RuntimeCommand::Reset);
+    let _ = runtime_coordinator.dispatch_runtime_command(RuntimeCommand::Reset);
 }
 
 pub(super) fn run_interrupt_current_turn_effect(
     model: &mut Model,
     runtime_coordinator: &mut impl RuntimeCommandPort,
 ) {
-    match runtime_coordinator.dispatch_runtime_command_port(RuntimeCommand::interrupt_current()) {
+    match runtime_coordinator.dispatch_runtime_command(RuntimeCommand::interrupt_current()) {
         Ok(RuntimeCommandReceipt::Interrupted {
             target: Some(RuntimeTarget::Provider(_)),
         }) => {

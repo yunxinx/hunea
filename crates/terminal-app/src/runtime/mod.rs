@@ -44,7 +44,7 @@ use session_store::{
     ResolvedSessionState, SessionBranchTreeSnapshot, SessionHeader, SessionId, SessionMeta,
     SessionStore, SessionTreeSnapshot, SessionTreeSnapshotRow,
 };
-use terminal_ui::UiRuntimePort;
+use terminal_ui::{ModelRuntimePort, PromptRuntimePort, RuntimeCommandPort, RuntimeEventPort};
 use tool_runtime::{ToolDefinition, ToolExecutorRegistry, builtin::ManagedRipgrepConfig};
 
 use self::{
@@ -415,7 +415,7 @@ fn restored_model_selection(
     ))
 }
 
-impl UiRuntimePort for AppRuntimeCoordinator {
+impl RuntimeEventPort for AppRuntimeCoordinator {
     fn bind_runtime_wake(&mut self, wake: RuntimeWake) -> Result<(), String> {
         self.components.bind_runtime_wake(wake)
     }
@@ -437,20 +437,15 @@ impl UiRuntimePort for AppRuntimeCoordinator {
         }
         events
     }
+}
 
+impl ModelRuntimePort for AppRuntimeCoordinator {
     fn drain_model_provider_refresh_events(&mut self) -> Vec<ModelProviderRefreshEvent> {
         let mut events = Vec::new();
         while let Some(event) = self.components.model_refresh.try_recv_event() {
             events.push(event);
         }
         events
-    }
-
-    fn dispatch_runtime_command(
-        &mut self,
-        command: RuntimeCommand,
-    ) -> Result<RuntimeCommandReceipt, String> {
-        self.handle_runtime_command(command)
     }
 
     fn persist_selected_model(&mut self, selection: &ModelSelection) -> Result<(), String> {
@@ -475,7 +470,18 @@ impl UiRuntimePort for AppRuntimeCoordinator {
             .map_err(|error| error.to_string())?;
         self.components.model_refresh.start(request, provider_lease)
     }
+}
 
+impl RuntimeCommandPort for AppRuntimeCoordinator {
+    fn dispatch_runtime_command(
+        &mut self,
+        command: RuntimeCommand,
+    ) -> Result<RuntimeCommandReceipt, String> {
+        self.handle_runtime_command(command)
+    }
+}
+
+impl PromptRuntimePort for AppRuntimeCoordinator {
     fn begin_prompt_assembly_edit(
         &mut self,
     ) -> Result<runtime_domain::prompt_assembly::PromptAssemblyManagerSnapshot, String> {

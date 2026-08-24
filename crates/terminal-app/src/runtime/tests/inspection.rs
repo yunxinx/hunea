@@ -10,7 +10,7 @@ use runtime_domain::{
     },
     provider::ProviderKind,
 };
-use terminal_ui::UiRuntimePort;
+use terminal_ui::RuntimeEventPort;
 
 use super::support::*;
 use crate::runtime::{
@@ -587,7 +587,7 @@ fn ui_runtime_bridge_reacts_to_wake_binding_lifecycle() {
 
     let wake_count = Arc::new(AtomicUsize::new(0));
     let wake_count_for_callback = Arc::clone(&wake_count);
-    UiRuntimePort::bind_runtime_wake(
+    RuntimeEventPort::bind_runtime_wake(
         &mut coordinator,
         RuntimeWake::new(move || {
             wake_count_for_callback.fetch_add(1, Ordering::SeqCst);
@@ -662,7 +662,7 @@ fn rebinding_ui_runtime_bridge_disposes_the_previous_wake_effect() {
     let mut coordinator = runtime_coordinator(AppRuntimeOptions::default());
     let first_wake_count = Arc::new(AtomicUsize::new(0));
     let first_wake_count_for_callback = Arc::clone(&first_wake_count);
-    UiRuntimePort::bind_runtime_wake(
+    RuntimeEventPort::bind_runtime_wake(
         &mut coordinator,
         RuntimeWake::new(move || {
             first_wake_count_for_callback.fetch_add(1, Ordering::SeqCst);
@@ -675,7 +675,7 @@ fn rebinding_ui_runtime_bridge_disposes_the_previous_wake_effect() {
 
     let second_wake_count = Arc::new(AtomicUsize::new(0));
     let second_wake_count_for_callback = Arc::clone(&second_wake_count);
-    UiRuntimePort::bind_runtime_wake(
+    RuntimeEventPort::bind_runtime_wake(
         &mut coordinator,
         RuntimeWake::new(move || {
             second_wake_count_for_callback.fetch_add(1, Ordering::SeqCst);
@@ -696,7 +696,7 @@ fn rebinding_ui_runtime_bridge_disposes_the_previous_wake_effect() {
 #[test]
 fn reset_replaces_session_component_generations_without_rebuilding_the_ui_bridge() {
     let mut coordinator = runtime_coordinator(AppRuntimeOptions::default());
-    UiRuntimePort::bind_runtime_wake(&mut coordinator, RuntimeWake::new(|| {}))
+    RuntimeEventPort::bind_runtime_wake(&mut coordinator, RuntimeWake::new(|| {}))
         .expect("runtime wake should bind");
     let before = composition_snapshot(&coordinator);
     let workspace_tools_before = before["workspace_tools"].clone();

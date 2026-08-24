@@ -21,7 +21,38 @@ use runtime_domain::{
     },
 };
 
-pub(super) use native::NativeAgentRuntime;
+use crate::runtime::context::{CapabilityLease, RuntimeEventStreamCapability};
+
+pub(super) use native::{NativeAgentRuntime, NativeAgentRuntimeMount};
+
+#[cfg(test)]
+pub(super) trait AgentRuntimeTestHarness {
+    fn append_conversation_items(
+        &mut self,
+        items: Vec<conversation_runtime::ConversationItem>,
+    ) -> Result<(), String>;
+
+    fn set_upstream_context_tokens(&mut self, upstream_context_tokens: Option<usize>);
+
+    fn stage_pending_turn(&mut self, request: ConversationTurnRequest);
+
+    fn set_worker_cancellation(&mut self, cancellation: tokio_util::sync::CancellationToken);
+
+    fn prepare_turn(
+        &mut self,
+        request: &ConversationTurnRequest,
+    ) -> Result<conversation_runtime::PreparedConversationRequest, String>;
+
+    fn dynamic_environment_injection(
+        &mut self,
+        observer: Arc<dyn crate::dynamic_environment::DynamicEnvironmentObserver>,
+    ) -> Result<crate::runtime::dynamic_environment_worker::DynamicEnvironmentInjection, String>;
+
+    fn attached_prompt_message_assembly(
+        &self,
+        user_message: &TranscriptUserMessage,
+    ) -> Result<crate::prompt_assembly::AttachedPromptMessageAssembly, String>;
+}
 
 /// `AgentId` 标识一个由 runtime host 管理的 Agent handle。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -312,10 +343,19 @@ pub(super) trait AgentRuntime {
 
 /// Agent host 所消费的 capability port。
 ///
-/// `NativeAgentRuntime` 是当前唯一 production projection；port 不拥有 worker、receiver、
-/// notifier 或 lifecycle disposer。host 通过它消费 Agent facts 与 session/configuration view，
-/// 使 coordinator 不需要知道 native loop 的具体实现。
-pub(super) trait AgentRuntimePort: AgentRuntime {
+/// `RuntimeComponents` 通过该 port 唯一拥有 active adapter；`NativeAgentRuntime` 是当前唯一
+/// production implementation。worker、receiver 与 event-stream lease 全部封装在 implementation
+/// 内，host 只消费 lifecycle、Agent facts 与 session/configuration view。
+pub(super) trait AgentRuntimePort: AgentRuntime + Send {
+    /// 使用当前 host event-stream generation 激活 adapter。
+    fn activate(
+        &mut self,
+        event_stream: CapabilityLease<RuntimeEventStreamCapability>,
+    ) -> Result<(), String>;
+
+    /// 撤销当前 activation generation 的副作用，同时保留可供重新激活的持久状态。
+    fn suspend(&mut self) -> Result<(), AgentRuntimeError>;
+
     fn is_busy(&self) -> bool;
 
     fn session_id(&self) -> Option<SessionId>;
@@ -338,6 +378,16 @@ pub(super) trait AgentRuntimePort: AgentRuntime {
     );
 
     fn restore_session(&mut self, restore: AgentSessionRestore) -> Result<(), String>;
+
+    #[cfg(test)]
+    fn test_harness(&mut self) -> Option<&mut dyn AgentRuntimeTestHarness> {
+        None
+    }
+
+    #[cfg(test)]
+    fn test_harness_ref(&self) -> Option<&dyn AgentRuntimeTestHarness> {
+        None
+    }
 
     #[cfg(test)]
     fn has_pending_work(&self) -> bool;

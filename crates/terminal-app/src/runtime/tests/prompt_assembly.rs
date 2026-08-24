@@ -485,12 +485,8 @@ fn prompt_assembly_changes_sync_current_empty_session_prelude_immediately() {
     });
 
     assert_eq!(
-        coordinator
-            .components
-            .agent_runtime
-            .provider_conversation_for_test()
-            .prompt_prelude(),
-        Some(&initial_prelude)
+        agent_prompt_prelude(&coordinator),
+        Some(initial_prelude.clone())
     );
 
     coordinator
@@ -520,12 +516,8 @@ fn prompt_assembly_changes_sync_current_empty_session_prelude_immediately() {
     );
 
     assert_eq!(
-        coordinator
-            .components
-            .agent_runtime
-            .provider_conversation_for_test()
-            .prompt_prelude(),
-        Some(&updated_manager.resolution.prelude)
+        agent_prompt_prelude(&coordinator),
+        Some(updated_manager.resolution.prelude.clone())
     );
     assert_eq!(
         coordinator
@@ -604,9 +596,8 @@ fn prompt_assembly_changes_on_started_session_apply_only_after_next_new_session_
     });
     coordinator
         .components
-        .agent_runtime
-        .provider_conversation_mut_for_test()
-        .append_items(vec![ConversationItem::text(Role::User, "already started")])
+        .agent_test_harness()
+        .append_conversation_items(vec![ConversationItem::text(Role::User, "already started")])
         .expect("seed history should succeed");
 
     coordinator
@@ -634,14 +625,7 @@ fn prompt_assembly_changes_on_started_session_apply_only_after_next_new_session_
         "prompt assembly updated event",
     );
 
-    assert_eq!(
-        coordinator
-            .components
-            .agent_runtime
-            .provider_conversation_for_test()
-            .prompt_prelude(),
-        Some(&initial_prelude)
-    );
+    assert_eq!(agent_prompt_prelude(&coordinator), Some(initial_prelude));
     assert_eq!(
         coordinator
             .components
@@ -662,18 +646,13 @@ fn prompt_assembly_changes_on_started_session_apply_only_after_next_new_session_
         .expect("reset should succeed");
 
     assert_eq!(
-        coordinator
-            .components
-            .agent_runtime
-            .provider_conversation_for_test()
-            .prompt_prelude(),
+        agent_prompt_prelude(&coordinator),
         coordinator
             .components
             .require::<PromptAssemblyCapability>()
             .expect("prompt assembly capability should be available")
             .session_snapshot()
             .prompt_prelude
-            .as_ref()
     );
     cleanup(&root);
 }
@@ -810,9 +789,8 @@ fn disabling_dynamic_environment_changes_waits_for_next_new_session() {
     });
     coordinator
         .components
-        .agent_runtime
-        .provider_conversation_mut_for_test()
-        .append_items(vec![ConversationItem::text(Role::User, "already started")])
+        .agent_test_harness()
+        .append_conversation_items(vec![ConversationItem::text(Role::User, "already started")])
         .expect("seed history should succeed");
 
     coordinator
@@ -857,9 +835,8 @@ fn disabling_dynamic_environment_changes_waits_for_next_new_session() {
         .expect("reset should succeed");
     coordinator
         .components
-        .agent_runtime
-        .provider_conversation_mut_for_test()
-        .append_items(vec![ConversationItem::text(Role::User, "fresh session")])
+        .agent_test_harness()
+        .append_conversation_items(vec![ConversationItem::text(Role::User, "fresh session")])
         .expect("fresh session history should seed");
     let next_session_injection = coordinator
         .dynamic_environment_injection()
@@ -1048,9 +1025,8 @@ fn disabling_tool_on_started_session_waits_for_next_new_session_reset() {
     });
     coordinator
         .components
-        .agent_runtime
-        .provider_conversation_mut_for_test()
-        .append_items(vec![ConversationItem::text(Role::User, "already started")])
+        .agent_test_harness()
+        .append_conversation_items(vec![ConversationItem::text(Role::User, "already started")])
         .expect("seed history should succeed");
     let disabled_tool_name = coordinator
         .prompt_assembly_tool_definitions()

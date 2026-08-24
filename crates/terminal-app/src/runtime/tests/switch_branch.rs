@@ -138,8 +138,8 @@ fn switch_branch_moves_leaf_and_rebuilds_transcript_and_tree() {
     let previous_context_cancellation = tokio_util::sync::CancellationToken::new();
     coordinator
         .components
-        .agent_runtime
-        .set_worker_cancellation_for_test(previous_context_cancellation.clone());
+        .agent_test_harness()
+        .set_worker_cancellation(previous_context_cancellation.clone());
 
     coordinator
         .handle_runtime_command(RuntimeCommand::SwitchBranch {
@@ -154,13 +154,7 @@ fn switch_branch_moves_leaf_and_rebuilds_transcript_and_tree() {
         "successful branch switch should reset the previous approval context"
     );
     assert_eq!(
-        coordinator
-            .components
-            .agent_runtime
-            .provider_conversation_for_test()
-            .history()
-            .map(ConversationItem::text_content)
-            .collect::<Vec<_>>(),
+        agent_history_texts(&coordinator),
         vec!["hello", "branch-b"],
         "provider history should move after the switch event is applied"
     );
@@ -271,8 +265,8 @@ fn switch_branch_is_blocked_while_provider_turn_is_running() {
     let request = ConversationTurnRequest::new_user_text("local", "qwen3", "pending user");
     coordinator
         .components
-        .agent_runtime
-        .set_pending_turn_for_test(request);
+        .agent_test_harness()
+        .stage_pending_turn(request);
 
     let error = coordinator
         .handle_runtime_command(RuntimeCommand::SwitchBranch {

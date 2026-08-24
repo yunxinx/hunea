@@ -92,7 +92,7 @@ impl AppRuntimeCoordinator {
         &mut self,
     ) -> Result<super::dynamic_environment_worker::DynamicEnvironmentInjection, String> {
         self.components
-            .agent_runtime
+            .agent_test_harness()
             .dynamic_environment_injection(self.options.dynamic_environment_observer.clone())
     }
 
@@ -102,8 +102,8 @@ impl AppRuntimeCoordinator {
         user_message: &TranscriptUserMessage,
     ) -> Result<AttachedPromptMessageAssembly, String> {
         self.components
-            .agent_runtime
-            .attached_prompt_message_assembly_for_test(user_message)
+            .agent_test_harness_ref()
+            .attached_prompt_message_assembly(user_message)
     }
 }
 

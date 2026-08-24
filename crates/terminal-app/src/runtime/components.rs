@@ -8,7 +8,7 @@ use tool_runtime::ToolExecutorRegistry;
 
 use super::{
     AppRuntimeOptions,
-    agent::{AgentRuntime, AgentRuntimePort, NativeAgentRuntime},
+    agent::{AgentRuntimePort, NativeAgentRuntime, NativeAgentRuntimeMount},
     context::{
         ApprovalProviderCapability, CapabilityLease, ComponentActivationContext, LlmPortCapability,
         ModelCatalogCapability, PermissionPolicyCapability, PromptAssemblyCapability,
@@ -298,11 +298,11 @@ struct PreparedPluginCommit {
 
 /// `RuntimeComponents` 是 coordinator 的长期 runtime owner。
 ///
-/// 它把 native Agent adapter、host workers、tool view、notifier 和 lifecycle graph 放在
+/// 它把 active Agent adapter、host workers、tool view、notifier 和 lifecycle graph 放在
 /// 同一所有权边界，让 reset/shutdown 不再依赖 coordinator 手工枚举底层 conversation
 /// resources。
 pub(super) struct RuntimeComponents {
-    pub(super) agent_runtime: NativeAgentRuntime,
+    agent_runtime: Box<dyn AgentRuntimePort>,
     pub(super) model_refresh: ModelRefreshWorker,
     llm_port: LlmPort,
     permission_policy: PermissionPolicy,
@@ -325,13 +325,33 @@ pub(super) struct RuntimeComponents {
     is_shutdown: bool,
 }
 
+fn boxed_native_agent_runtime(
+    mount: NativeAgentRuntimeMount<'_>,
+) -> Result<Box<dyn AgentRuntimePort>, String> {
+    NativeAgentRuntime::new(mount).map(|runtime| Box::new(runtime) as Box<dyn AgentRuntimePort>)
+}
+
 impl RuntimeComponents {
     pub(super) fn agent_port(&self) -> &dyn AgentRuntimePort {
-        &self.agent_runtime
+        &*self.agent_runtime
     }
 
     pub(super) fn agent_port_mut(&mut self) -> &mut dyn AgentRuntimePort {
-        &mut self.agent_runtime
+        &mut *self.agent_runtime
+    }
+
+    #[cfg(test)]
+    pub(super) fn agent_test_harness(&mut self) -> &mut dyn super::agent::AgentRuntimeTestHarness {
+        self.agent_runtime
+            .test_harness()
+            .expect("runtime test requires an Agent fixture harness")
+    }
+
+    #[cfg(test)]
+    pub(super) fn agent_test_harness_ref(&self) -> &dyn super::agent::AgentRuntimeTestHarness {
+        self.agent_runtime
+            .test_harness_ref()
+            .expect("runtime test requires an Agent fixture harness")
     }
 
     pub(super) fn new(options: &mut AppRuntimeOptions) -> Result<Self, String> {
@@ -376,18 +396,18 @@ impl RuntimeComponents {
         let session_store_worker = SessionStoreWorker::new(RuntimeEventNotifier::default());
         let context_budget_worker = ContextBudgetWorker::new(RuntimeEventNotifier::default())
             .map_err(|error| error.to_string())?;
-        let agent_runtime = NativeAgentRuntime::new(
+        let agent_runtime = boxed_native_agent_runtime(NativeAgentRuntimeMount {
             options,
-            session_workspace_tools.clone(),
+            session_workspace_tools: session_workspace_tools.clone(),
             prompt_assembly_tool_definitions,
-            prompt_assembly_snapshot,
-            session_backend_views
+            prompt_assembly: prompt_assembly_snapshot,
+            session_port: session_backend_views
                 .as_ref()
                 .map(|views| Arc::clone(&views.port)),
-            llm_port.clone(),
-            permission_policy.clone(),
-            TERMINAL_APPROVAL_PROVIDER_ID,
-        )?;
+            llm_port: llm_port.clone(),
+            permission_policy: permission_policy.clone(),
+            permission_provider_id: TERMINAL_APPROVAL_PROVIDER_ID.to_string(),
+        })?;
         let model_refresh = ModelRefreshWorker::new(RuntimeEventNotifier::default());
         let has_session_backend = session_backend_views.is_some();
         let mut components = Self {
@@ -738,17 +758,17 @@ impl RuntimeComponents {
         &self,
         options: &AppRuntimeOptions,
         session_port: Option<Arc<dyn session_store::SessionPort>>,
-    ) -> Result<NativeAgentRuntime, String> {
-        NativeAgentRuntime::new(
+    ) -> Result<Box<dyn AgentRuntimePort>, String> {
+        boxed_native_agent_runtime(NativeAgentRuntimeMount {
             options,
-            self.session_workspace_tools.clone(),
-            self.tool_catalog.definitions(),
-            self.prompt_assembly.session_snapshot(),
+            session_workspace_tools: self.session_workspace_tools.clone(),
+            prompt_assembly_tool_definitions: self.tool_catalog.definitions(),
+            prompt_assembly: self.prompt_assembly.session_snapshot(),
             session_port,
-            self.llm_port.clone(),
-            self.permission_policy.clone(),
-            self.permission_provider_id.as_str(),
-        )
+            llm_port: self.llm_port.clone(),
+            permission_policy: self.permission_policy.clone(),
+            permission_provider_id: self.permission_provider_id.clone(),
+        })
     }
 
     fn restore_ephemeral_session_consumers(
@@ -829,18 +849,19 @@ impl RuntimeComponents {
             .register(owner, provider_id.clone(), factory)
             .map_err(|error| error.to_string())?;
         let fresh_agent_runtime = match native_mount_check().and_then(|()| {
-            NativeAgentRuntime::new(
+            boxed_native_agent_runtime(NativeAgentRuntimeMount {
                 options,
-                self.session_workspace_tools.clone(),
-                self.tool_catalog.definitions(),
-                self.prompt_assembly.session_snapshot(),
-                self.session_backend_views
+                session_workspace_tools: self.session_workspace_tools.clone(),
+                prompt_assembly_tool_definitions: self.tool_catalog.definitions(),
+                prompt_assembly: self.prompt_assembly.session_snapshot(),
+                session_port: self
+                    .session_backend_views
                     .as_ref()
                     .map(|views| Arc::clone(&views.port)),
-                self.llm_port.clone(),
-                fresh_policy.clone(),
-                provider_id.clone(),
-            )
+                llm_port: self.llm_port.clone(),
+                permission_policy: fresh_policy.clone(),
+                permission_provider_id: provider_id.clone(),
+            })
         }) {
             Ok(runtime) => runtime,
             Err(error) => {
@@ -916,18 +937,19 @@ impl RuntimeComponents {
         // 旧 adapter 完全 quiescent 后才创建新 generation，避免 reset 期间存在两个
         // native worker path；构造失败时 capability 仍保持 removed，不发布半成品。
         let fresh_agent_runtime = native_mount_check().and_then(|()| {
-            NativeAgentRuntime::new(
+            boxed_native_agent_runtime(NativeAgentRuntimeMount {
                 options,
-                session_workspace_tools.clone(),
+                session_workspace_tools: session_workspace_tools.clone(),
                 prompt_assembly_tool_definitions,
-                fresh_prompt_assembly_snapshot,
-                self.session_backend_views
+                prompt_assembly: fresh_prompt_assembly_snapshot,
+                session_port: self
+                    .session_backend_views
                     .as_ref()
                     .map(|views| Arc::clone(&views.port)),
-                fresh_llm_port.clone(),
-                self.permission_policy.clone(),
-                self.permission_provider_id.as_str(),
-            )
+                llm_port: fresh_llm_port.clone(),
+                permission_policy: self.permission_policy.clone(),
+                permission_provider_id: self.permission_provider_id.clone(),
+            })
         })?;
         self.agent_runtime = fresh_agent_runtime;
         self.llm_port = fresh_llm_port;
@@ -1116,7 +1138,7 @@ impl RuntimeComponents {
         let event_stream = context
             .require::<RuntimeEventStreamCapability>()
             .map_err(|error| error.to_string())?;
-        self.agent_runtime.bind_event_stream(event_stream)?;
+        self.agent_runtime.activate(event_stream)?;
         Ok(ComponentActivationOutcome::Ready)
     }
 
@@ -1407,6 +1429,10 @@ mod tests {
     };
 
     use super::*;
+    use crate::runtime::agent::{
+        AgentCommand, AgentCommandReceipt, AgentContextBudgetSnapshot, AgentEvent, AgentRuntime,
+        AgentRuntimeError, AgentSessionRestore,
+    };
     use crate::runtime::lifecycle::{ComponentDefinition, ComponentState};
     use runtime_domain::prompt_assembly::{
         PromptPreludeSection, PromptSourceKind, PromptSourceOrigin,
@@ -1446,6 +1472,213 @@ mod tests {
             },
             ..AppRuntimeOptions::default()
         }
+    }
+
+    fn agent_system_prompt(components: &RuntimeComponents) -> Option<String> {
+        components
+            .agent_port()
+            .context_budget_snapshot()
+            .items
+            .iter()
+            .find(|item| item.role() == Some(provider_protocol::Role::System))
+            .map(provider_protocol::ConversationItem::text_content)
+    }
+
+    struct RecordingAgentRuntime {
+        lifecycle_trace: Arc<Mutex<Vec<&'static str>>>,
+        is_shutdown: bool,
+    }
+
+    impl RecordingAgentRuntime {
+        fn new(lifecycle_trace: Arc<Mutex<Vec<&'static str>>>) -> Self {
+            Self {
+                lifecycle_trace,
+                is_shutdown: true,
+            }
+        }
+
+        fn record(&self, event: &'static str) {
+            self.lifecycle_trace
+                .lock()
+                .expect("recording Agent trace lock should not be poisoned")
+                .push(event);
+        }
+    }
+
+    impl AgentRuntime for RecordingAgentRuntime {
+        fn dispatch(
+            &mut self,
+            _command: AgentCommand,
+        ) -> Result<AgentCommandReceipt, AgentRuntimeError> {
+            if self.is_shutdown {
+                Err(AgentRuntimeError::Disposed)
+            } else {
+                Err(AgentRuntimeError::CommandRejected(
+                    "recording Agent does not accept commands".to_string(),
+                ))
+            }
+        }
+
+        fn drain_events(&mut self) -> Vec<AgentEvent> {
+            Vec::new()
+        }
+
+        fn shutdown(&mut self) -> Result<(), AgentRuntimeError> {
+            if !self.is_shutdown {
+                self.record("shutdown");
+                self.is_shutdown = true;
+            }
+            Ok(())
+        }
+    }
+
+    impl AgentRuntimePort for RecordingAgentRuntime {
+        fn activate(
+            &mut self,
+            _event_stream: CapabilityLease<RuntimeEventStreamCapability>,
+        ) -> Result<(), String> {
+            self.record("activate");
+            self.is_shutdown = false;
+            Ok(())
+        }
+
+        fn suspend(&mut self) -> Result<(), AgentRuntimeError> {
+            if !self.is_shutdown {
+                self.record("suspend");
+                self.is_shutdown = true;
+            }
+            Ok(())
+        }
+
+        fn is_busy(&self) -> bool {
+            false
+        }
+
+        fn session_id(&self) -> Option<session_store::SessionId> {
+            None
+        }
+
+        fn is_history_empty(&self) -> bool {
+            true
+        }
+
+        fn is_idle_empty_session(&self) -> bool {
+            !self.is_shutdown
+        }
+
+        fn truncate_after_user_turns(
+            &mut self,
+            _retained_user_turns: usize,
+        ) -> Result<Option<(session_store::SessionId, String)>, String> {
+            Ok(None)
+        }
+
+        fn context_budget_snapshot(&self) -> AgentContextBudgetSnapshot {
+            AgentContextBudgetSnapshot {
+                items: Arc::from([]),
+                prompt_prelude: None,
+                upstream_context_tokens: None,
+                tool_definitions: Vec::new(),
+            }
+        }
+
+        fn update_empty_session_configuration(
+            &mut self,
+            _prompt_assembly: crate::runtime::prompt_assembly::PromptAssemblySessionSnapshot,
+            _session_workspace_tools: ToolExecutorRegistry,
+        ) {
+        }
+
+        fn restore_session(&mut self, _restore: AgentSessionRestore) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn has_pending_work(&self) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn runtime_components_owns_alternate_agent_through_the_lifecycle_port() {
+        let mut options = options_with_provider();
+        let mut components =
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+        let lifecycle_trace = Arc::new(Mutex::new(Vec::new()));
+        components
+            .with_lifecycle(|lifecycle, components| {
+                lifecycle.deactivate_components(
+                    [NATIVE_AGENT_RUNTIME_COMPONENT],
+                    components,
+                    ComponentLifecycleMode::Reconfigure,
+                )
+            })
+            .expect("old Agent owner should quiesce before replacement");
+        components.agent_runtime =
+            Box::new(RecordingAgentRuntime::new(Arc::clone(&lifecycle_trace)));
+        components
+            .with_lifecycle(|lifecycle, components| {
+                lifecycle.activate_components(
+                    [NATIVE_AGENT_RUNTIME_COMPONENT],
+                    components,
+                    ComponentLifecycleMode::Reconfigure,
+                )
+            })
+            .expect("recording Agent should activate through the lifecycle port");
+        components
+            .with_lifecycle(|lifecycle, components| {
+                lifecycle.deactivate_components(
+                    [RUNTIME_EVENT_STREAM.component_id],
+                    components,
+                    ComponentLifecycleMode::Reconfigure,
+                )
+            })
+            .expect("dependency removal should suspend the recording Agent");
+        components
+            .with_lifecycle(|lifecycle, components| {
+                lifecycle.activate_components(
+                    [RUNTIME_EVENT_STREAM.component_id],
+                    components,
+                    ComponentLifecycleMode::Reconfigure,
+                )
+            })
+            .expect("dependency republication should reactivate the recording Agent");
+        components
+            .shutdown()
+            .expect("shutdown should dispose the recording Agent");
+
+        assert_eq!(
+            *lifecycle_trace
+                .lock()
+                .expect("recording Agent trace lock should not be poisoned"),
+            ["activate", "suspend", "activate", "shutdown"]
+        );
+    }
+
+    #[test]
+    fn runtime_components_source_keeps_agent_ownership_erased() {
+        let source = include_str!("components.rs");
+        let concrete_owner = ["agent_runtime: ", "NativeAgentRuntime"].concat();
+        let concrete_constructor = ["NativeAgentRuntime", "::new("].concat();
+
+        assert!(source.contains("agent_runtime: Box<dyn AgentRuntimePort>"));
+        assert!(!source.contains(&concrete_owner));
+        assert_eq!(source.matches(&concrete_constructor).count(), 1);
+        for forbidden in [
+            ["downcast", "_ref"].concat(),
+            ["downcast", "_mut"].concat(),
+            ["std::any", "::Any"].concat(),
+            ["dyn", " Any"].concat(),
+        ] {
+            assert!(
+                !source.contains(&forbidden),
+                "Agent owner must not regain concrete access through {forbidden}"
+            );
+        }
+        let concrete_binding = ["agent_runtime", ".bind_event_stream"].concat();
+        assert!(!source.contains(&concrete_binding));
+        assert!(source.contains("self.agent_runtime.activate(event_stream)?"));
+        assert!(source.contains("self.agent_runtime.suspend()"));
+        assert!(source.contains("self.agent_runtime.shutdown()"));
     }
 
     fn desired_with_runtime_event_plugin(plugin_type: &'static str) -> DesiredPluginComposition {
@@ -2100,7 +2333,7 @@ mod tests {
         components
             .validate_context_alignment()
             .expect("dependency reaction must keep graph and context aligned");
-        assert!(components.agent_runtime.is_shutdown_for_test());
+        assert!(!components.agent_port().is_busy());
         assert!(!components.session_store_worker.is_running());
     }
 
@@ -2169,7 +2402,6 @@ mod tests {
         components
             .validate_context_alignment()
             .expect("republication must keep graph and context aligned");
-        assert!(!components.agent_runtime.is_shutdown_for_test());
         assert!(components.permission_policy.is_active_for_test());
         assert!(components.session_store_worker.is_running());
     }
@@ -2190,10 +2422,7 @@ mod tests {
             .capability(&CapabilityKey::from(SESSION_PERSISTENCE.capability))
             .expect("session backend should be visible")
             .generation;
-        let original_system_prompt = components
-            .agent_runtime
-            .system_prompt_for_test()
-            .map(str::to_string);
+        let original_system_prompt = agent_system_prompt(&components);
         let original_tool_names = components
             .session_workspace_tools
             .definitions()
@@ -2226,10 +2455,7 @@ mod tests {
         assert_eq!(backend_lease.generation(), backend_generation + 1);
         assert!(components.session_port.is_some());
         assert!(components.session_backend_views.is_some());
-        assert_eq!(
-            components.agent_runtime.system_prompt_for_test(),
-            original_system_prompt.as_deref()
-        );
+        assert_eq!(agent_system_prompt(&components), original_system_prompt);
         assert_eq!(
             components
                 .session_workspace_tools
@@ -2322,8 +2548,7 @@ mod tests {
             components.lifecycle.state("prompt_assembly"),
             Some(ComponentState::Active)
         );
-        assert!(components.agent_runtime.is_idle_empty_session());
-        assert!(!components.agent_runtime.is_shutdown_for_test());
+        assert!(components.agent_port().is_idle_empty_session());
     }
 
     #[test]
@@ -2573,8 +2798,7 @@ mod tests {
                 .lifecycle
                 .has_capability(&CapabilityKey::from("session_persistence"))
         );
-        assert!(components.agent_runtime.is_idle_empty_session());
-        assert!(!components.agent_runtime.is_shutdown_for_test());
+        assert!(components.agent_port().is_idle_empty_session());
         assert!(components.session_store_worker.is_running());
     }
 
@@ -2612,7 +2836,6 @@ mod tests {
             components.lifecycle.state("native_agent_runtime"),
             Some(ComponentState::Active)
         );
-        assert!(!components.agent_runtime.is_shutdown_for_test());
         assert!(components.session_store_worker.is_running());
         assert_eq!(
             Arc::strong_count(&store),
@@ -2661,7 +2884,10 @@ mod tests {
             .validate_context_alignment()
             .expect("backend replacement graph and context should align");
         assert!(components.session_backend_views.is_some());
-        assert!(!components.agent_runtime.is_shutdown_for_test());
+        assert_eq!(
+            components.lifecycle.state(NATIVE_AGENT_RUNTIME_COMPONENT),
+            Some(ComponentState::Active)
+        );
     }
 
     #[test]
@@ -2682,9 +2908,12 @@ mod tests {
             .reset_after_clear(&options)
             .expect("reset should preserve the active provider generation");
 
-        assert_eq!(
-            components.agent_runtime.permission_provider_id_for_test(),
-            "replacement-provider"
+        assert!(
+            components
+                .permission_policy
+                .inspection_snapshot()
+                .iter()
+                .any(|provider| provider.provider_id == "replacement-provider")
         );
     }
 
@@ -2753,7 +2982,6 @@ mod tests {
             components.lifecycle.state("native_agent_runtime"),
             Some(ComponentState::Active)
         );
-        assert!(!components.agent_runtime.is_shutdown_for_test());
         assert!(!components.llm_port.inspection_snapshot().is_empty());
     }
 
@@ -2786,7 +3014,6 @@ mod tests {
             components.lifecycle.state(NATIVE_AGENT_RUNTIME_COMPONENT),
             Some(ComponentState::Active)
         );
-        assert!(!components.agent_runtime.is_shutdown_for_test());
         assert!(Arc::strong_count(&store) > 1);
     }
 }

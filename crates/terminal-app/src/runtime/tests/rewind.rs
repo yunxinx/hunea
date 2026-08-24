@@ -95,8 +95,8 @@ fn select_entry_rewind_rebuilds_provider_history_to_selected_entry() {
     let previous_context_cancellation = tokio_util::sync::CancellationToken::new();
     coordinator
         .components
-        .agent_runtime
-        .set_worker_cancellation_for_test(previous_context_cancellation.clone());
+        .agent_test_harness()
+        .set_worker_cancellation(previous_context_cancellation.clone());
 
     coordinator
         .handle_runtime_command(RuntimeCommand::SelectEntryRewind {
@@ -109,16 +109,7 @@ fn select_entry_rewind_rebuilds_provider_history_to_selected_entry() {
         previous_context_cancellation.is_cancelled(),
         "successful rewind should reset the previous approval context"
     );
-    assert_eq!(
-        coordinator
-            .components
-            .agent_runtime
-            .provider_conversation_for_test()
-            .history()
-            .map(ConversationItem::text_content)
-            .collect::<Vec<_>>(),
-        vec!["first", "answer"]
-    );
+    assert_eq!(agent_history_texts(&coordinator), vec!["first", "answer"]);
     let Some(RuntimeEvent::SessionResumed { payload }) = events.into_iter().next() else {
         panic!("expected resumed payload after entry rewind");
     };
@@ -208,14 +199,7 @@ fn select_entry_rewind_ignores_reasoning_without_restore_target() {
             encrypted: None,
         },
     ];
-    assert!(
-        coordinator
-            .components
-            .agent_runtime
-            .provider_conversation_for_test()
-            .history()
-            .eq(expected_history.iter())
-    );
+    assert_eq!(agent_conversation_items(&coordinator), expected_history);
     assert_no_runtime_events(
         &mut coordinator,
         "non-rewindable reasoning should not emit a resumed payload",

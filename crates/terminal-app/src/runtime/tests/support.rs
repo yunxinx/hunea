@@ -34,6 +34,48 @@ pub(super) fn runtime_coordinator(options: AppRuntimeOptions) -> AppRuntimeCoord
     AppRuntimeCoordinator::new(options).expect("runtime coordinator should initialize")
 }
 
+pub(super) fn agent_conversation_items(
+    coordinator: &AppRuntimeCoordinator,
+) -> Vec<ConversationItem> {
+    coordinator
+        .components
+        .agent_port()
+        .context_budget_snapshot()
+        .items
+        .iter()
+        .filter(|item| item.role() != Some(Role::System))
+        .cloned()
+        .collect()
+}
+
+pub(super) fn agent_history_texts(coordinator: &AppRuntimeCoordinator) -> Vec<String> {
+    agent_conversation_items(coordinator)
+        .iter()
+        .map(ConversationItem::text_content)
+        .collect()
+}
+
+pub(super) fn agent_system_prompt(coordinator: &AppRuntimeCoordinator) -> Option<String> {
+    coordinator
+        .components
+        .agent_port()
+        .context_budget_snapshot()
+        .items
+        .iter()
+        .find(|item| item.role() == Some(Role::System))
+        .map(ConversationItem::text_content)
+}
+
+pub(super) fn agent_prompt_prelude(
+    coordinator: &AppRuntimeCoordinator,
+) -> Option<runtime_domain::prompt_assembly::PromptPreludeSnapshot> {
+    coordinator
+        .components
+        .agent_port()
+        .context_budget_snapshot()
+        .prompt_prelude
+}
+
 pub(super) fn prompt_manager_with_prelude(
     prelude: runtime_domain::prompt_assembly::PromptPreludeSnapshot,
 ) -> runtime_domain::prompt_assembly::PromptAssemblyManagerSnapshot {

@@ -20,6 +20,8 @@ use runtime_domain::{
 use session_store::{SessionHeader, SessionId, SessionPort};
 use tool_runtime::{ToolDefinition, ToolExecutorRegistry};
 
+#[cfg(test)]
+use super::AgentRuntimeTestHarness;
 use super::{
     AgentCommand, AgentCommandReceipt, AgentContextBudgetSnapshot, AgentEvent, AgentEventKind,
     AgentId, AgentRuntime, AgentRuntimeError, AgentRuntimePort, AgentSessionRestore, AgentTurnId,
@@ -83,20 +85,32 @@ pub struct NativeAgentRuntime {
     is_shutdown: bool,
 }
 
+/// 构造一个 Native adapter generation 所需的完整 host capability snapshot。
+pub(crate) struct NativeAgentRuntimeMount<'a> {
+    pub(crate) options: &'a AppRuntimeOptions,
+    pub(crate) session_workspace_tools: ToolExecutorRegistry,
+    pub(crate) prompt_assembly_tool_definitions: Vec<ToolDefinition>,
+    pub(crate) prompt_assembly: PromptAssemblySessionSnapshot,
+    pub(crate) session_port: Option<Arc<dyn SessionPort>>,
+    pub(crate) llm_port: LlmPort,
+    pub(crate) permission_policy: PermissionPolicy,
+    pub(crate) permission_provider_id: String,
+}
+
 impl NativeAgentRuntime {
     // provider identity 必须与传入的 PermissionPolicy generation 成对传递；将其
     // 隐藏到全局默认值会让 provider replacement 后的 turn 错误地访问旧注册。
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
-        options: &AppRuntimeOptions,
-        session_workspace_tools: ToolExecutorRegistry,
-        prompt_assembly_tool_definitions: Vec<ToolDefinition>,
-        prompt_assembly: PromptAssemblySessionSnapshot,
-        session_port: Option<Arc<dyn SessionPort>>,
-        llm_port: LlmPort,
-        permission_policy: PermissionPolicy,
-        permission_provider_id: impl Into<String>,
-    ) -> Result<Self, String> {
+    pub(crate) fn new(mount: NativeAgentRuntimeMount<'_>) -> Result<Self, String> {
+        let NativeAgentRuntimeMount {
+            options,
+            session_workspace_tools,
+            prompt_assembly_tool_definitions,
+            prompt_assembly,
+            session_port,
+            llm_port,
+            permission_policy,
+            permission_provider_id,
+        } = mount;
         Self::new_with_notifier(
             options,
             session_workspace_tools,
@@ -186,41 +200,6 @@ impl NativeAgentRuntime {
         self.worker.is_running()
     }
 
-    /// Active adapter 只保留从 Context 取得的 event stream generation lease。
-    pub(crate) fn bind_event_stream(
-        &mut self,
-        event_stream: CapabilityLease<RuntimeEventStreamCapability>,
-    ) -> Result<(), String> {
-        if self.is_busy() {
-            return Err("Cannot replace runtime event stream while Agent is busy".to_string());
-        }
-        self.worker = ConversationWorker::new((*event_stream).clone());
-        self.dynamic_environment_worker
-            .rebind_event_stream(event_stream.clone());
-        self.event_stream = Some(event_stream);
-        self.is_shutdown = false;
-        Ok(())
-    }
-
-    /// 暂停当前 component generation；持久 conversation 与配置由 fresh generation 继续使用。
-    pub(crate) fn suspend(&mut self) -> Result<(), AgentRuntimeError> {
-        if self.is_shutdown {
-            return Ok(());
-        }
-        self.is_shutdown = true;
-        self.pending_turn = None;
-        self.pending_events.clear();
-        self.dynamic_environment_worker.shutdown();
-        let worker_result = self
-            .worker
-            .reset_after_clear()
-            .map_err(AgentRuntimeError::Shutdown);
-        self.cancel_permission_turn();
-        self.active_turn = None;
-        self.event_stream = None;
-        worker_result
-    }
-
     pub(crate) fn is_preparing(&self) -> bool {
         self.pending_turn.is_some()
     }
@@ -246,11 +225,6 @@ impl NativeAgentRuntime {
         !self.is_busy()
             && self.provider_conversation.is_history_empty()
             && self.provider_conversation.session_id().is_none()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn is_shutdown_for_test(&self) -> bool {
-        self.is_shutdown
     }
 
     pub(crate) fn truncate_after_user_turns(
@@ -309,26 +283,6 @@ impl NativeAgentRuntime {
         worker_result?;
         self.provider_conversation = conversation;
         Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn system_prompt_for_test(&self) -> Option<&str> {
-        self.provider_conversation.system_prompt()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn provider_conversation_mut_for_test(&mut self) -> &mut ProviderConversation {
-        &mut self.provider_conversation
-    }
-
-    #[cfg(test)]
-    pub(crate) fn provider_conversation_for_test(&self) -> &ProviderConversation {
-        &self.provider_conversation
-    }
-
-    #[cfg(test)]
-    pub(crate) fn permission_provider_id_for_test(&self) -> &str {
-        &self.permission_provider_id
     }
 
     #[cfg(test)]
@@ -912,6 +866,39 @@ impl NativeAgentRuntime {
 }
 
 impl AgentRuntimePort for NativeAgentRuntime {
+    fn activate(
+        &mut self,
+        event_stream: CapabilityLease<RuntimeEventStreamCapability>,
+    ) -> Result<(), String> {
+        if self.is_busy() {
+            return Err("Cannot replace runtime event stream while Agent is busy".to_string());
+        }
+        self.worker = ConversationWorker::new((*event_stream).clone());
+        self.dynamic_environment_worker
+            .rebind_event_stream(event_stream.clone());
+        self.event_stream = Some(event_stream);
+        self.is_shutdown = false;
+        Ok(())
+    }
+
+    fn suspend(&mut self) -> Result<(), AgentRuntimeError> {
+        if self.is_shutdown {
+            return Ok(());
+        }
+        self.is_shutdown = true;
+        self.pending_turn = None;
+        self.pending_events.clear();
+        self.dynamic_environment_worker.shutdown();
+        let worker_result = self
+            .worker
+            .reset_after_clear()
+            .map_err(AgentRuntimeError::Shutdown);
+        self.cancel_permission_turn();
+        self.active_turn = None;
+        self.event_stream = None;
+        worker_result
+    }
+
     fn is_busy(&self) -> bool {
         self.is_busy()
     }
@@ -960,8 +947,66 @@ impl AgentRuntimePort for NativeAgentRuntime {
     }
 
     #[cfg(test)]
+    fn test_harness(&mut self) -> Option<&mut dyn AgentRuntimeTestHarness> {
+        Some(self)
+    }
+
+    #[cfg(test)]
+    fn test_harness_ref(&self) -> Option<&dyn AgentRuntimeTestHarness> {
+        Some(self)
+    }
+
+    #[cfg(test)]
     fn has_pending_work(&self) -> bool {
         self.has_pending_work()
+    }
+}
+
+#[cfg(test)]
+impl AgentRuntimeTestHarness for NativeAgentRuntime {
+    fn append_conversation_items(
+        &mut self,
+        items: Vec<conversation_runtime::ConversationItem>,
+    ) -> Result<(), String> {
+        self.provider_conversation
+            .append_items(items)
+            .map_err(|error| error.to_string())
+    }
+
+    fn set_upstream_context_tokens(&mut self, upstream_context_tokens: Option<usize>) {
+        self.provider_conversation
+            .set_upstream_context_tokens(upstream_context_tokens);
+    }
+
+    fn stage_pending_turn(&mut self, request: ConversationTurnRequest) {
+        self.set_pending_turn_for_test(request);
+    }
+
+    fn set_worker_cancellation(&mut self, cancellation: tokio_util::sync::CancellationToken) {
+        self.set_worker_cancellation_for_test(cancellation);
+    }
+
+    fn prepare_turn(
+        &mut self,
+        request: &ConversationTurnRequest,
+    ) -> Result<conversation_runtime::PreparedConversationRequest, String> {
+        self.provider_conversation
+            .prepare_turn(request)
+            .map_err(|error| error.to_string())
+    }
+
+    fn dynamic_environment_injection(
+        &mut self,
+        observer: Arc<dyn crate::dynamic_environment::DynamicEnvironmentObserver>,
+    ) -> Result<DynamicEnvironmentInjection, String> {
+        self.dynamic_environment_injection(observer)
+    }
+
+    fn attached_prompt_message_assembly(
+        &self,
+        user_message: &TranscriptUserMessage,
+    ) -> Result<AttachedPromptMessageAssembly, String> {
+        self.attached_prompt_message_assembly_for_test(user_message)
     }
 }
 
@@ -1000,7 +1045,7 @@ impl AgentRuntime for NativeAgentRuntime {
     }
 
     fn shutdown(&mut self) -> Result<(), AgentRuntimeError> {
-        let worker_result = self.suspend();
+        let worker_result = <Self as AgentRuntimePort>::suspend(self);
         self.provider_conversation = ProviderConversation::default();
         self.session_workspace_tools = ToolExecutorRegistry::new();
         self.prompt_assembly_tool_definitions.clear();

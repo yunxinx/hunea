@@ -76,8 +76,8 @@ fn resume_session_emits_transcript_and_restored_model() {
     let previous_context_cancellation = tokio_util::sync::CancellationToken::new();
     coordinator
         .components
-        .agent_runtime
-        .set_worker_cancellation_for_test(previous_context_cancellation.clone());
+        .agent_test_harness()
+        .set_worker_cancellation(previous_context_cancellation.clone());
 
     coordinator
         .handle_runtime_command(RuntimeCommand::ResumeSession {
@@ -104,20 +104,11 @@ fn resume_session_emits_transcript_and_restored_model() {
         vec!["hello resume", "resume answer"]
     );
     assert_eq!(
-        coordinator
-            .components
-            .agent_runtime
-            .provider_conversation_for_test()
-            .history()
-            .map(ConversationItem::text_content)
-            .collect::<Vec<_>>(),
+        agent_history_texts(&coordinator),
         vec!["hello resume", "resume answer"]
     );
     assert_eq!(
-        coordinator
-            .components
-            .agent_runtime
-            .system_prompt_for_test(),
+        agent_system_prompt(&coordinator).as_deref(),
         Some("historical prompt")
     );
     cleanup(&work_dir);
@@ -143,8 +134,8 @@ fn failed_resume_preserves_the_current_approval_context() {
     let current_context_cancellation = tokio_util::sync::CancellationToken::new();
     coordinator
         .components
-        .agent_runtime
-        .set_worker_cancellation_for_test(current_context_cancellation.clone());
+        .agent_test_harness()
+        .set_worker_cancellation(current_context_cancellation.clone());
 
     coordinator
         .handle_runtime_command(RuntimeCommand::ResumeSession {
@@ -411,10 +402,7 @@ fn reset_after_resume_restores_fresh_prompt_prelude_for_next_new_session() {
     wait_for_session_resumed(&mut coordinator);
 
     assert_eq!(
-        coordinator
-            .components
-            .agent_runtime
-            .system_prompt_for_test(),
+        agent_system_prompt(&coordinator).as_deref(),
         Some("historical prompt")
     );
 
@@ -424,8 +412,7 @@ fn reset_after_resume_restores_fresh_prompt_prelude_for_next_new_session() {
 
     let request = coordinator
         .components
-        .agent_runtime
-        .provider_conversation_mut_for_test()
+        .agent_test_harness()
         .prepare_turn(&ConversationTurnRequest::new(
             "local",
             "qwen3",
@@ -640,11 +627,7 @@ fn load_session_preview_emits_transcript_without_resuming_runtime_session() {
         vec!["preview user", "preview answer"]
     );
     assert!(
-        coordinator
-            .components
-            .agent_runtime
-            .provider_conversation_for_test()
-            .is_history_empty(),
+        coordinator.components.agent_port().is_history_empty(),
         "loading preview should not replace the active provider conversation"
     );
     cleanup(&work_dir);

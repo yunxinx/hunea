@@ -62,14 +62,14 @@ fn reset_discards_a_turn_waiting_for_dynamic_environment() {
     );
     coordinator
         .components
-        .agent_runtime
-        .set_pending_turn_for_test(request);
+        .agent_test_harness()
+        .stage_pending_turn(request);
 
     coordinator
         .handle_runtime_command(RuntimeCommand::Reset)
         .expect("reset should be accepted");
 
-    assert!(!coordinator.components.agent_runtime.is_preparing());
+    assert!(!coordinator.components.agent_port().is_busy());
 }
 
 #[test]
@@ -78,8 +78,8 @@ fn shutdown_cancels_the_previous_approval_context_turn() {
     let previous_context_cancellation = tokio_util::sync::CancellationToken::new();
     coordinator
         .components
-        .agent_runtime
-        .set_worker_cancellation_for_test(previous_context_cancellation.clone());
+        .agent_test_harness()
+        .set_worker_cancellation(previous_context_cancellation.clone());
 
     coordinator
         .shutdown()
@@ -186,20 +186,13 @@ fn unknown_provider_failure_rolls_back_pending_user() {
             .any(|event| matches!(event, RuntimeEvent::Failed { .. })),
         "preflight failure should be reported"
     );
-    assert!(
-        coordinator
-            .components
-            .agent_runtime
-            .provider_conversation_for_test()
-            .is_history_empty()
-    );
+    assert!(coordinator.components.agent_port().is_history_empty());
 
     let next_request =
         ConversationTurnRequest::new("local", "qwen3", ConversationItem::text(Role::User, "next"));
     coordinator
         .components
-        .agent_runtime
-        .provider_conversation_mut_for_test()
+        .agent_test_harness()
         .prepare_turn(&next_request)
         .expect("failed preflight turn should not leave stale pending state");
 }
@@ -692,7 +685,7 @@ fn reset_remount_discards_undelivered_agent_events_from_the_old_generation() {
         &mut coordinator,
         "reset must make undelivered old-generation Agent events unreachable",
     );
-    assert!(!coordinator.components.agent_runtime.has_pending_work());
+    assert!(!coordinator.components.agent_port().has_pending_work());
     cleanup(&root);
 }
 

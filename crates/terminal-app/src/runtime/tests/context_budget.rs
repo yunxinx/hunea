@@ -170,8 +170,7 @@ fn context_budget_snapshot_uses_upstream_context_tokens_for_total() {
     });
     coordinator
         .components
-        .agent_runtime
-        .provider_conversation_mut_for_test()
+        .agent_test_harness()
         .set_upstream_context_tokens(Some(48_052));
     let request_id = request_id(402);
 
@@ -375,9 +374,8 @@ fn context_budget_projection_failure_keeps_structured_error_kind() {
     });
     coordinator
         .components
-        .agent_runtime
-        .provider_conversation_mut_for_test()
-        .append_items(vec![ConversationItem::tool_result(
+        .agent_test_harness()
+        .append_conversation_items(vec![ConversationItem::tool_result(
             "missing-call",
             vec![ContentBlock::Text("tool output".to_string())],
             false,
@@ -445,9 +443,8 @@ fn cancel_context_budget_snapshot_stops_background_tracking_and_drops_stale_even
     });
     coordinator
         .components
-        .agent_runtime
-        .provider_conversation_mut_for_test()
-        .append_items(vec![ConversationItem::text(
+        .agent_test_harness()
+        .append_conversation_items(vec![ConversationItem::text(
             Role::User,
             "context budget ".repeat(250_000),
         )])
@@ -496,9 +493,8 @@ fn latest_context_budget_request_supersedes_stale_work() {
     });
     coordinator
         .components
-        .agent_runtime
-        .provider_conversation_mut_for_test()
-        .append_items(vec![ConversationItem::text(
+        .agent_test_harness()
+        .append_conversation_items(vec![ConversationItem::text(
             Role::User,
             "context budget ".repeat(250_000),
         )])

@@ -224,6 +224,14 @@ impl PluginDescriptor {
             trust: self.trust.as_str(),
         }
     }
+
+    pub(super) fn declares_required(&self, capability: &str) -> bool {
+        self.required.contains(&CapabilityKey::from(capability))
+    }
+
+    pub(super) fn declares_observed(&self, capability: &str) -> bool {
+        self.observed.contains(&CapabilityKey::from(capability))
+    }
 }
 
 /// Builder 可以暂存未完成声明；只有 `build` 成功后才产生 immutable descriptor。
@@ -808,6 +816,29 @@ struct PluginInstance<I> {
     implementation: I,
 }
 
+/// 将一个 plugin instance 的 descriptor 与 implementation 作为不可拆分的只读 view 暴露。
+pub(super) struct PluginInstanceView<'a, I> {
+    descriptor: &'a PluginDescriptor,
+    implementation: &'a I,
+}
+
+impl<'a, I> PluginInstanceView<'a, I> {
+    fn new(instance: &'a PluginInstance<I>) -> Self {
+        Self {
+            descriptor: &instance.descriptor,
+            implementation: &instance.implementation,
+        }
+    }
+
+    pub(super) fn descriptor(&self) -> &'a PluginDescriptor {
+        self.descriptor
+    }
+
+    pub(super) fn implementation(&self) -> &'a I {
+        self.implementation
+    }
+}
+
 /// `PreparedPluginReconciliation` 在 commit 前只拥有 fresh instance，不接管 live `Keep`。
 pub(super) struct PreparedPluginReconciliation<I> {
     desired: DesiredPluginComposition,
@@ -820,12 +851,12 @@ impl<I> PreparedPluginReconciliation<I> {
         self.definitions.clone()
     }
 
-    /// 返回 commit 后指定 slot 将使用的 implementation，但不转移或发布任何 authority。
-    pub(super) fn prospective_implementation<'a>(
+    /// 返回 commit 后指定 slot 将使用的完整 instance view，但不转移或发布任何 authority。
+    pub(super) fn prospective_instance<'a>(
         &'a self,
         observed: &'a PluginComposition<I>,
         component_id: &str,
-    ) -> Option<&'a I> {
+    ) -> Option<PluginInstanceView<'a, I>> {
         let desired_type = self
             .desired
             .entries
@@ -838,12 +869,12 @@ impl<I> PreparedPluginReconciliation<I> {
             .iter()
             .find(|instance| instance.component_id.as_str() == component_id)
         {
-            return Some(&fresh.implementation);
+            return Some(PluginInstanceView::new(fresh));
         }
 
         let observed_instance = observed.instances.get(component_id)?;
         (&observed_instance.descriptor.type_id == desired_type)
-            .then_some(&observed_instance.implementation)
+            .then(|| PluginInstanceView::new(observed_instance))
     }
 }
 
@@ -900,6 +931,12 @@ impl<I> PluginComposition<I> {
         self.instances
             .get(component_id)
             .map(|instance| &instance.implementation)
+    }
+
+    pub(super) fn instance(&self, component_id: &str) -> Option<PluginInstanceView<'_, I>> {
+        self.instances
+            .get(component_id)
+            .map(PluginInstanceView::new)
     }
 
     pub(super) fn descriptor_snapshots(&self) -> Vec<PluginDescriptorSnapshot> {
@@ -1431,25 +1468,30 @@ mod tests {
         );
         assert_eq!(observed.implementation("keep_slot"), Some(&1));
         assert_eq!(observed.implementation("replace_slot"), Some(&2));
-        assert_eq!(
-            prepared.prospective_implementation(&observed, "keep_slot"),
-            Some(&1)
+        let keep = prepared
+            .prospective_instance(&observed, "keep_slot")
+            .expect("Keep should expose the observed instance");
+        assert_eq!(keep.implementation(), &1);
+        assert_eq!(keep.descriptor().type_id.as_str(), "stable");
+        let replacement = prepared
+            .prospective_instance(&observed, "replace_slot")
+            .expect("Replace should expose the fresh instance");
+        assert_eq!(replacement.implementation(), &3);
+        assert_eq!(replacement.descriptor().type_id.as_str(), "replacement");
+        let addition = prepared
+            .prospective_instance(&observed, "add_slot")
+            .expect("Add should expose the fresh instance");
+        assert_eq!(addition.implementation(), &4);
+        assert_eq!(addition.descriptor().type_id.as_str(), "addition");
+        assert!(
+            prepared
+                .prospective_instance(&observed, "remove_slot")
+                .is_none()
         );
-        assert_eq!(
-            prepared.prospective_implementation(&observed, "replace_slot"),
-            Some(&3)
-        );
-        assert_eq!(
-            prepared.prospective_implementation(&observed, "add_slot"),
-            Some(&4)
-        );
-        assert_eq!(
-            prepared.prospective_implementation(&observed, "remove_slot"),
-            None
-        );
-        assert_eq!(
-            prepared.prospective_implementation(&observed, "unknown_slot"),
-            None
+        assert!(
+            prepared
+                .prospective_instance(&observed, "unknown_slot")
+                .is_none()
         );
 
         let mut incomplete_prepared = target_catalog
@@ -1465,9 +1507,10 @@ mod tests {
                 .fresh_instances
                 .remove(replacement_index),
         );
-        assert_eq!(
-            incomplete_prepared.prospective_implementation(&observed, "replace_slot"),
-            None,
+        assert!(
+            incomplete_prepared
+                .prospective_instance(&observed, "replace_slot")
+                .is_none(),
             "a damaged Replace must not fall back to the old implementation"
         );
         drop(incomplete_prepared);
@@ -1476,6 +1519,11 @@ mod tests {
         assert_eq!(observed.implementation("keep_slot"), Some(&1));
         assert_eq!(observed.implementation("replace_slot"), Some(&3));
         assert_eq!(observed.implementation("add_slot"), Some(&4));
+        let committed = observed
+            .instance("replace_slot")
+            .expect("committed slot should expose one bound instance view");
+        assert_eq!(committed.implementation(), &3);
+        assert_eq!(committed.descriptor().type_id.as_str(), "replacement");
     }
 
     #[test]

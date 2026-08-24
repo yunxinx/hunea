@@ -28,7 +28,6 @@ use runtime_domain::session::{ConversationTurnRequest, TranscriptUserMessage};
 use crate::{
     dynamic_environment::DynamicEnvironmentObserver,
     runtime::{
-        AppRuntimeOptions,
         context::{CapabilityLease, RuntimeEventStreamCapability},
         llm_port::LlmPort,
         permission_policy::PermissionPolicy,
@@ -42,56 +41,136 @@ pub(super) use native::construct_native_agent_runtime;
 #[cfg(test)]
 pub(super) use replay::{ReplayAgentRuntime, ReplayFixture, ReplayLifecycleProbe};
 
-/// `AgentRuntimeMount` 是构造一个 Agent adapter generation 所需的 immutable host snapshot。
-///
-/// 字段只对 `runtime::agent` implementation 可见；host 只能一次性构造并交给 plugin factory，
-/// 不能把它当作绕过 Context lifecycle 的 live registry。
-pub(super) struct AgentRuntimeMount {
-    loaded_models: conversation_runtime::models::LoadedModelCatalog,
+struct AgentPermissionConstructionGrant {
     runtime_request_policy: RuntimeRequestPolicy,
-    dynamic_environment_observer: Arc<dyn DynamicEnvironmentObserver>,
-    hunea_config_dir: PathBuf,
-    session_header_template: Option<SessionHeader>,
-    session_workspace_tools: ToolExecutorRegistry,
-    prompt_assembly_tool_definitions: Vec<tool_runtime::ToolDefinition>,
-    prompt_assembly: PromptAssemblySessionSnapshot,
-    session_port: Option<Arc<dyn SessionPort>>,
-    llm_port: LlmPort,
     permission_policy: PermissionPolicy,
     permission_provider_id: String,
 }
 
-impl AgentRuntimeMount {
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn new(
-        options: &AppRuntimeOptions,
-        session_workspace_tools: ToolExecutorRegistry,
-        prompt_assembly_tool_definitions: Vec<tool_runtime::ToolDefinition>,
-        prompt_assembly: PromptAssemblySessionSnapshot,
-        session_port: Option<Arc<dyn SessionPort>>,
-        llm_port: LlmPort,
+struct AgentPromptConstructionGrant {
+    dynamic_environment_observer: Arc<dyn DynamicEnvironmentObserver>,
+    hunea_config_dir: PathBuf,
+    prompt_assembly: PromptAssemblySessionSnapshot,
+}
+
+struct AgentToolConstructionGrant {
+    session_workspace_tools: ToolExecutorRegistry,
+    prompt_assembly_tool_definitions: Vec<tool_runtime::ToolDefinition>,
+}
+
+struct AgentSessionConstructionGrant {
+    session_header_template: Option<SessionHeader>,
+    session_port: Option<Arc<dyn SessionPort>>,
+}
+
+/// Agent plugin factory 只能看到 descriptor 允许 host 投影的 typed construction grants。
+#[derive(Default)]
+pub(super) struct AgentRuntimeConstructionGrants {
+    llm_port: Option<LlmPort>,
+    loaded_models: Option<conversation_runtime::models::LoadedModelCatalog>,
+    permission: Option<AgentPermissionConstructionGrant>,
+    prompt: Option<AgentPromptConstructionGrant>,
+    tools: Option<AgentToolConstructionGrant>,
+    session: Option<AgentSessionConstructionGrant>,
+}
+
+impl AgentRuntimeConstructionGrants {
+    pub(super) fn empty() -> Self {
+        Self::default()
+    }
+
+    pub(super) fn with_llm_port(mut self, llm_port: LlmPort) -> Self {
+        self.llm_port = Some(llm_port);
+        self
+    }
+
+    pub(super) fn with_loaded_models(
+        mut self,
+        loaded_models: conversation_runtime::models::LoadedModelCatalog,
+    ) -> Self {
+        self.loaded_models = Some(loaded_models);
+        self
+    }
+
+    pub(super) fn with_permission(
+        mut self,
+        runtime_request_policy: RuntimeRequestPolicy,
         permission_policy: PermissionPolicy,
         permission_provider_id: String,
     ) -> Self {
-        Self {
-            loaded_models: options.loaded_models.clone(),
-            runtime_request_policy: options.runtime_request_policy.clone(),
-            dynamic_environment_observer: Arc::clone(&options.dynamic_environment_observer),
-            hunea_config_dir: options.hunea_config_dir.clone(),
-            session_header_template: options.session_header_template.clone(),
-            session_workspace_tools,
-            prompt_assembly_tool_definitions,
-            prompt_assembly,
-            session_port,
-            llm_port,
+        self.permission = Some(AgentPermissionConstructionGrant {
+            runtime_request_policy,
             permission_policy,
             permission_provider_id,
-        }
+        });
+        self
+    }
+
+    pub(super) fn with_prompt(
+        mut self,
+        dynamic_environment_observer: Arc<dyn DynamicEnvironmentObserver>,
+        hunea_config_dir: PathBuf,
+        prompt_assembly: PromptAssemblySessionSnapshot,
+    ) -> Self {
+        self.prompt = Some(AgentPromptConstructionGrant {
+            dynamic_environment_observer,
+            hunea_config_dir,
+            prompt_assembly,
+        });
+        self
+    }
+
+    pub(super) fn with_tools(
+        mut self,
+        session_workspace_tools: ToolExecutorRegistry,
+        prompt_assembly_tool_definitions: Vec<tool_runtime::ToolDefinition>,
+    ) -> Self {
+        self.tools = Some(AgentToolConstructionGrant {
+            session_workspace_tools,
+            prompt_assembly_tool_definitions,
+        });
+        self
+    }
+
+    pub(super) fn with_session(
+        mut self,
+        session_header_template: Option<SessionHeader>,
+        session_port: Option<Arc<dyn SessionPort>>,
+    ) -> Self {
+        self.session = Some(AgentSessionConstructionGrant {
+            session_header_template,
+            session_port,
+        });
+        self
+    }
+
+    pub(super) fn payload_count(&self) -> usize {
+        [
+            self.llm_port.is_some(),
+            self.loaded_models.is_some(),
+            self.permission.is_some(),
+            self.prompt.is_some(),
+            self.tools.is_some(),
+            self.session.is_some(),
+        ]
+        .into_iter()
+        .filter(|is_present| *is_present)
+        .count()
     }
 }
 
-type AgentRuntimeConstructor =
-    dyn Fn(AgentRuntimeMount) -> Result<Box<dyn AgentRuntimePort>, String> + Send + Sync;
+impl fmt::Debug for AgentRuntimeConstructionGrants {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentRuntimeConstructionGrants")
+            .field("payload_count", &self.payload_count())
+            .finish_non_exhaustive()
+    }
+}
+
+type AgentRuntimeConstructor = dyn Fn(AgentRuntimeConstructionGrants) -> Result<Box<dyn AgentRuntimePort>, String>
+    + Send
+    + Sync;
 
 const AGENT_RUNTIME_CONSTRUCTION_FAILED: &str = "Agent plugin failed to construct its adapter";
 
@@ -103,7 +182,7 @@ pub(super) struct AgentRuntimeFactory {
 
 impl AgentRuntimeFactory {
     pub(super) fn new(
-        construct: impl Fn(AgentRuntimeMount) -> Result<Box<dyn AgentRuntimePort>, String>
+        construct: impl Fn(AgentRuntimeConstructionGrants) -> Result<Box<dyn AgentRuntimePort>, String>
         + Send
         + Sync
         + 'static,
@@ -115,9 +194,9 @@ impl AgentRuntimeFactory {
 
     pub(super) fn construct(
         &self,
-        mount: AgentRuntimeMount,
+        grants: AgentRuntimeConstructionGrants,
     ) -> Result<Box<dyn AgentRuntimePort>, String> {
-        (self.construct)(mount).map_err(|_| AGENT_RUNTIME_CONSTRUCTION_FAILED.to_string())
+        (self.construct)(grants).map_err(|_| AGENT_RUNTIME_CONSTRUCTION_FAILED.to_string())
     }
 
     #[cfg(test)]
@@ -125,7 +204,10 @@ impl AgentRuntimeFactory {
         fixture: ReplayFixture,
         lifecycle_probe: Option<Arc<ReplayLifecycleProbe>>,
     ) -> Self {
-        Self::new(move |_mount| {
+        Self::new(move |grants| {
+            if grants.payload_count() != 0 {
+                return Err("Replay Agent received undeclared construction grants".to_string());
+            }
             if let Some(probe) = &lifecycle_probe {
                 probe.record_construction();
             }

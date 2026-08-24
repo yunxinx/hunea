@@ -27,9 +27,10 @@ use tool_runtime::{
 
 use super::{
     AgentCommand, AgentEvent, AgentEventKind, AgentId, AgentRuntime, AgentRuntimeActivity,
-    AgentRuntimeError, AgentRuntimePort, AgentSessionRestore, AgentTurnId, AgentTurnRequest,
-    NativeAgentRuntime,
+    AgentRuntimeConstructionGrants, AgentRuntimeError, AgentRuntimePort, AgentSessionRestore,
+    AgentTurnId, AgentTurnRequest, NativeAgentRuntime,
 };
+
 use crate::runtime::{
     AppRuntimeOptions,
     context::RuntimeContext,
@@ -39,6 +40,31 @@ use crate::runtime::{
     },
     prompt_assembly::PromptAssemblySessionSnapshot,
 };
+
+#[test]
+fn construction_grant_debug_omits_all_payload_values() {
+    let options = AppRuntimeOptions::default();
+    let grants = AgentRuntimeConstructionGrants::empty()
+        .with_permission(
+            options.runtime_request_policy.clone(),
+            PermissionPolicy::new(),
+            "SENSITIVE_PERMISSION_PROVIDER".to_string(),
+        )
+        .with_prompt(
+            std::sync::Arc::clone(&options.dynamic_environment_observer),
+            std::path::PathBuf::from("/SENSITIVE_CONSTRUCTION_PATH"),
+            PromptAssemblySessionSnapshot::default(),
+        );
+
+    let debug = format!("{grants:?}");
+    assert!(debug.contains("payload_count: 2"));
+    for payload in [
+        "SENSITIVE_PERMISSION_PROVIDER",
+        "SENSITIVE_CONSTRUCTION_PATH",
+    ] {
+        assert!(!debug.contains(payload));
+    }
+}
 
 struct NativeRuntimeFixture {
     runtime: NativeAgentRuntime,

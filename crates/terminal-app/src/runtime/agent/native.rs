@@ -23,10 +23,11 @@ use tool_runtime::{ToolDefinition, ToolExecutorRegistry};
 use super::AgentRuntimeTestHarness;
 use super::{
     AgentCommand, AgentCommandReceipt, AgentContextBudgetSnapshot,
-    AgentEmptySessionConfigurationOutcome, AgentEvent, AgentEventKind, AgentId, AgentRuntime,
-    AgentRuntimeActivity, AgentRuntimeError, AgentRuntimeMount, AgentRuntimePort,
-    AgentSessionCapability, AgentSessionRestore, AgentSessionSnapshot, AgentTurnId,
-    AgentTurnRequest,
+    AgentEmptySessionConfigurationOutcome, AgentEvent, AgentEventKind, AgentId,
+    AgentPermissionConstructionGrant, AgentPromptConstructionGrant, AgentRuntime,
+    AgentRuntimeActivity, AgentRuntimeConstructionGrants, AgentRuntimeError, AgentRuntimePort,
+    AgentSessionCapability, AgentSessionConstructionGrant, AgentSessionRestore,
+    AgentSessionSnapshot, AgentToolConstructionGrant, AgentTurnId, AgentTurnRequest,
 };
 use crate::prompt_assembly::{
     AttachedPromptMessageAssembly, ManualSkillPromptUse, PromptAssemblyWorkspace,
@@ -87,16 +88,16 @@ pub struct NativeAgentRuntime {
 
 /// Native plugin factory 构造 concrete adapter 后立即擦除 implementation type。
 pub(in crate::runtime) fn construct_native_agent_runtime(
-    mount: AgentRuntimeMount,
+    grants: AgentRuntimeConstructionGrants,
 ) -> Result<Box<dyn AgentRuntimePort>, String> {
-    NativeAgentRuntime::new(mount).map(|runtime| Box::new(runtime) as Box<dyn AgentRuntimePort>)
+    NativeAgentRuntime::new(grants).map(|runtime| Box::new(runtime) as Box<dyn AgentRuntimePort>)
 }
 
 impl NativeAgentRuntime {
     // provider identity 必须与传入的 PermissionPolicy generation 成对传递；将其
     // 隐藏到全局默认值会让 provider replacement 后的 turn 错误地访问旧注册。
-    fn new(mount: AgentRuntimeMount) -> Result<Self, String> {
-        Self::new_with_notifier(mount, RuntimeEventNotifier::default())
+    fn new(grants: AgentRuntimeConstructionGrants) -> Result<Self, String> {
+        Self::new_with_notifier(grants, RuntimeEventNotifier::default())
     }
 
     #[cfg(test)]
@@ -112,39 +113,65 @@ impl NativeAgentRuntime {
         permission_policy: PermissionPolicy,
         permission_provider_id: impl Into<String>,
     ) -> Result<Self, String> {
-        Self::new_with_notifier(
-            AgentRuntimeMount::new(
-                options,
-                session_workspace_tools,
-                prompt_assembly_tool_definitions,
-                prompt_assembly,
-                session_port,
-                llm_port,
+        let grants = AgentRuntimeConstructionGrants::empty()
+            .with_llm_port(llm_port)
+            .with_loaded_models(options.loaded_models.clone())
+            .with_permission(
+                options.runtime_request_policy.clone(),
                 permission_policy,
                 permission_provider_id.into(),
-            ),
-            event_notifier,
-        )
+            )
+            .with_prompt(
+                Arc::clone(&options.dynamic_environment_observer),
+                options.hunea_config_dir.clone(),
+                prompt_assembly,
+            )
+            .with_tools(session_workspace_tools, prompt_assembly_tool_definitions)
+            .with_session(options.session_header_template.clone(), session_port);
+        Self::new_with_notifier(grants, event_notifier)
     }
 
     fn new_with_notifier(
-        mount: AgentRuntimeMount,
+        grants: AgentRuntimeConstructionGrants,
         event_notifier: RuntimeEventNotifier,
     ) -> Result<Self, String> {
-        let AgentRuntimeMount {
-            loaded_models,
-            runtime_request_policy,
-            dynamic_environment_observer,
-            hunea_config_dir,
-            session_header_template,
-            session_workspace_tools,
-            prompt_assembly_tool_definitions,
-            prompt_assembly,
-            session_port,
+        let AgentRuntimeConstructionGrants {
             llm_port,
+            loaded_models,
+            permission,
+            prompt,
+            tools,
+            session,
+        } = grants;
+        let llm_port = llm_port
+            .ok_or_else(|| "Agent construction grant is unavailable: llm_port".to_string())?;
+        let loaded_models = loaded_models
+            .ok_or_else(|| "Agent construction grant is unavailable: model_catalog".to_string())?;
+        let AgentPermissionConstructionGrant {
+            runtime_request_policy,
             permission_policy,
             permission_provider_id,
-        } = mount;
+        } = permission.ok_or_else(|| {
+            "Agent construction grant is unavailable: permission_policy".to_string()
+        })?;
+        let AgentPromptConstructionGrant {
+            dynamic_environment_observer,
+            hunea_config_dir,
+            prompt_assembly,
+        } = prompt.ok_or_else(|| {
+            "Agent construction grant is unavailable: prompt_assembly".to_string()
+        })?;
+        let AgentToolConstructionGrant {
+            session_workspace_tools,
+            prompt_assembly_tool_definitions,
+        } = tools
+            .ok_or_else(|| "Agent construction grant is unavailable: tool_catalog".to_string())?;
+        let AgentSessionConstructionGrant {
+            session_header_template,
+            session_port,
+        } = session.ok_or_else(|| {
+            "Agent construction grant is unavailable: session_persistence".to_string()
+        })?;
         let provider_conversation = fresh_provider_conversation(
             session_port,
             session_header_template.clone(),

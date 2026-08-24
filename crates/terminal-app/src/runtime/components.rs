@@ -11,8 +11,8 @@ use tool_runtime::{ToolCatalog, ToolExecutorRegistry, ToolRegistration};
 use super::{
     AppRuntimeOptions,
     agent::{
-        AgentRuntimeFactory, AgentRuntimeMount, AgentRuntimePort, AgentSessionCapability,
-        construct_native_agent_runtime,
+        AgentRuntimeConstructionGrants, AgentRuntimeFactory, AgentRuntimePort,
+        AgentSessionCapability, construct_native_agent_runtime,
     },
     context::{
         ApprovalProviderCapability, CapabilityLease, ComponentActivationContext, LlmPortCapability,
@@ -35,7 +35,7 @@ use super::{
     plugin::{
         DesiredPluginComposition, PluginCatalogError, PluginComposition, PluginCompositionLoader,
         PluginDescriptor, PluginDescriptorBuilder, PluginDescriptorSnapshot, PluginFactory,
-        PluginFactoryCatalog, PluginReloadPolicy, PluginTrust, PluginTypeId,
+        PluginFactoryCatalog, PluginInstanceView, PluginReloadPolicy, PluginTrust, PluginTypeId,
         PreparedPluginReconciliation,
     },
     prompt_assembly::{PromptAssembly, PromptRegistration},
@@ -177,10 +177,13 @@ impl RuntimePluginImplementation {
 
     fn construct_agent_runtime(
         &self,
-        mount: AgentRuntimeMount,
+        descriptor: &PluginDescriptor,
+        grant_source: AgentRuntimeGrantSource<'_>,
     ) -> Result<Box<dyn AgentRuntimePort>, String> {
         match &self.kind {
-            RuntimePluginImplementationKind::AgentRuntime(factory) => factory.construct(mount),
+            RuntimePluginImplementationKind::AgentRuntime(factory) => {
+                factory.construct(grant_source.project(descriptor))
+            }
             RuntimePluginImplementationKind::Component => {
                 Err("plugin implementation does not provide an Agent runtime factory".to_string())
             }
@@ -435,7 +438,6 @@ enum PreparedAgentRuntimeCommit {
 }
 
 struct PreparedAgentRuntimeReplacement {
-    mount: Option<AgentRuntimeMount>,
     candidate: Option<Box<dyn AgentRuntimePort>>,
 }
 
@@ -443,6 +445,129 @@ struct PreparedAgentRuntimeReplacement {
 enum AgentPluginReconciliation {
     Keep,
     Replace,
+}
+
+struct AgentRuntimeGrantSource<'a> {
+    options: &'a AppRuntimeOptions,
+    session_workspace_tools: &'a ToolExecutorRegistry,
+    tool_catalog: &'a ToolCatalog,
+    prompt_assembly: &'a PromptAssembly,
+    session_port: Option<&'a Arc<dyn session_store::SessionPort>>,
+    llm_port: &'a LlmPort,
+    permission_policy: &'a PermissionPolicy,
+    permission_provider_id: &'a str,
+    #[cfg(test)]
+    materialization_probe: Option<Arc<AgentRuntimeGrantMaterializationProbe>>,
+}
+
+struct PluginCommitCallbacks<'a> {
+    components: &'a mut RuntimeComponents,
+    agent_options: Option<&'a AppRuntimeOptions>,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct AgentRuntimeGrantMaterializationProbe {
+    materializations: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+impl AgentRuntimeGrantMaterializationProbe {
+    fn record(&self) {
+        self.materializations
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn materializations(&self) -> usize {
+        self.materializations
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl<'a> AgentRuntimeGrantSource<'a> {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        options: &'a AppRuntimeOptions,
+        session_workspace_tools: &'a ToolExecutorRegistry,
+        tool_catalog: &'a ToolCatalog,
+        prompt_assembly: &'a PromptAssembly,
+        session_port: Option<&'a Arc<dyn session_store::SessionPort>>,
+        llm_port: &'a LlmPort,
+        permission_policy: &'a PermissionPolicy,
+        permission_provider_id: &'a str,
+    ) -> Self {
+        Self {
+            options,
+            session_workspace_tools,
+            tool_catalog,
+            prompt_assembly,
+            session_port,
+            llm_port,
+            permission_policy,
+            permission_provider_id,
+            #[cfg(test)]
+            materialization_probe: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_materialization_probe(
+        mut self,
+        probe: Option<Arc<AgentRuntimeGrantMaterializationProbe>>,
+    ) -> Self {
+        self.materialization_probe = probe;
+        self
+    }
+
+    fn record_materialization(&self) {
+        #[cfg(test)]
+        if let Some(probe) = &self.materialization_probe {
+            probe.record();
+        }
+    }
+
+    fn project(self, descriptor: &PluginDescriptor) -> AgentRuntimeConstructionGrants {
+        let mut grants = AgentRuntimeConstructionGrants::empty();
+        if descriptor.declares_required(LLM_PORT.capability) {
+            self.record_materialization();
+            grants = grants.with_llm_port(self.llm_port.clone());
+        }
+        if descriptor.declares_required(MODEL_CATALOG.capability) {
+            self.record_materialization();
+            grants = grants.with_loaded_models(self.options.loaded_models.clone());
+        }
+        if descriptor.declares_required(PERMISSION_POLICY.capability) {
+            self.record_materialization();
+            grants = grants.with_permission(
+                self.options.runtime_request_policy.clone(),
+                self.permission_policy.clone(),
+                self.permission_provider_id.to_string(),
+            );
+        }
+        if descriptor.declares_required(PROMPT_ASSEMBLY.capability) {
+            self.record_materialization();
+            grants = grants.with_prompt(
+                Arc::clone(&self.options.dynamic_environment_observer),
+                self.options.hunea_config_dir.clone(),
+                self.prompt_assembly.session_snapshot(),
+            );
+        }
+        if descriptor.declares_required(TOOL_CATALOG.capability) {
+            self.record_materialization();
+            grants = grants.with_tools(
+                self.session_workspace_tools.clone(),
+                self.tool_catalog.definitions(),
+            );
+        }
+        if descriptor.declares_observed(SESSION_PERSISTENCE.capability) {
+            self.record_materialization();
+            grants = grants.with_session(
+                self.options.session_header_template.clone(),
+                self.session_port.map(Arc::clone),
+            );
+        }
+        grants
+    }
 }
 
 /// `RuntimeComponents` 是 coordinator 的长期 runtime owner。
@@ -473,26 +598,30 @@ pub(super) struct RuntimeComponents {
     is_agent_replacement_activating: bool,
     #[cfg(test)]
     plugin_transaction_trace: Option<Arc<Mutex<Vec<String>>>>,
+    #[cfg(test)]
+    agent_grant_materialization_probe: Option<Arc<AgentRuntimeGrantMaterializationProbe>>,
     pub(super) lifecycle: ComponentLifecycleExecutor,
     is_shutdown: bool,
     shutdown_lifecycle_error: Option<String>,
 }
 
 fn construct_agent_runtime(
-    implementation: &RuntimePluginImplementation,
-    mount: AgentRuntimeMount,
+    instance: PluginInstanceView<'_, RuntimePluginImplementation>,
+    grant_source: AgentRuntimeGrantSource<'_>,
 ) -> Result<Box<dyn AgentRuntimePort>, String> {
-    implementation.construct_agent_runtime(mount)
+    instance
+        .implementation()
+        .construct_agent_runtime(instance.descriptor(), grant_source)
 }
 
 fn construct_committed_agent_runtime(
     plugins: &PluginComposition<RuntimePluginImplementation>,
-    mount: AgentRuntimeMount,
+    grant_source: AgentRuntimeGrantSource<'_>,
 ) -> Result<Box<dyn AgentRuntimePort>, String> {
-    let implementation = plugins
-        .implementation(AGENT_RUNTIME_COMPONENT)
+    let instance = plugins
+        .instance(AGENT_RUNTIME_COMPONENT)
         .ok_or_else(|| "Agent component has no committed plugin implementation".to_string())?;
-    construct_agent_runtime(implementation, mount)
+    construct_agent_runtime(instance, grant_source)
 }
 
 fn classify_agent_plugin_reconciliation(
@@ -621,7 +750,6 @@ impl RuntimeComponents {
         let (session_port, session_backend_views, session_backend_registration) =
             mount_session_backend(options.session_store.take())?;
         let prompt_assembly_snapshot = prompt_assembly.session_snapshot();
-        let prompt_assembly_tool_definitions = tool_catalog.definitions();
         let session_workspace_tools =
             session_tools_for_manager(&tool_catalog, prompt_assembly_snapshot.manager.as_ref());
         // Consumer 在 activation callback 中从 typed Context 换入 live generation；
@@ -631,17 +759,15 @@ impl RuntimeComponents {
             .map_err(|error| error.to_string())?;
         let agent_runtime = construct_committed_agent_runtime(
             &plugins,
-            AgentRuntimeMount::new(
+            AgentRuntimeGrantSource::new(
                 options,
-                session_workspace_tools.clone(),
-                prompt_assembly_tool_definitions,
-                prompt_assembly_snapshot,
-                session_backend_views
-                    .as_ref()
-                    .map(|views| Arc::clone(&views.port)),
-                llm_port.clone(),
-                permission_policy.clone(),
-                TERMINAL_APPROVAL_PROVIDER_ID.to_string(),
+                &session_workspace_tools,
+                &tool_catalog,
+                &prompt_assembly,
+                session_backend_views.as_ref().map(|views| &views.port),
+                &llm_port,
+                &permission_policy,
+                TERMINAL_APPROVAL_PROVIDER_ID,
             ),
         )?;
         let model_refresh = ModelRefreshWorker::new(RuntimeEventNotifier::default());
@@ -679,6 +805,8 @@ impl RuntimeComponents {
             is_agent_replacement_activating: false,
             #[cfg(test)]
             plugin_transaction_trace: None,
+            #[cfg(test)]
+            agent_grant_materialization_probe: None,
             lifecycle: ComponentLifecycleExecutor::default(),
             is_shutdown: false,
             shutdown_lifecycle_error: None,
@@ -736,6 +864,7 @@ impl RuntimeComponents {
             }
         };
         let result = self.commit_prepared_plugin_reconciliation(
+            None,
             desired,
             reconciliation,
             PreparedAgentRuntimeCommit::Keep,
@@ -775,6 +904,7 @@ impl RuntimeComponents {
             .prepare_reconciliation(&desired, &self.plugins)
             .map_err(|error| error.to_string())?;
         let result = self.commit_prepared_plugin_reconciliation(
+            None,
             desired,
             reconciliation,
             PreparedAgentRuntimeCommit::Keep,
@@ -847,12 +977,19 @@ impl RuntimeComponents {
         if self.is_shutdown {
             return Err("Runtime components are shut down".to_string());
         }
-        let agent_runtime = self.prepare_agent_runtime_commit(options, &desired)?;
+        let agent_action = self.classify_agent_plugin_reconciliation(&desired)?;
         let reconciliation = self
             .plugin_loader
             .prepare_reconciliation(&desired, &self.plugins)
             .map_err(|error| error.to_string())?;
-        self.commit_prepared_plugin_reconciliation(desired, reconciliation, agent_runtime, mode)
+        let agent_runtime = Self::prepare_agent_runtime_commit(agent_action);
+        self.commit_prepared_plugin_reconciliation(
+            Some(options),
+            desired,
+            reconciliation,
+            agent_runtime,
+            mode,
+        )
     }
 
     #[cfg(test)]
@@ -863,18 +1000,24 @@ impl RuntimeComponents {
         desired: DesiredPluginComposition,
         mode: ComponentLifecycleMode,
     ) -> Result<(), String> {
-        let agent_runtime = self.prepare_agent_runtime_commit(options, &desired)?;
+        let agent_action = self.classify_agent_plugin_reconciliation(&desired)?;
         let reconciliation = catalog
             .prepare_reconciliation(&desired, &self.plugins)
             .map_err(|error| error.to_string())?;
-        self.commit_prepared_plugin_reconciliation(desired, reconciliation, agent_runtime, mode)
+        let agent_runtime = Self::prepare_agent_runtime_commit(agent_action);
+        self.commit_prepared_plugin_reconciliation(
+            Some(options),
+            desired,
+            reconciliation,
+            agent_runtime,
+            mode,
+        )
     }
 
-    fn prepare_agent_runtime_commit(
+    fn classify_agent_plugin_reconciliation(
         &self,
-        options: &AppRuntimeOptions,
         desired: &DesiredPluginComposition,
-    ) -> Result<PreparedAgentRuntimeCommit, String> {
+    ) -> Result<AgentPluginReconciliation, String> {
         let desired_type = desired
             .iter()
             .find(|(component_id, _)| component_id.as_str() == AGENT_RUNTIME_COMPONENT)
@@ -884,19 +1027,25 @@ impl RuntimeComponents {
             .iter()
             .find(|(component_id, _)| component_id.as_str() == AGENT_RUNTIME_COMPONENT)
             .map(|(_, plugin_type)| plugin_type);
-        match classify_agent_plugin_reconciliation(observed_type, desired_type)? {
-            AgentPluginReconciliation::Keep => Ok(PreparedAgentRuntimeCommit::Keep),
-            AgentPluginReconciliation::Replace => Ok(PreparedAgentRuntimeCommit::Replace(
-                Box::new(PreparedAgentRuntimeReplacement {
-                    mount: Some(self.agent_runtime_mount(options, self.current_session_port())),
+        classify_agent_plugin_reconciliation(observed_type, desired_type)
+    }
+
+    fn prepare_agent_runtime_commit(
+        action: AgentPluginReconciliation,
+    ) -> PreparedAgentRuntimeCommit {
+        match action {
+            AgentPluginReconciliation::Keep => PreparedAgentRuntimeCommit::Keep,
+            AgentPluginReconciliation::Replace => {
+                PreparedAgentRuntimeCommit::Replace(Box::new(PreparedAgentRuntimeReplacement {
                     candidate: None,
-                }),
-            )),
+                }))
+            }
         }
     }
 
     fn commit_prepared_plugin_reconciliation(
         &mut self,
+        agent_options: Option<&AppRuntimeOptions>,
         desired: DesiredPluginComposition,
         reconciliation: PreparedPluginReconciliation<RuntimePluginImplementation>,
         agent_runtime: PreparedAgentRuntimeCommit,
@@ -910,7 +1059,11 @@ impl RuntimeComponents {
             agent_runtime,
         });
         self.with_lifecycle(|lifecycle, components| {
-            lifecycle.reconcile_definitions_with_commit(definitions, components, mode)
+            let mut callbacks = PluginCommitCallbacks {
+                components,
+                agent_options,
+            };
+            lifecycle.reconcile_definitions_with_commit(definitions, &mut callbacks, mode)
         })
         .map_err(|error| format!("{error:?}"))
     }
@@ -1078,7 +1231,6 @@ impl RuntimeComponents {
             &options.hunea_config_dir,
         )
         .map_err(|error| error.to_string())?;
-        let prompt_assembly_tool_definitions = fresh_tool_catalog.definitions();
         let (fresh_prompt_assembly, fresh_prompt_registration) =
             PromptAssembly::adopt_manager("workspace-prompt", current_prompt_assembly)
                 .map_err(|error| error.to_string())?;
@@ -1091,17 +1243,15 @@ impl RuntimeComponents {
         // capability 保持 removed，所有尚未发布的 fresh registrations 由 Drop 逆向撤销。
         let fresh_agent_runtime = construct_committed_agent_runtime(
             &self.plugins,
-            AgentRuntimeMount::new(
+            AgentRuntimeGrantSource::new(
                 options,
-                session_workspace_tools.clone(),
-                prompt_assembly_tool_definitions,
-                fresh_prompt_assembly_snapshot,
-                self.session_backend_views
-                    .as_ref()
-                    .map(|views| Arc::clone(&views.port)),
-                fresh_llm_port.clone(),
-                self.permission_policy.clone(),
-                self.permission_provider_id.clone(),
+                &session_workspace_tools,
+                &fresh_tool_catalog,
+                &fresh_prompt_assembly,
+                self.session_backend_views.as_ref().map(|views| &views.port),
+                &fresh_llm_port,
+                &self.permission_policy,
+                &self.permission_provider_id,
             ),
         )?;
         self.agent_runtime = fresh_agent_runtime;
@@ -1168,19 +1318,18 @@ impl RuntimeComponents {
         let Some(fresh_views) = fresh_views else {
             return Err("session backend mount did not produce views".to_string());
         };
-        let fresh_agent_runtime =
-            match self.fresh_agent_runtime(options, Some(Arc::clone(&fresh_views.port))) {
-                Ok(runtime) => runtime,
-                Err(error) => {
-                    if let Some(session_port) = &fresh_session_port {
-                        session_port.deactivate();
-                    }
-                    drop(fresh_registration);
-                    self.restore_ephemeral_session_consumers(options)
-                        .map_err(|fallback_error| format!("{error}; {fallback_error}"))?;
-                    return Err(error);
+        let fresh_agent_runtime = match self.fresh_agent_runtime(options, Some(&fresh_views.port)) {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                if let Some(session_port) = &fresh_session_port {
+                    session_port.deactivate();
                 }
-            };
+                drop(fresh_registration);
+                self.restore_ephemeral_session_consumers(options)
+                    .map_err(|fallback_error| format!("{error}; {fallback_error}"))?;
+                return Err(error);
+            }
+        };
 
         self.session_store_worker = SessionStoreWorker::default();
         self.agent_runtime = fresh_agent_runtime;
@@ -1200,35 +1349,36 @@ impl RuntimeComponents {
     fn fresh_agent_runtime(
         &self,
         options: &AppRuntimeOptions,
-        session_port: Option<Arc<dyn session_store::SessionPort>>,
+        session_port: Option<&Arc<dyn session_store::SessionPort>>,
     ) -> Result<Box<dyn AgentRuntimePort>, String> {
         construct_committed_agent_runtime(
             &self.plugins,
-            self.agent_runtime_mount(options, session_port),
+            self.agent_runtime_grant_source(options, session_port),
         )
     }
 
-    fn current_session_port(&self) -> Option<Arc<dyn session_store::SessionPort>> {
-        self.session_backend_views
-            .as_ref()
-            .map(|views| Arc::clone(&views.port))
-    }
-
-    fn agent_runtime_mount(
-        &self,
-        options: &AppRuntimeOptions,
-        session_port: Option<Arc<dyn session_store::SessionPort>>,
-    ) -> AgentRuntimeMount {
-        AgentRuntimeMount::new(
+    fn agent_runtime_grant_source<'a>(
+        &'a self,
+        options: &'a AppRuntimeOptions,
+        session_port: Option<&'a Arc<dyn session_store::SessionPort>>,
+    ) -> AgentRuntimeGrantSource<'a> {
+        let source = AgentRuntimeGrantSource::new(
             options,
-            self.session_workspace_tools.clone(),
-            self.tool_catalog.definitions(),
-            self.prompt_assembly.session_snapshot(),
+            &self.session_workspace_tools,
+            &self.tool_catalog,
+            &self.prompt_assembly,
             session_port,
-            self.llm_port.clone(),
-            self.permission_policy.clone(),
-            self.permission_provider_id.clone(),
-        )
+            &self.llm_port,
+            &self.permission_policy,
+            &self.permission_provider_id,
+        );
+        #[cfg(test)]
+        let source = source.with_materialization_probe(
+            self.agent_grant_materialization_probe
+                .as_ref()
+                .map(Arc::clone),
+        );
+        source
     }
 
     fn restore_ephemeral_session_consumers(
@@ -1292,17 +1442,15 @@ impl RuntimeComponents {
             .map_err(|error| error.to_string())?;
         let fresh_agent_runtime = match construct_committed_agent_runtime(
             &self.plugins,
-            AgentRuntimeMount::new(
+            AgentRuntimeGrantSource::new(
                 options,
-                self.session_workspace_tools.clone(),
-                self.tool_catalog.definitions(),
-                self.prompt_assembly.session_snapshot(),
-                self.session_backend_views
-                    .as_ref()
-                    .map(|views| Arc::clone(&views.port)),
-                self.llm_port.clone(),
-                fresh_policy.clone(),
-                provider_id.clone(),
+                &self.session_workspace_tools,
+                &self.tool_catalog,
+                &self.prompt_assembly,
+                self.session_backend_views.as_ref().map(|views| &views.port),
+                &self.llm_port,
+                &fresh_policy,
+                &provider_id,
             ),
         ) {
             Ok(runtime) => runtime,
@@ -1693,53 +1841,65 @@ impl RuntimeComponents {
             (Some(lifecycle), Some(agent)) => Err(format!("{lifecycle}; {agent}")),
         }
     }
-}
 
-impl ComponentLifecycleCallbacks for RuntimeComponents {
-    fn prepare_authority(&mut self) -> Result<(), String> {
-        let is_agent_replacement = self
+    fn prepare_plugin_authority(
+        &mut self,
+        agent_options: Option<&AppRuntimeOptions>,
+    ) -> Result<(), String> {
+        let prepared = self
             .prepared_plugin_commit
             .as_ref()
-            .is_some_and(|prepared| {
-                matches!(
-                    &prepared.agent_runtime,
-                    PreparedAgentRuntimeCommit::Replace(_)
-                )
-            });
+            .ok_or_else(|| "plugin authority preparation is missing".to_string())?;
+        let is_agent_replacement = matches!(
+            &prepared.agent_runtime,
+            PreparedAgentRuntimeCommit::Replace(_)
+        );
         if is_agent_replacement {
+            let options = agent_options.ok_or_else(|| {
+                "Agent replacement construction source is not available".to_string()
+            })?;
+            if matches!(
+                &prepared.agent_runtime,
+                PreparedAgentRuntimeCommit::Replace(replacement)
+                    if replacement.candidate.is_some()
+            ) {
+                return Err("Agent adapter candidate is already prepared".to_string());
+            }
             self.finalize_agent_runtime_replacement()?;
-        }
-        {
+
+            let candidate = {
+                let prepared = self
+                    .prepared_plugin_commit
+                    .as_ref()
+                    .expect("prepared plugin commit must survive Agent finalization");
+                let instance = prepared
+                    .reconciliation
+                    .prospective_instance(&self.plugins, AGENT_RUNTIME_COMPONENT)
+                    .ok_or_else(|| {
+                        "Agent replacement has no prospective plugin instance".to_string()
+                    })?;
+                let grant_source = self.agent_runtime_grant_source(
+                    options,
+                    self.session_backend_views.as_ref().map(|views| &views.port),
+                );
+                construct_agent_runtime(instance, grant_source)?
+            };
             let prepared = self
                 .prepared_plugin_commit
                 .as_mut()
-                .ok_or_else(|| "plugin authority preparation is missing".to_string())?;
-            match &mut prepared.agent_runtime {
-                PreparedAgentRuntimeCommit::Keep => {}
-                PreparedAgentRuntimeCommit::Replace(replacement) => {
-                    if replacement.candidate.is_some() {
-                        return Err("Agent adapter candidate is already prepared".to_string());
-                    }
-                    let mount = replacement
-                        .mount
-                        .take()
-                        .ok_or_else(|| "Agent adapter mount is no longer available".to_string())?;
-                    let implementation = prepared
-                        .reconciliation
-                        .prospective_implementation(&self.plugins, AGENT_RUNTIME_COMPONENT)
-                        .ok_or_else(|| {
-                            "Agent replacement has no prospective plugin implementation".to_string()
-                        })?;
-                    replacement.candidate = Some(construct_agent_runtime(implementation, mount)?);
-                }
-            }
+                .expect("prepared plugin commit must survive Agent construction");
+            let PreparedAgentRuntimeCommit::Replace(replacement) = &mut prepared.agent_runtime
+            else {
+                unreachable!("Agent replacement kind must remain stable during construction")
+            };
+            replacement.candidate = Some(candidate);
         }
         #[cfg(test)]
         self.record_plugin_transaction_event("prepare:authority");
         Ok(())
     }
 
-    fn commit_authority(&mut self) {
+    fn commit_plugin_authority(&mut self) {
         let mut prepared = self
             .prepared_plugin_commit
             .take()
@@ -1763,10 +1923,62 @@ impl ComponentLifecycleCallbacks for RuntimeComponents {
         self.record_plugin_transaction_event("authority:commit");
     }
 
-    fn abort_authority(&mut self) {
+    fn abort_plugin_authority(&mut self) {
         self.prepared_plugin_commit.take();
         #[cfg(test)]
         self.record_plugin_transaction_event("authority:abort");
+    }
+}
+
+impl ComponentLifecycleCallbacks for PluginCommitCallbacks<'_> {
+    fn prepare_authority(&mut self) -> Result<(), String> {
+        self.components.prepare_plugin_authority(self.agent_options)
+    }
+
+    fn commit_authority(&mut self) {
+        self.components.commit_plugin_authority();
+    }
+
+    fn abort_authority(&mut self) {
+        self.components.abort_plugin_authority();
+    }
+
+    fn activate_component(
+        &mut self,
+        component_id: &str,
+        scope: &EffectScope,
+        context: &mut ComponentActivationContext<'_>,
+        mode: ComponentLifecycleMode,
+    ) -> Result<ComponentActivationOutcome, String> {
+        ComponentLifecycleCallbacks::activate_component(
+            self.components,
+            component_id,
+            scope,
+            context,
+            mode,
+        )
+    }
+
+    fn quiesce_component(
+        &mut self,
+        component_id: &str,
+        mode: ComponentLifecycleMode,
+    ) -> Result<(), String> {
+        ComponentLifecycleCallbacks::quiesce_component(self.components, component_id, mode)
+    }
+}
+
+impl ComponentLifecycleCallbacks for RuntimeComponents {
+    fn prepare_authority(&mut self) -> Result<(), String> {
+        self.prepare_plugin_authority(None)
+    }
+
+    fn commit_authority(&mut self) {
+        self.commit_plugin_authority();
+    }
+
+    fn abort_authority(&mut self) {
+        self.abort_plugin_authority();
     }
 
     fn activate_component(
@@ -2095,7 +2307,7 @@ mod tests {
         shutdown_failures_remaining: usize,
         shutdown_calls: Option<Arc<AtomicUsize>>,
         drop_count: Option<Arc<AtomicUsize>>,
-        owned_mount: Option<AgentRuntimeMount>,
+        owned_grants: Option<AgentRuntimeConstructionGrants>,
         is_shutdown: bool,
         is_finalized: bool,
     }
@@ -2108,7 +2320,7 @@ mod tests {
                 shutdown_failures_remaining: 0,
                 shutdown_calls: None,
                 drop_count: None,
-                owned_mount: None,
+                owned_grants: None,
                 is_shutdown: true,
                 is_finalized: false,
             }
@@ -2121,7 +2333,7 @@ mod tests {
                 shutdown_failures_remaining: usize::MAX,
                 shutdown_calls: None,
                 drop_count: None,
-                owned_mount: None,
+                owned_grants: None,
                 is_shutdown: true,
                 is_finalized: false,
             }
@@ -2137,7 +2349,7 @@ mod tests {
                 shutdown_failures_remaining: 0,
                 shutdown_calls: Some(shutdown_calls),
                 drop_count: None,
-                owned_mount: None,
+                owned_grants: None,
                 is_shutdown: true,
                 is_finalized: false,
             }
@@ -2145,7 +2357,7 @@ mod tests {
 
         fn with_abort_probes(
             lifecycle_trace: Arc<Mutex<Vec<&'static str>>>,
-            mount: AgentRuntimeMount,
+            grants: AgentRuntimeConstructionGrants,
             drop_count: Arc<AtomicUsize>,
         ) -> Self {
             Self {
@@ -2154,7 +2366,7 @@ mod tests {
                 shutdown_failures_remaining: 0,
                 shutdown_calls: None,
                 drop_count: Some(drop_count),
-                owned_mount: Some(mount),
+                owned_grants: Some(grants),
                 is_shutdown: true,
                 is_finalized: false,
             }
@@ -2248,7 +2460,7 @@ mod tests {
 
     impl Drop for RecordingAgentRuntime {
         fn drop(&mut self) {
-            let _ = self.owned_mount.take();
+            let _ = self.owned_grants.take();
             if let Some(drop_count) = &self.drop_count {
                 drop_count.fetch_add(1, Ordering::SeqCst);
             }
@@ -2267,30 +2479,33 @@ mod tests {
 
     #[test]
     fn runtime_components_owns_alternate_agent_through_the_lifecycle_port() {
+        const RECORDING_AGENT: &str = "recording-agent-loop";
         let mut options = options_with_provider();
         let mut components =
             RuntimeComponents::new(&mut options).expect("runtime components should initialize");
         let lifecycle_trace = Arc::new(Mutex::new(Vec::new()));
+        let factory_lifecycle_trace = Arc::clone(&lifecycle_trace);
+        let grant_payload_count = Arc::new(AtomicUsize::new(0));
+        let observed_grant_payload_count = Arc::clone(&grant_payload_count);
+        let catalog = PluginFactoryCatalog::try_new([agent_replacement_factory(
+            RECORDING_AGENT,
+            AgentRuntimeFactory::new(move |grants| {
+                observed_grant_payload_count.store(grants.payload_count(), Ordering::SeqCst);
+                Ok(Box::new(RecordingAgentRuntime::new(Arc::clone(
+                    &factory_lifecycle_trace,
+                ))))
+            }),
+        )])
+        .expect("recording Agent catalog should validate");
         components
-            .with_lifecycle(|lifecycle, components| {
-                lifecycle.deactivate_components(
-                    [AGENT_RUNTIME_COMPONENT],
-                    components,
-                    ComponentLifecycleMode::Reconfigure,
-                )
-            })
-            .expect("old Agent owner should quiesce before replacement");
-        components.agent_runtime =
-            Box::new(RecordingAgentRuntime::new(Arc::clone(&lifecycle_trace)));
-        components
-            .with_lifecycle(|lifecycle, components| {
-                lifecycle.activate_components(
-                    [AGENT_RUNTIME_COMPONENT],
-                    components,
-                    ComponentLifecycleMode::Reconfigure,
-                )
-            })
-            .expect("recording Agent should activate through the lifecycle port");
+            .reconcile_plugin_composition_with_catalog(
+                &options,
+                &catalog,
+                desired_with_agent_plugin_for_test(Some(RECORDING_AGENT)),
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect("recording Agent should replace Native through plugin reconciliation");
+        assert_eq!(grant_payload_count.load(Ordering::SeqCst), 6);
         let unavailable = match components.agent_session_mut() {
             Ok(_) => panic!("recording Agent must not fabricate a session capability"),
             Err(error) => error,
@@ -2343,6 +2558,7 @@ mod tests {
             .map(|(production, _)| production)
             .expect("components source should keep tests behind cfg(test)");
         let native_source = include_str!("agent/native.rs");
+        let agent_contract_source = include_str!("agent/mod.rs");
         let inspection_source = include_str!("tests/inspection.rs");
         let legacy_agent_slot = ["native", "_agent_runtime"].concat();
         for runtime_source in [source, inspection_source] {
@@ -2365,10 +2581,17 @@ mod tests {
         ]
         .concat();
         let native_factory_definition = ["fn construct_native_", "agent_runtime("].concat();
-        let native_construction = ["NativeAgentRuntime", "::new(mount)"].concat();
+        let native_construction = ["NativeAgentRuntime", "::new(grants)"].concat();
         let erased_native_owner = ["Box::new(runtime) as Box<dyn Agent", "RuntimePort>"].concat();
         let concrete_materialization = ["Self", " {"].concat();
-        let plugin_factory_dispatch = [".construct_agent_", "runtime(mount)"].concat();
+        let plugin_factory_dispatch = [
+            ".construct_agent_",
+            "runtime(instance.descriptor(), grant_source)",
+        ]
+        .concat();
+        let broad_mount = ["AgentRuntime", "Mount"].concat();
+        let ignored_broad_mount = ["|_", "mount|"].concat();
+        let descriptor_independent_lookup = ["prospective_", "implementation("].concat();
         let optional_factory = ["Option<Agent", "RuntimeFactory>"].concat();
         let old_mount_check = ["native_mount", "_check"].concat();
         let old_fresh_helper = ["fresh_native_", "agent_runtime"].concat();
@@ -2403,16 +2626,22 @@ mod tests {
         assert!(replay_factory_source.contains("agent_runtime_plugin_factory("));
         assert!(replay_factory_source.contains(".requires(RUNTIME_EVENT_STREAM.capability)"));
         for forbidden in [
-            "NativeAgentRuntime",
-            "construct_native_agent_runtime",
-            "components.agent_runtime =",
-            "downcast",
+            "NativeAgentRuntime".to_string(),
+            "construct_native_agent_runtime".to_string(),
+            ["components.agent_", "runtime ="].concat(),
+            "downcast".to_string(),
         ] {
             assert!(
-                !replay_factory_source.contains(forbidden),
+                !replay_factory_source.contains(&forbidden),
                 "Replay factory must not bypass plugin ownership through {forbidden}"
             );
         }
+
+        let direct_test_owner_assignment = ["components.agent_", "runtime ="].concat();
+        assert!(
+            !source.contains(&direct_test_owner_assignment),
+            "test adapters must enter the Agent slot through plugin reconciliation"
+        );
 
         assert_eq!(
             production_source
@@ -2422,6 +2651,10 @@ mod tests {
         );
         assert!(!production_source.contains(&concrete_owner));
         assert!(!production_source.contains(&concrete_constructor));
+        assert!(!production_source.contains(&broad_mount));
+        assert!(!agent_contract_source.contains(&broad_mount));
+        assert!(!agent_contract_source.contains(&ignored_broad_mount));
+        assert!(!production_source.contains(&descriptor_independent_lookup));
         assert_eq!(production_source.matches(&plugin_factory_wiring).count(), 1);
         assert_eq!(
             production_source.matches(&plugin_factory_dispatch).count(),
@@ -2482,19 +2715,19 @@ mod tests {
         assert_eq!(agent_finalization_source.matches(".shutdown()").count(), 1);
 
         let prepare_authority_source = production_source
-            .split_once("fn prepare_authority(&mut self) -> Result<(), String> {")
-            .and_then(|(_, tail)| tail.split_once("fn commit_authority(&mut self) {"))
+            .split_once("fn prepare_plugin_authority(")
+            .and_then(|(_, tail)| tail.split_once("fn commit_plugin_authority("))
             .map(|(method, _)| method)
             .expect("authority preparation should remain a distinct callback stage");
         assert_eq!(
             prepare_authority_source
-                .matches(".prospective_implementation(")
+                .matches(".prospective_instance(")
                 .count(),
             1
         );
         assert_eq!(
             prepare_authority_source
-                .matches("construct_agent_runtime(implementation, mount)?")
+                .matches("construct_agent_runtime(instance, grant_source)?")
                 .count(),
             1
         );
@@ -2502,16 +2735,20 @@ mod tests {
             .find("self.finalize_agent_runtime_replacement()?")
             .expect("authority preparation must finalize the old Agent");
         let construction_position = prepare_authority_source
-            .find("construct_agent_runtime(implementation, mount)?")
+            .find("construct_agent_runtime(instance, grant_source)?")
             .expect("authority preparation must construct the fresh Agent");
+        let projection_source_position = prepare_authority_source
+            .find("self.agent_runtime_grant_source(")
+            .expect("authority preparation must defer descriptor grant projection");
         assert!(
-            finalization_position < construction_position,
-            "old Agent finalization must precede candidate construction"
+            finalization_position < projection_source_position
+                && projection_source_position < construction_position,
+            "old Agent finalization must precede grant projection and candidate construction"
         );
 
         let commit_authority_source = production_source
-            .split_once("fn commit_authority(&mut self) {")
-            .and_then(|(_, tail)| tail.split_once("fn abort_authority(&mut self) {"))
+            .split_once("fn commit_plugin_authority(")
+            .and_then(|(_, tail)| tail.split_once("fn abort_plugin_authority("))
             .map(|(method, _)| method)
             .expect("authority commit should remain a distinct callback stage");
         assert!(!commit_authority_source.contains("construct_agent_runtime("));
@@ -2899,7 +3136,7 @@ mod tests {
         let old_factory_trace = Arc::clone(&old_lifecycle_trace);
         let mut components = RuntimeComponents::new_with_agent_runtime_factory(
             &mut options,
-            AgentRuntimeFactory::new(move |_mount| {
+            AgentRuntimeFactory::new(move |_grants| {
                 Ok(Box::new(RecordingAgentRuntime::new(Arc::clone(
                     &old_factory_trace,
                 ))))
@@ -2915,7 +3152,7 @@ mod tests {
         let observed_constructions = Arc::clone(&constructions);
         let catalog = PluginFactoryCatalog::try_new([traced_agent_replacement_factory(
             ALTERNATE_AGENT,
-            AgentRuntimeFactory::new(move |_mount| {
+            AgentRuntimeFactory::new(move |_grants| {
                 observed_constructions.fetch_add(1, Ordering::SeqCst);
                 factory_transaction_trace
                     .lock()
@@ -3021,6 +3258,8 @@ mod tests {
         let mut options = AppRuntimeOptions::default();
         let mut components =
             RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+        let grant_materialization = Arc::new(AgentRuntimeGrantMaterializationProbe::default());
+        components.agent_grant_materialization_probe = Some(Arc::clone(&grant_materialization));
 
         components
             .reconcile_plugin_composition_with_catalog(
@@ -3045,6 +3284,11 @@ mod tests {
         );
         assert_eq!(replay_lifecycle.constructions(), 1);
         assert_eq!(replay_lifecycle.activations(), 1);
+        assert_eq!(
+            grant_materialization.materializations(),
+            0,
+            "Replay construction must not materialize Native-only grants"
+        );
         let restore_materialized = Arc::new(AtomicBool::new(false));
         let session_id = session_store::SessionId::new();
         let restore = AgentSessionRestore::new(
@@ -3183,6 +3427,11 @@ mod tests {
         assert_eq!(replay_lifecycle.shutdowns(), 1);
         assert_eq!(replay_lifecycle.drops(), 1);
         assert_eq!(replay_lifecycle.constructions(), 1);
+        assert_eq!(
+            grant_materialization.materializations(),
+            6,
+            "Native restoration should materialize exactly its declared grant groups"
+        );
         assert!(components.agent_session().is_ok());
         assert!(components.agent_port_mut().drain_events().is_empty());
         assert_eq!(
@@ -3207,7 +3456,7 @@ mod tests {
         let startup_trace = Arc::clone(&old_lifecycle_trace);
         let mut components = RuntimeComponents::new_with_agent_runtime_factory(
             &mut options,
-            AgentRuntimeFactory::new(move |_mount| {
+            AgentRuntimeFactory::new(move |_grants| {
                 Ok(Box::new(RecordingAgentRuntime::with_shutdown_failure(
                     Arc::clone(&startup_trace),
                 )))
@@ -3218,7 +3467,7 @@ mod tests {
         let observed_constructions = Arc::clone(&constructions);
         let catalog = PluginFactoryCatalog::try_new([agent_replacement_factory(
             ALTERNATE_AGENT,
-            AgentRuntimeFactory::new(move |_mount| {
+            AgentRuntimeFactory::new(move |_grants| {
                 observed_constructions.fetch_add(1, Ordering::SeqCst);
                 Ok(Box::new(RecordingAgentRuntime::new(Arc::new(Mutex::new(
                     Vec::new(),
@@ -3300,11 +3549,11 @@ mod tests {
                 };
                 let constructor_candidate_drops = Arc::clone(&prepared_candidate_drops);
                 Ok(RuntimePluginImplementation::agent_runtime(
-                    AgentRuntimeFactory::new(move |mount| {
+                    AgentRuntimeFactory::new(move |grants| {
                         let _implementation_owner = &implementation_drop;
                         Ok(Box::new(RecordingAgentRuntime::with_abort_probes(
                             Arc::new(Mutex::new(Vec::new())),
-                            mount,
+                            grants,
                             Arc::clone(&constructor_candidate_drops),
                         )))
                     }),
@@ -3313,13 +3562,14 @@ mod tests {
         )])
         .expect("replacement Agent catalog should validate");
         let desired = desired_with_agent_plugin_for_test(Some(ALTERNATE_AGENT));
-        let agent_runtime = components
-            .prepare_agent_runtime_commit(&options, &desired)
-            .expect("Agent replacement mount should prepare");
-        assert_eq!(Arc::strong_count(&observer), observer_owner_count + 1);
+        let agent_action = components
+            .classify_agent_plugin_reconciliation(&desired)
+            .expect("Agent replacement should classify");
         let reconciliation = catalog
             .prepare_reconciliation(&desired, &components.plugins)
             .expect("fresh Agent plugin should prepare");
+        let agent_runtime = RuntimeComponents::prepare_agent_runtime_commit(agent_action);
+        assert_eq!(Arc::strong_count(&observer), observer_owner_count);
         let prepared_graph = components
             .lifecycle
             .prepare_definition_reconciliation(reconciliation.definitions())
@@ -3340,7 +3590,7 @@ mod tests {
             })
             .expect("old Agent effects should retire before candidate construction");
         components
-            .prepare_authority()
+            .prepare_plugin_authority(Some(&options))
             .expect("fresh Agent adapter should prepare after cleanup");
 
         assert_eq!(candidate_drops.load(Ordering::SeqCst), 0);
@@ -3379,7 +3629,7 @@ mod tests {
         let factory_lifecycle_trace = Arc::clone(&lifecycle_trace);
         let catalog = PluginFactoryCatalog::try_new([agent_replacement_factory(
             ALTERNATE_AGENT,
-            AgentRuntimeFactory::new(move |_mount| {
+            AgentRuntimeFactory::new(move |_grants| {
                 if observed_constructions.fetch_add(1, Ordering::SeqCst) == 0 {
                     Err("SENSITIVE_AGENT_CONSTRUCTION_FAILURE".to_string())
                 } else {
@@ -3452,6 +3702,69 @@ mod tests {
     }
 
     #[test]
+    fn native_factory_rejects_missing_descriptor_grant_before_authority_commit() {
+        const INCOMPLETE_NATIVE: &str = "incomplete-native-agent-loop";
+        let mut options = AppRuntimeOptions::default();
+        let mut components =
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+        let old_desired = components.plugin_loader.desired().clone();
+        let construction_attempts = Arc::new(AtomicUsize::new(0));
+        let observed_attempts = Arc::clone(&construction_attempts);
+        let descriptor = builtin_descriptor(INCOMPLETE_NATIVE, "Incomplete Native Agent")
+            .requires(RUNTIME_EVENT_STREAM.capability)
+            .requires(LLM_PORT.capability)
+            .requires(MODEL_CATALOG.capability)
+            .requires(PERMISSION_POLICY.capability)
+            .requires(PROMPT_ASSEMBLY.capability)
+            .observes(SESSION_PERSISTENCE.capability);
+        let catalog = PluginFactoryCatalog::try_new([agent_runtime_plugin_factory(
+            descriptor,
+            AgentRuntimeFactory::new(move |grants| {
+                observed_attempts.fetch_add(1, Ordering::SeqCst);
+                construct_native_agent_runtime(grants)
+            }),
+        )])
+        .expect("incomplete Native catalog should validate");
+
+        let error = components
+            .reconcile_plugin_composition_with_catalog(
+                &options,
+                &catalog,
+                desired_with_agent_plugin_for_test(Some(INCOMPLETE_NATIVE)),
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect_err("missing tool grant must reject Native construction");
+
+        assert_eq!(construction_attempts.load(Ordering::SeqCst), 1);
+        assert!(error.contains("authority_preparation"));
+        for payload in [
+            "tool_catalog",
+            "Agent construction grant is unavailable",
+            "Incomplete Native Agent",
+        ] {
+            assert!(
+                !error.contains(payload),
+                "closed construction diagnostics must omit {payload}"
+            );
+        }
+        assert_eq!(components.plugin_loader.desired(), &old_desired);
+        assert_eq!(
+            components
+                .plugin_descriptor_snapshots()
+                .into_iter()
+                .find(|snapshot| snapshot.component_id == AGENT_RUNTIME_COMPONENT)
+                .expect("old Agent descriptor should remain visible")
+                .plugin_type,
+            NATIVE_AGENT_RUNTIME_PLUGIN
+        );
+        assert_eq!(
+            components.lifecycle.state(AGENT_RUNTIME_COMPONENT),
+            Some(ComponentState::Pending),
+            "failed grants must not revive the finalized old Agent"
+        );
+    }
+
+    #[test]
     fn failed_fresh_agent_activation_keeps_fresh_plugin_and_adapter_authority() {
         const ALTERNATE_AGENT: &str = "alternate-agent-rejected";
         let mut options = AppRuntimeOptions::default();
@@ -3465,7 +3778,7 @@ mod tests {
         let factory_lifecycle_trace = Arc::clone(&lifecycle_trace);
         let catalog = PluginFactoryCatalog::try_new([agent_replacement_factory(
             ALTERNATE_AGENT,
-            AgentRuntimeFactory::new(move |_mount| {
+            AgentRuntimeFactory::new(move |_grants| {
                 observed_constructions.fetch_add(1, Ordering::SeqCst);
                 Ok(Box::new(RecordingAgentRuntime::with_shutdown_counter(
                     Arc::clone(&factory_lifecycle_trace),
@@ -3532,7 +3845,7 @@ mod tests {
         let factory_trace = Arc::clone(&lifecycle_trace);
         let mut components = RuntimeComponents::new_with_agent_runtime_factory(
             &mut options,
-            AgentRuntimeFactory::new(move |_mount| {
+            AgentRuntimeFactory::new(move |_grants| {
                 Ok(Box::new(RecordingAgentRuntime::with_shutdown_failure(
                     Arc::clone(&factory_trace),
                 )))
@@ -3572,9 +3885,9 @@ mod tests {
         let mut options = AppRuntimeOptions::default();
         let mut components = RuntimeComponents::new_with_agent_runtime_factory(
             &mut options,
-            AgentRuntimeFactory::new(move |mount| {
+            AgentRuntimeFactory::new(move |grants| {
                 observed_constructions.fetch_add(1, Ordering::SeqCst);
-                construct_native_agent_runtime(mount)
+                construct_native_agent_runtime(grants)
             }),
         )
         .expect("runtime should initialize through the injected Agent plugin factory");
@@ -4361,9 +4674,9 @@ mod tests {
         let factory_attempts = Arc::clone(&construction_attempts);
         let mut components = RuntimeComponents::new_with_agent_runtime_factory(
             &mut options,
-            AgentRuntimeFactory::new(move |mount| {
+            AgentRuntimeFactory::new(move |grants| {
                 if factory_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
-                    construct_native_agent_runtime(mount)
+                    construct_native_agent_runtime(grants)
                 } else {
                     Err("injected Agent plugin mount failure".to_string())
                 }
@@ -4557,11 +4870,11 @@ mod tests {
         let factory_attempts = Arc::clone(&construction_attempts);
         let mut components = RuntimeComponents::new_with_agent_runtime_factory(
             &mut options,
-            AgentRuntimeFactory::new(move |mount| {
+            AgentRuntimeFactory::new(move |grants| {
                 if factory_attempts.fetch_add(1, Ordering::SeqCst) == 1 {
                     Err("injected session Agent plugin mount failure".to_string())
                 } else {
-                    construct_native_agent_runtime(mount)
+                    construct_native_agent_runtime(grants)
                 }
             }),
         )
@@ -4720,9 +5033,9 @@ mod tests {
         let factory_attempts = Arc::clone(&construction_attempts);
         let mut components = RuntimeComponents::new_with_agent_runtime_factory(
             &mut options,
-            AgentRuntimeFactory::new(move |mount| {
+            AgentRuntimeFactory::new(move |grants| {
                 if factory_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
-                    construct_native_agent_runtime(mount)
+                    construct_native_agent_runtime(grants)
                 } else {
                     Err("injected permission Agent plugin mount failure".to_string())
                 }

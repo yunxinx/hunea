@@ -239,11 +239,11 @@ fn composition_snapshot_is_deterministic_and_redacted() {
     assert_eq!(
         names(&snapshot["components"]),
         vec![
+            "agent_runtime",
             "approval_provider",
             "context_budget",
             "llm_port",
             "model_refresh",
-            "native_agent_runtime",
             "permission_policy",
             "prompt_assembly",
             "runtime_event_stream",
@@ -258,7 +258,7 @@ fn composition_snapshot_is_deterministic_and_redacted() {
         ("context_budget", "context-budget"),
         ("llm_port", "openai-compatible-provider-catalog"),
         ("model_refresh", "model-refresh"),
-        ("native_agent_runtime", "native-agent-loop"),
+        ("agent_runtime", "native-agent-loop"),
         ("permission_policy", "permission-policy"),
         ("prompt_assembly", "prompt-assembly"),
         ("runtime_event_stream", "runtime-event-stream"),
@@ -302,8 +302,8 @@ fn composition_snapshot_is_deterministic_and_redacted() {
             "session_persistence",
             "tool_catalog",
             "prompt_assembly",
+            "agent_runtime",
             "context_budget",
-            "native_agent_runtime",
             "ui_runtime_bridge",
         ])
     );
@@ -311,8 +311,8 @@ fn composition_snapshot_is_deterministic_and_redacted() {
         snapshot["deactivation_order"],
         serde_json::json!([
             "ui_runtime_bridge",
-            "native_agent_runtime",
             "context_budget",
+            "agent_runtime",
             "prompt_assembly",
             "tool_catalog",
             "session_persistence",
@@ -368,6 +368,11 @@ fn composition_snapshot_is_deterministic_and_redacted() {
         snapshot["effect_scopes"],
         serde_json::json!([
             {
+                "owner": "agent_runtime",
+                "effects": ["dependency:runtime_event_stream"],
+                "children": [],
+            },
+            {
                 "owner": "approval_provider",
                 "effects": ["approval_provider_registration", "capability:approval_provider"],
                 "children": [],
@@ -384,11 +389,6 @@ fn composition_snapshot_is_deterministic_and_redacted() {
             },
             {
                 "owner": "model_refresh",
-                "effects": ["dependency:runtime_event_stream"],
-                "children": [],
-            },
-            {
-                "owner": "native_agent_runtime",
                 "effects": ["dependency:runtime_event_stream"],
                 "children": [],
             },
@@ -651,10 +651,7 @@ fn ui_runtime_bridge_reacts_to_wake_binding_lifecycle() {
     assert_eq!(snapshot["providers"], serde_json::json!([]));
     assert_eq!(snapshot["approval_providers"], serde_json::json!([]));
     assert_eq!(snapshot["effect_scopes"], serde_json::json!([]));
-    assert_eq!(
-        component_state(&coordinator, "native_agent_runtime"),
-        "disposed"
-    );
+    assert_eq!(component_state(&coordinator, "agent_runtime"), "disposed");
 }
 
 #[test]
@@ -727,15 +724,12 @@ fn reset_replaces_session_component_generations_without_rebuilding_the_ui_bridge
         capability_generation(&after, "runtime_wake"),
         capability_generation(&before, "runtime_wake")
     );
-    assert_eq!(
-        component_state(&coordinator, "native_agent_runtime"),
-        "active"
-    );
+    assert_eq!(component_state(&coordinator, "agent_runtime"), "active");
     assert_eq!(component_state(&coordinator, "ui_runtime_bridge"), "active");
     assert_eq!(after["workspace_tools"], workspace_tools_before);
     assert_eq!(after["session_tools"], session_tools_before);
     assert_eq!(after["effect_scopes"], before["effect_scopes"]);
-    assert!(component_required(&after, "native_agent_runtime").contains(&"llm_port".to_string()));
+    assert!(component_required(&after, "agent_runtime").contains(&"llm_port".to_string()));
     assert_eq!(
         component_required(&after, "model_refresh"),
         vec![

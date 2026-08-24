@@ -15,10 +15,11 @@ impl AppRuntimeCoordinator {
         &mut self,
         retained_user_turns: usize,
     ) -> Result<RuntimeCommandReceipt, String> {
+        self.components.agent_session()?;
         self.ensure_session_mutation_available("truncate conversation")?;
         if let Some((session_id, leaf_id)) = self
             .components
-            .agent_port_mut()
+            .agent_session_mut()?
             .truncate_after_user_turns(retained_user_turns)?
         {
             let views = self.session_views()?;

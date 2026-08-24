@@ -295,6 +295,15 @@ impl AppRuntimeCoordinator {
     }
 
     #[cfg(test)]
+    fn replace_agent_with_replay_for_test(
+        &mut self,
+        fixture: agent::ReplayFixture,
+    ) -> Result<(), String> {
+        self.components
+            .replace_agent_with_replay_for_test(&self.options, fixture)
+    }
+
+    #[cfg(test)]
     pub(crate) fn has_pending_work_for_test(&self) -> bool {
         self.components.agent_port().has_pending_work()
             || self.components.model_refresh.is_running()
@@ -516,7 +525,10 @@ impl AppRuntimeCoordinator {
             match event {
                 SessionStoreWorkerEvent::Runtime { event, .. } => events.push(event),
                 SessionStoreWorkerEvent::Restored { restore, payload } => {
-                    let restore_result = self.components.agent_port_mut().restore_session(restore);
+                    let restore_result = self
+                        .components
+                        .agent_session_mut()
+                        .and_then(|session| session.restore_session(restore));
                     project_session_restore_result(
                         events,
                         restore_result,
@@ -529,7 +541,10 @@ impl AppRuntimeCoordinator {
                     tree_request_id,
                     tree_payload,
                 } => {
-                    let restore_result = self.components.agent_port_mut().restore_session(restore);
+                    let restore_result = self
+                        .components
+                        .agent_session_mut()
+                        .and_then(|session| session.restore_session(restore));
                     project_session_restore_result(
                         events,
                         restore_result,

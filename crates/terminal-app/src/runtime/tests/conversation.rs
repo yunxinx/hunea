@@ -69,7 +69,7 @@ fn reset_discards_a_turn_waiting_for_dynamic_environment() {
         .handle_runtime_command(RuntimeCommand::Reset)
         .expect("reset should be accepted");
 
-    assert!(!coordinator.components.agent_port().is_busy());
+    assert!(!coordinator.components.agent_port().activity().is_busy());
 }
 
 #[test]
@@ -188,7 +188,14 @@ fn unknown_provider_failure_rolls_back_pending_user() {
             .any(|event| matches!(event, RuntimeEvent::Failed { .. })),
         "preflight failure should be reported"
     );
-    assert!(coordinator.components.agent_port().is_history_empty());
+    assert!(
+        coordinator
+            .components
+            .agent_session()
+            .expect("Native Agent should provide session capability")
+            .snapshot()
+            .is_history_empty
+    );
 
     let next_request =
         ConversationTurnRequest::new("local", "qwen3", ConversationItem::text(Role::User, "next"));

@@ -15,6 +15,7 @@ impl AppRuntimeCoordinator {
         request_id: SessionLoadRequestId,
         selection: &ModelSelection,
     ) -> Result<RuntimeCommandReceipt, String> {
+        let snapshot = self.components.agent_session()?.context_budget_snapshot();
         let Some(provider) = self
             .options
             .loaded_models
@@ -24,7 +25,6 @@ impl AppRuntimeCoordinator {
             self.context_budget_unknown_provider_event(request_id, selection.provider_id.clone());
             return Ok(RuntimeCommandReceipt::Accepted);
         };
-        let snapshot = self.components.agent_port().context_budget_snapshot();
         if let Err(error) =
             self.components
                 .context_budget_worker

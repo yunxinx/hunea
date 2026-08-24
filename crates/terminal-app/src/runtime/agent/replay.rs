@@ -1,4 +1,10 @@
-use std::{collections::VecDeque, sync::Arc};
+use std::{
+    collections::VecDeque,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use runtime_domain::{
     event_notifier::RuntimeEventNotifier,
@@ -7,27 +13,28 @@ use runtime_domain::{
 
 use super::{
     AgentCommand, AgentCommandReceipt, AgentEvent, AgentEventKind, AgentId, AgentRuntime,
-    AgentRuntimeError, AgentTurnId,
+    AgentRuntimeActivity, AgentRuntimeError, AgentRuntimePort, AgentTurnId,
 };
+use crate::runtime::context::{CapabilityLease, RuntimeEventStreamCapability};
 
 /// 一个只在测试中使用的、经过校验的 Agent fact 序列。
 #[derive(Clone)]
-pub(super) struct ReplayFixture {
+pub(in crate::runtime) struct ReplayFixture {
     facts: Arc<[AgentEventKind]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub(super) enum ReplayFixtureError {
+pub(in crate::runtime) enum ReplayFixtureError {
     #[error("replay fixture must contain exactly one terminal fact")]
     MissingOrMultipleTerminalFacts,
     #[error("replay fixture cannot contain facts after its terminal fact")]
     TerminalFactIsNotLast,
-    #[error("replay fixture repeats permission request id {0}")]
-    DuplicatePermissionRequest(String),
+    #[error("replay fixture repeats a permission request id")]
+    DuplicatePermissionRequest,
 }
 
 impl ReplayFixture {
-    pub(super) fn new(facts: Vec<AgentEventKind>) -> Result<Self, ReplayFixtureError> {
+    pub(in crate::runtime) fn new(facts: Vec<AgentEventKind>) -> Result<Self, ReplayFixtureError> {
         let terminal_indices = facts
             .iter()
             .enumerate()
@@ -45,15 +52,44 @@ impl ReplayFixture {
             if let AgentEventKind::PermissionRequested { request } = fact
                 && !permission_ids.insert(request.request_id.clone())
             {
-                return Err(ReplayFixtureError::DuplicatePermissionRequest(
-                    request.request_id.clone(),
-                ));
+                return Err(ReplayFixtureError::DuplicatePermissionRequest);
             }
         }
 
         Ok(Self {
             facts: Arc::from(facts.into_boxed_slice()),
         })
+    }
+}
+
+/// Replay owner 的 test-only lifecycle 计数；不保存 fixture 或 runtime payload。
+#[derive(Default)]
+pub(in crate::runtime) struct ReplayLifecycleProbe {
+    constructions: AtomicUsize,
+    activations: AtomicUsize,
+    shutdowns: AtomicUsize,
+    drops: AtomicUsize,
+}
+
+impl ReplayLifecycleProbe {
+    pub(in crate::runtime) fn record_construction(&self) {
+        self.constructions.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(in crate::runtime) fn constructions(&self) -> usize {
+        self.constructions.load(Ordering::SeqCst)
+    }
+
+    pub(in crate::runtime) fn activations(&self) -> usize {
+        self.activations.load(Ordering::SeqCst)
+    }
+
+    pub(in crate::runtime) fn shutdowns(&self) -> usize {
+        self.shutdowns.load(Ordering::SeqCst)
+    }
+
+    pub(in crate::runtime) fn drops(&self) -> usize {
+        self.drops.load(Ordering::SeqCst)
     }
 }
 
@@ -64,18 +100,24 @@ struct ReplayTurnIdentity {
 }
 
 /// 只回放 typed Agent facts 的第二个 adapter；它不启动 producer，也不触碰 native resources。
-pub(super) struct ReplayAgentRuntime {
+pub(in crate::runtime) struct ReplayAgentRuntime {
     fixture: ReplayFixture,
     event_notifier: RuntimeEventNotifier,
     active_turn: Option<ReplayTurnIdentity>,
     remaining_facts: VecDeque<AgentEventKind>,
     pending_events: VecDeque<AgentEvent>,
     pending_permission: Option<RuntimePermissionRequest>,
+    event_stream: Option<CapabilityLease<RuntimeEventStreamCapability>>,
+    lifecycle_probe: Option<Arc<ReplayLifecycleProbe>>,
     is_shutdown: bool,
+    is_finalized: bool,
 }
 
 impl ReplayAgentRuntime {
-    pub(super) fn new(fixture: ReplayFixture, event_notifier: RuntimeEventNotifier) -> Self {
+    pub(in crate::runtime) fn new(
+        fixture: ReplayFixture,
+        event_notifier: RuntimeEventNotifier,
+    ) -> Self {
         Self {
             fixture,
             event_notifier,
@@ -83,8 +125,21 @@ impl ReplayAgentRuntime {
             remaining_facts: VecDeque::new(),
             pending_events: VecDeque::new(),
             pending_permission: None,
+            event_stream: None,
+            lifecycle_probe: None,
             is_shutdown: false,
+            is_finalized: false,
         }
+    }
+
+    pub(in crate::runtime) fn new_with_lifecycle_probe(
+        fixture: ReplayFixture,
+        event_notifier: RuntimeEventNotifier,
+        lifecycle_probe: Arc<ReplayLifecycleProbe>,
+    ) -> Self {
+        let mut runtime = Self::new(fixture, event_notifier);
+        runtime.lifecycle_probe = Some(lifecycle_probe);
+        runtime
     }
 
     fn ensure_agent(&self, agent_id: AgentId) -> Result<(), AgentRuntimeError> {
@@ -128,8 +183,24 @@ impl ReplayAgentRuntime {
 
     fn notify_if_ready(&self, had_pending_events: bool) {
         if !had_pending_events && !self.pending_events.is_empty() {
+            self.notify();
+        }
+    }
+
+    fn notify(&self) {
+        if let Some(event_stream) = &self.event_stream {
+            event_stream.notify();
+        } else {
             self.event_notifier.notify();
         }
+    }
+
+    fn clear_active_state(&mut self) {
+        self.active_turn = None;
+        self.remaining_facts.clear();
+        self.pending_events.clear();
+        self.pending_permission = None;
+        self.event_stream = None;
     }
 
     fn interrupt(
@@ -155,7 +226,7 @@ impl ReplayAgentRuntime {
         self.pending_events.clear();
         self.pending_permission = None;
         self.pending_events.push_back(interrupted);
-        self.event_notifier.notify();
+        self.notify();
         Ok(AgentCommandReceipt::Interrupted {
             target: Some(active_target),
         })
@@ -257,15 +328,76 @@ impl AgentRuntime for ReplayAgentRuntime {
     }
 
     fn shutdown(&mut self) -> Result<(), AgentRuntimeError> {
-        if self.is_shutdown {
+        if self.is_finalized {
+            return Ok(());
+        }
+        if let Some(probe) = &self.lifecycle_probe {
+            probe.shutdowns.fetch_add(1, Ordering::SeqCst);
+        }
+        self.is_finalized = true;
+        self.is_shutdown = true;
+        self.clear_active_state();
+        Ok(())
+    }
+}
+
+impl AgentRuntimePort for ReplayAgentRuntime {
+    fn activate(
+        &mut self,
+        event_stream: CapabilityLease<RuntimeEventStreamCapability>,
+    ) -> Result<(), String> {
+        if self.is_finalized {
+            return Err("Agent adapter is finalized".to_string());
+        }
+        if self.active_turn.is_some() {
+            return Err("Cannot replace runtime event stream while Agent is busy".to_string());
+        }
+        self.event_stream = Some(event_stream);
+        self.is_shutdown = false;
+        if let Some(probe) = &self.lifecycle_probe {
+            probe.activations.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+
+    fn suspend(&mut self) -> Result<(), AgentRuntimeError> {
+        if self.is_finalized || self.is_shutdown {
             return Ok(());
         }
         self.is_shutdown = true;
-        self.active_turn = None;
-        self.remaining_facts.clear();
-        self.pending_events.clear();
-        self.pending_permission = None;
+        self.clear_active_state();
         Ok(())
+    }
+
+    fn activity(&self) -> AgentRuntimeActivity {
+        if self.active_turn.is_some() {
+            AgentRuntimeActivity::Busy
+        } else {
+            AgentRuntimeActivity::Idle
+        }
+    }
+
+    fn session(&self) -> Option<&dyn super::AgentSessionCapability> {
+        None
+    }
+
+    fn session_mut(&mut self) -> Option<&mut dyn super::AgentSessionCapability> {
+        None
+    }
+
+    fn has_pending_work(&self) -> bool {
+        self.active_turn.is_some()
+            || !self.remaining_facts.is_empty()
+            || !self.pending_events.is_empty()
+            || self.pending_permission.is_some()
+    }
+}
+
+impl Drop for ReplayAgentRuntime {
+    fn drop(&mut self) {
+        if let Some(probe) = &self.lifecycle_probe {
+            probe.drops.fetch_add(1, Ordering::SeqCst);
+        }
     }
 }
 

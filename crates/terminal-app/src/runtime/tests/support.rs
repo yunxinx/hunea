@@ -41,7 +41,8 @@ pub(super) fn agent_conversation_items(
 ) -> Vec<ConversationItem> {
     coordinator
         .components
-        .agent_port()
+        .agent_session()
+        .expect("Native Agent should provide session capability")
         .context_budget_snapshot()
         .items
         .iter()
@@ -60,7 +61,8 @@ pub(super) fn agent_history_texts(coordinator: &AppRuntimeCoordinator) -> Vec<St
 pub(super) fn agent_system_prompt(coordinator: &AppRuntimeCoordinator) -> Option<String> {
     coordinator
         .components
-        .agent_port()
+        .agent_session()
+        .expect("Native Agent should provide session capability")
         .context_budget_snapshot()
         .items
         .iter()
@@ -73,7 +75,8 @@ pub(super) fn agent_prompt_prelude(
 ) -> Option<runtime_domain::prompt_assembly::PromptPreludeSnapshot> {
     coordinator
         .components
-        .agent_port()
+        .agent_session()
+        .expect("Native Agent should provide session capability")
         .context_budget_snapshot()
         .prompt_prelude
 }

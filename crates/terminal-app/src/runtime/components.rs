@@ -11,7 +11,8 @@ use tool_runtime::{ToolCatalog, ToolExecutorRegistry, ToolRegistration};
 use super::{
     AppRuntimeOptions,
     agent::{
-        AgentRuntimeFactory, AgentRuntimeMount, AgentRuntimePort, construct_native_agent_runtime,
+        AgentRuntimeFactory, AgentRuntimeMount, AgentRuntimePort, AgentSessionCapability,
+        construct_native_agent_runtime,
     },
     context::{
         ApprovalProviderCapability, CapabilityLease, ComponentActivationContext, LlmPortCapability,
@@ -44,6 +45,9 @@ use super::{
     workspace_tools::conversation_workspace_tool_catalog,
 };
 use runtime_domain::runtime_wake::RuntimeWake;
+
+#[cfg(test)]
+use super::agent::{ReplayFixture, ReplayLifecycleProbe};
 
 #[derive(Clone, Copy)]
 struct CapabilityOwner {
@@ -88,7 +92,7 @@ const TOOL_CATALOG: CapabilityOwner = CapabilityOwner {
     capability: "tool_catalog",
 };
 
-const NATIVE_AGENT_RUNTIME_COMPONENT: &str = "native_agent_runtime";
+const AGENT_RUNTIME_COMPONENT: &str = "agent_runtime";
 const MODEL_REFRESH_COMPONENT: &str = "model_refresh";
 const CONTEXT_BUDGET_COMPONENT: &str = "context_budget";
 const UI_RUNTIME_BRIDGE_COMPONENT: &str = "ui_runtime_bridge";
@@ -235,7 +239,7 @@ fn builtin_desired_composition() -> Result<DesiredPluginComposition, PluginCatal
         desired_builtin(TOOL_CATALOG.component_id, TOOL_CATALOG_PLUGIN),
         desired_builtin(PERMISSION_POLICY.component_id, PERMISSION_POLICY_PLUGIN),
         desired_builtin(PROMPT_ASSEMBLY.component_id, PROMPT_ASSEMBLY_PLUGIN),
-        desired_builtin(NATIVE_AGENT_RUNTIME_COMPONENT, NATIVE_AGENT_RUNTIME_PLUGIN),
+        desired_builtin(AGENT_RUNTIME_COMPONENT, NATIVE_AGENT_RUNTIME_PLUGIN),
         desired_builtin(MODEL_REFRESH_COMPONENT, MODEL_REFRESH_PLUGIN),
         desired_builtin(CONTEXT_BUDGET_COMPONENT, CONTEXT_BUDGET_PLUGIN),
         desired_builtin(UI_RUNTIME_BRIDGE_COMPONENT, UI_RUNTIME_BRIDGE_PLUGIN),
@@ -267,6 +271,33 @@ fn agent_runtime_plugin_factory(
             .expect("builtin plugin descriptor must be valid"),
         move || Ok(implementation.clone()),
     )
+}
+
+#[cfg(test)]
+fn replay_agent_replacement_factory(
+    plugin_type: &'static str,
+    fixture: ReplayFixture,
+    lifecycle_probe: Option<Arc<ReplayLifecycleProbe>>,
+) -> PluginFactory<RuntimePluginImplementation> {
+    agent_runtime_plugin_factory(
+        builtin_descriptor(plugin_type, "Replay Agent loop")
+            .requires(RUNTIME_EVENT_STREAM.capability),
+        AgentRuntimeFactory::replay(fixture, lifecycle_probe),
+    )
+}
+
+#[cfg(test)]
+fn desired_with_agent_plugin_for_test(
+    plugin_type: Option<&'static str>,
+) -> DesiredPluginComposition {
+    let desired = builtin_desired_composition().expect("builtin desired state should validate");
+    DesiredPluginComposition::try_new(desired.iter().filter_map(|(component_id, current_type)| {
+        if component_id.as_str() != AGENT_RUNTIME_COMPONENT {
+            return Some((component_id.as_str(), current_type.clone()));
+        }
+        plugin_type.map(|plugin_type| (component_id.as_str(), builtin_plugin_type(plugin_type)))
+    }))
+    .expect("Agent replacement desired state should validate")
 }
 
 fn builtin_plugin_catalog()
@@ -459,7 +490,7 @@ fn construct_committed_agent_runtime(
     mount: AgentRuntimeMount,
 ) -> Result<Box<dyn AgentRuntimePort>, String> {
     let implementation = plugins
-        .implementation(NATIVE_AGENT_RUNTIME_COMPONENT)
+        .implementation(AGENT_RUNTIME_COMPONENT)
         .ok_or_else(|| "Agent component has no committed plugin implementation".to_string())?;
     construct_agent_runtime(implementation, mount)
 }
@@ -486,9 +517,44 @@ impl RuntimeComponents {
         &mut *self.agent_runtime
     }
 
+    pub(super) fn agent_session(&self) -> Result<&dyn AgentSessionCapability, String> {
+        self.agent_runtime
+            .session()
+            .ok_or_else(|| "Agent adapter does not provide session capability".to_string())
+    }
+
+    pub(super) fn agent_session_mut(&mut self) -> Result<&mut dyn AgentSessionCapability, String> {
+        self.agent_runtime
+            .session_mut()
+            .ok_or_else(|| "Agent adapter does not provide session capability".to_string())
+    }
+
+    #[cfg(test)]
+    pub(super) fn replace_agent_with_replay_for_test(
+        &mut self,
+        options: &AppRuntimeOptions,
+        fixture: ReplayFixture,
+    ) -> Result<(), String> {
+        const REPLAY_AGENT: &str = "replay-agent-loop";
+        let catalog = PluginFactoryCatalog::try_new([replay_agent_replacement_factory(
+            REPLAY_AGENT,
+            fixture,
+            None,
+        )])
+        .map_err(|error| error.to_string())?;
+        self.reconcile_plugin_composition_with_catalog(
+            options,
+            &catalog,
+            desired_with_agent_plugin_for_test(Some(REPLAY_AGENT)),
+            ComponentLifecycleMode::Reconfigure,
+        )
+    }
+
     #[cfg(test)]
     pub(super) fn agent_test_harness(&mut self) -> &mut dyn super::agent::AgentRuntimeTestHarness {
         self.agent_runtime
+            .session_mut()
+            .expect("runtime test requires an Agent session capability")
             .test_harness()
             .expect("runtime test requires an Agent fixture harness")
     }
@@ -496,6 +562,8 @@ impl RuntimeComponents {
     #[cfg(test)]
     pub(super) fn agent_test_harness_ref(&self) -> &dyn super::agent::AgentRuntimeTestHarness {
         self.agent_runtime
+            .session()
+            .expect("runtime test requires an Agent session capability")
             .test_harness_ref()
             .expect("runtime test requires an Agent fixture harness")
     }
@@ -809,12 +877,12 @@ impl RuntimeComponents {
     ) -> Result<PreparedAgentRuntimeCommit, String> {
         let desired_type = desired
             .iter()
-            .find(|(component_id, _)| component_id.as_str() == NATIVE_AGENT_RUNTIME_COMPONENT)
+            .find(|(component_id, _)| component_id.as_str() == AGENT_RUNTIME_COMPONENT)
             .map(|(_, plugin_type)| plugin_type);
         let observed = self.plugins.observed();
         let observed_type = observed
             .iter()
-            .find(|(component_id, _)| component_id.as_str() == NATIVE_AGENT_RUNTIME_COMPONENT)
+            .find(|(component_id, _)| component_id.as_str() == AGENT_RUNTIME_COMPONENT)
             .map(|(_, plugin_type)| plugin_type);
         match classify_agent_plugin_reconciliation(observed_type, desired_type)? {
             AgentPluginReconciliation::Keep => Ok(PreparedAgentRuntimeCommit::Keep),
@@ -1070,19 +1138,13 @@ impl RuntimeComponents {
                     SESSION_PERSISTENCE.component_id,
                     CapabilityKey::from(SESSION_PERSISTENCE.capability),
                 )],
-                [
-                    SESSION_PERSISTENCE.component_id,
-                    NATIVE_AGENT_RUNTIME_COMPONENT,
-                ],
+                [SESSION_PERSISTENCE.component_id, AGENT_RUNTIME_COMPONENT],
             )
             .map_err(|error| error.to_string())?;
         self.activation_staging.is_session_backend_replacement = true;
         if let Err(error) = self.with_lifecycle(|lifecycle, components| {
             lifecycle.deactivate_components(
-                [
-                    NATIVE_AGENT_RUNTIME_COMPONENT,
-                    SESSION_PERSISTENCE.component_id,
-                ],
+                [AGENT_RUNTIME_COMPONENT, SESSION_PERSISTENCE.component_id],
                 components,
                 ComponentLifecycleMode::Reconfigure,
             )
@@ -1127,10 +1189,7 @@ impl RuntimeComponents {
         self.activation_staging.session_backend_registration = fresh_registration;
         self.with_lifecycle(|lifecycle, components| {
             lifecycle.activate_components(
-                [
-                    SESSION_PERSISTENCE.component_id,
-                    NATIVE_AGENT_RUNTIME_COMPONENT,
-                ],
+                [SESSION_PERSISTENCE.component_id, AGENT_RUNTIME_COMPONENT],
                 components,
                 ComponentLifecycleMode::Reconfigure,
             )
@@ -1183,7 +1242,7 @@ impl RuntimeComponents {
         self.session_store_worker = SessionStoreWorker::default();
         self.with_lifecycle(|lifecycle, components| {
             lifecycle.activate_components(
-                [NATIVE_AGENT_RUNTIME_COMPONENT],
+                [AGENT_RUNTIME_COMPONENT],
                 components,
                 ComponentLifecycleMode::Reconfigure,
             )
@@ -1667,7 +1726,7 @@ impl ComponentLifecycleCallbacks for RuntimeComponents {
                         .ok_or_else(|| "Agent adapter mount is no longer available".to_string())?;
                     let implementation = prepared
                         .reconciliation
-                        .prospective_implementation(&self.plugins, NATIVE_AGENT_RUNTIME_COMPONENT)
+                        .prospective_implementation(&self.plugins, AGENT_RUNTIME_COMPONENT)
                         .ok_or_else(|| {
                             "Agent replacement has no prospective plugin implementation".to_string()
                         })?;
@@ -1740,15 +1799,14 @@ impl ComponentLifecycleCallbacks for RuntimeComponents {
         #[cfg(test)]
         self.record_plugin_transaction_event(format!("quiesce:{component_id}"));
         let plugin_result = implementation.quiesce(self, mode);
-        let finalization_result = if component_id == NATIVE_AGENT_RUNTIME_COMPONENT
-            && self.is_agent_replacement_activating
-        {
-            self.finalize_agent_runtime_replacement()
-        } else {
-            Ok(())
-        };
+        let finalization_result =
+            if component_id == AGENT_RUNTIME_COMPONENT && self.is_agent_replacement_activating {
+                self.finalize_agent_runtime_replacement()
+            } else {
+                Ok(())
+            };
         if finalization_result.is_ok()
-            && component_id == NATIVE_AGENT_RUNTIME_COMPONENT
+            && component_id == AGENT_RUNTIME_COMPONENT
             && self.is_agent_replacement_activating
         {
             self.is_agent_replacement_activating = false;
@@ -1882,7 +1940,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::runtime::agent::{AgentContextBudgetSnapshot, AgentSessionRestore};
+    use crate::runtime::agent::{AgentRuntimeActivity, AgentSessionRestore};
     use crate::runtime::lifecycle::{ComponentDefinition, ComponentState};
     use extension_protocol::{
         ExtensionCapability, ExtensionMethod, ExtensionRequest, ExtensionResponse,
@@ -1893,7 +1951,8 @@ mod tests {
         ExtensionToolClient, ExtensionToolOptions, ExtensionToolSetSource, ExtensionTransportError,
     };
     use runtime_domain::agent::{
-        AgentCommand, AgentCommandReceipt, AgentEvent, AgentRuntime, AgentRuntimeError,
+        AgentCommand, AgentCommandReceipt, AgentEvent, AgentEventKind, AgentId, AgentRuntime,
+        AgentRuntimeError, AgentTurnId, AgentTurnRequest,
     };
     use runtime_domain::prompt_assembly::{
         PromptPreludeSection, PromptSourceKind, PromptSourceOrigin,
@@ -2021,7 +2080,8 @@ mod tests {
 
     fn agent_system_prompt(components: &RuntimeComponents) -> Option<String> {
         components
-            .agent_port()
+            .agent_session()
+            .expect("Native Agent should provide session capability")
             .context_budget_snapshot()
             .items
             .iter()
@@ -2169,47 +2229,16 @@ mod tests {
             Ok(())
         }
 
-        fn is_busy(&self) -> bool {
-            false
+        fn activity(&self) -> AgentRuntimeActivity {
+            AgentRuntimeActivity::Idle
         }
 
-        fn session_id(&self) -> Option<session_store::SessionId> {
+        fn session(&self) -> Option<&dyn AgentSessionCapability> {
             None
         }
 
-        fn is_history_empty(&self) -> bool {
-            true
-        }
-
-        fn is_idle_empty_session(&self) -> bool {
-            !self.is_shutdown
-        }
-
-        fn truncate_after_user_turns(
-            &mut self,
-            _retained_user_turns: usize,
-        ) -> Result<Option<(session_store::SessionId, String)>, String> {
-            Ok(None)
-        }
-
-        fn context_budget_snapshot(&self) -> AgentContextBudgetSnapshot {
-            AgentContextBudgetSnapshot {
-                items: Arc::from([]),
-                prompt_prelude: None,
-                upstream_context_tokens: None,
-                tool_definitions: Vec::new(),
-            }
-        }
-
-        fn update_empty_session_configuration(
-            &mut self,
-            _prompt_assembly: crate::runtime::prompt_assembly::PromptAssemblySessionSnapshot,
-            _session_workspace_tools: ToolExecutorRegistry,
-        ) {
-        }
-
-        fn restore_session(&mut self, _restore: AgentSessionRestore) -> Result<(), String> {
-            Ok(())
+        fn session_mut(&mut self) -> Option<&mut dyn AgentSessionCapability> {
+            None
         }
 
         fn has_pending_work(&self) -> bool {
@@ -2245,7 +2274,7 @@ mod tests {
         components
             .with_lifecycle(|lifecycle, components| {
                 lifecycle.deactivate_components(
-                    [NATIVE_AGENT_RUNTIME_COMPONENT],
+                    [AGENT_RUNTIME_COMPONENT],
                     components,
                     ComponentLifecycleMode::Reconfigure,
                 )
@@ -2256,12 +2285,26 @@ mod tests {
         components
             .with_lifecycle(|lifecycle, components| {
                 lifecycle.activate_components(
-                    [NATIVE_AGENT_RUNTIME_COMPONENT],
+                    [AGENT_RUNTIME_COMPONENT],
                     components,
                     ComponentLifecycleMode::Reconfigure,
                 )
             })
             .expect("recording Agent should activate through the lifecycle port");
+        let unavailable = match components.agent_session_mut() {
+            Ok(_) => panic!("recording Agent must not fabricate a session capability"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            unavailable,
+            "Agent adapter does not provide session capability"
+        );
+        assert_eq!(
+            components.agent_port().activity(),
+            AgentRuntimeActivity::Idle
+        );
+        assert!(!components.agent_port().has_pending_work());
+        assert!(components.agent_port_mut().drain_events().is_empty());
         components
             .with_lifecycle(|lifecycle, components| {
                 lifecycle.deactivate_components(
@@ -2300,6 +2343,19 @@ mod tests {
             .map(|(production, _)| production)
             .expect("components source should keep tests behind cfg(test)");
         let native_source = include_str!("agent/native.rs");
+        let inspection_source = include_str!("tests/inspection.rs");
+        let legacy_agent_slot = ["native", "_agent_runtime"].concat();
+        for runtime_source in [source, inspection_source] {
+            for legacy_projection in [
+                format!("\"{legacy_agent_slot}\""),
+                format!("`{legacy_agent_slot}`"),
+            ] {
+                assert!(
+                    !runtime_source.contains(&legacy_projection),
+                    "runtime source must not retain legacy Agent slot {legacy_projection}"
+                );
+            }
+        }
         let concrete_owner = ["agent_runtime: ", "NativeAgentRuntime"].concat();
         let concrete_constructor = ["NativeAgentRuntime", "::new("].concat();
         let plugin_factory_wiring = [
@@ -2321,6 +2377,42 @@ mod tests {
             "replacement transaction",
         ]
         .concat();
+        let recording_port_source = source
+            .split_once("impl AgentRuntimePort for RecordingAgentRuntime {")
+            .and_then(|(_, tail)| tail.split_once("impl Drop for RecordingAgentRuntime"))
+            .map(|(implementation, _)| implementation)
+            .expect("recording Agent port implementation should remain inspectable");
+        for removed_stub in [
+            "fn session_id(",
+            "fn is_history_empty(",
+            "fn context_budget_snapshot(",
+            "fn restore_session(",
+        ] {
+            assert!(
+                !recording_port_source.contains(removed_stub),
+                "recording Agent must not recreate removed stub {removed_stub}"
+            );
+        }
+        let replay_factory_start = ["fn replay_agent_", "replacement_factory("].concat();
+        let replay_factory_end = ["fn desired_with_", "agent_plugin_for_test("].concat();
+        let replay_factory_source = source
+            .split_once(&replay_factory_start)
+            .and_then(|(_, tail)| tail.split_once(&replay_factory_end))
+            .map(|(factory, _)| factory)
+            .expect("Replay Agent factory should remain inspectable");
+        assert!(replay_factory_source.contains("agent_runtime_plugin_factory("));
+        assert!(replay_factory_source.contains(".requires(RUNTIME_EVENT_STREAM.capability)"));
+        for forbidden in [
+            "NativeAgentRuntime",
+            "construct_native_agent_runtime",
+            "components.agent_runtime =",
+            "downcast",
+        ] {
+            assert!(
+                !replay_factory_source.contains(forbidden),
+                "Replay factory must not bypass plugin ownership through {forbidden}"
+            );
+        }
 
         assert_eq!(
             production_source
@@ -2439,20 +2531,6 @@ mod tests {
         desired_with_runtime_event_plugin_in_order(plugin_type, false)
     }
 
-    fn desired_with_agent_plugin(plugin_type: Option<&'static str>) -> DesiredPluginComposition {
-        let desired = builtin_desired_composition().expect("builtin desired state should validate");
-        DesiredPluginComposition::try_new(desired.iter().filter_map(
-            |(component_id, current_type)| {
-                if component_id.as_str() != NATIVE_AGENT_RUNTIME_COMPONENT {
-                    return Some((component_id.as_str(), current_type.clone()));
-                }
-                plugin_type
-                    .map(|plugin_type| (component_id.as_str(), builtin_plugin_type(plugin_type)))
-            },
-        ))
-        .expect("Agent replacement desired state should validate")
-    }
-
     fn desired_with_runtime_event_plugin_in_order(
         plugin_type: &'static str,
         reverse: bool,
@@ -2559,11 +2637,11 @@ mod tests {
                 })
                 .collect::<Vec<_>>(),
             vec![
+                (AGENT_RUNTIME_COMPONENT, NATIVE_AGENT_RUNTIME_PLUGIN),
                 (APPROVAL_PROVIDER.component_id, APPROVAL_PROVIDER_PLUGIN),
                 (CONTEXT_BUDGET_COMPONENT, CONTEXT_BUDGET_PLUGIN),
                 (LLM_PORT.component_id, LLM_PORT_PLUGIN),
                 (MODEL_REFRESH_COMPONENT, MODEL_REFRESH_PLUGIN),
-                (NATIVE_AGENT_RUNTIME_COMPONENT, NATIVE_AGENT_RUNTIME_PLUGIN),
                 (PERMISSION_POLICY.component_id, PERMISSION_POLICY_PLUGIN),
                 (PROMPT_ASSEMBLY.component_id, PROMPT_ASSEMBLY_PLUGIN),
                 (
@@ -2580,6 +2658,15 @@ mod tests {
         assert_eq!(
             composition.definitions(),
             vec![
+                ComponentDefinition::new(AGENT_RUNTIME_COMPONENT)
+                    .implemented_by(NATIVE_AGENT_RUNTIME_PLUGIN)
+                    .requires(RUNTIME_EVENT_STREAM.capability)
+                    .requires(LLM_PORT.capability)
+                    .requires(MODEL_CATALOG.capability)
+                    .requires(PERMISSION_POLICY.capability)
+                    .requires(PROMPT_ASSEMBLY.capability)
+                    .requires(TOOL_CATALOG.capability)
+                    .observes(SESSION_PERSISTENCE.capability),
                 ComponentDefinition::new(APPROVAL_PROVIDER.component_id)
                     .implemented_by(APPROVAL_PROVIDER_PLUGIN)
                     .provides(APPROVAL_PROVIDER.capability),
@@ -2599,15 +2686,6 @@ mod tests {
                     .requires(RUNTIME_EVENT_STREAM.capability)
                     .requires(LLM_PORT.capability)
                     .requires(MODEL_CATALOG.capability),
-                ComponentDefinition::new(NATIVE_AGENT_RUNTIME_COMPONENT)
-                    .implemented_by(NATIVE_AGENT_RUNTIME_PLUGIN)
-                    .requires(RUNTIME_EVENT_STREAM.capability)
-                    .requires(LLM_PORT.capability)
-                    .requires(MODEL_CATALOG.capability)
-                    .requires(PERMISSION_POLICY.capability)
-                    .requires(PROMPT_ASSEMBLY.capability)
-                    .requires(TOOL_CATALOG.capability)
-                    .observes(SESSION_PERSISTENCE.capability),
                 ComponentDefinition::new(PERMISSION_POLICY.component_id)
                     .implemented_by(PERMISSION_POLICY_PLUGIN)
                     .requires(APPROVAL_PROVIDER.capability)
@@ -2796,7 +2874,7 @@ mod tests {
         let error = components
             .reconcile_plugin_composition(
                 &options,
-                desired_with_agent_plugin(None),
+                desired_with_agent_plugin_for_test(None),
                 ComponentLifecycleMode::Reconfigure,
             )
             .expect_err("Agent Remove must fail before runtime mutation");
@@ -2855,7 +2933,7 @@ mod tests {
             .reconcile_plugin_composition_with_catalog(
                 &options,
                 &catalog,
-                desired_with_agent_plugin(Some(ALTERNATE_AGENT)),
+                desired_with_agent_plugin_for_test(Some(ALTERNATE_AGENT)),
                 ComponentLifecycleMode::Reconfigure,
             )
             .expect("Agent replacement should commit and activate");
@@ -2875,11 +2953,11 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
             [
                 format!("prepare:{ALTERNATE_AGENT}"),
-                format!("quiesce:{NATIVE_AGENT_RUNTIME_COMPONENT}"),
+                format!("quiesce:{AGENT_RUNTIME_COMPONENT}"),
                 format!("construct:{ALTERNATE_AGENT}"),
                 "prepare:authority".to_string(),
                 "authority:commit".to_string(),
-                format!("activate:{NATIVE_AGENT_RUNTIME_COMPONENT}"),
+                format!("activate:{AGENT_RUNTIME_COMPONENT}"),
             ]
         );
         assert_eq!(
@@ -2892,7 +2970,7 @@ mod tests {
             components
                 .plugin_descriptor_snapshots()
                 .into_iter()
-                .find(|snapshot| snapshot.component_id == NATIVE_AGENT_RUNTIME_COMPONENT)
+                .find(|snapshot| snapshot.component_id == AGENT_RUNTIME_COMPONENT)
                 .expect("Agent descriptor should remain visible")
                 .plugin_type,
             ALTERNATE_AGENT
@@ -2902,21 +2980,223 @@ mod tests {
                 .plugin_loader
                 .desired()
                 .iter()
-                .find(|(component_id, _)| {
-                    component_id.as_str() == NATIVE_AGENT_RUNTIME_COMPONENT
-                })
+                .find(|(component_id, _)| { component_id.as_str() == AGENT_RUNTIME_COMPONENT })
                 .expect("desired composition should retain Agent slot")
                 .1
                 .as_str(),
             ALTERNATE_AGENT
         );
         assert_eq!(
-            components.lifecycle.state(NATIVE_AGENT_RUNTIME_COMPONENT),
+            components.lifecycle.state(AGENT_RUNTIME_COMPONENT),
             Some(ComponentState::Active)
         );
         components
             .validate_context_alignment()
             .expect("fresh Agent plugin, graph, and Context should align");
+    }
+
+    #[test]
+    fn replay_agent_uses_the_plugin_owner_and_reactive_lifecycle() {
+        const REPLAY_AGENT: &str = "replay-agent-loop";
+        let replay_fixture = ReplayFixture::new(vec![
+            AgentEventKind::AssistantDelta {
+                content: "replayed through composition".to_string(),
+            },
+            AgentEventKind::TurnFinished {
+                response: runtime_domain::session::ConversationResponse::assistant_text(
+                    "replayed through composition",
+                ),
+                metrics: None,
+                context_usage: None,
+            },
+        ])
+        .expect("Replay fixture should validate");
+        let replay_lifecycle = Arc::new(ReplayLifecycleProbe::default());
+        let catalog = PluginFactoryCatalog::try_new([replay_agent_replacement_factory(
+            REPLAY_AGENT,
+            replay_fixture,
+            Some(Arc::clone(&replay_lifecycle)),
+        )])
+        .expect("Replay Agent catalog should validate");
+        let mut options = AppRuntimeOptions::default();
+        let mut components =
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+
+        components
+            .reconcile_plugin_composition_with_catalog(
+                &options,
+                &catalog,
+                desired_with_agent_plugin_for_test(Some(REPLAY_AGENT)),
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect("Replay Agent should replace Native through plugin reconciliation");
+
+        let agent = components
+            .lifecycle
+            .components()
+            .into_iter()
+            .find(|component| component.id == AGENT_RUNTIME_COMPONENT)
+            .expect("Agent component should remain declared");
+        assert_eq!(agent.required, [RUNTIME_EVENT_STREAM.capability]);
+        assert!(agent.optional.is_empty());
+        assert_eq!(
+            components.lifecycle.state(AGENT_RUNTIME_COMPONENT),
+            Some(ComponentState::Active)
+        );
+        assert_eq!(replay_lifecycle.constructions(), 1);
+        assert_eq!(replay_lifecycle.activations(), 1);
+        let restore_materialized = Arc::new(AtomicBool::new(false));
+        let session_id = session_store::SessionId::new();
+        let restore = AgentSessionRestore::new(
+            Arc::new(session_store::InMemorySessionStore::new()),
+            session_store::SessionHeader {
+                session_id: session_id.clone(),
+                work_dir: std::path::PathBuf::from("/replay-unavailable-restore"),
+                session_name: None,
+                initial_model: "fixture-model".to_string(),
+                git_head: None,
+                cli_version: None,
+            },
+            session_id,
+            session_store::ResolvedConversationState {
+                items: Vec::new(),
+                latest_config: None,
+            },
+        )
+        .with_materialization_probe(Arc::clone(&restore_materialized));
+        let unavailable = match components
+            .agent_session_mut()
+            .and_then(|session| session.restore_session(restore))
+        {
+            Ok(()) => panic!("Replay must not accept a session restore"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            unavailable,
+            "Agent adapter does not provide session capability"
+        );
+        assert!(!restore_materialized.load(Ordering::SeqCst));
+        assert_eq!(
+            components.agent_port().activity(),
+            AgentRuntimeActivity::Idle
+        );
+        assert!(!components.agent_port().has_pending_work());
+        assert!(components.agent_port_mut().drain_events().is_empty());
+
+        let target = runtime_domain::session::RuntimeTarget::provider("replay", "fixture-model");
+        components
+            .agent_port_mut()
+            .dispatch(AgentCommand::SubmitTurn {
+                agent_id: AgentId::MAIN,
+                turn_id: AgentTurnId::new(1),
+                request: Box::new(AgentTurnRequest::from_conversation_request(
+                    runtime_domain::session::ConversationTurnRequest::new(
+                        "replay",
+                        "fixture-model",
+                        provider_protocol::ConversationItem::text(
+                            provider_protocol::Role::User,
+                            "delivery must not be projected by the plugin host",
+                        ),
+                    ),
+                )),
+            })
+            .expect("Replay turn should be admitted through the common owner");
+        let projected = components
+            .agent_port_mut()
+            .drain_events()
+            .into_iter()
+            .map(crate::runtime::event_mapping::runtime_event_from_agent_event)
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            &projected[0],
+            runtime_domain::session::RuntimeEvent::AssistantDelta {
+                target: event_target,
+                content,
+            } if event_target == &target && content == "replayed through composition"
+        ));
+        assert!(matches!(
+            &projected[1],
+            runtime_domain::session::RuntimeEvent::MessageFinished {
+                target: Some(event_target),
+                ..
+            } if event_target == &target
+        ));
+
+        components
+            .agent_port_mut()
+            .dispatch(AgentCommand::SubmitTurn {
+                agent_id: AgentId::MAIN,
+                turn_id: AgentTurnId::new(2),
+                request: Box::new(AgentTurnRequest::from_conversation_request(
+                    runtime_domain::session::ConversationTurnRequest::new(
+                        "replay",
+                        "fixture-model",
+                        provider_protocol::ConversationItem::text(
+                            provider_protocol::Role::User,
+                            "old generation",
+                        ),
+                    ),
+                )),
+            })
+            .expect("second Replay turn should queue facts before dependency suspension");
+        components
+            .with_lifecycle(|lifecycle, components| {
+                lifecycle.deactivate_components(
+                    [RUNTIME_EVENT_STREAM.component_id],
+                    components,
+                    ComponentLifecycleMode::Reconfigure,
+                )
+            })
+            .expect("event-stream suspension should quiesce Replay");
+        assert_eq!(
+            components.lifecycle.state(AGENT_RUNTIME_COMPONENT),
+            Some(ComponentState::Pending)
+        );
+        assert!(components.agent_port_mut().drain_events().is_empty());
+        assert!(!components.agent_port().has_pending_work());
+
+        components
+            .with_lifecycle(|lifecycle, components| {
+                lifecycle.activate_components(
+                    [RUNTIME_EVENT_STREAM.component_id],
+                    components,
+                    ComponentLifecycleMode::Reconfigure,
+                )
+            })
+            .expect("fresh event-stream generation should reactivate Replay");
+        assert_eq!(
+            components.lifecycle.state(AGENT_RUNTIME_COMPONENT),
+            Some(ComponentState::Active)
+        );
+        assert_eq!(replay_lifecycle.constructions(), 1);
+        assert_eq!(replay_lifecycle.activations(), 2);
+
+        let native_catalog = builtin_plugin_catalog().expect("Native catalog should validate");
+        components
+            .reconcile_plugin_composition_with_catalog(
+                &options,
+                &native_catalog,
+                desired_with_agent_plugin_for_test(Some(NATIVE_AGENT_RUNTIME_PLUGIN)),
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect("Native Agent should replace Replay through the same transaction");
+        assert_eq!(replay_lifecycle.shutdowns(), 1);
+        assert_eq!(replay_lifecycle.drops(), 1);
+        assert_eq!(replay_lifecycle.constructions(), 1);
+        assert!(components.agent_session().is_ok());
+        assert!(components.agent_port_mut().drain_events().is_empty());
+        assert_eq!(
+            components
+                .plugin_descriptor_snapshots()
+                .into_iter()
+                .find(|snapshot| snapshot.component_id == AGENT_RUNTIME_COMPONENT)
+                .expect("Agent descriptor should remain visible")
+                .plugin_type,
+            NATIVE_AGENT_RUNTIME_PLUGIN
+        );
+        components
+            .validate_context_alignment()
+            .expect("Native restoration should keep graph and Context aligned");
     }
 
     #[test]
@@ -2951,7 +3231,7 @@ mod tests {
             .reconcile_plugin_composition_with_catalog(
                 &options,
                 &catalog,
-                desired_with_agent_plugin(Some(ALTERNATE_AGENT)),
+                desired_with_agent_plugin_for_test(Some(ALTERNATE_AGENT)),
                 ComponentLifecycleMode::Reconfigure,
             )
             .expect_err("old Agent cleanup failure must block candidate construction");
@@ -2968,13 +3248,13 @@ mod tests {
             components
                 .plugin_descriptor_snapshots()
                 .into_iter()
-                .find(|snapshot| snapshot.component_id == NATIVE_AGENT_RUNTIME_COMPONENT)
+                .find(|snapshot| snapshot.component_id == AGENT_RUNTIME_COMPONENT)
                 .expect("old Agent descriptor should remain visible")
                 .plugin_type,
             NATIVE_AGENT_RUNTIME_PLUGIN
         );
         assert_ne!(
-            components.lifecycle.state(NATIVE_AGENT_RUNTIME_COMPONENT),
+            components.lifecycle.state(AGENT_RUNTIME_COMPONENT),
             Some(ComponentState::Active)
         );
 
@@ -2982,7 +3262,7 @@ mod tests {
             .reconcile_plugin_composition_with_catalog(
                 &options,
                 &catalog,
-                desired_with_agent_plugin(Some(ALTERNATE_AGENT)),
+                desired_with_agent_plugin_for_test(Some(ALTERNATE_AGENT)),
                 ComponentLifecycleMode::Reconfigure,
             )
             .expect_err("retry must not bypass incomplete old Agent finalization");
@@ -3032,7 +3312,7 @@ mod tests {
             },
         )])
         .expect("replacement Agent catalog should validate");
-        let desired = desired_with_agent_plugin(Some(ALTERNATE_AGENT));
+        let desired = desired_with_agent_plugin_for_test(Some(ALTERNATE_AGENT));
         let agent_runtime = components
             .prepare_agent_runtime_commit(&options, &desired)
             .expect("Agent replacement mount should prepare");
@@ -3110,7 +3390,7 @@ mod tests {
             }),
         )])
         .expect("replacement Agent catalog should validate");
-        let desired = desired_with_agent_plugin(Some(ALTERNATE_AGENT));
+        let desired = desired_with_agent_plugin_for_test(Some(ALTERNATE_AGENT));
 
         let error = components
             .reconcile_plugin_composition_with_catalog(
@@ -3129,13 +3409,13 @@ mod tests {
             components
                 .plugin_descriptor_snapshots()
                 .into_iter()
-                .find(|snapshot| snapshot.component_id == NATIVE_AGENT_RUNTIME_COMPONENT)
+                .find(|snapshot| snapshot.component_id == AGENT_RUNTIME_COMPONENT)
                 .expect("old Agent descriptor should remain visible")
                 .plugin_type,
             NATIVE_AGENT_RUNTIME_PLUGIN
         );
         assert_eq!(
-            components.lifecycle.state(NATIVE_AGENT_RUNTIME_COMPONENT),
+            components.lifecycle.state(AGENT_RUNTIME_COMPONENT),
             Some(ComponentState::Pending),
             "old Agent effects must stay removed after candidate failure"
         );
@@ -3157,14 +3437,14 @@ mod tests {
             ["activate"]
         );
         assert_eq!(
-            components.lifecycle.state(NATIVE_AGENT_RUNTIME_COMPONENT),
+            components.lifecycle.state(AGENT_RUNTIME_COMPONENT),
             Some(ComponentState::Active)
         );
         assert_eq!(
             components
                 .plugin_descriptor_snapshots()
                 .into_iter()
-                .find(|snapshot| snapshot.component_id == NATIVE_AGENT_RUNTIME_COMPONENT)
+                .find(|snapshot| snapshot.component_id == AGENT_RUNTIME_COMPONENT)
                 .expect("fresh Agent descriptor should be visible")
                 .plugin_type,
             ALTERNATE_AGENT
@@ -3199,7 +3479,7 @@ mod tests {
             .reconcile_plugin_composition_with_catalog(
                 &options,
                 &catalog,
-                desired_with_agent_plugin(Some(ALTERNATE_AGENT)),
+                desired_with_agent_plugin_for_test(Some(ALTERNATE_AGENT)),
                 ComponentLifecycleMode::Reconfigure,
             )
             .expect_err("fresh Agent activation rejection should be reported");
@@ -3210,7 +3490,7 @@ mod tests {
             components
                 .plugin_descriptor_snapshots()
                 .into_iter()
-                .find(|snapshot| snapshot.component_id == NATIVE_AGENT_RUNTIME_COMPONENT)
+                .find(|snapshot| snapshot.component_id == AGENT_RUNTIME_COMPONENT)
                 .expect("fresh Agent descriptor should remain authoritative")
                 .plugin_type,
             ALTERNATE_AGENT
@@ -3220,16 +3500,14 @@ mod tests {
                 .plugin_loader
                 .desired()
                 .iter()
-                .find(|(component_id, _)| {
-                    component_id.as_str() == NATIVE_AGENT_RUNTIME_COMPONENT
-                })
+                .find(|(component_id, _)| { component_id.as_str() == AGENT_RUNTIME_COMPONENT })
                 .expect("fresh desired Agent should remain committed")
                 .1
                 .as_str(),
             ALTERNATE_AGENT
         );
         assert_eq!(
-            components.lifecycle.state(NATIVE_AGENT_RUNTIME_COMPONENT),
+            components.lifecycle.state(AGENT_RUNTIME_COMPONENT),
             Some(ComponentState::Failed)
         );
         assert_eq!(
@@ -3244,7 +3522,7 @@ mod tests {
                 == ["shutdown"],
             "rejected activation must finally dispose the candidate adapter"
         );
-        assert!(!components.agent_port().is_idle_empty_session());
+        assert!(components.agent_port().session().is_none());
     }
 
     #[test]
@@ -3317,7 +3595,7 @@ mod tests {
 
         assert_eq!(constructions.load(Ordering::SeqCst), 1);
         assert_eq!(
-            components.lifecycle.state(NATIVE_AGENT_RUNTIME_COMPONENT),
+            components.lifecycle.state(AGENT_RUNTIME_COMPONENT),
             Some(ComponentState::Active)
         );
     }
@@ -3777,7 +4055,7 @@ mod tests {
         assert!(components.tool_catalog.definitions().is_empty());
         assert!(components.llm_port.inspection_snapshot().is_empty());
         assert_eq!(
-            components.lifecycle.state("native_agent_runtime"),
+            components.lifecycle.state("agent_runtime"),
             Some(ComponentState::Disposed)
         );
         assert_eq!(
@@ -3805,7 +4083,7 @@ mod tests {
 
         for component_id in [
             PERMISSION_POLICY.component_id,
-            NATIVE_AGENT_RUNTIME_COMPONENT,
+            AGENT_RUNTIME_COMPONENT,
             MODEL_REFRESH_COMPONENT,
             CONTEXT_BUDGET_COMPONENT,
             SESSION_PERSISTENCE.component_id,
@@ -3820,7 +4098,7 @@ mod tests {
         components
             .validate_context_alignment()
             .expect("dependency reaction must keep graph and context aligned");
-        assert!(!components.agent_port().is_busy());
+        assert!(!components.agent_port().activity().is_busy());
         assert!(!components.session_store_worker.is_running());
     }
 
@@ -3875,7 +4153,7 @@ mod tests {
         );
         for component_id in [
             PERMISSION_POLICY.component_id,
-            NATIVE_AGENT_RUNTIME_COMPONENT,
+            AGENT_RUNTIME_COMPONENT,
             MODEL_REFRESH_COMPONENT,
             CONTEXT_BUDGET_COMPONENT,
             SESSION_PERSISTENCE.component_id,
@@ -4021,21 +4299,25 @@ mod tests {
                 .has_capability(&CapabilityKey::from("session_persistence"))
         );
         assert_eq!(
-            components.lifecycle.optional_available(
-                "native_agent_runtime",
-                &CapabilityKey::from("session_persistence"),
-            ),
+            components
+                .lifecycle
+                .optional_available("agent_runtime", &CapabilityKey::from("session_persistence"),),
             Some(false)
         );
         assert_eq!(
-            components.lifecycle.state("native_agent_runtime"),
+            components.lifecycle.state("agent_runtime"),
             Some(ComponentState::Active)
         );
         assert_eq!(
             components.lifecycle.state("prompt_assembly"),
             Some(ComponentState::Active)
         );
-        assert!(components.agent_port().is_idle_empty_session());
+        let snapshot = components
+            .agent_session()
+            .expect("Native Agent should provide session capability")
+            .snapshot();
+        assert!(!components.agent_port().activity().is_busy());
+        assert!(snapshot.is_history_empty);
     }
 
     #[test]
@@ -4124,7 +4406,7 @@ mod tests {
             );
         }
         assert_eq!(
-            components.lifecycle.state("native_agent_runtime"),
+            components.lifecycle.state("agent_runtime"),
             Some(ComponentState::Pending)
         );
         assert_eq!(
@@ -4182,7 +4464,7 @@ mod tests {
             );
         }
         assert_eq!(
-            components.lifecycle.state("native_agent_runtime"),
+            components.lifecycle.state("agent_runtime"),
             Some(ComponentState::Pending)
         );
         assert_eq!(
@@ -4197,7 +4479,7 @@ mod tests {
             .validate_context_alignment()
             .expect("retry graph and context should align");
         assert_eq!(
-            components.lifecycle.state("native_agent_runtime"),
+            components.lifecycle.state("agent_runtime"),
             Some(ComponentState::Active)
         );
         assert_eq!(
@@ -4253,7 +4535,7 @@ mod tests {
             Some(ComponentState::Active)
         );
         assert_eq!(
-            components.lifecycle.state("native_agent_runtime"),
+            components.lifecycle.state("agent_runtime"),
             Some(ComponentState::Active)
         );
         assert!(
@@ -4307,7 +4589,12 @@ mod tests {
                 .lifecycle
                 .has_capability(&CapabilityKey::from("session_persistence"))
         );
-        assert!(components.agent_port().is_idle_empty_session());
+        let snapshot = components
+            .agent_session()
+            .expect("Native Agent should provide session capability")
+            .snapshot();
+        assert!(!components.agent_port().activity().is_busy());
+        assert!(snapshot.is_history_empty);
         assert!(components.session_store_worker.is_running());
     }
 
@@ -4342,7 +4629,7 @@ mod tests {
                 .has_capability(&CapabilityKey::from("session_persistence"))
         );
         assert_eq!(
-            components.lifecycle.state("native_agent_runtime"),
+            components.lifecycle.state("agent_runtime"),
             Some(ComponentState::Active)
         );
         assert!(components.session_store_worker.is_running());
@@ -4394,7 +4681,7 @@ mod tests {
             .expect("backend replacement graph and context should align");
         assert!(components.session_backend_views.is_some());
         assert_eq!(
-            components.lifecycle.state(NATIVE_AGENT_RUNTIME_COMPONENT),
+            components.lifecycle.state(AGENT_RUNTIME_COMPONENT),
             Some(ComponentState::Active)
         );
     }
@@ -4469,7 +4756,7 @@ mod tests {
             );
         }
         assert_eq!(
-            components.lifecycle.state("native_agent_runtime"),
+            components.lifecycle.state("agent_runtime"),
             Some(ComponentState::Pending)
         );
         assert_eq!(
@@ -4500,7 +4787,7 @@ mod tests {
             Some(ComponentState::Active)
         );
         assert_eq!(
-            components.lifecycle.state("native_agent_runtime"),
+            components.lifecycle.state("agent_runtime"),
             Some(ComponentState::Active)
         );
         assert!(!components.llm_port.inspection_snapshot().is_empty());
@@ -4518,7 +4805,7 @@ mod tests {
         let capabilities_before = components.lifecycle.capabilities();
         components
             .lifecycle
-            .inject_epoch_exhaustion(NATIVE_AGENT_RUNTIME_COMPONENT);
+            .inject_epoch_exhaustion(AGENT_RUNTIME_COMPONENT);
 
         let error = components
             .replace_session_backend(
@@ -4527,12 +4814,12 @@ mod tests {
             )
             .expect_err("observed consumer exhaustion should reject replacement before cleanup");
 
-        assert!(error.contains("component `native_agent_runtime` activation epoch is exhausted"));
+        assert!(error.contains("component `agent_runtime` activation epoch is exhausted"));
         assert_eq!(components.lifecycle.capabilities(), capabilities_before);
         assert!(components.session_port.is_some());
         assert!(components.session_backend_views.is_some());
         assert_eq!(
-            components.lifecycle.state(NATIVE_AGENT_RUNTIME_COMPONENT),
+            components.lifecycle.state(AGENT_RUNTIME_COMPONENT),
             Some(ComponentState::Active)
         );
         assert!(Arc::strong_count(&store) > 1);

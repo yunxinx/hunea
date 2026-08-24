@@ -8,6 +8,9 @@ mod tests;
 
 use std::{fmt, path::PathBuf, sync::Arc};
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use session_store::{ResolvedConversationState, SessionHeader, SessionId, SessionPort};
 use tool_runtime::ToolExecutorRegistry;
 
@@ -36,6 +39,8 @@ use crate::{
 #[cfg(test)]
 pub(super) use native::NativeAgentRuntime;
 pub(super) use native::construct_native_agent_runtime;
+#[cfg(test)]
+pub(super) use replay::{ReplayAgentRuntime, ReplayFixture, ReplayLifecycleProbe};
 
 /// `AgentRuntimeMount` 是构造一个 Agent adapter generation 所需的 immutable host snapshot。
 ///
@@ -114,6 +119,30 @@ impl AgentRuntimeFactory {
     ) -> Result<Box<dyn AgentRuntimePort>, String> {
         (self.construct)(mount).map_err(|_| AGENT_RUNTIME_CONSTRUCTION_FAILED.to_string())
     }
+
+    #[cfg(test)]
+    pub(super) fn replay(
+        fixture: ReplayFixture,
+        lifecycle_probe: Option<Arc<ReplayLifecycleProbe>>,
+    ) -> Self {
+        Self::new(move |_mount| {
+            if let Some(probe) = &lifecycle_probe {
+                probe.record_construction();
+            }
+            let runtime = match &lifecycle_probe {
+                Some(probe) => ReplayAgentRuntime::new_with_lifecycle_probe(
+                    fixture.clone(),
+                    runtime_domain::event_notifier::RuntimeEventNotifier::default(),
+                    Arc::clone(probe),
+                ),
+                None => ReplayAgentRuntime::new(
+                    fixture.clone(),
+                    runtime_domain::event_notifier::RuntimeEventNotifier::default(),
+                ),
+            };
+            Ok(Box::new(runtime))
+        })
+    }
 }
 
 #[cfg(test)]
@@ -160,13 +189,48 @@ pub(super) trait AgentRuntimePort: AgentRuntime + Send {
     /// 撤销当前 activation generation 的副作用，同时保留可供重新激活的持久状态。
     fn suspend(&mut self) -> Result<(), AgentRuntimeError>;
 
-    fn is_busy(&self) -> bool;
+    /// 返回 framework-neutral 的 Agent activity；不能由 session capability 缺省值推导。
+    fn activity(&self) -> AgentRuntimeActivity;
 
-    fn session_id(&self) -> Option<SessionId>;
+    /// 返回当前 adapter 实际提供的 session capability。
+    fn session(&self) -> Option<&dyn AgentSessionCapability>;
 
-    fn is_history_empty(&self) -> bool;
+    /// 返回当前 adapter 实际提供的 mutable session capability。
+    fn session_mut(&mut self) -> Option<&mut dyn AgentSessionCapability>;
 
-    fn is_idle_empty_session(&self) -> bool;
+    #[cfg(test)]
+    fn has_pending_work(&self) -> bool;
+}
+
+/// Agent loop 是否仍占有一个未结束或未完成交付的 turn。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AgentRuntimeActivity {
+    Idle,
+    Busy,
+}
+
+impl AgentRuntimeActivity {
+    pub(super) const fn is_busy(self) -> bool {
+        matches!(self, Self::Busy)
+    }
+}
+
+/// Agent-owned session state 的 immutable host projection。
+pub(super) struct AgentSessionSnapshot {
+    pub(super) session_id: Option<SessionId>,
+    pub(super) is_history_empty: bool,
+}
+
+/// 当前空 session 是否实际接收了最新 prompt/tool configuration。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AgentEmptySessionConfigurationOutcome {
+    Applied,
+    DeferredToNextSession,
+}
+
+/// 只有实际拥有 conversation/session state 的 Agent adapter 才提供该 capability。
+pub(super) trait AgentSessionCapability {
+    fn snapshot(&self) -> AgentSessionSnapshot;
 
     fn truncate_after_user_turns(
         &mut self,
@@ -179,7 +243,7 @@ pub(super) trait AgentRuntimePort: AgentRuntime + Send {
         &mut self,
         prompt_assembly: crate::runtime::prompt_assembly::PromptAssemblySessionSnapshot,
         session_workspace_tools: ToolExecutorRegistry,
-    );
+    ) -> AgentEmptySessionConfigurationOutcome;
 
     fn restore_session(&mut self, restore: AgentSessionRestore) -> Result<(), String>;
 
@@ -192,9 +256,6 @@ pub(super) trait AgentRuntimePort: AgentRuntime + Send {
     fn test_harness_ref(&self) -> Option<&dyn AgentRuntimeTestHarness> {
         None
     }
-
-    #[cfg(test)]
-    fn has_pending_work(&self) -> bool;
 }
 
 /// Host 交给当前 Agent adapter 的 framework-neutral session restore value。
@@ -203,6 +264,8 @@ pub(super) struct AgentSessionRestore {
     header: SessionHeader,
     session_id: SessionId,
     conversation: ResolvedConversationState,
+    #[cfg(test)]
+    materialization_probe: Option<Arc<AtomicBool>>,
 }
 
 impl AgentSessionRestore {
@@ -217,7 +280,15 @@ impl AgentSessionRestore {
             header,
             session_id,
             conversation,
+            #[cfg(test)]
+            materialization_probe: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_materialization_probe(mut self, probe: Arc<AtomicBool>) -> Self {
+        self.materialization_probe = Some(probe);
+        self
     }
 
     fn into_parts(
@@ -228,6 +299,10 @@ impl AgentSessionRestore {
         SessionId,
         ResolvedConversationState,
     ) {
+        #[cfg(test)]
+        if let Some(probe) = &self.materialization_probe {
+            probe.store(true, Ordering::SeqCst);
+        }
         (
             self.session_port,
             self.header,

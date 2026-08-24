@@ -1,15 +1,19 @@
-use runtime_domain::prompt_assembly::{
-    PromptAssemblyMutation, PromptAssemblyScopedMutationKind, PromptPreludeSection,
-    PromptPreludeSnapshot, PromptSourceKind, PromptSourceOrigin,
-    persistence::{
-        PersistedPromptAssemblyEntry, PromptAssemblyScope, StoredPromptBody,
-        load_project_prompt_assembly_state, project_custom_prompts_dir,
-        save_project_prompt_assembly_state,
+use runtime_domain::session::PromptAssemblyUpdateNotice;
+use runtime_domain::{
+    agent::AgentEventKind,
+    prompt_assembly::{
+        PromptAssemblyMutation, PromptAssemblyScopedMutationKind, PromptPreludeSection,
+        PromptPreludeSnapshot, PromptSourceKind, PromptSourceOrigin,
+        persistence::{
+            PersistedPromptAssemblyEntry, PromptAssemblyScope, StoredPromptBody,
+            load_project_prompt_assembly_state, project_custom_prompts_dir,
+            save_project_prompt_assembly_state,
+        },
     },
 };
-use runtime_domain::session::PromptAssemblyUpdateNotice;
 
 use super::support::*;
+use crate::runtime::agent::ReplayFixture;
 use crate::runtime::context::{PromptAssemblyCapability, ToolCatalogCapability};
 
 macro_rules! scope_state {
@@ -336,6 +340,82 @@ fn commit_prompt_assembly_edit_reports_save_failure() {
             },
         ))
         .expect("further mutation should apply to preserved working copy");
+    cleanup(&root);
+}
+
+#[test]
+fn sessionless_agent_rejects_prompt_commit_before_persistence_or_live_replacement() {
+    let root = temp_test_dir("sessionless-prompt-commit-preflight");
+    let work_dir = root.join("repo");
+    fs::create_dir_all(&work_dir).expect("work dir should exist");
+    let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        session_store: Some(store),
+        session_header_template: Some(SessionHeader {
+            session_id: SessionId::new(),
+            work_dir: work_dir.clone(),
+            session_name: None,
+            initial_model: "qwen3".to_string(),
+            git_head: None,
+            cli_version: None,
+        }),
+        ..AppRuntimeOptions::default()
+    });
+    coordinator
+        .replace_agent_with_replay_for_test(
+            ReplayFixture::new(vec![AgentEventKind::TurnFailed {
+                message: "closed fixture failure".to_string(),
+            }])
+            .expect("Replay fixture should validate"),
+        )
+        .expect("Replay should replace Native through plugin reconciliation");
+    let live_manager_before = coordinator
+        .components
+        .require::<PromptAssemblyCapability>()
+        .expect("prompt assembly capability should be available")
+        .manager_snapshot();
+
+    coordinator
+        .begin_prompt_assembly_edit()
+        .expect("prompt edit should remain a host capability");
+    coordinator
+        .apply_prompt_assembly_edit_mutation(PromptAssemblyMutation::scoped(
+            PromptAssemblyScope::Project,
+            PromptAssemblyScopedMutationKind::CreateExtraPrompt {
+                content: "# Uncommitted sessionless edit\n".to_string(),
+            },
+        ))
+        .expect("working-copy mutation should succeed");
+    let error = coordinator
+        .commit_prompt_assembly_edit()
+        .expect_err("sessionless Agent must reject a session configuration update");
+
+    assert_eq!(error, "Agent adapter does not provide session capability");
+    let project_state = load_project_prompt_assembly_state(&work_dir)
+        .expect("project prompt state should remain readable");
+    assert!(project_state.entries().is_empty());
+    assert!(project_state.extra_prompts().is_empty());
+    assert_eq!(
+        coordinator
+            .components
+            .require::<PromptAssemblyCapability>()
+            .expect("prompt assembly capability should remain available")
+            .manager_snapshot(),
+        live_manager_before
+    );
+    assert!(
+        coordinator
+            .peek_prompt_assembly_edit_snapshot()
+            .expect("failed commit should retain the working copy")
+            .candidates
+            .extra_prompts
+            .iter()
+            .any(|prompt| prompt.title == "Uncommitted sessionless edit")
+    );
+    assert!(
+        terminal_ui::RuntimeEventPort::drain_runtime_events(&mut coordinator).is_empty(),
+        "failed preflight must not publish a prompt update"
+    );
     cleanup(&root);
 }
 

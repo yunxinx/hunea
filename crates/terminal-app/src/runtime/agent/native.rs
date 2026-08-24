@@ -22,9 +22,11 @@ use tool_runtime::{ToolDefinition, ToolExecutorRegistry};
 #[cfg(test)]
 use super::AgentRuntimeTestHarness;
 use super::{
-    AgentCommand, AgentCommandReceipt, AgentContextBudgetSnapshot, AgentEvent, AgentEventKind,
-    AgentId, AgentRuntime, AgentRuntimeError, AgentRuntimeMount, AgentRuntimePort,
-    AgentSessionRestore, AgentTurnId, AgentTurnRequest,
+    AgentCommand, AgentCommandReceipt, AgentContextBudgetSnapshot,
+    AgentEmptySessionConfigurationOutcome, AgentEvent, AgentEventKind, AgentId, AgentRuntime,
+    AgentRuntimeActivity, AgentRuntimeError, AgentRuntimeMount, AgentRuntimePort,
+    AgentSessionCapability, AgentSessionRestore, AgentSessionSnapshot, AgentTurnId,
+    AgentTurnRequest,
 };
 use crate::prompt_assembly::{
     AttachedPromptMessageAssembly, ManualSkillPromptUse, PromptAssemblyWorkspace,
@@ -883,20 +885,34 @@ impl AgentRuntimePort for NativeAgentRuntime {
         worker_result
     }
 
-    fn is_busy(&self) -> bool {
-        self.is_busy()
+    fn activity(&self) -> AgentRuntimeActivity {
+        if self.is_busy() {
+            AgentRuntimeActivity::Busy
+        } else {
+            AgentRuntimeActivity::Idle
+        }
     }
 
-    fn session_id(&self) -> Option<SessionId> {
-        self.session_id().cloned()
+    fn session(&self) -> Option<&dyn AgentSessionCapability> {
+        Some(self)
     }
 
-    fn is_history_empty(&self) -> bool {
-        self.is_history_empty()
+    fn session_mut(&mut self) -> Option<&mut dyn AgentSessionCapability> {
+        Some(self)
     }
 
-    fn is_idle_empty_session(&self) -> bool {
-        self.is_idle_empty_session()
+    #[cfg(test)]
+    fn has_pending_work(&self) -> bool {
+        self.has_pending_work()
+    }
+}
+
+impl AgentSessionCapability for NativeAgentRuntime {
+    fn snapshot(&self) -> AgentSessionSnapshot {
+        AgentSessionSnapshot {
+            session_id: self.session_id().cloned(),
+            is_history_empty: self.is_history_empty(),
+        }
     }
 
     fn truncate_after_user_turns(
@@ -914,8 +930,12 @@ impl AgentRuntimePort for NativeAgentRuntime {
         &mut self,
         prompt_assembly: PromptAssemblySessionSnapshot,
         session_workspace_tools: ToolExecutorRegistry,
-    ) {
+    ) -> AgentEmptySessionConfigurationOutcome {
+        if !self.is_idle_empty_session() {
+            return AgentEmptySessionConfigurationOutcome::DeferredToNextSession;
+        }
         self.update_empty_session_configuration(prompt_assembly, session_workspace_tools);
+        AgentEmptySessionConfigurationOutcome::Applied
     }
 
     fn restore_session(&mut self, restore: AgentSessionRestore) -> Result<(), String> {
@@ -938,11 +958,6 @@ impl AgentRuntimePort for NativeAgentRuntime {
     #[cfg(test)]
     fn test_harness_ref(&self) -> Option<&dyn AgentRuntimeTestHarness> {
         Some(self)
-    }
-
-    #[cfg(test)]
-    fn has_pending_work(&self) -> bool {
-        self.has_pending_work()
     }
 }
 

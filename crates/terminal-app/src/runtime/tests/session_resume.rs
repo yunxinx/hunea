@@ -627,7 +627,12 @@ fn load_session_preview_emits_transcript_without_resuming_runtime_session() {
         vec!["preview user", "preview answer"]
     );
     assert!(
-        coordinator.components.agent_port().is_history_empty(),
+        coordinator
+            .components
+            .agent_session()
+            .expect("Native Agent should provide session capability")
+            .snapshot()
+            .is_history_empty,
         "loading preview should not replace the active provider conversation"
     );
     cleanup(&work_dir);

@@ -3,26 +3,12 @@ use runtime_domain::session::{PromptAssemblyUpdateNotice, RuntimeEvent};
 
 use super::{
     AppRuntimeCoordinator,
+    agent::AgentEmptySessionConfigurationOutcome,
     context::{PromptAssemblyCapability, ToolCatalogCapability},
 };
 use crate::prompt_assembly::PromptAssemblyEditSession;
 
-/// `PromptSessionConfigRefreshTarget` 标识 commit 后的新 prelude 应作用于当前空会话还是下一次新会话。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PromptSessionConfigRefreshTarget {
-    CurrentEmptySession,
-    NextNewSession,
-}
-
 impl AppRuntimeCoordinator {
-    fn prompt_session_config_refresh_target(&self) -> PromptSessionConfigRefreshTarget {
-        if self.components.agent_port().is_idle_empty_session() {
-            PromptSessionConfigRefreshTarget::CurrentEmptySession
-        } else {
-            PromptSessionConfigRefreshTarget::NextNewSession
-        }
-    }
-
     /// `prompt_assembly_update_notice` 在 commit 后判断是否需要通知用户。
     ///
     /// 仅当 prelude / dynamic env / 工具启停实际变化时返回 `Some`；
@@ -35,29 +21,27 @@ impl AppRuntimeCoordinator {
         if !session_prompt_config_changed {
             return Ok(None);
         }
-        match self.prompt_session_config_refresh_target() {
-            PromptSessionConfigRefreshTarget::CurrentEmptySession => {
-                let tool_catalog = self
-                    .components
-                    .require::<ToolCatalogCapability>()
-                    .map_err(|error| error.to_string())?;
-                let prompt_capability = self
-                    .components
-                    .require::<PromptAssemblyCapability>()
-                    .map_err(|error| error.to_string())?;
-                let session_workspace_tools =
-                    super::session_tools_for_manager(&tool_catalog, Some(manager));
-                let prompt_assembly = prompt_capability.session_snapshot();
-                self.components
-                    .agent_port_mut()
-                    .update_empty_session_configuration(
-                        prompt_assembly,
-                        session_workspace_tools.clone(),
-                    );
+        let tool_catalog = self
+            .components
+            .require::<ToolCatalogCapability>()
+            .map_err(|error| error.to_string())?;
+        let prompt_capability = self
+            .components
+            .require::<PromptAssemblyCapability>()
+            .map_err(|error| error.to_string())?;
+        let session_workspace_tools =
+            super::session_tools_for_manager(&tool_catalog, Some(manager));
+        let prompt_assembly = prompt_capability.session_snapshot();
+        match self
+            .components
+            .agent_session_mut()?
+            .update_empty_session_configuration(prompt_assembly, session_workspace_tools.clone())
+        {
+            AgentEmptySessionConfigurationOutcome::Applied => {
                 self.components.session_workspace_tools = session_workspace_tools;
                 Ok(Some(PromptAssemblyUpdateNotice::CurrentEmptySessionUpdated))
             }
-            PromptSessionConfigRefreshTarget::NextNewSession => {
+            AgentEmptySessionConfigurationOutcome::DeferredToNextSession => {
                 Ok(Some(PromptAssemblyUpdateNotice::NextNewSessionUpdated))
             }
         }
@@ -106,37 +90,21 @@ impl AppRuntimeCoordinator {
     /// 若 not dirty 则不落盘、不通知；若 dirty 则 save + push `RuntimeEvent::PromptAssemblyUpdated`。
     /// 成功路径（无论是否 dirty）都释放 edit session；失败时保留 session 供重试或继续编辑。
     pub(super) fn commit_prompt_assembly_edit_impl(&mut self) -> Result<(), String> {
-        if let Some(manager) = self
-            .prompt_assembly_edit_session
-            .as_ref()
-            .map(PromptAssemblyEditSession::snapshot)
-        {
-            self.components
-                .require::<PromptAssemblyCapability>()
-                .map_err(|error| error.to_string())?
-                .validate_manager_replacement(Some(&manager))
-                .map_err(|error| error.to_string())?;
-        }
-        let outcome = {
-            let views = self.session_views()?;
-            let Some(session) = self.prompt_assembly_edit_session.as_mut() else {
-                return Ok(());
-            };
-            session.commit(views.prompt_assembly)
-        }
-        .map_err(|error| error.to_string())?;
-        let manager = match outcome {
-            Some(outcome) => outcome.manager,
-            None => {
-                // not-dirty commit 已经完整成功，不需要更新 capability 或发送事件。
-                self.prompt_assembly_edit_session = None;
-                return Ok(());
-            }
+        let Some(edit_session) = self.prompt_assembly_edit_session.as_ref() else {
+            return Ok(());
         };
+        if !edit_session.has_changes() {
+            self.prompt_assembly_edit_session = None;
+            return Ok(());
+        }
 
+        let manager = edit_session.snapshot();
         let prompt_assembly = self
             .components
             .require::<PromptAssemblyCapability>()
+            .map_err(|error| error.to_string())?;
+        prompt_assembly
+            .validate_manager_replacement(Some(&manager))
             .map_err(|error| error.to_string())?;
         let previous_manager = prompt_assembly.manager_snapshot();
         let dynamic_environment_session_config =
@@ -150,17 +118,40 @@ impl AppRuntimeCoordinator {
             .map(crate::prompt_assembly::dynamic_environment_session_config_from_manager)
             .as_ref()
             != Some(&dynamic_environment_session_config);
-        // 工具启停可能不影响 prelude（如禁用无 guidelines 的工具），因此需要相对
-        // capability 当前持有的 live manager 单独参与变化检测。
+        // 工具启停可能不改变 prelude；它仍会改变当前空 session 的 executor view。
         let tool_enablement_changed = super::manager_disabled_tool_names(previous_manager.as_ref())
             != super::manager_disabled_tool_names(Some(&manager));
+        let session_prompt_config_changed =
+            prelude_changed || dynamic_environment_config_changed || tool_enablement_changed;
+        if session_prompt_config_changed {
+            self.components.agent_session()?;
+            self.components
+                .require::<ToolCatalogCapability>()
+                .map_err(|error| error.to_string())?;
+        }
+
+        let outcome = {
+            let views = self.session_views()?;
+            let session = self
+                .prompt_assembly_edit_session
+                .as_mut()
+                .expect("prompt edit session was preflighted above");
+            session.commit(views.prompt_assembly)
+        }
+        .map_err(|error| error.to_string())?;
+        let manager = match outcome {
+            Some(outcome) => outcome.manager,
+            None => {
+                // not-dirty commit 已经完整成功，不需要更新 capability 或发送事件。
+                self.prompt_assembly_edit_session = None;
+                return Ok(());
+            }
+        };
+
         prompt_assembly
             .replace_manager(Some(manager.clone()))
             .map_err(|error| error.to_string())?;
-        let notice = self.prompt_assembly_update_notice(
-            prelude_changed || dynamic_environment_config_changed || tool_enablement_changed,
-            &manager,
-        )?;
+        let notice = self.prompt_assembly_update_notice(session_prompt_config_changed, &manager)?;
         self.pending_runtime_events
             .push(RuntimeEvent::PromptAssemblyUpdated { manager, notice });
         // capability replacement、空 session refresh 与 event publication 均成功后，working

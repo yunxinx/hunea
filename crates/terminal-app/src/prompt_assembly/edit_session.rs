@@ -104,6 +104,12 @@ impl PromptAssemblyEditSession {
         )
     }
 
+    /// 返回 working copy 是否包含尚未成功持久化的变更。
+    pub(crate) fn has_changes(&self) -> bool {
+        self.global_state != self.baseline_global_state
+            || self.project_state != self.baseline_project_state
+    }
+
     /// `commit` 在 working copy 上落盘：若 not dirty 则不落盘、不通知；若 dirty 则 save。
     ///
     /// 失败时保留 working copy（`&mut self` 不消费），调用方可重试或继续编辑。

@@ -26,11 +26,13 @@ use tool_runtime::{
 };
 
 use super::{
-    AgentCommand, AgentEvent, AgentEventKind, AgentId, AgentRuntime, AgentRuntimeError,
-    AgentRuntimePort, AgentSessionRestore, AgentTurnId, AgentTurnRequest, NativeAgentRuntime,
+    AgentCommand, AgentEvent, AgentEventKind, AgentId, AgentRuntime, AgentRuntimeActivity,
+    AgentRuntimeError, AgentRuntimePort, AgentSessionRestore, AgentTurnId, AgentTurnRequest,
+    NativeAgentRuntime,
 };
 use crate::runtime::{
     AppRuntimeOptions,
+    context::RuntimeContext,
     permission_policy::{
         ApprovalProviderRegistration, InteractiveApprovalProviderFactory, PermissionPolicy,
         TERMINAL_APPROVAL_PROVIDER_ID,
@@ -48,11 +50,20 @@ fn native_runtime_projects_host_operations_through_agent_port() {
     let mut fixture = native_runtime(RuntimeEventNotifier::default());
     let port: &mut dyn AgentRuntimePort = &mut fixture.runtime;
 
-    assert!(!port.is_busy());
-    assert!(port.session_id().is_none());
-    assert!(port.is_history_empty());
-    assert!(port.is_idle_empty_session());
-    assert!(port.context_budget_snapshot().items.is_empty());
+    assert_eq!(port.activity(), AgentRuntimeActivity::Idle);
+    let snapshot = port
+        .session()
+        .expect("Native Agent should provide session capability")
+        .snapshot();
+    assert!(snapshot.session_id.is_none());
+    assert!(snapshot.is_history_empty);
+    assert!(
+        port.session()
+            .expect("Native Agent should provide session capability")
+            .context_budget_snapshot()
+            .items
+            .is_empty()
+    );
     assert!(!port.has_pending_work());
     assert!(port.drain_events().is_empty());
 
@@ -63,13 +74,25 @@ fn native_runtime_projects_host_operations_through_agent_port() {
         }],
         None,
     );
-    port.restore_session(restore)
+    port.session_mut()
+        .expect("Native Agent should provide session capability")
+        .restore_session(restore)
         .expect("host port should restore Agent session state");
 
-    assert!(!port.is_history_empty());
-    assert!(!port.is_idle_empty_session());
-    assert_eq!(port.session_id(), Some(session_id));
-    assert_eq!(port.context_budget_snapshot().items.len(), 1);
+    let snapshot = port
+        .session()
+        .expect("Native Agent should provide session capability")
+        .snapshot();
+    assert!(!snapshot.is_history_empty);
+    assert_eq!(snapshot.session_id, Some(session_id));
+    assert_eq!(
+        port.session()
+            .expect("Native Agent should provide session capability")
+            .context_budget_snapshot()
+            .items
+            .len(),
+        1
+    );
 
     port.shutdown()
         .expect("host port should quiesce its single native owner");
@@ -946,14 +969,20 @@ fn native_restore_cleanup_failure_reverts_turn_effects_without_installing_candid
         None,
     );
     let error = port
+        .session_mut()
+        .expect("Native Agent should provide session capability")
         .restore_session(restore)
         .expect_err("worker cleanup failure must reject the candidate restore");
 
     assert_eq!(error, "conversation worker thread panicked");
-    assert_ne!(port.session_id(), Some(candidate_session_id));
-    assert!(port.session_id().is_none());
-    assert!(port.is_history_empty());
-    assert!(!port.is_busy());
+    let snapshot = port
+        .session()
+        .expect("Native Agent should provide session capability")
+        .snapshot();
+    assert_ne!(snapshot.session_id, Some(candidate_session_id));
+    assert!(snapshot.session_id.is_none());
+    assert!(snapshot.is_history_empty);
+    assert_eq!(port.activity(), AgentRuntimeActivity::Idle);
     assert!(!port.has_pending_work());
     assert!(port.drain_events().is_empty());
     assert_eq!(
@@ -1071,17 +1100,29 @@ fn replay_fixture_validation_rejects_unsafe_sequences() {
         ]),
         Err(super::replay::ReplayFixtureError::TerminalFactIsNotLast)
     ));
-    let permission = RuntimePermissionRequest::new("duplicate", None, Vec::new());
-    assert!(matches!(
-        super::replay::ReplayFixture::new(vec![
-            AgentEventKind::PermissionRequested {
-                request: permission.clone(),
-            },
-            AgentEventKind::PermissionRequested { request: permission },
-            terminal,
-        ]),
-        Err(super::replay::ReplayFixtureError::DuplicatePermissionRequest(id)) if id == "duplicate"
-    ));
+    let sensitive_request_id = "SENSITIVE_REPLAY_PERMISSION_REQUEST";
+    let permission = RuntimePermissionRequest::new(sensitive_request_id, None, Vec::new());
+    let duplicate_permission_error = super::replay::ReplayFixture::new(vec![
+        AgentEventKind::PermissionRequested {
+            request: permission.clone(),
+        },
+        AgentEventKind::PermissionRequested {
+            request: permission,
+        },
+        terminal,
+    ])
+    .err()
+    .expect("duplicate permission ids should reject the fixture");
+    assert_eq!(
+        duplicate_permission_error,
+        super::replay::ReplayFixtureError::DuplicatePermissionRequest
+    );
+    for rendered in [
+        duplicate_permission_error.to_string(),
+        format!("{duplicate_permission_error:?}"),
+    ] {
+        assert!(!rendered.contains(sensitive_request_id));
+    }
 }
 
 #[test]
@@ -1234,6 +1275,81 @@ fn replay_keeps_turn_busy_until_terminal_fact_is_drained() {
 }
 
 #[test]
+fn replay_suspension_reverts_queued_facts_and_rebinds_the_event_stream() {
+    let (old_wake_tx, old_wake_rx) = mpsc::channel();
+    let old_notifier = RuntimeEventNotifier::default();
+    let _old_binding = old_notifier.bind_callback(move || {
+        let _ = old_wake_tx.send(());
+    });
+    let (fresh_wake_tx, fresh_wake_rx) = mpsc::channel();
+    let fresh_notifier = RuntimeEventNotifier::default();
+    let _fresh_binding = fresh_notifier.bind_callback(move || {
+        let _ = fresh_wake_tx.send(());
+    });
+    let mut runtime = super::replay::ReplayAgentRuntime::new(
+        permission_fixture(),
+        RuntimeEventNotifier::default(),
+    );
+
+    runtime
+        .activate(RuntimeContext::test_event_stream_lease(old_notifier))
+        .expect("Replay should bind the first event-stream generation");
+    assert_eq!(runtime.activity(), AgentRuntimeActivity::Idle);
+    assert!(!runtime.has_pending_work());
+    runtime
+        .dispatch(AgentCommand::SubmitTurn {
+            agent_id: AgentId::MAIN,
+            turn_id: AgentTurnId::new(57),
+            request: Box::new(replay_request()),
+        })
+        .expect("Replay should queue the first generation facts");
+    old_wake_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("the first event-stream generation should receive the wake");
+    assert_eq!(runtime.activity(), AgentRuntimeActivity::Busy);
+    assert!(runtime.has_pending_work());
+
+    runtime
+        .suspend()
+        .expect("Replay suspension should revert its active generation");
+    runtime
+        .suspend()
+        .expect("Replay suspension should be idempotent");
+    assert_eq!(runtime.activity(), AgentRuntimeActivity::Idle);
+    assert!(!runtime.has_pending_work());
+    assert!(runtime.drain_events().is_empty());
+
+    runtime
+        .activate(RuntimeContext::test_event_stream_lease(fresh_notifier))
+        .expect("Replay should accept a fresh event-stream generation");
+    runtime
+        .dispatch(AgentCommand::SubmitTurn {
+            agent_id: AgentId::MAIN,
+            turn_id: AgentTurnId::new(58),
+            request: Box::new(replay_request()),
+        })
+        .expect("Replay should admit work after reactivation");
+    fresh_wake_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("the fresh event-stream generation should receive the wake");
+    assert!(matches!(
+        old_wake_rx.try_recv(),
+        Err(mpsc::TryRecvError::Empty)
+    ));
+    assert_eq!(runtime.activity(), AgentRuntimeActivity::Busy);
+    assert!(runtime.has_pending_work());
+
+    let facts = runtime.drain_events();
+    assert!(
+        facts
+            .iter()
+            .any(|event| matches!(event.kind, AgentEventKind::PermissionRequested { .. }))
+    );
+    assert_eq!(runtime.activity(), AgentRuntimeActivity::Busy);
+    assert!(runtime.has_pending_work());
+}
+
+#[test]
 fn replay_shutdown_erases_active_state_and_undelivered_facts() {
     let mut runtime = super::replay::ReplayAgentRuntime::new(
         permission_fixture(),
@@ -1260,6 +1376,14 @@ fn replay_shutdown_erases_active_state_and_undelivered_facts() {
         })
         .expect_err("disposed replay must reject commands");
     assert!(matches!(error, AgentRuntimeError::Disposed));
+    let activation_error = runtime
+        .activate(RuntimeContext::test_event_stream_lease(
+            RuntimeEventNotifier::default(),
+        ))
+        .expect_err("finalized Replay must reject reactivation");
+    assert_eq!(activation_error, "Agent adapter is finalized");
+    assert_eq!(runtime.activity(), AgentRuntimeActivity::Idle);
+    assert!(!runtime.has_pending_work());
 }
 
 #[test]

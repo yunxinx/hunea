@@ -14,10 +14,11 @@ use super::{
         CapabilityKey, ComponentFailureSnapshot, ComponentSnapshot, OptionalCapabilitySnapshot,
         PendingComponentSnapshot,
     },
+    plugin::PluginDescriptorSnapshot,
     prompt_assembly::PromptContributionSnapshot,
 };
 
-const COMPOSITION_SNAPSHOT_VERSION: u32 = 8;
+const COMPOSITION_SNAPSHOT_VERSION: u32 = 9;
 
 /// `RuntimeCompositionSnapshot` 是默认 runtime composition 的只读诊断投影。
 ///
@@ -115,6 +116,30 @@ impl RuntimeCompositionSnapshot {
             }
         }
         for component in &self.components {
+            if component.plugin_type.is_empty() {
+                return Err(format!(
+                    "component {} has an empty plugin type",
+                    component.id
+                ));
+            }
+            if component.config_schema_version == 0 {
+                return Err(format!(
+                    "component {} has an invalid plugin config schema version",
+                    component.id
+                ));
+            }
+            if component.reload_policy != "replace" {
+                return Err(format!(
+                    "component {} has an unknown plugin reload policy",
+                    component.id
+                ));
+            }
+            if component.trust != "builtin" {
+                return Err(format!(
+                    "component {} has an unknown plugin trust tier",
+                    component.id
+                ));
+            }
             ensure_sorted_unique(component.required.iter(), "required dependency")?;
             ensure_sorted_unique(component.provides.iter(), "provided capability")?;
             let requirements_ready = component
@@ -214,6 +239,10 @@ struct CapabilitySnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct RuntimeComponentSnapshot {
     id: String,
+    plugin_type: String,
+    config_schema_version: u32,
+    reload_policy: String,
+    trust: String,
     state: String,
     epoch: u64,
     required: Vec<String>,
@@ -322,13 +351,28 @@ impl AppRuntimeCoordinator {
                 generation: capability.generation,
             })
             .collect();
+        let mut plugin_descriptors = self
+            .components
+            .plugin_descriptor_snapshots()
+            .into_iter()
+            .map(|descriptor| (descriptor.component_id.clone(), descriptor))
+            .collect::<BTreeMap<_, _>>();
         let components = self
             .components
             .lifecycle
             .components()
             .into_iter()
-            .map(runtime_component_snapshot)
-            .collect();
+            .map(|component| {
+                let descriptor = plugin_descriptors
+                    .remove(&component.id)
+                    .expect("every declared component must have one prepared plugin descriptor");
+                runtime_component_snapshot(component, descriptor)
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            plugin_descriptors.is_empty(),
+            "prepared plugin descriptors must not outlive undeclared components"
+        );
         let pending = self
             .components
             .lifecycle
@@ -602,9 +646,17 @@ fn validate_topology_orders(
     Ok(())
 }
 
-fn runtime_component_snapshot(component: ComponentSnapshot) -> RuntimeComponentSnapshot {
+fn runtime_component_snapshot(
+    component: ComponentSnapshot,
+    descriptor: PluginDescriptorSnapshot,
+) -> RuntimeComponentSnapshot {
+    debug_assert_eq!(component.id, descriptor.component_id);
     RuntimeComponentSnapshot {
         id: component.id,
+        plugin_type: descriptor.plugin_type,
+        config_schema_version: descriptor.config_schema_version,
+        reload_policy: descriptor.reload_policy.to_string(),
+        trust: descriptor.trust.to_string(),
         state: component.state.as_str().to_string(),
         epoch: component.epoch,
         required: component.required,

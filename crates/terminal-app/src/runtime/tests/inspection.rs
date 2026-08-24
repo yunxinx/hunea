@@ -14,7 +14,7 @@ use terminal_ui::{RuntimeWake, UiRuntimePort};
 use super::support::*;
 use crate::runtime::{
     context::{PromptAssemblyCapability, ToolCatalogCapability},
-    lifecycle::{ComponentDefinition, ComponentFailureReason},
+    lifecycle::ComponentFailureReason,
     prompt_assembly::PromptSectionContribution,
 };
 
@@ -182,10 +182,13 @@ fn composition_snapshot_is_deterministic_and_redacted() {
     assert!(!json.contains("runtime_composition"));
     assert!(!json.contains("registration_id"));
     assert!(!json.contains("entry_id"));
+    assert!(!json.contains("display_name"));
+    assert!(!json.contains("constructor"));
+    assert!(!json.contains("callback"));
 
     let snapshot: serde_json::Value =
         serde_json::from_str(&json).expect("snapshot JSON should decode");
-    assert_eq!(snapshot["schema_version"], 8);
+    assert_eq!(snapshot["schema_version"], 9);
     assert_eq!(snapshot["failures"], serde_json::json!([]));
     assert_eq!(
         snapshot["capabilities"],
@@ -249,6 +252,31 @@ fn composition_snapshot_is_deterministic_and_redacted() {
             "ui_runtime_bridge",
         ]
     );
+    for (component_id, plugin_type) in [
+        ("approval_provider", "terminal-approval-provider"),
+        ("context_budget", "context-budget"),
+        ("llm_port", "openai-compatible-provider-catalog"),
+        ("model_refresh", "model-refresh"),
+        ("native_agent_runtime", "native-agent-loop"),
+        ("permission_policy", "permission-policy"),
+        ("prompt_assembly", "prompt-assembly"),
+        ("runtime_event_stream", "runtime-event-stream"),
+        ("runtime_wake_binding", "runtime-wake-slot"),
+        ("session_persistence", "session-persistence"),
+        ("tool_catalog", "workspace-tools"),
+        ("ui_runtime_bridge", "terminal-ui-runtime-adapter"),
+    ] {
+        let component = snapshot["components"]
+            .as_array()
+            .expect("components should be an array")
+            .iter()
+            .find(|component| component["id"] == component_id)
+            .expect("component should have plugin metadata");
+        assert_eq!(component["plugin_type"], plugin_type);
+        assert_eq!(component["config_schema_version"], 1);
+        assert_eq!(component["reload_policy"], "replace");
+        assert_eq!(component["trust"], "builtin");
+    }
     for (component_id, provides) in [
         ("approval_provider", &["approval_provider"][..]),
         ("llm_port", &["llm_port", "model_catalog"][..]),
@@ -445,37 +473,35 @@ fn composition_snapshot_is_deterministic_and_redacted() {
 #[test]
 fn composition_snapshot_projects_safe_failure_and_pending_diagnostics() {
     let mut coordinator = runtime_coordinator(AppRuntimeOptions::default());
-    let declaration = coordinator
+    let deactivation = coordinator
         .components
         .lifecycle
-        .declare(ComponentDefinition::new("failed_activation_test_component"))
-        .expect("synthetic component id should be unique");
+        .suspend("model_refresh")
+        .expect("model refresh should begin suspension");
+    coordinator
+        .components
+        .lifecycle
+        .complete_deactivation(deactivation.deactivation_requests[0].clone())
+        .expect("model refresh suspension should complete");
+    let activation = coordinator
+        .components
+        .lifecycle
+        .activate("model_refresh")
+        .expect("model refresh should begin reactivation");
     coordinator
         .components
         .lifecycle
         .fail_activation(
-            declaration.activation_requests[0].clone(),
+            activation.activation_requests[0].clone(),
             ComponentFailureReason::ActivationRejected,
             true,
         )
-        .expect("synthetic activation should fail at the current epoch");
-    let declaration = coordinator
-        .components
-        .lifecycle
-        .declare(ComponentDefinition::new(
-            "failed_deactivation_test_component",
-        ))
-        .expect("synthetic component id should be unique");
-    coordinator
-        .components
-        .lifecycle
-        .complete_activation(declaration.activation_requests[0].clone())
-        .expect("synthetic activation should complete");
+        .expect("model refresh activation should fail at the current epoch");
     let deactivation = coordinator
         .components
         .lifecycle
-        .deactivate("failed_deactivation_test_component")
-        .expect("synthetic component should begin deactivation");
+        .deactivate("context_budget")
+        .expect("context budget should begin deactivation");
     coordinator
         .components
         .lifecycle
@@ -484,7 +510,7 @@ fn composition_snapshot_projects_safe_failure_and_pending_diagnostics() {
             ComponentFailureReason::EffectDisposalRejected,
             false,
         )
-        .expect("synthetic deactivation should fail at the current epoch");
+        .expect("context budget deactivation should fail at the current epoch");
 
     let snapshot = coordinator.inspect_composition();
     snapshot
@@ -505,20 +531,20 @@ fn composition_snapshot_projects_safe_failure_and_pending_diagnostics() {
         snapshot["failures"],
         serde_json::json!([
             {
-                "component_id": "failed_activation_test_component",
-                "operation": "activation",
-                "code": "activation_rejected",
-                "message": "component activation was rejected",
-                "recoverable": true,
-                "epoch": 1,
-            },
-            {
-                "component_id": "failed_deactivation_test_component",
+                "component_id": "context_budget",
                 "operation": "deactivation",
                 "code": "effect_disposal_rejected",
                 "message": "component effect disposal was rejected",
                 "recoverable": false,
                 "epoch": 1,
+            },
+            {
+                "component_id": "model_refresh",
+                "operation": "activation",
+                "code": "activation_rejected",
+                "message": "component activation was rejected",
+                "recoverable": true,
+                "epoch": 2,
             },
         ])
     );

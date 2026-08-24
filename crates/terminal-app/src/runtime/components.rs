@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{num::NonZeroU32, sync::Arc};
 
 use conversation_runtime::{ModelRefreshWorker, RuntimeEventBinding, RuntimeEventNotifier};
 use tool_runtime::ToolExecutorRegistry;
@@ -14,7 +14,7 @@ use super::{
     },
     context_budget_worker::ContextBudgetWorker,
     effect_scope::{EffectScope, EffectScopeSnapshot},
-    lifecycle::{CapabilityKey, ComponentDefinition},
+    lifecycle::CapabilityKey,
     lifecycle_executor::{
         ComponentActivationOutcome, ComponentLifecycleCallbacks, ComponentLifecycleExecutor,
         ComponentLifecycleMode, LifecycleExecutionError,
@@ -23,6 +23,11 @@ use super::{
     permission_policy::{
         ApprovalProviderRegistration, InteractiveApprovalProviderFactory, PermissionPolicy,
         TERMINAL_APPROVAL_PROVIDER_ID,
+    },
+    plugin::{
+        DesiredPlugin, PluginCatalogError, PluginComposition, PluginDescriptor,
+        PluginDescriptorBuilder, PluginDescriptorSnapshot, PluginFactory, PluginFactoryCatalog,
+        PluginReloadPolicy, PluginTrust, PluginTypeId,
     },
     prompt_assembly::{PromptAssembly, PromptRegistration},
     session_port::{SessionBackendRegistration, SessionBackendViews, SessionPortHost},
@@ -81,6 +86,184 @@ const MODEL_REFRESH_COMPONENT: &str = "model_refresh";
 const CONTEXT_BUDGET_COMPONENT: &str = "context_budget";
 const UI_RUNTIME_BRIDGE_COMPONENT: &str = "ui_runtime_bridge";
 
+const APPROVAL_PROVIDER_PLUGIN: &str = "terminal-approval-provider";
+const LLM_PORT_PLUGIN: &str = "openai-compatible-provider-catalog";
+const RUNTIME_EVENT_STREAM_PLUGIN: &str = "runtime-event-stream";
+const RUNTIME_WAKE_PLUGIN: &str = "runtime-wake-slot";
+const SESSION_PERSISTENCE_PLUGIN: &str = "session-persistence";
+const TOOL_CATALOG_PLUGIN: &str = "workspace-tools";
+const PERMISSION_POLICY_PLUGIN: &str = "permission-policy";
+const PROMPT_ASSEMBLY_PLUGIN: &str = "prompt-assembly";
+const NATIVE_AGENT_RUNTIME_PLUGIN: &str = "native-agent-loop";
+const MODEL_REFRESH_PLUGIN: &str = "model-refresh";
+const CONTEXT_BUDGET_PLUGIN: &str = "context-budget";
+const UI_RUNTIME_BRIDGE_PLUGIN: &str = "terminal-ui-runtime-adapter";
+
+type RuntimePluginActivation = for<'a> fn(
+    &mut RuntimeComponents,
+    &EffectScope,
+    &mut ComponentActivationContext<'a>,
+    ComponentLifecycleMode,
+) -> Result<ComponentActivationOutcome, String>;
+type RuntimePluginQuiescence =
+    fn(&mut RuntimeComponents, ComponentLifecycleMode) -> Result<(), String>;
+
+#[derive(Clone, Copy)]
+struct RuntimePluginImplementation {
+    activate: RuntimePluginActivation,
+    quiesce: RuntimePluginQuiescence,
+}
+
+fn builtin_plugin_type(type_id: &'static str) -> PluginTypeId {
+    PluginTypeId::try_new(type_id).expect("builtin plugin type id must be valid")
+}
+
+fn builtin_descriptor(
+    type_id: &'static str,
+    display_name: &'static str,
+) -> PluginDescriptorBuilder {
+    PluginDescriptor::builder(
+        builtin_plugin_type(type_id),
+        display_name,
+        NonZeroU32::MIN,
+        PluginReloadPolicy::Replace,
+        PluginTrust::Builtin,
+    )
+}
+
+fn desired_builtin(component_id: &'static str, plugin_type: &'static str) -> DesiredPlugin {
+    DesiredPlugin::new(component_id, builtin_plugin_type(plugin_type))
+}
+
+fn runtime_plugin_factory(
+    descriptor: PluginDescriptorBuilder,
+    activate: RuntimePluginActivation,
+    quiesce: RuntimePluginQuiescence,
+) -> PluginFactory<RuntimePluginImplementation> {
+    let implementation = RuntimePluginImplementation { activate, quiesce };
+    PluginFactory::new(
+        descriptor
+            .build()
+            .expect("builtin plugin descriptor must be valid"),
+        move || Ok(implementation),
+    )
+}
+
+fn builtin_plugin_composition()
+-> Result<PluginComposition<RuntimePluginImplementation>, PluginCatalogError> {
+    let catalog = PluginFactoryCatalog::try_new([
+        runtime_plugin_factory(
+            builtin_descriptor(APPROVAL_PROVIDER_PLUGIN, "Terminal approval provider")
+                .provides(APPROVAL_PROVIDER.capability),
+            RuntimeComponents::activate_approval_provider,
+            RuntimeComponents::quiesce_noop,
+        ),
+        runtime_plugin_factory(
+            builtin_descriptor(LLM_PORT_PLUGIN, "OpenAI-compatible provider catalog")
+                .provides(LLM_PORT.capability)
+                .provides(MODEL_CATALOG.capability),
+            RuntimeComponents::activate_llm_port,
+            RuntimeComponents::quiesce_llm_port,
+        ),
+        runtime_plugin_factory(
+            builtin_descriptor(RUNTIME_EVENT_STREAM_PLUGIN, "Runtime event stream")
+                .provides(RUNTIME_EVENT_STREAM.capability),
+            RuntimeComponents::activate_runtime_event_stream,
+            RuntimeComponents::quiesce_noop,
+        ),
+        runtime_plugin_factory(
+            builtin_descriptor(RUNTIME_WAKE_PLUGIN, "Runtime wake slot")
+                .provides(RUNTIME_WAKE.capability),
+            RuntimeComponents::activate_runtime_wake,
+            RuntimeComponents::quiesce_noop,
+        ),
+        runtime_plugin_factory(
+            builtin_descriptor(SESSION_PERSISTENCE_PLUGIN, "Session persistence")
+                .requires(RUNTIME_EVENT_STREAM.capability)
+                .provides(SESSION_PERSISTENCE.capability),
+            RuntimeComponents::activate_session_persistence,
+            RuntimeComponents::quiesce_session_persistence,
+        ),
+        runtime_plugin_factory(
+            builtin_descriptor(TOOL_CATALOG_PLUGIN, "Workspace tools")
+                .provides(TOOL_CATALOG.capability),
+            RuntimeComponents::activate_tool_catalog,
+            RuntimeComponents::quiesce_tool_catalog,
+        ),
+        runtime_plugin_factory(
+            builtin_descriptor(PERMISSION_POLICY_PLUGIN, "Permission policy")
+                .requires(APPROVAL_PROVIDER.capability)
+                .requires(RUNTIME_EVENT_STREAM.capability)
+                .provides(PERMISSION_POLICY.capability),
+            RuntimeComponents::activate_permission_policy,
+            RuntimeComponents::quiesce_permission_policy,
+        ),
+        runtime_plugin_factory(
+            builtin_descriptor(PROMPT_ASSEMBLY_PLUGIN, "Prompt assembly")
+                .requires(TOOL_CATALOG.capability)
+                .observes(SESSION_PERSISTENCE.capability)
+                .provides(PROMPT_ASSEMBLY.capability),
+            RuntimeComponents::activate_prompt_assembly,
+            RuntimeComponents::quiesce_prompt_assembly,
+        ),
+        runtime_plugin_factory(
+            builtin_descriptor(NATIVE_AGENT_RUNTIME_PLUGIN, "Native agent loop")
+                .requires(RUNTIME_EVENT_STREAM.capability)
+                .requires(LLM_PORT.capability)
+                .requires(MODEL_CATALOG.capability)
+                .requires(PERMISSION_POLICY.capability)
+                .requires(PROMPT_ASSEMBLY.capability)
+                .requires(TOOL_CATALOG.capability)
+                .observes(SESSION_PERSISTENCE.capability),
+            RuntimeComponents::activate_native_agent_runtime,
+            RuntimeComponents::quiesce_native_agent_runtime,
+        ),
+        runtime_plugin_factory(
+            builtin_descriptor(MODEL_REFRESH_PLUGIN, "Model refresh")
+                .requires(RUNTIME_EVENT_STREAM.capability)
+                .requires(LLM_PORT.capability)
+                .requires(MODEL_CATALOG.capability),
+            RuntimeComponents::activate_model_refresh,
+            RuntimeComponents::quiesce_model_refresh,
+        ),
+        runtime_plugin_factory(
+            builtin_descriptor(CONTEXT_BUDGET_PLUGIN, "Context budget")
+                .requires(RUNTIME_EVENT_STREAM.capability)
+                .requires(LLM_PORT.capability)
+                .requires(MODEL_CATALOG.capability)
+                .requires(PROMPT_ASSEMBLY.capability)
+                .requires(TOOL_CATALOG.capability),
+            RuntimeComponents::activate_context_budget,
+            RuntimeComponents::quiesce_context_budget,
+        ),
+        runtime_plugin_factory(
+            builtin_descriptor(UI_RUNTIME_BRIDGE_PLUGIN, "Terminal UI runtime adapter")
+                .requires(RUNTIME_EVENT_STREAM.capability)
+                .requires(RUNTIME_WAKE.capability),
+            RuntimeComponents::activate_ui_runtime_bridge,
+            RuntimeComponents::quiesce_noop,
+        ),
+    ])?;
+
+    catalog.instantiate([
+        desired_builtin(APPROVAL_PROVIDER.component_id, APPROVAL_PROVIDER_PLUGIN),
+        desired_builtin(LLM_PORT.component_id, LLM_PORT_PLUGIN),
+        desired_builtin(
+            RUNTIME_EVENT_STREAM.component_id,
+            RUNTIME_EVENT_STREAM_PLUGIN,
+        ),
+        desired_builtin(RUNTIME_WAKE.component_id, RUNTIME_WAKE_PLUGIN),
+        desired_builtin(SESSION_PERSISTENCE.component_id, SESSION_PERSISTENCE_PLUGIN),
+        desired_builtin(TOOL_CATALOG.component_id, TOOL_CATALOG_PLUGIN),
+        desired_builtin(PERMISSION_POLICY.component_id, PERMISSION_POLICY_PLUGIN),
+        desired_builtin(PROMPT_ASSEMBLY.component_id, PROMPT_ASSEMBLY_PLUGIN),
+        desired_builtin(NATIVE_AGENT_RUNTIME_COMPONENT, NATIVE_AGENT_RUNTIME_PLUGIN),
+        desired_builtin(MODEL_REFRESH_COMPONENT, MODEL_REFRESH_PLUGIN),
+        desired_builtin(CONTEXT_BUDGET_COMPONENT, CONTEXT_BUDGET_PLUGIN),
+        desired_builtin(UI_RUNTIME_BRIDGE_COMPONENT, UI_RUNTIME_BRIDGE_PLUGIN),
+    ])
+}
+
 #[derive(Default)]
 struct ComponentActivationStaging {
     approval_registration: Option<ApprovalProviderRegistration>,
@@ -112,12 +295,14 @@ pub(super) struct RuntimeComponents {
     pub(super) context_budget_worker: ContextBudgetWorker,
     runtime_event_notifier: RuntimeEventNotifier,
     activation_staging: ComponentActivationStaging,
+    plugins: PluginComposition<RuntimePluginImplementation>,
     pub(super) lifecycle: ComponentLifecycleExecutor,
     is_shutdown: bool,
 }
 
 impl RuntimeComponents {
     pub(super) fn new(options: &mut AppRuntimeOptions) -> Result<Self, String> {
+        let plugins = builtin_plugin_composition().map_err(|error| error.to_string())?;
         let runtime_event_notifier = RuntimeEventNotifier::default();
         let permission_policy = PermissionPolicy::new();
         let approval_registration = permission_policy
@@ -189,6 +374,7 @@ impl RuntimeComponents {
                 runtime_wake: None,
                 is_session_backend_replacement: false,
             },
+            plugins,
             lifecycle: ComponentLifecycleExecutor::default(),
             is_shutdown: false,
         };
@@ -209,10 +395,9 @@ impl RuntimeComponents {
                 .session_backend_registration
                 .is_some()
         );
-        self.with_lifecycle(|lifecycle, components| {
-            lifecycle.declare_all(runtime_component_definitions(), components)
-        })
-        .map_err(|error| error.to_string())
+        let definitions = self.plugins.definitions();
+        self.with_lifecycle(|lifecycle, components| lifecycle.declare_all(definitions, components))
+            .map_err(|error| error.to_string())
     }
 
     pub(super) fn bind_runtime_wake(&mut self, wake: RuntimeWake) -> Result<(), String> {
@@ -253,6 +438,11 @@ impl RuntimeComponents {
     /// 返回 composition root 下的 active component scope；root identity 不进入诊断投影。
     pub(super) fn effect_scope_snapshots(&self) -> Vec<EffectScopeSnapshot> {
         self.lifecycle.scope_snapshots()
+    }
+
+    /// 返回按 component id 排序的 builtin plugin descriptor projection。
+    pub(super) fn plugin_descriptor_snapshots(&self) -> Vec<PluginDescriptorSnapshot> {
+        self.plugins.descriptor_snapshots()
     }
 
     pub(super) fn require<C>(&self) -> Result<CapabilityLease<C>, RuntimeContextError>
@@ -639,6 +829,284 @@ impl RuntimeComponents {
         .map_err(|error| error.to_string())
     }
 
+    fn activate_approval_provider(
+        &mut self,
+        scope: &EffectScope,
+        context: &mut ComponentActivationContext<'_>,
+        _mode: ComponentLifecycleMode,
+    ) -> Result<ComponentActivationOutcome, String> {
+        let registration = self
+            .activation_staging
+            .approval_registration
+            .take()
+            .ok_or_else(|| "approval provider activation was not staged".to_string())?;
+        register_permission_policy_effect(scope, registration)?;
+        context
+            .publish::<ApprovalProviderCapability>(self.permission_policy.clone())
+            .map_err(|error| error.to_string())?;
+        Ok(ComponentActivationOutcome::PublishCapabilities)
+    }
+
+    fn activate_llm_port(
+        &mut self,
+        scope: &EffectScope,
+        context: &mut ComponentActivationContext<'_>,
+        _mode: ComponentLifecycleMode,
+    ) -> Result<ComponentActivationOutcome, String> {
+        let registrations = self
+            .activation_staging
+            .provider_registrations
+            .take()
+            .ok_or_else(|| "LLM provider activation was not staged".to_string())?;
+        register_llm_port_effect(scope, registrations)?;
+        context
+            .publish::<LlmPortCapability>(self.llm_port.clone())
+            .map_err(|error| error.to_string())?;
+        context
+            .publish::<ModelCatalogCapability>(self.llm_port.clone())
+            .map_err(|error| error.to_string())?;
+        Ok(ComponentActivationOutcome::PublishCapabilities)
+    }
+
+    fn activate_tool_catalog(
+        &mut self,
+        scope: &EffectScope,
+        context: &mut ComponentActivationContext<'_>,
+        _mode: ComponentLifecycleMode,
+    ) -> Result<ComponentActivationOutcome, String> {
+        let registration = self
+            .activation_staging
+            .tool_registration
+            .take()
+            .ok_or_else(|| "tool catalog activation was not staged".to_string())?;
+        register_tool_catalog_effect(scope, registration)?;
+        context
+            .publish::<ToolCatalogCapability>(self.tool_catalog.clone())
+            .map_err(|error| error.to_string())?;
+        Ok(ComponentActivationOutcome::PublishCapabilities)
+    }
+
+    fn activate_prompt_assembly(
+        &mut self,
+        scope: &EffectScope,
+        context: &mut ComponentActivationContext<'_>,
+        _mode: ComponentLifecycleMode,
+    ) -> Result<ComponentActivationOutcome, String> {
+        let registration = self
+            .activation_staging
+            .prompt_registration
+            .take()
+            .ok_or_else(|| "prompt assembly activation was not staged".to_string())?;
+        register_prompt_assembly_effect(scope, registration)?;
+        context
+            .publish::<PromptAssemblyCapability>(self.prompt_assembly.clone())
+            .map_err(|error| error.to_string())?;
+        Ok(ComponentActivationOutcome::PublishCapabilities)
+    }
+
+    fn activate_session_persistence(
+        &mut self,
+        scope: &EffectScope,
+        context: &mut ComponentActivationContext<'_>,
+        _mode: ComponentLifecycleMode,
+    ) -> Result<ComponentActivationOutcome, String> {
+        let event_stream = context
+            .require::<RuntimeEventStreamCapability>()
+            .map_err(|error| error.to_string())?;
+        self.session_store_worker.shutdown()?;
+        self.session_store_worker = SessionStoreWorker::new((*event_stream).clone());
+        if let Some(registration) = self.activation_staging.session_backend_registration.take() {
+            register_session_backend_effect(scope, registration)?;
+        }
+        if let Some(views) = self.session_backend_views.clone() {
+            context
+                .publish::<SessionPersistenceCapability>(views)
+                .map_err(|error| error.to_string())?;
+            Ok(ComponentActivationOutcome::PublishCapabilities)
+        } else {
+            Ok(ComponentActivationOutcome::Ready)
+        }
+    }
+
+    fn activate_runtime_wake(
+        &mut self,
+        _scope: &EffectScope,
+        context: &mut ComponentActivationContext<'_>,
+        _mode: ComponentLifecycleMode,
+    ) -> Result<ComponentActivationOutcome, String> {
+        if let Some(wake) = self.activation_staging.runtime_wake.take() {
+            context
+                .publish::<RuntimeWakeCapability>(wake)
+                .map_err(|error| error.to_string())?;
+            Ok(ComponentActivationOutcome::PublishCapabilities)
+        } else {
+            Ok(ComponentActivationOutcome::Ready)
+        }
+    }
+
+    fn activate_permission_policy(
+        &mut self,
+        _scope: &EffectScope,
+        context: &mut ComponentActivationContext<'_>,
+        _mode: ComponentLifecycleMode,
+    ) -> Result<ComponentActivationOutcome, String> {
+        let event_stream = context
+            .require::<RuntimeEventStreamCapability>()
+            .map_err(|error| error.to_string())?;
+        self.permission_policy.bind_event_stream(event_stream);
+        context
+            .publish::<PermissionPolicyCapability>(self.permission_policy.clone())
+            .map_err(|error| error.to_string())?;
+        Ok(ComponentActivationOutcome::PublishCapabilities)
+    }
+
+    fn activate_runtime_event_stream(
+        &mut self,
+        _scope: &EffectScope,
+        context: &mut ComponentActivationContext<'_>,
+        _mode: ComponentLifecycleMode,
+    ) -> Result<ComponentActivationOutcome, String> {
+        context
+            .publish::<RuntimeEventStreamCapability>(self.runtime_event_notifier.clone())
+            .map_err(|error| error.to_string())?;
+        Ok(ComponentActivationOutcome::PublishCapabilities)
+    }
+
+    fn activate_ui_runtime_bridge(
+        &mut self,
+        scope: &EffectScope,
+        context: &mut ComponentActivationContext<'_>,
+        _mode: ComponentLifecycleMode,
+    ) -> Result<ComponentActivationOutcome, String> {
+        let event_stream = context
+            .require::<RuntimeEventStreamCapability>()
+            .map_err(|error| error.to_string())?;
+        let wake = context
+            .require::<RuntimeWakeCapability>()
+            .map_err(|error| error.to_string())?;
+        let binding = event_stream.bind_callback(move || wake.wake());
+        register_runtime_wake_effect(scope, binding)?;
+        Ok(ComponentActivationOutcome::Ready)
+    }
+
+    fn activate_native_agent_runtime(
+        &mut self,
+        _scope: &EffectScope,
+        context: &mut ComponentActivationContext<'_>,
+        _mode: ComponentLifecycleMode,
+    ) -> Result<ComponentActivationOutcome, String> {
+        let event_stream = context
+            .require::<RuntimeEventStreamCapability>()
+            .map_err(|error| error.to_string())?;
+        self.agent_runtime.bind_event_stream(event_stream)?;
+        Ok(ComponentActivationOutcome::Ready)
+    }
+
+    fn activate_model_refresh(
+        &mut self,
+        _scope: &EffectScope,
+        context: &mut ComponentActivationContext<'_>,
+        _mode: ComponentLifecycleMode,
+    ) -> Result<ComponentActivationOutcome, String> {
+        let event_stream = context
+            .require::<RuntimeEventStreamCapability>()
+            .map_err(|error| error.to_string())?;
+        self.model_refresh.shutdown()?;
+        self.model_refresh = ModelRefreshWorker::new((*event_stream).clone());
+        Ok(ComponentActivationOutcome::Ready)
+    }
+
+    fn activate_context_budget(
+        &mut self,
+        _scope: &EffectScope,
+        context: &mut ComponentActivationContext<'_>,
+        _mode: ComponentLifecycleMode,
+    ) -> Result<ComponentActivationOutcome, String> {
+        let event_stream = context
+            .require::<RuntimeEventStreamCapability>()
+            .map_err(|error| error.to_string())?;
+        self.context_budget_worker
+            .rebind_event_notifier((*event_stream).clone())?;
+        Ok(ComponentActivationOutcome::Ready)
+    }
+
+    fn quiesce_native_agent_runtime(&mut self, mode: ComponentLifecycleMode) -> Result<(), String> {
+        match mode {
+            ComponentLifecycleMode::Shutdown => self.agent_runtime.shutdown(),
+            _ => self.agent_runtime.suspend(),
+        }
+        .map_err(|error| error.to_string())
+    }
+
+    fn quiesce_model_refresh(&mut self, mode: ComponentLifecycleMode) -> Result<(), String> {
+        match mode {
+            ComponentLifecycleMode::Shutdown => self.model_refresh.shutdown(),
+            _ => self.model_refresh.reset_after_clear(),
+        }
+    }
+
+    fn quiesce_context_budget(&mut self, mode: ComponentLifecycleMode) -> Result<(), String> {
+        match mode {
+            ComponentLifecycleMode::Shutdown => self.context_budget_worker.shutdown(),
+            _ => {
+                self.context_budget_worker.cancel_pending();
+                Ok(())
+            }
+        }
+    }
+
+    fn quiesce_permission_policy(&mut self, _mode: ComponentLifecycleMode) -> Result<(), String> {
+        self.permission_policy.deactivate();
+        Ok(())
+    }
+
+    fn quiesce_llm_port(&mut self, _mode: ComponentLifecycleMode) -> Result<(), String> {
+        self.llm_port.deactivate();
+        Ok(())
+    }
+
+    fn quiesce_tool_catalog(&mut self, _mode: ComponentLifecycleMode) -> Result<(), String> {
+        self.session_workspace_tools = ToolExecutorRegistry::new();
+        Ok(())
+    }
+
+    fn quiesce_prompt_assembly(&mut self, _mode: ComponentLifecycleMode) -> Result<(), String> {
+        self.prompt_assembly.deactivate();
+        Ok(())
+    }
+
+    fn quiesce_session_persistence(&mut self, mode: ComponentLifecycleMode) -> Result<(), String> {
+        let mut failures = Vec::new();
+        if self.session_store_worker.is_running()
+            && let Some(views) = self.session_backend_views.clone()
+            && let Err(error) = self.session_store_worker.flush_all(views)
+        {
+            failures.push(error);
+        }
+        if let Err(error) = self.session_store_worker.shutdown() {
+            failures.push(error);
+        }
+        if mode == ComponentLifecycleMode::Shutdown
+            || self.activation_staging.is_session_backend_replacement
+        {
+            if let Some(session_port) = &self.session_port {
+                session_port.deactivate();
+            }
+            self.session_backend_views = None;
+            self.session_port = None;
+            self.activation_staging.is_session_backend_replacement = false;
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; "))
+        }
+    }
+
+    fn quiesce_noop(&mut self, _mode: ComponentLifecycleMode) -> Result<(), String> {
+        Ok(())
+    }
+
     pub(super) fn shutdown(&mut self) -> Result<(), String> {
         if self.is_shutdown {
             return Ok(());
@@ -661,143 +1129,14 @@ impl ComponentLifecycleCallbacks for RuntimeComponents {
         component_id: &str,
         scope: &EffectScope,
         context: &mut ComponentActivationContext<'_>,
-        _mode: ComponentLifecycleMode,
+        mode: ComponentLifecycleMode,
     ) -> Result<ComponentActivationOutcome, String> {
-        let outcome = match component_id {
-            id if id == APPROVAL_PROVIDER.component_id => {
-                let registration = self
-                    .activation_staging
-                    .approval_registration
-                    .take()
-                    .ok_or_else(|| "approval provider activation was not staged".to_string())?;
-                register_permission_policy_effect(scope, registration)?;
-                context
-                    .publish::<ApprovalProviderCapability>(self.permission_policy.clone())
-                    .map_err(|error| error.to_string())?;
-                ComponentActivationOutcome::PublishCapabilities
-            }
-            id if id == LLM_PORT.component_id => {
-                let registrations = self
-                    .activation_staging
-                    .provider_registrations
-                    .take()
-                    .ok_or_else(|| "LLM provider activation was not staged".to_string())?;
-                register_llm_port_effect(scope, registrations)?;
-                context
-                    .publish::<LlmPortCapability>(self.llm_port.clone())
-                    .map_err(|error| error.to_string())?;
-                context
-                    .publish::<ModelCatalogCapability>(self.llm_port.clone())
-                    .map_err(|error| error.to_string())?;
-                ComponentActivationOutcome::PublishCapabilities
-            }
-            id if id == TOOL_CATALOG.component_id => {
-                let registration = self
-                    .activation_staging
-                    .tool_registration
-                    .take()
-                    .ok_or_else(|| "tool catalog activation was not staged".to_string())?;
-                register_tool_catalog_effect(scope, registration)?;
-                context
-                    .publish::<ToolCatalogCapability>(self.tool_catalog.clone())
-                    .map_err(|error| error.to_string())?;
-                ComponentActivationOutcome::PublishCapabilities
-            }
-            id if id == PROMPT_ASSEMBLY.component_id => {
-                let registration = self
-                    .activation_staging
-                    .prompt_registration
-                    .take()
-                    .ok_or_else(|| "prompt assembly activation was not staged".to_string())?;
-                register_prompt_assembly_effect(scope, registration)?;
-                context
-                    .publish::<PromptAssemblyCapability>(self.prompt_assembly.clone())
-                    .map_err(|error| error.to_string())?;
-                ComponentActivationOutcome::PublishCapabilities
-            }
-            id if id == SESSION_PERSISTENCE.component_id => {
-                let event_stream = context
-                    .require::<RuntimeEventStreamCapability>()
-                    .map_err(|error| error.to_string())?;
-                self.session_store_worker.shutdown()?;
-                self.session_store_worker = SessionStoreWorker::new((*event_stream).clone());
-                if let Some(registration) =
-                    self.activation_staging.session_backend_registration.take()
-                {
-                    register_session_backend_effect(scope, registration)?;
-                }
-                if let Some(views) = self.session_backend_views.clone() {
-                    context
-                        .publish::<SessionPersistenceCapability>(views)
-                        .map_err(|error| error.to_string())?;
-                    ComponentActivationOutcome::PublishCapabilities
-                } else {
-                    ComponentActivationOutcome::Ready
-                }
-            }
-            id if id == RUNTIME_WAKE.component_id => {
-                if let Some(wake) = self.activation_staging.runtime_wake.take() {
-                    context
-                        .publish::<RuntimeWakeCapability>(wake)
-                        .map_err(|error| error.to_string())?;
-                    ComponentActivationOutcome::PublishCapabilities
-                } else {
-                    ComponentActivationOutcome::Ready
-                }
-            }
-            id if id == PERMISSION_POLICY.component_id => {
-                let event_stream = context
-                    .require::<RuntimeEventStreamCapability>()
-                    .map_err(|error| error.to_string())?;
-                self.permission_policy.bind_event_stream(event_stream);
-                context
-                    .publish::<PermissionPolicyCapability>(self.permission_policy.clone())
-                    .map_err(|error| error.to_string())?;
-                ComponentActivationOutcome::PublishCapabilities
-            }
-            id if id == RUNTIME_EVENT_STREAM.component_id => {
-                context
-                    .publish::<RuntimeEventStreamCapability>(self.runtime_event_notifier.clone())
-                    .map_err(|error| error.to_string())?;
-                ComponentActivationOutcome::PublishCapabilities
-            }
-            UI_RUNTIME_BRIDGE_COMPONENT => {
-                let event_stream = context
-                    .require::<RuntimeEventStreamCapability>()
-                    .map_err(|error| error.to_string())?;
-                let wake = context
-                    .require::<RuntimeWakeCapability>()
-                    .map_err(|error| error.to_string())?;
-                let binding = event_stream.bind_callback(move || wake.wake());
-                register_runtime_wake_effect(scope, binding)?;
-                ComponentActivationOutcome::Ready
-            }
-            NATIVE_AGENT_RUNTIME_COMPONENT => {
-                let event_stream = context
-                    .require::<RuntimeEventStreamCapability>()
-                    .map_err(|error| error.to_string())?;
-                self.agent_runtime.bind_event_stream(event_stream)?;
-                ComponentActivationOutcome::Ready
-            }
-            MODEL_REFRESH_COMPONENT => {
-                let event_stream = context
-                    .require::<RuntimeEventStreamCapability>()
-                    .map_err(|error| error.to_string())?;
-                self.model_refresh.shutdown()?;
-                self.model_refresh = ModelRefreshWorker::new((*event_stream).clone());
-                ComponentActivationOutcome::Ready
-            }
-            CONTEXT_BUDGET_COMPONENT => {
-                let event_stream = context
-                    .require::<RuntimeEventStreamCapability>()
-                    .map_err(|error| error.to_string())?;
-                self.context_budget_worker
-                    .rebind_event_notifier((*event_stream).clone())?;
-                ComponentActivationOutcome::Ready
-            }
-            unknown => return Err(format!("unknown component lifecycle callback `{unknown}`")),
-        };
-        Ok(outcome)
+        let implementation = self
+            .plugins
+            .implementation(component_id)
+            .copied()
+            .ok_or_else(|| format!("component `{component_id}` has no prepared plugin instance"))?;
+        (implementation.activate)(self, scope, context, mode)
     }
 
     fn quiesce_component(
@@ -805,122 +1144,13 @@ impl ComponentLifecycleCallbacks for RuntimeComponents {
         component_id: &str,
         mode: ComponentLifecycleMode,
     ) -> Result<(), String> {
-        match component_id {
-            NATIVE_AGENT_RUNTIME_COMPONENT => match mode {
-                ComponentLifecycleMode::Shutdown => self.agent_runtime.shutdown(),
-                _ => self.agent_runtime.suspend(),
-            }
-            .map_err(|error| error.to_string()),
-            MODEL_REFRESH_COMPONENT => match mode {
-                ComponentLifecycleMode::Shutdown => self.model_refresh.shutdown(),
-                _ => self.model_refresh.reset_after_clear(),
-            },
-            CONTEXT_BUDGET_COMPONENT => match mode {
-                ComponentLifecycleMode::Shutdown => self.context_budget_worker.shutdown(),
-                _ => {
-                    self.context_budget_worker.cancel_pending();
-                    Ok(())
-                }
-            },
-            id if id == PERMISSION_POLICY.component_id => {
-                self.permission_policy.deactivate();
-                Ok(())
-            }
-            id if id == LLM_PORT.component_id => {
-                self.llm_port.deactivate();
-                Ok(())
-            }
-            id if id == TOOL_CATALOG.component_id => {
-                self.session_workspace_tools = ToolExecutorRegistry::new();
-                Ok(())
-            }
-            id if id == PROMPT_ASSEMBLY.component_id => {
-                self.prompt_assembly.deactivate();
-                Ok(())
-            }
-            id if id == SESSION_PERSISTENCE.component_id => {
-                let mut failures = Vec::new();
-                if self.session_store_worker.is_running()
-                    && let Some(views) = self.session_backend_views.clone()
-                    && let Err(error) = self.session_store_worker.flush_all(views)
-                {
-                    failures.push(error);
-                }
-                if let Err(error) = self.session_store_worker.shutdown() {
-                    failures.push(error);
-                }
-                if mode == ComponentLifecycleMode::Shutdown
-                    || self.activation_staging.is_session_backend_replacement
-                {
-                    if let Some(session_port) = &self.session_port {
-                        session_port.deactivate();
-                    }
-                    self.session_backend_views = None;
-                    self.session_port = None;
-                    self.activation_staging.is_session_backend_replacement = false;
-                }
-                if failures.is_empty() {
-                    Ok(())
-                } else {
-                    Err(failures.join("; "))
-                }
-            }
-            id if id == APPROVAL_PROVIDER.component_id
-                || id == RUNTIME_EVENT_STREAM.component_id
-                || id == RUNTIME_WAKE.component_id
-                || component_id == UI_RUNTIME_BRIDGE_COMPONENT =>
-            {
-                Ok(())
-            }
-            unknown => Err(format!("unknown component lifecycle callback `{unknown}`")),
-        }
+        let implementation = self
+            .plugins
+            .implementation(component_id)
+            .copied()
+            .ok_or_else(|| format!("component `{component_id}` has no prepared plugin instance"))?;
+        (implementation.quiesce)(self, mode)
     }
-}
-
-fn runtime_component_definitions() -> Vec<ComponentDefinition> {
-    vec![
-        ComponentDefinition::new(APPROVAL_PROVIDER.component_id)
-            .provides(APPROVAL_PROVIDER.capability),
-        ComponentDefinition::new(LLM_PORT.component_id)
-            .provides(LLM_PORT.capability)
-            .provides(MODEL_CATALOG.capability),
-        ComponentDefinition::new(RUNTIME_EVENT_STREAM.component_id)
-            .provides(RUNTIME_EVENT_STREAM.capability),
-        ComponentDefinition::new(RUNTIME_WAKE.component_id).provides(RUNTIME_WAKE.capability),
-        ComponentDefinition::new(SESSION_PERSISTENCE.component_id)
-            .requires(RUNTIME_EVENT_STREAM.capability)
-            .provides(SESSION_PERSISTENCE.capability),
-        ComponentDefinition::new(TOOL_CATALOG.component_id).provides(TOOL_CATALOG.capability),
-        ComponentDefinition::new(PERMISSION_POLICY.component_id)
-            .requires(APPROVAL_PROVIDER.capability)
-            .requires(RUNTIME_EVENT_STREAM.capability)
-            .provides(PERMISSION_POLICY.capability),
-        ComponentDefinition::new(PROMPT_ASSEMBLY.component_id)
-            .requires(TOOL_CATALOG.capability)
-            .observes(SESSION_PERSISTENCE.capability)
-            .provides(PROMPT_ASSEMBLY.capability),
-        ComponentDefinition::new("native_agent_runtime")
-            .requires(RUNTIME_EVENT_STREAM.capability)
-            .requires(LLM_PORT.capability)
-            .requires(MODEL_CATALOG.capability)
-            .requires(PERMISSION_POLICY.capability)
-            .requires(PROMPT_ASSEMBLY.capability)
-            .requires(TOOL_CATALOG.capability)
-            .observes(SESSION_PERSISTENCE.capability),
-        ComponentDefinition::new("model_refresh")
-            .requires(RUNTIME_EVENT_STREAM.capability)
-            .requires(LLM_PORT.capability)
-            .requires(MODEL_CATALOG.capability),
-        ComponentDefinition::new(CONTEXT_BUDGET_COMPONENT)
-            .requires(RUNTIME_EVENT_STREAM.capability)
-            .requires(LLM_PORT.capability)
-            .requires(MODEL_CATALOG.capability)
-            .requires(PROMPT_ASSEMBLY.capability)
-            .requires(TOOL_CATALOG.capability),
-        ComponentDefinition::new("ui_runtime_bridge")
-            .requires(RUNTIME_EVENT_STREAM.capability)
-            .requires(RUNTIME_WAKE.capability),
-    ]
 }
 
 fn register_tool_catalog_effect(
@@ -1041,7 +1271,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::runtime::lifecycle::ComponentState;
+    use crate::runtime::lifecycle::{ComponentDefinition, ComponentState};
     use runtime_domain::prompt_assembly::{
         PromptPreludeSection, PromptSourceKind, PromptSourceOrigin,
     };
@@ -1080,6 +1310,80 @@ mod tests {
             },
             ..AppRuntimeOptions::default()
         }
+    }
+
+    #[test]
+    fn builtin_plugin_descriptors_define_the_exact_default_graph() {
+        let composition =
+            builtin_plugin_composition().expect("builtin plugin composition should prepare");
+
+        assert_eq!(
+            composition.definitions(),
+            vec![
+                ComponentDefinition::new(APPROVAL_PROVIDER.component_id)
+                    .provides(APPROVAL_PROVIDER.capability),
+                ComponentDefinition::new(CONTEXT_BUDGET_COMPONENT)
+                    .requires(RUNTIME_EVENT_STREAM.capability)
+                    .requires(LLM_PORT.capability)
+                    .requires(MODEL_CATALOG.capability)
+                    .requires(PROMPT_ASSEMBLY.capability)
+                    .requires(TOOL_CATALOG.capability),
+                ComponentDefinition::new(LLM_PORT.component_id)
+                    .provides(LLM_PORT.capability)
+                    .provides(MODEL_CATALOG.capability),
+                ComponentDefinition::new(MODEL_REFRESH_COMPONENT)
+                    .requires(RUNTIME_EVENT_STREAM.capability)
+                    .requires(LLM_PORT.capability)
+                    .requires(MODEL_CATALOG.capability),
+                ComponentDefinition::new(NATIVE_AGENT_RUNTIME_COMPONENT)
+                    .requires(RUNTIME_EVENT_STREAM.capability)
+                    .requires(LLM_PORT.capability)
+                    .requires(MODEL_CATALOG.capability)
+                    .requires(PERMISSION_POLICY.capability)
+                    .requires(PROMPT_ASSEMBLY.capability)
+                    .requires(TOOL_CATALOG.capability)
+                    .observes(SESSION_PERSISTENCE.capability),
+                ComponentDefinition::new(PERMISSION_POLICY.component_id)
+                    .requires(APPROVAL_PROVIDER.capability)
+                    .requires(RUNTIME_EVENT_STREAM.capability)
+                    .provides(PERMISSION_POLICY.capability),
+                ComponentDefinition::new(PROMPT_ASSEMBLY.component_id)
+                    .requires(TOOL_CATALOG.capability)
+                    .observes(SESSION_PERSISTENCE.capability)
+                    .provides(PROMPT_ASSEMBLY.capability),
+                ComponentDefinition::new(RUNTIME_EVENT_STREAM.component_id)
+                    .provides(RUNTIME_EVENT_STREAM.capability),
+                ComponentDefinition::new(RUNTIME_WAKE.component_id)
+                    .provides(RUNTIME_WAKE.capability),
+                ComponentDefinition::new(SESSION_PERSISTENCE.component_id)
+                    .requires(RUNTIME_EVENT_STREAM.capability)
+                    .provides(SESSION_PERSISTENCE.capability),
+                ComponentDefinition::new(TOOL_CATALOG.component_id)
+                    .provides(TOOL_CATALOG.capability),
+                ComponentDefinition::new(UI_RUNTIME_BRIDGE_COMPONENT)
+                    .requires(RUNTIME_EVENT_STREAM.capability)
+                    .requires(RUNTIME_WAKE.capability),
+            ]
+        );
+    }
+
+    #[test]
+    fn lifecycle_dispatch_rejects_a_component_without_a_prepared_plugin_instance() {
+        let mut options = AppRuntimeOptions::default();
+        let mut components =
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+
+        let error = ComponentLifecycleCallbacks::quiesce_component(
+            &mut components,
+            "unregistered_component",
+            ComponentLifecycleMode::Reconfigure,
+        )
+        .expect_err("unknown component must not reach a lifecycle handler");
+
+        assert_eq!(
+            error,
+            "component `unregistered_component` has no prepared plugin instance"
+        );
     }
 
     struct BackendStateCheckingFlush {

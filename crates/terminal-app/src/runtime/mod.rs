@@ -13,6 +13,7 @@ mod lifecycle;
 mod lifecycle_executor;
 mod llm_port;
 mod permission_policy;
+mod plugin;
 mod prompt_assembly;
 mod prompt_assembly_commands;
 mod session_commands;

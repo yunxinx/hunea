@@ -19,7 +19,7 @@ mod external_io;
 mod input;
 mod loop_event_pump;
 mod model_refresh;
-mod runtime_port;
+pub mod runtime_port;
 mod terminal;
 mod terminal_probe;
 pub(crate) mod terminal_surface;
@@ -95,18 +95,22 @@ pub fn run_with_runtime_coordinator(
 
     let mut loop_events = LoopEventPump::start()?;
     let runtime_waker = loop_events.waker();
-    runtime_coordinator
-        .bind_runtime_wake(RuntimeWake::new(move || runtime_waker.wake()))
-        .map_err(color_eyre::eyre::Report::msg)?;
+    runtime_port::RuntimeEventPort::bind_runtime_wake_port(
+        runtime_coordinator,
+        RuntimeWake::new(move || runtime_waker.wake()),
+    )
+    .map_err(color_eyre::eyre::Report::msg)?;
 
-    if let Err(message) =
-        runtime_coordinator.dispatch_runtime_command(RuntimeCommand::LoadMessageHistoryStartupCache)
-    {
+    if let Err(message) = runtime_port::RuntimeCommandPort::dispatch_runtime_command_port(
+        runtime_coordinator,
+        RuntimeCommand::LoadMessageHistoryStartupCache,
+    ) {
         model.show_toast(crate::toast::ToastSeverity::Error, message);
     }
-    if let Err(message) = runtime_coordinator
-        .dispatch_runtime_command(RuntimeCommand::CheckPromptAssemblyMissingSources)
-    {
+    if let Err(message) = runtime_port::RuntimeCommandPort::dispatch_runtime_command_port(
+        runtime_coordinator,
+        RuntimeCommand::CheckPromptAssemblyMissingSources,
+    ) {
         model.show_toast(crate::toast::ToastSeverity::Error, message);
     }
 
@@ -214,15 +218,20 @@ fn apply_model_event_without_effect(model: &mut Model, event: AppEvent, context:
     );
 }
 
-fn apply_terminal_input_actions(
+fn apply_terminal_input_actions<R>(
     actions: Vec<TerminalInputAction>,
     terminal: &mut terminal::TuiTerminal,
     terminal_session: &mut TerminalSession,
     model: &mut Model,
-    runtime_coordinator: &mut impl UiRuntimePort,
+    runtime_coordinator: &mut R,
     external_io: &mut ExternalIoRuntime,
     loop_events: &mut LoopEventPump,
-) -> Result<bool> {
+) -> Result<bool>
+where
+    R: runtime_port::RuntimeCommandPort
+        + runtime_port::ModelRuntimePort
+        + runtime_port::PromptRuntimePort,
+{
     let mut changed = false;
     for action in actions {
         match action {
@@ -281,18 +290,18 @@ fn apply_external_io_shutdown_events(
     Ok(())
 }
 
-fn drain_runtime_coordinator_events(
-    model: &mut Model,
-    runtime_coordinator: &mut impl UiRuntimePort,
-) -> bool {
+fn drain_runtime_coordinator_events<R>(model: &mut Model, runtime_coordinator: &mut R) -> bool
+where
+    R: runtime_port::RuntimeEventPort + runtime_port::ModelRuntimePort + ?Sized,
+{
     let mut changed = false;
 
-    for event in runtime_coordinator.drain_runtime_events() {
+    for event in runtime_coordinator.drain_runtime_events_port() {
         model.apply_runtime_event(event);
         changed = true;
     }
 
-    for event in runtime_coordinator.drain_model_provider_refresh_events() {
+    for event in runtime_coordinator.drain_model_provider_refresh_events_port() {
         apply_model_provider_refresh_event(model, event);
         changed = true;
     }

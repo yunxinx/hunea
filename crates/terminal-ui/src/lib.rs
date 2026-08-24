@@ -96,6 +96,9 @@ pub use model::{
     RequestMetrics,
 };
 pub use motion::MotionMode;
+pub use runner::runtime_port::{
+    ModelRuntimePort, PromptRuntimePort, RuntimeCommandPort, RuntimeEventPort,
+};
 pub use runner::{
     NoopUiRuntimePort, RuntimeWake, UiRuntimePort, run, run_with_options,
     run_with_runtime_coordinator, run_with_style_mode,

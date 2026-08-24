@@ -3,7 +3,7 @@ use runtime_domain::model_catalog::{
     ModelProviderRefreshEvent, ModelSelection, ProviderSyncRequest,
 };
 
-use super::UiRuntimePort;
+use super::runtime_port::ModelRuntimePort;
 
 pub(super) fn apply_model_provider_refresh_event(
     model: &mut Model,
@@ -23,20 +23,20 @@ pub(super) fn apply_model_provider_refresh_event(
 
 pub(super) fn run_refresh_model_provider_effect(
     model: &mut Model,
-    runtime_coordinator: &mut impl UiRuntimePort,
+    runtime_coordinator: &mut impl ModelRuntimePort,
     request: ProviderSyncRequest,
 ) {
-    if let Err(message) = runtime_coordinator.refresh_model_provider(request) {
+    if let Err(message) = runtime_coordinator.refresh_model_provider_port(request) {
         model.show_toast(ToastSeverity::Error, message);
     }
 }
 
 pub(super) fn persist_selected_model(
     model: &mut Model,
-    runtime_coordinator: &mut impl UiRuntimePort,
+    runtime_coordinator: &mut impl ModelRuntimePort,
     selection: &ModelSelection,
 ) {
-    if let Err(message) = runtime_coordinator.persist_selected_model(selection) {
+    if let Err(message) = runtime_coordinator.persist_selected_model_port(selection) {
         model.show_toast(ToastSeverity::Error, message);
     }
 }

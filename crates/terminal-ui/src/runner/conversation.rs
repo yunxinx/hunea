@@ -7,7 +7,7 @@ use runtime_domain::session::{
 };
 use runtime_domain::session::{ConversationTurnRequest, RuntimeCommand, RuntimeCommandReceipt};
 
-use super::UiRuntimePort;
+use super::runtime_port::RuntimeCommandPort;
 
 #[cfg(test)]
 pub(super) fn apply_conversation_event(
@@ -74,11 +74,11 @@ pub(super) fn apply_conversation_event(
 
 pub(super) fn run_send_conversation_turn_effect(
     model: &mut Model,
-    runtime_coordinator: &mut impl UiRuntimePort,
+    runtime_coordinator: &mut impl RuntimeCommandPort,
     request: ConversationTurnRequest,
 ) {
     match runtime_coordinator
-        .dispatch_runtime_command(RuntimeCommand::submit_conversation_turn(request))
+        .dispatch_runtime_command_port(RuntimeCommand::submit_conversation_turn(request))
     {
         Ok(RuntimeCommandReceipt::ConversationStarted { activity_label }) => {
             model.show_stream_activity(activity_label);

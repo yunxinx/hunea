@@ -6,6 +6,7 @@ use std::{
     sync::{Arc, Mutex, Weak, mpsc},
 };
 
+#[cfg(test)]
 use conversation_runtime::RuntimeEventNotifier;
 use runtime_domain::session::{
     RuntimePermissionOption, RuntimePermissionOptionKind, RuntimePermissionRequest,
@@ -18,6 +19,8 @@ use tool_runtime::{
     ToolPermissionHandler, ToolPermissionRequest, ToolPermissionRule, ToolPermissionRuleBehavior,
     ToolPermissionRuleSet,
 };
+
+use super::context::{CapabilityLease, RuntimeEventStreamCapability};
 
 pub(super) const TERMINAL_APPROVAL_PROVIDER_ID: &str = "terminal-interactive";
 
@@ -59,7 +62,7 @@ pub(super) enum ApprovalProviderError {
 pub(super) trait ApprovalProviderFactory: Send + Sync {
     fn open(
         &self,
-        notifier: RuntimeEventNotifier,
+        event_stream: CapabilityLease<RuntimeEventStreamCapability>,
     ) -> Result<Arc<dyn ApprovalProvider>, ApprovalProviderError>;
 
     fn adapter_kind(&self) -> &'static str;
@@ -126,15 +129,39 @@ pub(super) struct ApprovalProviderSnapshot {
 #[derive(Clone)]
 pub(super) struct PermissionPolicy {
     state: Arc<Mutex<PermissionPolicyState>>,
-    notifier: RuntimeEventNotifier,
+    event_stream: Arc<Mutex<Option<CapabilityLease<RuntimeEventStreamCapability>>>>,
 }
 
 impl PermissionPolicy {
-    pub(super) fn new(notifier: RuntimeEventNotifier) -> Self {
+    pub(super) fn new() -> Self {
         Self {
             state: Arc::new(Mutex::new(PermissionPolicyState::default())),
-            notifier,
+            event_stream: Arc::new(Mutex::new(None)),
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn new_for_test(notifier: RuntimeEventNotifier) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(PermissionPolicyState::default())),
+            event_stream: Arc::new(Mutex::new(Some(
+                crate::runtime::context::RuntimeContext::test_event_stream_lease(notifier),
+            ))),
+        }
+    }
+
+    /// 绑定由当前 component dependency 解析出的 event stream generation。
+    pub(super) fn bind_event_stream(
+        &self,
+        event_stream: CapabilityLease<RuntimeEventStreamCapability>,
+    ) {
+        *lock(&self.event_stream) = Some(event_stream);
+        lock(&self.state).is_active = true;
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_active_for_test(&self) -> bool {
+        lock(&self.state).is_active
     }
 
     /// 注册一个 approval provider；duplicate 在 identity 分配与 mutation 前拒绝。
@@ -200,11 +227,17 @@ impl PermissionPolicy {
             )
         };
 
-        let provider = factory.open(self.notifier.clone()).map_err(|_| {
+        let event_stream = self.event_stream_lease().ok_or_else(|| {
             PermissionPolicyError::ProviderUnavailable {
                 provider_id: provider_id.to_string(),
             }
         })?;
+        let provider =
+            factory
+                .open(event_stream)
+                .map_err(|_| PermissionPolicyError::ProviderUnavailable {
+                    provider_id: provider_id.to_string(),
+                })?;
 
         let mut state = lock(&self.state);
         let provider_is_current = state
@@ -268,6 +301,7 @@ impl PermissionPolicy {
             state.rules.clear();
             std::mem::take(&mut state.active_turns)
         };
+        lock(&self.event_stream).take();
         cancel_turns(turns);
     }
 
@@ -284,6 +318,10 @@ impl PermissionPolicy {
                 adapter_kind: entry.adapter_kind.clone(),
             })
             .collect()
+    }
+
+    fn event_stream_lease(&self) -> Option<CapabilityLease<RuntimeEventStreamCapability>> {
+        lock(&self.event_stream).clone()
     }
 }
 
@@ -620,9 +658,9 @@ pub(super) struct InteractiveApprovalProviderFactory;
 impl ApprovalProviderFactory for InteractiveApprovalProviderFactory {
     fn open(
         &self,
-        notifier: RuntimeEventNotifier,
+        event_stream: CapabilityLease<RuntimeEventStreamCapability>,
     ) -> Result<Arc<dyn ApprovalProvider>, ApprovalProviderError> {
-        Ok(Arc::new(InteractiveApprovalProvider::new(notifier)))
+        Ok(Arc::new(InteractiveApprovalProvider::new(event_stream)))
     }
 
     fn adapter_kind(&self) -> &'static str {
@@ -640,17 +678,17 @@ struct InteractiveApprovalProvider {
     state: Mutex<InteractiveApprovalState>,
     request_sender: mpsc::Sender<RuntimePermissionRequest>,
     request_receiver: Mutex<mpsc::Receiver<RuntimePermissionRequest>>,
-    notifier: RuntimeEventNotifier,
+    event_stream: CapabilityLease<RuntimeEventStreamCapability>,
 }
 
 impl InteractiveApprovalProvider {
-    fn new(notifier: RuntimeEventNotifier) -> Self {
+    fn new(event_stream: CapabilityLease<RuntimeEventStreamCapability>) -> Self {
         let (request_sender, request_receiver) = mpsc::channel();
         Self {
             state: Mutex::new(InteractiveApprovalState::default()),
             request_sender,
             request_receiver: Mutex::new(request_receiver),
-            notifier,
+            event_stream,
         }
     }
 
@@ -682,7 +720,7 @@ impl ApprovalProvider for InteractiveApprovalProvider {
                     return None;
                 }
             }
-            self.notifier.notify();
+            self.event_stream.notify();
 
             let option_id = tokio::select! {
                 biased;

@@ -16,7 +16,7 @@ use tool_runtime::{
 ///
 /// caller 只能注册 tool、读取独立 executor snapshot 或创建过滤后的 session view；
 /// registration identity 与逆操作留在 module 内部。
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct ToolCatalog {
     state: Arc<Mutex<ToolCatalogState>>,
 }

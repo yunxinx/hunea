@@ -1,7 +1,10 @@
 use runtime_domain::prompt_assembly::PromptAssemblyMutation;
 use runtime_domain::session::{PromptAssemblyUpdateNotice, RuntimeEvent};
 
-use super::AppRuntimeCoordinator;
+use super::{
+    AppRuntimeCoordinator,
+    context::{PromptAssemblyCapability, ToolCatalogCapability},
+};
 use crate::prompt_assembly::PromptAssemblyEditSession;
 
 /// `PromptSessionConfigRefreshTarget` 标识 commit 后的新 prelude 应作用于当前空会话还是下一次新会话。
@@ -28,15 +31,23 @@ impl AppRuntimeCoordinator {
         &mut self,
         session_prompt_config_changed: bool,
         manager: &runtime_domain::prompt_assembly::PromptAssemblyManagerSnapshot,
-    ) -> Option<PromptAssemblyUpdateNotice> {
+    ) -> Result<Option<PromptAssemblyUpdateNotice>, String> {
         if !session_prompt_config_changed {
-            return None;
+            return Ok(None);
         }
         match self.prompt_session_config_refresh_target() {
             PromptSessionConfigRefreshTarget::CurrentEmptySession => {
+                let tool_catalog = self
+                    .components
+                    .require::<ToolCatalogCapability>()
+                    .map_err(|error| error.to_string())?;
+                let prompt_capability = self
+                    .components
+                    .require::<PromptAssemblyCapability>()
+                    .map_err(|error| error.to_string())?;
                 let session_workspace_tools =
-                    super::session_tools_for_manager(&self.components.tool_catalog, Some(manager));
-                let prompt_assembly = self.components.prompt_assembly.session_snapshot();
+                    super::session_tools_for_manager(&tool_catalog, Some(manager));
+                let prompt_assembly = prompt_capability.session_snapshot();
                 self.components
                     .agent_runtime
                     .update_empty_session_configuration(
@@ -44,10 +55,10 @@ impl AppRuntimeCoordinator {
                         session_workspace_tools.clone(),
                     );
                 self.components.session_workspace_tools = session_workspace_tools;
-                Some(PromptAssemblyUpdateNotice::CurrentEmptySessionUpdated)
+                Ok(Some(PromptAssemblyUpdateNotice::CurrentEmptySessionUpdated))
             }
             PromptSessionConfigRefreshTarget::NextNewSession => {
-                Some(PromptAssemblyUpdateNotice::NextNewSessionUpdated)
+                Ok(Some(PromptAssemblyUpdateNotice::NextNewSessionUpdated))
             }
         }
     }
@@ -68,7 +79,7 @@ impl AppRuntimeCoordinator {
             views.prompt_assembly,
             header.work_dir,
             self.options.hunea_config_dir.clone(),
-            self.prompt_assembly_tool_definitions(),
+            self.prompt_assembly_tool_definitions()?,
         )
         .map_err(|error| error.to_string())?;
         let snapshot = session.snapshot();
@@ -101,7 +112,8 @@ impl AppRuntimeCoordinator {
             .map(PromptAssemblyEditSession::snapshot)
         {
             self.components
-                .prompt_assembly
+                .require::<PromptAssemblyCapability>()
+                .map_err(|error| error.to_string())?
                 .validate_manager_replacement(Some(&manager))
                 .map_err(|error| error.to_string())?;
         }
@@ -122,7 +134,11 @@ impl AppRuntimeCoordinator {
             }
         };
 
-        let previous_manager = self.components.prompt_assembly.manager_snapshot();
+        let prompt_assembly = self
+            .components
+            .require::<PromptAssemblyCapability>()
+            .map_err(|error| error.to_string())?;
+        let previous_manager = prompt_assembly.manager_snapshot();
         let dynamic_environment_session_config =
             crate::prompt_assembly::dynamic_environment_session_config_from_manager(&manager);
         let prelude_changed = previous_manager
@@ -138,14 +154,13 @@ impl AppRuntimeCoordinator {
         // capability 当前持有的 live manager 单独参与变化检测。
         let tool_enablement_changed = super::manager_disabled_tool_names(previous_manager.as_ref())
             != super::manager_disabled_tool_names(Some(&manager));
-        self.components
-            .prompt_assembly
+        prompt_assembly
             .replace_manager(Some(manager.clone()))
             .map_err(|error| error.to_string())?;
         let notice = self.prompt_assembly_update_notice(
             prelude_changed || dynamic_environment_config_changed || tool_enablement_changed,
             &manager,
-        );
+        )?;
         self.pending_runtime_events
             .push(RuntimeEvent::PromptAssemblyUpdated { manager, notice });
         // capability replacement、空 session refresh 与 event publication 均成功后，working

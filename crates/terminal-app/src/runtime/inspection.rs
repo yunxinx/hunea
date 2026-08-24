@@ -5,6 +5,10 @@ use tool_runtime::{ToolDefinition, ToolKind, ToolPermissionPolicy};
 
 use super::{
     AppRuntimeCoordinator,
+    context::{
+        LlmPortCapability, PermissionPolicyCapability, PromptAssemblyCapability,
+        ToolCatalogCapability,
+    },
     effect_scope::EffectScopeSnapshot,
     lifecycle::{
         CapabilityKey, ComponentFailureSnapshot, ComponentSnapshot, OptionalCapabilitySnapshot,
@@ -342,9 +346,10 @@ impl AppRuntimeCoordinator {
 
         let mut providers = self
             .components
-            .llm_port
-            .inspection_snapshot()
+            .optional::<LlmPortCapability>()
+            .expect("LlmPort capability marker must match its registered value")
             .into_iter()
+            .flat_map(|llm_port| llm_port.inspection_snapshot())
             .map(|registration| {
                 let mut model_ids = self
                     .options
@@ -369,9 +374,10 @@ impl AppRuntimeCoordinator {
 
         let approval_providers = self
             .components
-            .permission_policy
-            .inspection_snapshot()
+            .optional::<PermissionPolicyCapability>()
+            .expect("PermissionPolicy capability marker must match its registered value")
             .into_iter()
+            .flat_map(|policy| policy.inspection_snapshot())
             .map(|provider| ApprovalProviderSnapshot {
                 provider_id: provider.provider_id,
                 adapter_kind: provider.adapter_kind,
@@ -389,7 +395,12 @@ impl AppRuntimeCoordinator {
                 model_id: selection.model_id.clone(),
             });
 
-        let tool_definitions = self.components.tool_catalog.definitions();
+        let tool_definitions = self
+            .components
+            .optional::<ToolCatalogCapability>()
+            .expect("ToolCatalog capability marker must match its registered value")
+            .map(|catalog| catalog.definitions())
+            .unwrap_or_default();
         let mut workspace_tools = tool_definitions
             .iter()
             .map(tool_snapshot)
@@ -428,9 +439,10 @@ impl AppRuntimeCoordinator {
             prompt_tools: self.prompt_tool_snapshots(&tool_definitions, &session_tool_names),
             prompt_sources: self
                 .components
-                .prompt_assembly
-                .inspection_snapshot()
+                .optional::<PromptAssemblyCapability>()
+                .expect("PromptAssembly capability marker must match its registered value")
                 .into_iter()
+                .flat_map(|assembly| assembly.inspection_snapshot())
                 .map(prompt_source_snapshot)
                 .collect(),
             session_persistence: self.session_persistence_snapshot(),
@@ -462,7 +474,12 @@ impl AppRuntimeCoordinator {
         session_tool_names: &BTreeSet<String>,
     ) -> Vec<PromptToolSnapshot> {
         let mut tools = BTreeMap::new();
-        if let Some(manager) = self.components.prompt_assembly.manager_snapshot().as_ref() {
+        let manager = self
+            .components
+            .optional::<PromptAssemblyCapability>()
+            .expect("PromptAssembly capability marker must match its registered value")
+            .and_then(|assembly| assembly.manager_snapshot());
+        if let Some(manager) = manager.as_ref() {
             let catalog_tool_names = tool_definitions
                 .iter()
                 .map(|definition| definition.name.as_str())

@@ -7,6 +7,7 @@ use runtime_domain::{
 };
 
 use super::support::*;
+use crate::runtime::context::RuntimeEventStreamCapability;
 
 #[test]
 fn model_refresh_completion_notifies_the_coordinator_consumer() {
@@ -27,7 +28,8 @@ fn model_refresh_completion_notifies_the_coordinator_consumer() {
     let (wake_sender, wake_receiver) = mpsc::channel();
     let _wake_binding = coordinator
         .components
-        .runtime_event_notifier
+        .require::<RuntimeEventStreamCapability>()
+        .expect("runtime event stream capability should be available")
         .bind_callback(move || {
             let _ = wake_sender.send(());
         });
@@ -55,7 +57,8 @@ fn render_barrier_deferral_rearms_the_coordinator_consumer() {
     let (wake_sender, wake_receiver) = mpsc::channel();
     let _wake_binding = coordinator
         .components
-        .runtime_event_notifier
+        .require::<RuntimeEventStreamCapability>()
+        .expect("runtime event stream capability should be available")
         .bind_callback(move || {
             let _ = wake_sender.send(());
         });
@@ -97,7 +100,8 @@ fn deferred_event_does_not_skip_ready_worker_payloads() {
     let (wake_sender, wake_receiver) = mpsc::channel();
     let _wake_binding = coordinator
         .components
-        .runtime_event_notifier
+        .require::<RuntimeEventStreamCapability>()
+        .expect("runtime event stream capability should be available")
         .bind_callback(move || {
             let _ = wake_sender.send(());
         });

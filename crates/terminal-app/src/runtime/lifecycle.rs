@@ -430,6 +430,22 @@ impl ComponentGraph {
         self.reconcile_components(self.dependents_for_key(key), Some(change))
     }
 
+    /// 在 clone 上按稳定 key 顺序移除一组 capability，供 host 与 concrete Context 原子提交。
+    pub(super) fn prepare_capability_removals(
+        &self,
+        provider_component: &str,
+        keys: impl IntoIterator<Item = CapabilityKey>,
+    ) -> Result<(Self, Vec<ReconciliationReport>), ComponentGraphError> {
+        let mut tentative = self.clone();
+        let mut keys = keys.into_iter().collect::<Vec<_>>();
+        keys.sort();
+        let mut reports = Vec::new();
+        for key in keys {
+            reports.push(tentative.remove_capability(provider_component, &key)?);
+        }
+        Ok((tentative, reports))
+    }
+
     /// 替换同一 capability 的 provider generation，而不是改变依赖 key。
     ///
     /// 依赖方必须先离开 `Active`，旧 owner 的 effect 才能被释放；随后 resolver 才能
@@ -541,10 +557,21 @@ impl ComponentGraph {
         Ok(report)
     }
 
+    #[cfg(test)]
     pub(super) fn complete_activation_and_publish(
         &mut self,
         token: ActivationToken,
     ) -> Result<Vec<ReconciliationReport>, ComponentGraphError> {
+        let (tentative, reports) = self.prepare_activation_and_publish(token)?;
+        *self = tentative;
+        Ok(reports)
+    }
+
+    /// 在 clone 上完成 activation/publication，供 host 与 concrete Context 原子提交。
+    pub(super) fn prepare_activation_and_publish(
+        &self,
+        token: ActivationToken,
+    ) -> Result<(Self, Vec<ReconciliationReport>), ComponentGraphError> {
         let component_id = token.component_id.clone();
         let mut tentative = self.clone();
         let mut reports = vec![tentative.complete_activation(token)?];
@@ -556,8 +583,17 @@ impl ComponentGraph {
             };
             reports.push(publication);
         }
-        *self = tentative;
-        Ok(reports)
+        Ok((tentative, reports))
+    }
+
+    /// 在 clone 上完成不发布 capability 的 activation。
+    pub(super) fn prepare_activation(
+        &self,
+        token: ActivationToken,
+    ) -> Result<(Self, ReconciliationReport), ComponentGraphError> {
+        let mut tentative = self.clone();
+        let report = tentative.complete_activation(token)?;
+        Ok((tentative, report))
     }
 
     pub(super) fn complete_deactivation(
@@ -577,6 +613,19 @@ impl ComponentGraph {
             }
             DeactivationDisposition::Dispose => {}
         }
+        self.refresh_report_failures(&mut report);
+        Ok(report)
+    }
+
+    /// 撤销尚未触碰 concrete effects 的 deactivation，使失败 transaction 回到原有 active 状态。
+    pub(super) fn rollback_deactivation(
+        &mut self,
+        token: DeactivationToken,
+    ) -> Result<ReconciliationReport, ComponentGraphError> {
+        self.validate_deactivation_token(&token)?;
+        let component_id = token.component_id;
+        let mut report = self.report_for_component(component_id.clone());
+        self.transition(&component_id, ComponentState::Active, &mut report);
         self.refresh_report_failures(&mut report);
         Ok(report)
     }
@@ -783,6 +832,15 @@ impl ComponentGraph {
                 generation: self.capability_generations.get(key).copied().unwrap_or(0),
             })
             .collect()
+    }
+
+    pub(super) fn capability(&self, key: &CapabilityKey) -> Option<CapabilitySnapshot> {
+        let provider_component = self.capabilities.get(key)?;
+        Some(CapabilitySnapshot {
+            key: key.to_string(),
+            provider_component: provider_component.clone(),
+            generation: self.capability_generations.get(key).copied().unwrap_or(0),
+        })
     }
 
     pub(super) fn has_capability(&self, key: &CapabilityKey) -> bool {

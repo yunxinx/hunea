@@ -40,7 +40,7 @@ fn permission_request() -> ToolPermissionRequest {
 fn interactive_policy(
     notifier: RuntimeEventNotifier,
 ) -> (PermissionPolicy, ApprovalProviderRegistration) {
-    let policy = PermissionPolicy::new(notifier);
+    let policy = PermissionPolicy::new_for_test(notifier);
     let registration = policy
         .register(
             "terminal-runtime",
@@ -312,7 +312,7 @@ async fn context_generation_change_denies_a_delivered_always_response() {
 
 #[test]
 fn registry_is_transactional_revertible_and_stale_safe() {
-    let policy = PermissionPolicy::new(RuntimeEventNotifier::default());
+    let policy = PermissionPolicy::new_for_test(RuntimeEventNotifier::default());
     let factory: Arc<dyn ApprovalProviderFactory> = Arc::new(InteractiveApprovalProviderFactory);
     let mut first = policy
         .register("first-owner", "interactive", Arc::clone(&factory))
@@ -384,7 +384,7 @@ struct InMemoryApprovalProviderFactory {
 impl ApprovalProviderFactory for InMemoryApprovalProviderFactory {
     fn open(
         &self,
-        _notifier: RuntimeEventNotifier,
+        _event_stream: CapabilityLease<RuntimeEventStreamCapability>,
     ) -> Result<Arc<dyn ApprovalProvider>, ApprovalProviderError> {
         Ok(Arc::new(InMemoryApprovalProvider {
             selected_kind: self.selected_kind,
@@ -432,7 +432,7 @@ impl ApprovalProvider for InMemoryApprovalProvider {
 
 #[tokio::test]
 async fn in_memory_provider_uses_the_same_begin_turn_handler_contract() {
-    let policy = PermissionPolicy::new(RuntimeEventNotifier::default());
+    let policy = PermissionPolicy::new_for_test(RuntimeEventNotifier::default());
     let _registration = policy
         .register(
             "test-owner",
@@ -459,7 +459,7 @@ async fn in_memory_provider_uses_the_same_begin_turn_handler_contract() {
 async fn diagnostics_do_not_expose_approval_delivery_or_owner_identity() {
     let secret_owner = "secret-owner-sentinel";
     let secret_path = "secret-path-sentinel";
-    let policy = PermissionPolicy::new(RuntimeEventNotifier::default());
+    let policy = PermissionPolicy::new_for_test(RuntimeEventNotifier::default());
     let registration = policy
         .register(
             secret_owner,

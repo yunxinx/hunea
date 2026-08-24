@@ -245,6 +245,16 @@ impl ContextBudgetWorker {
         join_result
     }
 
+    /// 在 component activation 时换入 Context 解析出的 notifier generation。
+    pub(super) fn rebind_event_notifier(
+        &mut self,
+        event_notifier: RuntimeEventNotifier,
+    ) -> Result<(), String> {
+        self.shutdown()?;
+        *self = Self::new(event_notifier).map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
     pub(super) fn drain_events(&mut self) -> Vec<RuntimeEvent> {
         let mut events = Vec::new();
         self.collect_finished_events(&mut events);

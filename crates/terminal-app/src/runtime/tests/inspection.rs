@@ -13,6 +13,7 @@ use terminal_ui::{RuntimeWake, UiRuntimePort};
 
 use super::support::*;
 use crate::runtime::{
+    context::{PromptAssemblyCapability, ToolCatalogCapability},
     lifecycle::{ComponentDefinition, ComponentFailureReason},
     prompt_assembly::PromptSectionContribution,
 };
@@ -97,7 +98,8 @@ fn composition_snapshot_is_deterministic_and_redacted() {
     });
     let _private_runtime_registration = coordinator
         .components
-        .prompt_assembly
+        .require::<PromptAssemblyCapability>()
+        .expect("prompt assembly capability should be available")
         .contribute(
             "runtime-private-owner",
             PromptSectionContribution {
@@ -119,19 +121,22 @@ fn composition_snapshot_is_deterministic_and_redacted() {
 
     let workspace_tool_names = coordinator
         .components
-        .tool_catalog
+        .require::<ToolCatalogCapability>()
+        .expect("tool catalog capability should be available")
         .definitions()
         .into_iter()
         .map(|definition| definition.name)
         .collect::<Vec<_>>();
     let mut prompt_manager = coordinator
         .components
-        .prompt_assembly
+        .require::<PromptAssemblyCapability>()
+        .expect("prompt assembly capability should be available")
         .manager_snapshot()
         .expect("test prelude should be owned by a manager");
     prompt_manager.candidates.tools = coordinator
         .components
-        .tool_catalog
+        .require::<ToolCatalogCapability>()
+        .expect("tool catalog capability should be available")
         .definitions()
         .into_iter()
         .map(|definition| PromptAssemblyToolCandidate {
@@ -147,7 +152,8 @@ fn composition_snapshot_is_deterministic_and_redacted() {
         .collect();
     coordinator
         .components
-        .prompt_assembly
+        .require::<PromptAssemblyCapability>()
+        .expect("prompt assembly capability should be available")
         .replace_manager(Some(prompt_manager))
         .expect("test prompt manager should be replaceable");
     let disabled_session_tool = workspace_tool_names
@@ -156,7 +162,8 @@ fn composition_snapshot_is_deterministic_and_redacted() {
         .clone();
     coordinator.components.session_workspace_tools = coordinator
         .components
-        .tool_catalog
+        .require::<ToolCatalogCapability>()
+        .expect("tool catalog capability should be available")
         .filtered(|name| name != disabled_session_tool);
 
     let first = serde_json::to_vec(&coordinator.inspect_composition())
@@ -259,9 +266,9 @@ fn composition_snapshot_is_deterministic_and_redacted() {
         serde_json::json!([
             "approval_provider",
             "llm_port",
+            "runtime_event_stream",
             "model_refresh",
             "permission_policy",
-            "runtime_event_stream",
             "runtime_wake_binding",
             "session_persistence",
             "tool_catalog",
@@ -281,9 +288,9 @@ fn composition_snapshot_is_deterministic_and_redacted() {
             "tool_catalog",
             "session_persistence",
             "runtime_wake_binding",
-            "runtime_event_stream",
             "permission_policy",
             "model_refresh",
+            "runtime_event_stream",
             "llm_port",
             "approval_provider",
         ])
@@ -333,42 +340,42 @@ fn composition_snapshot_is_deterministic_and_redacted() {
         serde_json::json!([
             {
                 "owner": "approval_provider",
-                "effects": ["approval_provider_registration"],
+                "effects": ["approval_provider_registration", "capability:approval_provider"],
                 "children": [],
             },
             {
                 "owner": "context_budget",
-                "effects": [],
+                "effects": ["dependency:runtime_event_stream"],
                 "children": [],
             },
             {
                 "owner": "llm_port",
-                "effects": ["provider_registrations"],
+                "effects": ["capability:llm_port", "capability:model_catalog", "provider_registrations"],
                 "children": [],
             },
             {
                 "owner": "model_refresh",
-                "effects": [],
+                "effects": ["dependency:runtime_event_stream"],
                 "children": [],
             },
             {
                 "owner": "native_agent_runtime",
-                "effects": [],
+                "effects": ["dependency:runtime_event_stream"],
                 "children": [],
             },
             {
                 "owner": "permission_policy",
-                "effects": [],
+                "effects": ["capability:permission_policy", "dependency:runtime_event_stream"],
                 "children": [],
             },
             {
                 "owner": "prompt_assembly",
-                "effects": ["prompt_registration"],
+                "effects": ["capability:prompt_assembly", "prompt_registration"],
                 "children": [],
             },
             {
                 "owner": "runtime_event_stream",
-                "effects": [],
+                "effects": ["capability:runtime_event_stream"],
                 "children": [],
             },
             {
@@ -378,12 +385,12 @@ fn composition_snapshot_is_deterministic_and_redacted() {
             },
             {
                 "owner": "session_persistence",
-                "effects": ["backend_registration"],
+                "effects": ["backend_registration", "capability:session_persistence", "dependency:runtime_event_stream"],
                 "children": [],
             },
             {
                 "owner": "tool_catalog",
-                "effects": ["tool_registrations"],
+                "effects": ["capability:tool_catalog", "tool_registrations"],
                 "children": [],
             },
         ])
@@ -569,7 +576,11 @@ fn ui_runtime_bridge_reacts_to_wake_binding_lifecycle() {
             .iter()
             .find(|scope| scope["owner"] == "ui_runtime_bridge")
             .expect("wake consumer should own its binding effect")["effects"],
-        serde_json::json!(["runtime_wake_binding"])
+        serde_json::json!([
+            "dependency:runtime_event_stream",
+            "dependency:runtime_wake",
+            "runtime_wake_binding"
+        ])
     );
     assert_eq!(
         names(&composition_snapshot(&coordinator)["providers"]),
@@ -585,7 +596,7 @@ fn ui_runtime_bridge_reacts_to_wake_binding_lifecycle() {
             "guidelines_selected": true,
         }])
     );
-    coordinator.components.runtime_event_notifier.notify();
+    coordinator.components.notify_runtime_event();
     assert_eq!(wake_count.load(Ordering::SeqCst), 1);
 
     coordinator.shutdown().expect("runtime should shut down");
@@ -593,7 +604,7 @@ fn ui_runtime_bridge_reacts_to_wake_binding_lifecycle() {
         component_state(&coordinator, "ui_runtime_bridge"),
         "disposed"
     );
-    coordinator.components.runtime_event_notifier.notify();
+    coordinator.components.notify_runtime_event();
     assert_eq!(
         wake_count.load(Ordering::SeqCst),
         1,
@@ -645,7 +656,7 @@ fn rebinding_ui_runtime_bridge_disposes_the_previous_wake_effect() {
     )
     .expect("replacement runtime wake should bind");
 
-    coordinator.components.runtime_event_notifier.notify();
+    coordinator.components.notify_runtime_event();
     assert_eq!(first_wake_count.load(Ordering::SeqCst), 0);
     assert_eq!(second_wake_count.load(Ordering::SeqCst), 1);
     assert_eq!(
@@ -700,7 +711,11 @@ fn reset_replaces_session_component_generations_without_rebuilding_the_ui_bridge
     assert!(component_required(&after, "native_agent_runtime").contains(&"llm_port".to_string()));
     assert_eq!(
         component_required(&after, "model_refresh"),
-        vec!["llm_port".to_string(), "model_catalog".to_string()]
+        vec![
+            "llm_port".to_string(),
+            "model_catalog".to_string(),
+            "runtime_event_stream".to_string(),
+        ]
     );
 }
 

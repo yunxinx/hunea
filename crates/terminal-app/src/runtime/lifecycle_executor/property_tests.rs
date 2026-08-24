@@ -60,6 +60,16 @@ impl TestComponent {
             Self::AlphaSource | Self::BetaSource | Self::LeftBranch | Self::RightBranch
         )
     }
+
+    const fn capability(self) -> Option<&'static str> {
+        match self {
+            Self::AlphaSource => Some("alpha"),
+            Self::BetaSource => Some("beta"),
+            Self::LeftBranch => Some("left"),
+            Self::RightBranch => Some("right"),
+            Self::DiamondLeaf | Self::Observer => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,6 +218,7 @@ impl ComponentLifecycleCallbacks for PropertyCallbacks {
         &mut self,
         component_id: &str,
         scope: &EffectScope,
+        context: &mut super::ComponentActivationContext<'_>,
         _mode: ComponentLifecycleMode,
     ) -> Result<ComponentActivationOutcome, String> {
         let component = TestComponent::from_id(component_id);
@@ -270,11 +281,14 @@ impl ComponentLifecycleCallbacks for PropertyCallbacks {
         {
             return Err(ACTIVATION_SENTINEL.to_string());
         }
-        Ok(if component.publishes_capability() {
-            ComponentActivationOutcome::PublishCapabilities
+        if component.publishes_capability() {
+            context
+                .publish_declared_presence()
+                .map_err(|error| error.to_string())?;
+            Ok(ComponentActivationOutcome::PublishCapabilities)
         } else {
-            ComponentActivationOutcome::Ready
-        })
+            Ok(ComponentActivationOutcome::Ready)
+        }
     }
 
     fn quiesce_component(
@@ -824,9 +838,23 @@ fn assert_stable_boundary(
         .scope_snapshots()
         .into_iter()
         .map(|scope| {
-            prop_assert_eq!(scope.effects, vec![RESOURCE_EFFECT.to_string()]);
+            let component = TestComponent::from_id(&scope.owner);
+            let expected_effects = if component.publishes_capability() {
+                vec![
+                    format!(
+                        "capability:{}",
+                        component
+                            .capability()
+                            .expect("publishing test component should declare a capability")
+                    ),
+                    RESOURCE_EFFECT.to_string(),
+                ]
+            } else {
+                vec![RESOURCE_EFFECT.to_string()]
+            };
+            prop_assert_eq!(scope.effects, expected_effects);
             prop_assert!(scope.children.is_empty());
-            Ok(TestComponent::from_id(&scope.owner))
+            Ok(component)
         })
         .collect::<Result<BTreeSet<_>, TestCaseError>>()?;
     prop_assert_eq!(scope_owners, active.clone());
@@ -834,6 +862,30 @@ fn assert_stable_boundary(
         callbacks.resources.keys().copied().collect::<BTreeSet<_>>(),
         active,
     );
+    let graph_capabilities = executor
+        .graph()
+        .capabilities()
+        .into_iter()
+        .map(|snapshot| {
+            (
+                snapshot.key,
+                snapshot.provider_component,
+                snapshot.generation,
+            )
+        })
+        .collect::<Vec<_>>();
+    let context_capabilities = executor
+        .context_snapshots()
+        .into_iter()
+        .map(|snapshot| {
+            (
+                snapshot.key,
+                snapshot.provider_component,
+                snapshot.generation,
+            )
+        })
+        .collect::<Vec<_>>();
+    prop_assert_eq!(context_capabilities, graph_capabilities);
 
     for (component, (key, resource)) in &callbacks.resources {
         let snapshot = component_by_id

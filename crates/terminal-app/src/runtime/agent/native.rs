@@ -29,6 +29,7 @@ use crate::prompt_assembly::{
 };
 use crate::runtime::{
     AppRuntimeOptions,
+    context::{CapabilityLease, RuntimeContext, RuntimeEventStreamCapability},
     dynamic_environment_worker::{
         DynamicEnvironmentInjection, DynamicEnvironmentRequest, DynamicEnvironmentWorker,
         dynamic_environment_snapshot_for_turn,
@@ -70,7 +71,9 @@ pub struct NativeAgentRuntime {
     permission_provider_id: String,
     provider_conversation: ProviderConversation,
     dynamic_environment_worker: DynamicEnvironmentWorker,
-    event_notifier: RuntimeEventNotifier,
+    event_stream: Option<CapabilityLease<RuntimeEventStreamCapability>>,
+    #[cfg(test)]
+    test_event_notifier: RuntimeEventNotifier,
     request_policy: RuntimeRequestPolicy,
     loaded_models: conversation_runtime::models::LoadedModelCatalog,
     session_workspace_tools: ToolExecutorRegistry,
@@ -97,6 +100,56 @@ impl NativeAgentRuntime {
         prompt_assembly_tool_definitions: Vec<ToolDefinition>,
         prompt_assembly: PromptAssemblySessionSnapshot,
         session_port: Option<Arc<dyn SessionPort>>,
+        llm_port: LlmPort,
+        permission_policy: PermissionPolicy,
+        permission_provider_id: impl Into<String>,
+    ) -> Result<Self, String> {
+        Self::new_with_notifier(
+            options,
+            session_workspace_tools,
+            prompt_assembly_tool_definitions,
+            prompt_assembly,
+            session_port,
+            RuntimeEventNotifier::default(),
+            llm_port,
+            permission_policy,
+            permission_provider_id,
+        )
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_for_test(
+        options: &AppRuntimeOptions,
+        session_workspace_tools: ToolExecutorRegistry,
+        prompt_assembly_tool_definitions: Vec<ToolDefinition>,
+        prompt_assembly: PromptAssemblySessionSnapshot,
+        session_port: Option<Arc<dyn SessionPort>>,
+        event_notifier: RuntimeEventNotifier,
+        llm_port: LlmPort,
+        permission_policy: PermissionPolicy,
+        permission_provider_id: impl Into<String>,
+    ) -> Result<Self, String> {
+        Self::new_with_notifier(
+            options,
+            session_workspace_tools,
+            prompt_assembly_tool_definitions,
+            prompt_assembly,
+            session_port,
+            event_notifier,
+            llm_port,
+            permission_policy,
+            permission_provider_id,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_notifier(
+        options: &AppRuntimeOptions,
+        session_workspace_tools: ToolExecutorRegistry,
+        prompt_assembly_tool_definitions: Vec<ToolDefinition>,
+        prompt_assembly: PromptAssemblySessionSnapshot,
+        session_port: Option<Arc<dyn SessionPort>>,
         event_notifier: RuntimeEventNotifier,
         llm_port: LlmPort,
         permission_policy: PermissionPolicy,
@@ -104,17 +157,21 @@ impl NativeAgentRuntime {
     ) -> Result<Self, String> {
         let provider_conversation =
             fresh_provider_conversation(session_port, options, &prompt_assembly)?;
+        let event_stream =
+            RuntimeContext::event_stream_lease(event_notifier.clone(), "native_agent_bootstrap");
         Ok(Self {
-            worker: ConversationWorker::new(event_notifier.clone()),
+            worker: ConversationWorker::new((*event_stream).clone()),
             llm_port,
             permission_policy,
             permission_provider_id: permission_provider_id.into(),
             provider_conversation,
             dynamic_environment_worker: DynamicEnvironmentWorker::new(
                 Arc::clone(&options.dynamic_environment_observer),
-                event_notifier.clone(),
+                event_stream.clone(),
             ),
-            event_notifier,
+            event_stream: None,
+            #[cfg(test)]
+            test_event_notifier: event_notifier,
             request_policy: options.runtime_request_policy.clone(),
             loaded_models: options.loaded_models.clone(),
             session_workspace_tools,
@@ -134,6 +191,41 @@ impl NativeAgentRuntime {
 
     pub(crate) fn is_running(&self) -> bool {
         self.worker.is_running()
+    }
+
+    /// Active adapter 只保留从 Context 取得的 event stream generation lease。
+    pub(crate) fn bind_event_stream(
+        &mut self,
+        event_stream: CapabilityLease<RuntimeEventStreamCapability>,
+    ) -> Result<(), String> {
+        if self.is_busy() {
+            return Err("Cannot replace runtime event stream while Agent is busy".to_string());
+        }
+        self.worker = ConversationWorker::new((*event_stream).clone());
+        self.dynamic_environment_worker
+            .rebind_event_stream(event_stream.clone());
+        self.event_stream = Some(event_stream);
+        self.is_shutdown = false;
+        Ok(())
+    }
+
+    /// 暂停当前 component generation；持久 conversation 与配置由 fresh generation 继续使用。
+    pub(crate) fn suspend(&mut self) -> Result<(), AgentRuntimeError> {
+        if self.is_shutdown {
+            return Ok(());
+        }
+        self.is_shutdown = true;
+        self.pending_turn = None;
+        self.pending_events.clear();
+        self.dynamic_environment_worker.shutdown();
+        let worker_result = self
+            .worker
+            .reset_after_clear()
+            .map_err(AgentRuntimeError::Shutdown);
+        self.cancel_permission_turn();
+        self.active_turn = None;
+        self.event_stream = None;
+        worker_result
     }
 
     pub(crate) fn is_preparing(&self) -> bool {
@@ -360,7 +452,7 @@ impl NativeAgentRuntime {
                         message: error.to_string(),
                     },
                 });
-                self.event_notifier.notify();
+                self.notify_runtime_event();
             }
         }
         Ok(AgentCommandReceipt::TurnStarted {
@@ -429,6 +521,16 @@ impl NativeAgentRuntime {
             .respond(request_id, option_id)
             .map_err(|error| AgentRuntimeError::CommandRejected(error.to_string()))?;
         Ok(AgentCommandReceipt::Accepted)
+    }
+
+    fn notify_runtime_event(&self) {
+        if let Some(event_stream) = &self.event_stream {
+            event_stream.notify();
+        }
+        #[cfg(test)]
+        if self.event_stream.is_none() {
+            self.test_event_notifier.notify();
+        }
     }
 
     fn ensure_agent(&self, agent_id: AgentId) -> Result<(), AgentRuntimeError> {
@@ -504,7 +606,7 @@ impl NativeAgentRuntime {
             Some(permission_handler),
         );
         if !self.pending_events.is_empty() {
-            self.event_notifier.notify();
+            self.notify_runtime_event();
         }
         Ok(())
     }
@@ -845,19 +947,7 @@ impl AgentRuntime for NativeAgentRuntime {
     }
 
     fn shutdown(&mut self) -> Result<(), AgentRuntimeError> {
-        if self.is_shutdown {
-            return Ok(());
-        }
-        self.is_shutdown = true;
-        self.pending_turn = None;
-        self.pending_events.clear();
-        self.dynamic_environment_worker.shutdown();
-        let worker_result = self
-            .worker
-            .reset_after_clear()
-            .map_err(AgentRuntimeError::Shutdown);
-        self.cancel_permission_turn();
-        self.active_turn = None;
+        let worker_result = self.suspend();
         self.provider_conversation = ProviderConversation::default();
         self.session_workspace_tools = ToolExecutorRegistry::new();
         self.prompt_assembly_tool_definitions.clear();

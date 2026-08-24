@@ -1,5 +1,6 @@
 mod agent;
 mod components;
+mod context;
 mod context_budget;
 mod context_budget_command;
 mod context_budget_worker;
@@ -47,6 +48,7 @@ use tool_runtime::{ToolDefinition, ToolExecutorRegistry, builtin::ManagedRipgrep
 use self::{
     agent::AgentRuntime,
     components::RuntimeComponents,
+    context::{LlmPortCapability, SessionPersistenceCapability, ToolCatalogCapability},
     event_mapping::{
         runtime_event_from_agent_event, should_defer_runtime_event_for_render_barrier,
     },
@@ -152,6 +154,7 @@ impl AppRuntimeCoordinator {
             next_agent_turn_id: 1,
             prompt_assembly_edit_session: None,
         };
+        coordinator.components.validate_context_alignment()?;
         coordinator
             .inspect_composition()
             .validate()
@@ -231,9 +234,9 @@ impl AppRuntimeCoordinator {
 
     fn session_views(&self) -> Result<SessionBackendViews, String> {
         self.components
-            .session_backend_views
-            .clone()
-            .ok_or_else(|| "Session store is not available".to_string())
+            .require::<SessionPersistenceCapability>()
+            .map(|views| (*views).clone())
+            .map_err(|_| "Session store is not available".to_string())
     }
 
     fn session_header(&self) -> Result<SessionHeader, String> {
@@ -253,8 +256,11 @@ impl AppRuntimeCoordinator {
         Ok(())
     }
 
-    fn prompt_assembly_tool_definitions(&self) -> Vec<ToolDefinition> {
-        self.components.tool_catalog.definitions()
+    fn prompt_assembly_tool_definitions(&self) -> Result<Vec<ToolDefinition>, String> {
+        self.components
+            .require::<ToolCatalogCapability>()
+            .map(|catalog| catalog.definitions())
+            .map_err(|error| error.to_string())
     }
 
     #[cfg(test)]
@@ -269,7 +275,7 @@ impl AppRuntimeCoordinator {
     ) {
         self.pending_runtime_events.push(event);
         self.pending_runtime_events.extend(remaining);
-        self.components.runtime_event_notifier.notify();
+        self.components.notify_runtime_event();
     }
 
     pub(crate) fn shutdown(&mut self) -> Result<(), String> {
@@ -452,7 +458,8 @@ impl UiRuntimePort for AppRuntimeCoordinator {
 
         let provider_lease = self
             .components
-            .llm_port
+            .require::<LlmPortCapability>()
+            .map_err(|error| error.to_string())?
             .resolve_model_listing(&request.provider_id)
             .map_err(|error| error.to_string())?;
         self.components.model_refresh.start(request, provider_lease)

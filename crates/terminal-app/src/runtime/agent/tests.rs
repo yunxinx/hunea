@@ -60,7 +60,7 @@ impl DerefMut for NativeRuntimeFixture {
 fn permission_policy_fixture(
     event_notifier: RuntimeEventNotifier,
 ) -> (PermissionPolicy, ApprovalProviderRegistration) {
-    let policy = PermissionPolicy::new(event_notifier);
+    let policy = PermissionPolicy::new_for_test(event_notifier);
     let registration = policy
         .register(
             "native-test",
@@ -74,7 +74,7 @@ fn permission_policy_fixture(
 fn native_runtime(event_notifier: RuntimeEventNotifier) -> NativeRuntimeFixture {
     let (permission_policy, approval_registration) =
         permission_policy_fixture(event_notifier.clone());
-    let runtime = NativeAgentRuntime::new(
+    let runtime = NativeAgentRuntime::new_for_test(
         &AppRuntimeOptions {
             runtime_request_policy: runtime_domain::request_policy::RuntimeRequestPolicy::new(
                 0,
@@ -567,7 +567,7 @@ fn native_runtime_streams_through_the_llm_port_factory() {
         .expect("fixture provider should register");
     let notifier = RuntimeEventNotifier::default();
     let (permission_policy, _approval_registration) = permission_policy_fixture(notifier.clone());
-    let mut runtime = NativeAgentRuntime::new(
+    let mut runtime = NativeAgentRuntime::new_for_test(
         &AppRuntimeOptions {
             runtime_request_policy: runtime_domain::request_policy::RuntimeRequestPolicy::new(
                 0,
@@ -633,7 +633,7 @@ fn native_runtime_routes_tool_approval_through_the_live_permission_turn() {
     let (permission_policy, _approval_registration) = permission_policy_fixture(notifier.clone());
     let mut tools = ToolExecutorRegistry::new();
     tools.insert(NativeAskTool);
-    let mut runtime = NativeAgentRuntime::new(
+    let mut runtime = NativeAgentRuntime::new_for_test(
         &AppRuntimeOptions {
             runtime_request_policy: runtime_domain::request_policy::RuntimeRequestPolicy::new(
                 0,
@@ -725,7 +725,7 @@ fn provider_failure_is_redacted_before_runtime_event_projection() {
         .expect("fixture provider should register");
     let notifier = RuntimeEventNotifier::default();
     let (permission_policy, _approval_registration) = permission_policy_fixture(notifier.clone());
-    let mut runtime = NativeAgentRuntime::new(
+    let mut runtime = NativeAgentRuntime::new_for_test(
         &AppRuntimeOptions {
             runtime_request_policy: runtime_domain::request_policy::RuntimeRequestPolicy::new(
                 0,

@@ -10,6 +10,7 @@ use runtime_domain::prompt_assembly::{
 use runtime_domain::session::PromptAssemblyUpdateNotice;
 
 use super::support::*;
+use crate::runtime::context::{PromptAssemblyCapability, ToolCatalogCapability};
 
 macro_rules! scope_state {
     (scope: $scope:expr, $($field:ident $(: $value:expr)?),* $(,)?) => {{
@@ -529,7 +530,8 @@ fn prompt_assembly_changes_sync_current_empty_session_prelude_immediately() {
     assert_eq!(
         coordinator
             .components
-            .prompt_assembly
+            .require::<PromptAssemblyCapability>()
+            .expect("prompt assembly capability should be available")
             .session_snapshot()
             .prompt_prelude
             .as_ref(),
@@ -643,7 +645,8 @@ fn prompt_assembly_changes_on_started_session_apply_only_after_next_new_session_
     assert_eq!(
         coordinator
             .components
-            .prompt_assembly
+            .require::<PromptAssemblyCapability>()
+            .expect("prompt assembly capability should be available")
             .session_snapshot()
             .prompt_prelude
             .as_ref(),
@@ -666,7 +669,8 @@ fn prompt_assembly_changes_on_started_session_apply_only_after_next_new_session_
             .prompt_prelude(),
         coordinator
             .components
-            .prompt_assembly
+            .require::<PromptAssemblyCapability>()
+            .expect("prompt assembly capability should be available")
             .session_snapshot()
             .prompt_prelude
             .as_ref()
@@ -958,7 +962,9 @@ fn disabling_tool_on_empty_session_updates_session_tools_immediately() {
         }),
         ..AppRuntimeOptions::default()
     });
-    let disabled_tool_name = coordinator.prompt_assembly_tool_definitions()[0]
+    let disabled_tool_name = coordinator
+        .prompt_assembly_tool_definitions()
+        .expect("tool catalog capability should be available")[0]
         .name
         .clone();
     assert!(
@@ -1013,7 +1019,8 @@ fn disabling_tool_on_empty_session_updates_session_tools_immediately() {
     assert!(
         coordinator
             .components
-            .tool_catalog
+            .require::<ToolCatalogCapability>()
+            .expect("tool catalog capability should be available")
             .definitions()
             .into_iter()
             .any(|definition| definition.name == disabled_tool_name),
@@ -1045,7 +1052,9 @@ fn disabling_tool_on_started_session_waits_for_next_new_session_reset() {
         .provider_conversation_mut_for_test()
         .append_items(vec![ConversationItem::text(Role::User, "already started")])
         .expect("seed history should succeed");
-    let disabled_tool_name = coordinator.prompt_assembly_tool_definitions()[0]
+    let disabled_tool_name = coordinator
+        .prompt_assembly_tool_definitions()
+        .expect("tool catalog capability should be available")[0]
         .name
         .clone();
 

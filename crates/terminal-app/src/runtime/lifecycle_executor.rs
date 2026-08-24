@@ -6,6 +6,10 @@ use std::{
 };
 
 use super::{
+    context::{
+        CapabilityLease, ComponentActivationContext, RuntimeCapability, RuntimeCapabilitySnapshot,
+        RuntimeContext, RuntimeContextError,
+    },
     effect_scope::{EffectScope, EffectScopeSnapshot},
     lifecycle::{
         ActivationToken, CapabilityKey, ComponentDefinition, ComponentFailureReason,
@@ -38,6 +42,7 @@ pub(super) trait ComponentLifecycleCallbacks {
         &mut self,
         component_id: &str,
         scope: &EffectScope,
+        context: &mut ComponentActivationContext<'_>,
         mode: ComponentLifecycleMode,
     ) -> Result<ComponentActivationOutcome, String>;
 
@@ -165,6 +170,7 @@ impl LifecycleExecutionState {
 #[derive(Default)]
 pub(super) struct ComponentLifecycleExecutor {
     graph: ComponentGraph,
+    context: RuntimeContext,
     root_scope: EffectScope,
     component_scopes: BTreeMap<String, EffectScope>,
     is_shutdown: bool,
@@ -198,6 +204,24 @@ impl ComponentLifecycleExecutor {
             .unwrap_or_default()
     }
 
+    pub(super) fn require<C>(&self) -> Result<CapabilityLease<C>, RuntimeContextError>
+    where
+        C: RuntimeCapability + 'static,
+    {
+        self.context.require::<C>()
+    }
+
+    pub(super) fn optional<C>(&self) -> Result<Option<CapabilityLease<C>>, RuntimeContextError>
+    where
+        C: RuntimeCapability + 'static,
+    {
+        self.context.optional::<C>()
+    }
+
+    pub(super) fn context_snapshots(&self) -> Vec<RuntimeCapabilitySnapshot> {
+        self.context.snapshots()
+    }
+
     pub(super) fn declare_all(
         &mut self,
         definitions: impl IntoIterator<Item = ComponentDefinition>,
@@ -225,11 +249,29 @@ impl ComponentLifecycleExecutor {
         mode: ComponentLifecycleMode,
     ) -> Result<(), LifecycleExecutionError> {
         self.ensure_running()?;
-        let report = self
+        let snapshot = self.graph.capability(capability).ok_or_else(|| {
+            LifecycleExecutionError::graph(
+                provider_component,
+                ComponentGraphError::UndeclaredCapabilityProvider {
+                    capability: capability.to_string(),
+                },
+            )
+        })?;
+        let (tentative_graph, reports) = self
             .graph
-            .remove_capability(provider_component, capability)
+            .prepare_capability_removals(provider_component, [capability.clone()])
             .map_err(|error| LifecycleExecutionError::graph(provider_component, error))?;
-        self.execute_report(report, callbacks, mode)
+        self.context
+            .hide_batch(&[snapshot])
+            .map_err(|error| LifecycleExecutionError {
+                failures: vec![LifecycleExecutionFailure {
+                    component_id: provider_component.to_string(),
+                    operation: LifecycleExecutionOperation::Graph,
+                    message: error.to_string(),
+                }],
+            })?;
+        self.graph = tentative_graph;
+        self.execute_reports(reports, callbacks, mode)
     }
 
     pub(super) fn validate_reconfiguration<P, C>(
@@ -365,7 +407,10 @@ impl ComponentLifecycleExecutor {
             .err()
             .map(|error| error.failures)
             .unwrap_or_default();
-        if let Some(message) = self.root_scope.dispose().error_message() {
+        let has_graph_failure = failures
+            .iter()
+            .any(|failure| failure.operation == LifecycleExecutionOperation::Graph);
+        if !has_graph_failure && let Some(message) = self.root_scope.dispose().error_message() {
             failures.push(LifecycleExecutionFailure {
                 component_id: "runtime_composition".to_string(),
                 operation: LifecycleExecutionOperation::EffectDisposal,
@@ -471,32 +516,17 @@ impl ComponentLifecycleExecutor {
                     operation: LifecycleExecutionOperation::Activation,
                     message: error.to_string(),
                 });
-                if let Ok(report) = self.graph.fail_activation(
-                    token,
-                    ComponentFailureReason::ActivationRejected,
-                    true,
-                ) {
-                    pending.push_back(report);
-                }
+                self.reject_activation(token, &component_id, pending, state);
                 return;
             }
         };
 
-        let outcome = match callbacks.activate_component(&component_id, &scope, mode) {
-            Ok(outcome) => outcome,
-            Err(message) => {
-                state.failures.push(LifecycleExecutionFailure {
-                    component_id: component_id.clone(),
-                    operation: LifecycleExecutionOperation::Activation,
-                    message,
-                });
-                if let Err(message) = callbacks.quiesce_component(&component_id, mode) {
-                    state.failures.push(LifecycleExecutionFailure {
-                        component_id: component_id.clone(),
-                        operation: LifecycleExecutionOperation::Quiescence,
-                        message,
-                    });
-                }
+        let declared_capabilities = match self.graph.provided_capabilities(&component_id) {
+            Ok(capabilities) => capabilities,
+            Err(error) => {
+                state
+                    .failures
+                    .extend(LifecycleExecutionError::graph(component_id.clone(), error).failures);
                 if let Some(message) = scope.dispose().error_message() {
                     state.failures.push(LifecycleExecutionFailure {
                         component_id: component_id.clone(),
@@ -504,13 +534,41 @@ impl ComponentLifecycleExecutor {
                         message,
                     });
                 }
-                if let Ok(report) = self.graph.fail_activation(
-                    token,
-                    ComponentFailureReason::ActivationRejected,
-                    true,
-                ) {
-                    pending.push_back(report);
-                }
+                self.reject_activation(token, &component_id, pending, state);
+                return;
+            }
+        };
+        let mut activation_context =
+            self.context
+                .activation(&scope, &component_id, declared_capabilities);
+        let outcome = match callbacks.activate_component(
+            &component_id,
+            &scope,
+            &mut activation_context,
+            mode,
+        ) {
+            Ok(outcome) => outcome,
+            Err(message) => {
+                state.failures.push(LifecycleExecutionFailure {
+                    component_id: component_id.clone(),
+                    operation: LifecycleExecutionOperation::Activation,
+                    message,
+                });
+                self.rollback_activation(token, scope, callbacks, mode, pending, state);
+                return;
+            }
+        };
+
+        let publishes_capabilities = outcome == ComponentActivationOutcome::PublishCapabilities;
+        let staged = match activation_context.finish(publishes_capabilities) {
+            Ok(staged) => staged,
+            Err(error) => {
+                state.failures.push(LifecycleExecutionFailure {
+                    component_id: component_id.clone(),
+                    operation: LifecycleExecutionOperation::Activation,
+                    message: error.to_string(),
+                });
+                self.rollback_activation(token, scope, callbacks, mode, pending, state);
                 return;
             }
         };
@@ -518,14 +576,27 @@ impl ComponentLifecycleExecutor {
         let completion = match outcome {
             ComponentActivationOutcome::Ready => self
                 .graph
-                .complete_activation(token.clone())
-                .map(|report| vec![report]),
+                .prepare_activation(token.clone())
+                .map(|(graph, report)| (graph, vec![report])),
             ComponentActivationOutcome::PublishCapabilities => {
-                self.graph.complete_activation_and_publish(token.clone())
+                self.graph.prepare_activation_and_publish(token.clone())
             }
         };
         match completion {
-            Ok(reports) => {
+            Ok((tentative_graph, reports)) => {
+                if let Err(error) = self
+                    .context
+                    .commit(&staged, &tentative_graph.capabilities())
+                {
+                    state.failures.push(LifecycleExecutionFailure {
+                        component_id: component_id.clone(),
+                        operation: LifecycleExecutionOperation::Activation,
+                        message: error.to_string(),
+                    });
+                    self.rollback_activation(token, scope, callbacks, mode, pending, state);
+                    return;
+                }
+                self.graph = tentative_graph;
                 self.component_scopes.insert(component_id.clone(), scope);
                 pending.extend(reports);
             }
@@ -535,31 +606,53 @@ impl ComponentLifecycleExecutor {
                     operation: LifecycleExecutionOperation::Graph,
                     message: error.to_string(),
                 });
-                if let Err(message) = callbacks.quiesce_component(&component_id, mode) {
-                    state.failures.push(LifecycleExecutionFailure {
-                        component_id: component_id.clone(),
-                        operation: LifecycleExecutionOperation::Quiescence,
-                        message,
-                    });
-                }
-                if let Some(message) = scope.dispose().error_message() {
-                    state.failures.push(LifecycleExecutionFailure {
-                        component_id: component_id.clone(),
-                        operation: LifecycleExecutionOperation::EffectDisposal,
-                        message,
-                    });
-                }
-                match self.graph.fail_activation(
-                    token,
-                    ComponentFailureReason::ActivationRejected,
-                    true,
-                ) {
-                    Ok(report) => pending.push_back(report),
-                    Err(error) => state
-                        .failures
-                        .extend(LifecycleExecutionError::graph(component_id, error).failures),
-                }
+                self.rollback_activation(token, scope, callbacks, mode, pending, state);
             }
+        }
+    }
+
+    fn rollback_activation(
+        &mut self,
+        token: ActivationToken,
+        scope: EffectScope,
+        callbacks: &mut impl ComponentLifecycleCallbacks,
+        mode: ComponentLifecycleMode,
+        pending: &mut VecDeque<ReconciliationReport>,
+        state: &mut LifecycleExecutionState,
+    ) {
+        let component_id = token.component_id().to_string();
+        if let Err(message) = callbacks.quiesce_component(&component_id, mode) {
+            state.failures.push(LifecycleExecutionFailure {
+                component_id: component_id.clone(),
+                operation: LifecycleExecutionOperation::Quiescence,
+                message,
+            });
+        }
+        if let Some(message) = scope.dispose().error_message() {
+            state.failures.push(LifecycleExecutionFailure {
+                component_id: component_id.clone(),
+                operation: LifecycleExecutionOperation::EffectDisposal,
+                message,
+            });
+        }
+        self.reject_activation(token, &component_id, pending, state);
+    }
+
+    fn reject_activation(
+        &mut self,
+        token: ActivationToken,
+        component_id: &str,
+        pending: &mut VecDeque<ReconciliationReport>,
+        state: &mut LifecycleExecutionState,
+    ) {
+        match self
+            .graph
+            .fail_activation(token, ComponentFailureReason::ActivationRejected, true)
+        {
+            Ok(report) => pending.push_back(report),
+            Err(error) => state
+                .failures
+                .extend(LifecycleExecutionError::graph(component_id.to_string(), error).failures),
         }
     }
 
@@ -573,23 +666,46 @@ impl ComponentLifecycleExecutor {
     ) {
         let component_id = token.component_id().to_string();
         let mut dependent_reports = VecDeque::new();
-        match self.graph.provided_capabilities(&component_id) {
+        let preparation = match self.graph.provided_capabilities(&component_id) {
             Ok(capabilities) => {
-                for capability in capabilities {
-                    if !self.graph.has_capability(&capability) {
-                        continue;
+                let active = capabilities
+                    .into_iter()
+                    .filter(|capability| self.graph.has_capability(capability))
+                    .collect::<Vec<_>>();
+                let snapshots = active
+                    .iter()
+                    .filter_map(|capability| self.graph.capability(capability))
+                    .collect::<Vec<_>>();
+                match self
+                    .graph
+                    .prepare_capability_removals(&component_id, active)
+                {
+                    Ok((tentative_graph, reports)) => {
+                        if let Err(error) = self.context.hide_batch(&snapshots) {
+                            Err(error.to_string())
+                        } else {
+                            self.graph = tentative_graph;
+                            dependent_reports.extend(reports);
+                            Ok(())
+                        }
                     }
-                    match self.graph.remove_capability(&component_id, &capability) {
-                        Ok(report) => dependent_reports.push_back(report),
-                        Err(error) => state.failures.extend(
-                            LifecycleExecutionError::graph(component_id.clone(), error).failures,
-                        ),
-                    }
+                    Err(error) => Err(error.to_string()),
                 }
             }
-            Err(error) => state
-                .failures
-                .extend(LifecycleExecutionError::graph(component_id.clone(), error).failures),
+            Err(error) => Err(error.to_string()),
+        };
+        if let Err(message) = preparation {
+            state.failures.push(LifecycleExecutionFailure {
+                component_id: component_id.clone(),
+                operation: LifecycleExecutionOperation::Graph,
+                message,
+            });
+            if let Err(error) = self.graph.rollback_deactivation(token) {
+                state
+                    .failures
+                    .extend(LifecycleExecutionError::graph(component_id, error).failures);
+            }
+            return;
         }
         self.execute_reports_inner(dependent_reports, callbacks, mode, state);
         let quiescence_error = callbacks
@@ -694,6 +810,7 @@ mod tests {
             &mut self,
             component_id: &str,
             scope: &EffectScope,
+            context: &mut ComponentActivationContext<'_>,
             _mode: ComponentLifecycleMode,
         ) -> Result<ComponentActivationOutcome, String> {
             self.record(format!("activate:{component_id}"));
@@ -716,11 +833,14 @@ mod tests {
             if self.activation_failures.contains(component_id) {
                 return Err("ACTIVATION_SECRET".to_string());
             }
-            Ok(if self.publishers.contains(component_id) {
-                ComponentActivationOutcome::PublishCapabilities
+            if self.publishers.contains(component_id) {
+                context
+                    .publish_declared_presence()
+                    .map_err(|error| error.to_string())?;
+                Ok(ComponentActivationOutcome::PublishCapabilities)
             } else {
-                ComponentActivationOutcome::Ready
-            })
+                Ok(ComponentActivationOutcome::Ready)
+            }
         }
 
         fn quiesce_component(
@@ -1120,6 +1240,93 @@ mod tests {
         assert!(executor.scope_snapshots().is_empty());
         assert!(error.to_string().contains("generation is exhausted"));
         assert!(!format!("{error:?}").contains("generation is exhausted"));
+    }
+
+    #[test]
+    fn context_hide_rejection_rolls_back_before_provider_teardown() {
+        let mut executor = ComponentLifecycleExecutor::default();
+        let mut callbacks = FakeCallbacks::publishing(&["database", "service"]);
+        executor
+            .declare_all(definitions(), &mut callbacks)
+            .expect("composition should activate");
+        callbacks
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        let capabilities_before = executor.graph().capabilities();
+        let context_before = executor.context_snapshots();
+        let scopes_before = executor.scope_snapshots();
+        executor.context.reject_next_hide();
+
+        let error = executor
+            .deactivate_components(
+                ["database"],
+                &mut callbacks,
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect_err("context rejection should abort deactivation");
+
+        assert!(callbacks.snapshot().is_empty());
+        assert_eq!(
+            executor.graph().state("database"),
+            Some(ComponentState::Active)
+        );
+        assert_eq!(
+            executor.graph().state("service"),
+            Some(ComponentState::Active)
+        );
+        assert_eq!(executor.graph().state("ui"), Some(ComponentState::Active));
+        assert_eq!(executor.graph().capabilities(), capabilities_before);
+        assert_eq!(executor.context_snapshots(), context_before);
+        assert_eq!(executor.scope_snapshots(), scopes_before);
+        assert!(error.to_string().contains("visibility does not match"));
+        assert!(!format!("{error:?}").contains("visibility does not match"));
+    }
+
+    #[test]
+    fn shutdown_context_rejection_preserves_a_consistent_terminal_state() {
+        let mut executor = ComponentLifecycleExecutor::default();
+        let mut callbacks = FakeCallbacks::publishing(&["database", "service"]);
+        executor
+            .declare_all(definitions(), &mut callbacks)
+            .expect("composition should activate");
+        callbacks
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        executor.context.reject_next_hide();
+
+        let error = executor
+            .shutdown(&mut callbacks)
+            .expect_err("shutdown should report context rejection");
+
+        let graph = executor
+            .graph()
+            .capabilities()
+            .into_iter()
+            .map(|snapshot| {
+                (
+                    snapshot.key,
+                    snapshot.provider_component,
+                    snapshot.generation,
+                )
+            })
+            .collect::<Vec<_>>();
+        let context = executor
+            .context_snapshots()
+            .into_iter()
+            .map(|snapshot| {
+                (
+                    snapshot.key,
+                    snapshot.provider_component,
+                    snapshot.generation,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(graph, context);
+        assert!(error.to_string().contains("visibility does not match"));
     }
 
     #[test]

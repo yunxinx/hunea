@@ -6,6 +6,12 @@ use tool_runtime::ToolExecutorRegistry;
 use super::{
     AppRuntimeOptions,
     agent::{AgentRuntime, NativeAgentRuntime},
+    context::{
+        ApprovalProviderCapability, CapabilityLease, ComponentActivationContext, LlmPortCapability,
+        ModelCatalogCapability, PermissionPolicyCapability, PromptAssemblyCapability,
+        RuntimeCapability, RuntimeContextError, RuntimeEventStreamCapability,
+        RuntimeWakeCapability, SessionPersistenceCapability, ToolCatalogCapability,
+    },
     context_budget_worker::ContextBudgetWorker,
     effect_scope::{EffectScope, EffectScopeSnapshot},
     lifecycle::{CapabilityKey, ComponentDefinition},
@@ -82,7 +88,8 @@ struct ComponentActivationStaging {
     tool_registration: Option<ToolRegistration>,
     prompt_registration: Option<PromptRegistration>,
     session_backend_registration: Option<SessionBackendRegistration>,
-    runtime_wake_binding: Option<RuntimeEventBinding>,
+    runtime_wake: Option<RuntimeWake>,
+    is_session_backend_replacement: bool,
 }
 
 /// `RuntimeComponents` 是 coordinator 的长期 runtime owner。
@@ -93,17 +100,17 @@ struct ComponentActivationStaging {
 pub(super) struct RuntimeComponents {
     pub(super) agent_runtime: NativeAgentRuntime,
     pub(super) model_refresh: ModelRefreshWorker,
-    pub(super) llm_port: LlmPort,
-    pub(super) permission_policy: PermissionPolicy,
+    llm_port: LlmPort,
+    permission_policy: PermissionPolicy,
     permission_provider_id: String,
-    pub(super) tool_catalog: ToolCatalog,
-    pub(super) prompt_assembly: PromptAssembly,
+    tool_catalog: ToolCatalog,
+    prompt_assembly: PromptAssembly,
     pub(super) session_workspace_tools: ToolExecutorRegistry,
     pub(super) session_port: Option<SessionPortHost>,
-    pub(super) session_backend_views: Option<SessionBackendViews>,
+    session_backend_views: Option<SessionBackendViews>,
     pub(super) session_store_worker: SessionStoreWorker,
     pub(super) context_budget_worker: ContextBudgetWorker,
-    pub(super) runtime_event_notifier: RuntimeEventNotifier,
+    runtime_event_notifier: RuntimeEventNotifier,
     activation_staging: ComponentActivationStaging,
     pub(super) lifecycle: ComponentLifecycleExecutor,
     is_shutdown: bool,
@@ -112,7 +119,7 @@ pub(super) struct RuntimeComponents {
 impl RuntimeComponents {
     pub(super) fn new(options: &mut AppRuntimeOptions) -> Result<Self, String> {
         let runtime_event_notifier = RuntimeEventNotifier::default();
-        let permission_policy = PermissionPolicy::new(runtime_event_notifier.clone());
+        let permission_policy = PermissionPolicy::new();
         let approval_registration = permission_policy
             .register(
                 "terminal-runtime",
@@ -140,8 +147,10 @@ impl RuntimeComponents {
         let prompt_assembly_tool_definitions = tool_catalog.definitions();
         let session_workspace_tools =
             session_tools_for_manager(&tool_catalog, prompt_assembly_snapshot.manager.as_ref());
-        let session_store_worker = SessionStoreWorker::new(runtime_event_notifier.clone());
-        let context_budget_worker = ContextBudgetWorker::new(runtime_event_notifier.clone())
+        // Consumer 在 activation callback 中从 typed Context 换入 live generation；
+        // bootstrap placeholder 不得提前持有 provider 的 raw notifier。
+        let session_store_worker = SessionStoreWorker::new(RuntimeEventNotifier::default());
+        let context_budget_worker = ContextBudgetWorker::new(RuntimeEventNotifier::default())
             .map_err(|error| error.to_string())?;
         let agent_runtime = NativeAgentRuntime::new(
             options,
@@ -151,12 +160,11 @@ impl RuntimeComponents {
             session_backend_views
                 .as_ref()
                 .map(|views| Arc::clone(&views.port)),
-            runtime_event_notifier.clone(),
             llm_port.clone(),
             permission_policy.clone(),
             TERMINAL_APPROVAL_PROVIDER_ID,
         )?;
-        let model_refresh = ModelRefreshWorker::new(runtime_event_notifier.clone());
+        let model_refresh = ModelRefreshWorker::new(RuntimeEventNotifier::default());
         let has_session_backend = session_backend_views.is_some();
         let mut components = Self {
             agent_runtime,
@@ -178,7 +186,8 @@ impl RuntimeComponents {
                 tool_registration: Some(tool_registration),
                 prompt_registration: Some(prompt_registration),
                 session_backend_registration,
-                runtime_wake_binding: None,
+                runtime_wake: None,
+                is_session_backend_replacement: false,
             },
             lifecycle: ComponentLifecycleExecutor::default(),
             is_shutdown: false,
@@ -219,10 +228,7 @@ impl RuntimeComponents {
             .validate_reconfiguration(replacements, [RUNTIME_WAKE.component_id])
             .map_err(|error| error.to_string())?;
         self.remove_runtime_wake()?;
-        let binding = self
-            .runtime_event_notifier
-            .bind_callback(move || wake.wake());
-        self.activation_staging.runtime_wake_binding = Some(binding);
+        self.activation_staging.runtime_wake = Some(wake);
         self.with_lifecycle(|lifecycle, components| {
             lifecycle.activate_components(
                 [RUNTIME_WAKE.component_id],
@@ -247,6 +253,65 @@ impl RuntimeComponents {
     /// 返回 composition root 下的 active component scope；root identity 不进入诊断投影。
     pub(super) fn effect_scope_snapshots(&self) -> Vec<EffectScopeSnapshot> {
         self.lifecycle.scope_snapshots()
+    }
+
+    pub(super) fn require<C>(&self) -> Result<CapabilityLease<C>, RuntimeContextError>
+    where
+        C: RuntimeCapability + 'static,
+    {
+        self.lifecycle.require::<C>()
+    }
+
+    pub(super) fn optional<C>(&self) -> Result<Option<CapabilityLease<C>>, RuntimeContextError>
+    where
+        C: RuntimeCapability + 'static,
+    {
+        self.lifecycle.optional::<C>()
+    }
+
+    pub(super) fn validate_context_alignment(&self) -> Result<(), String> {
+        let graph = self
+            .lifecycle
+            .capabilities()
+            .into_iter()
+            .map(|snapshot| {
+                (
+                    snapshot.key,
+                    snapshot.provider_component,
+                    snapshot.generation,
+                )
+            })
+            .collect::<Vec<_>>();
+        let context = self
+            .lifecycle
+            .context_snapshots()
+            .into_iter()
+            .map(|snapshot| {
+                (
+                    snapshot.key,
+                    snapshot.provider_component,
+                    snapshot.generation,
+                )
+            })
+            .collect::<Vec<_>>();
+        if graph == context {
+            Ok(())
+        } else {
+            Err("runtime capability context does not match lifecycle graph".to_string())
+        }
+    }
+
+    pub(super) fn notify_runtime_event(&self) {
+        match self.require::<RuntimeEventStreamCapability>() {
+            Ok(notifier) => notifier.notify(),
+            Err(RuntimeContextError::MissingCapability { .. }) => {}
+            Err(RuntimeContextError::CapabilityTypeMismatch { .. }) => {
+                panic!("RuntimeEventStream capability marker must match its registered value")
+            }
+            Err(RuntimeContextError::DependencyRetentionRejected { .. }) => {
+                unreachable!("host lookup does not retain a component dependency")
+            }
+        }
     }
 
     fn with_lifecycle<T>(
@@ -298,6 +363,7 @@ impl RuntimeComponents {
                 ],
             )
             .map_err(|error| error.to_string())?;
+        self.activation_staging.is_session_backend_replacement = true;
         if let Err(error) = self.with_lifecycle(|lifecycle, components| {
             lifecycle.deactivate_components(
                 [
@@ -309,6 +375,7 @@ impl RuntimeComponents {
             )
         }) {
             let cleanup_error = error.to_string();
+            self.activation_staging.is_session_backend_replacement = false;
             self.restore_ephemeral_session_consumers(options)
                 .map_err(|fallback_error| format!("{cleanup_error}; {fallback_error}"))?;
             return Err(cleanup_error);
@@ -341,7 +408,7 @@ impl RuntimeComponents {
             }
         };
 
-        self.session_store_worker = SessionStoreWorker::new(self.runtime_event_notifier.clone());
+        self.session_store_worker = SessionStoreWorker::default();
         self.agent_runtime = fresh_agent_runtime;
         self.session_port = fresh_session_port;
         self.session_backend_views = Some(fresh_views);
@@ -370,7 +437,6 @@ impl RuntimeComponents {
             self.tool_catalog.definitions(),
             self.prompt_assembly.session_snapshot(),
             session_port,
-            self.runtime_event_notifier.clone(),
             self.llm_port.clone(),
             self.permission_policy.clone(),
             self.permission_provider_id.as_str(),
@@ -385,7 +451,7 @@ impl RuntimeComponents {
             .fresh_native_agent_runtime(options, None)
             .map_err(|error| format!("restore ephemeral Agent after backend failure: {error}"))?;
         self.agent_runtime = fresh_agent_runtime;
-        self.session_store_worker = SessionStoreWorker::new(self.runtime_event_notifier.clone());
+        self.session_store_worker = SessionStoreWorker::default();
         self.with_lifecycle(|lifecycle, components| {
             lifecycle.activate_components(
                 [NATIVE_AGENT_RUNTIME_COMPONENT],
@@ -450,7 +516,7 @@ impl RuntimeComponents {
         .map_err(|error| error.to_string())?;
 
         let provider_id = provider_id.into();
-        let fresh_policy = PermissionPolicy::new(self.runtime_event_notifier.clone());
+        let fresh_policy = PermissionPolicy::new();
         let fresh_registration = fresh_policy
             .register(owner, provider_id.clone(), factory)
             .map_err(|error| error.to_string())?;
@@ -463,7 +529,6 @@ impl RuntimeComponents {
                 self.session_backend_views
                     .as_ref()
                     .map(|views| Arc::clone(&views.port)),
-                self.runtime_event_notifier.clone(),
                 self.llm_port.clone(),
                 fresh_policy.clone(),
                 provider_id.clone(),
@@ -551,7 +616,6 @@ impl RuntimeComponents {
                 self.session_backend_views
                     .as_ref()
                     .map(|views| Arc::clone(&views.port)),
-                self.runtime_event_notifier.clone(),
                 fresh_llm_port.clone(),
                 self.permission_policy.clone(),
                 self.permission_provider_id.as_str(),
@@ -596,6 +660,7 @@ impl ComponentLifecycleCallbacks for RuntimeComponents {
         &mut self,
         component_id: &str,
         scope: &EffectScope,
+        context: &mut ComponentActivationContext<'_>,
         _mode: ComponentLifecycleMode,
     ) -> Result<ComponentActivationOutcome, String> {
         let outcome = match component_id {
@@ -606,6 +671,9 @@ impl ComponentLifecycleCallbacks for RuntimeComponents {
                     .take()
                     .ok_or_else(|| "approval provider activation was not staged".to_string())?;
                 register_permission_policy_effect(scope, registration)?;
+                context
+                    .publish::<ApprovalProviderCapability>(self.permission_policy.clone())
+                    .map_err(|error| error.to_string())?;
                 ComponentActivationOutcome::PublishCapabilities
             }
             id if id == LLM_PORT.component_id => {
@@ -615,6 +683,12 @@ impl ComponentLifecycleCallbacks for RuntimeComponents {
                     .take()
                     .ok_or_else(|| "LLM provider activation was not staged".to_string())?;
                 register_llm_port_effect(scope, registrations)?;
+                context
+                    .publish::<LlmPortCapability>(self.llm_port.clone())
+                    .map_err(|error| error.to_string())?;
+                context
+                    .publish::<ModelCatalogCapability>(self.llm_port.clone())
+                    .map_err(|error| error.to_string())?;
                 ComponentActivationOutcome::PublishCapabilities
             }
             id if id == TOOL_CATALOG.component_id => {
@@ -624,6 +698,9 @@ impl ComponentLifecycleCallbacks for RuntimeComponents {
                     .take()
                     .ok_or_else(|| "tool catalog activation was not staged".to_string())?;
                 register_tool_catalog_effect(scope, registration)?;
+                context
+                    .publish::<ToolCatalogCapability>(self.tool_catalog.clone())
+                    .map_err(|error| error.to_string())?;
                 ComponentActivationOutcome::PublishCapabilities
             }
             id if id == PROMPT_ASSEMBLY.component_id => {
@@ -633,40 +710,89 @@ impl ComponentLifecycleCallbacks for RuntimeComponents {
                     .take()
                     .ok_or_else(|| "prompt assembly activation was not staged".to_string())?;
                 register_prompt_assembly_effect(scope, registration)?;
+                context
+                    .publish::<PromptAssemblyCapability>(self.prompt_assembly.clone())
+                    .map_err(|error| error.to_string())?;
                 ComponentActivationOutcome::PublishCapabilities
             }
             id if id == SESSION_PERSISTENCE.component_id => {
+                let event_stream = context
+                    .require::<RuntimeEventStreamCapability>()
+                    .map_err(|error| error.to_string())?;
+                self.session_store_worker.shutdown()?;
+                self.session_store_worker = SessionStoreWorker::new((*event_stream).clone());
                 if let Some(registration) =
                     self.activation_staging.session_backend_registration.take()
                 {
                     register_session_backend_effect(scope, registration)?;
+                }
+                if let Some(views) = self.session_backend_views.clone() {
+                    context
+                        .publish::<SessionPersistenceCapability>(views)
+                        .map_err(|error| error.to_string())?;
                     ComponentActivationOutcome::PublishCapabilities
                 } else {
                     ComponentActivationOutcome::Ready
                 }
             }
             id if id == RUNTIME_WAKE.component_id => {
-                if self.activation_staging.runtime_wake_binding.is_some() {
+                if let Some(wake) = self.activation_staging.runtime_wake.take() {
+                    context
+                        .publish::<RuntimeWakeCapability>(wake)
+                        .map_err(|error| error.to_string())?;
                     ComponentActivationOutcome::PublishCapabilities
                 } else {
                     ComponentActivationOutcome::Ready
                 }
             }
-            id if id == PERMISSION_POLICY.component_id
-                || id == RUNTIME_EVENT_STREAM.component_id =>
-            {
+            id if id == PERMISSION_POLICY.component_id => {
+                let event_stream = context
+                    .require::<RuntimeEventStreamCapability>()
+                    .map_err(|error| error.to_string())?;
+                self.permission_policy.bind_event_stream(event_stream);
+                context
+                    .publish::<PermissionPolicyCapability>(self.permission_policy.clone())
+                    .map_err(|error| error.to_string())?;
+                ComponentActivationOutcome::PublishCapabilities
+            }
+            id if id == RUNTIME_EVENT_STREAM.component_id => {
+                context
+                    .publish::<RuntimeEventStreamCapability>(self.runtime_event_notifier.clone())
+                    .map_err(|error| error.to_string())?;
                 ComponentActivationOutcome::PublishCapabilities
             }
             UI_RUNTIME_BRIDGE_COMPONENT => {
-                let binding = self
-                    .activation_staging
-                    .runtime_wake_binding
-                    .take()
-                    .ok_or_else(|| "runtime wake binding activation was not staged".to_string())?;
+                let event_stream = context
+                    .require::<RuntimeEventStreamCapability>()
+                    .map_err(|error| error.to_string())?;
+                let wake = context
+                    .require::<RuntimeWakeCapability>()
+                    .map_err(|error| error.to_string())?;
+                let binding = event_stream.bind_callback(move || wake.wake());
                 register_runtime_wake_effect(scope, binding)?;
                 ComponentActivationOutcome::Ready
             }
-            NATIVE_AGENT_RUNTIME_COMPONENT | MODEL_REFRESH_COMPONENT | CONTEXT_BUDGET_COMPONENT => {
+            NATIVE_AGENT_RUNTIME_COMPONENT => {
+                let event_stream = context
+                    .require::<RuntimeEventStreamCapability>()
+                    .map_err(|error| error.to_string())?;
+                self.agent_runtime.bind_event_stream(event_stream)?;
+                ComponentActivationOutcome::Ready
+            }
+            MODEL_REFRESH_COMPONENT => {
+                let event_stream = context
+                    .require::<RuntimeEventStreamCapability>()
+                    .map_err(|error| error.to_string())?;
+                self.model_refresh.shutdown()?;
+                self.model_refresh = ModelRefreshWorker::new((*event_stream).clone());
+                ComponentActivationOutcome::Ready
+            }
+            CONTEXT_BUDGET_COMPONENT => {
+                let event_stream = context
+                    .require::<RuntimeEventStreamCapability>()
+                    .map_err(|error| error.to_string())?;
+                self.context_budget_worker
+                    .rebind_event_notifier((*event_stream).clone())?;
                 ComponentActivationOutcome::Ready
             }
             unknown => return Err(format!("unknown component lifecycle callback `{unknown}`")),
@@ -680,10 +806,11 @@ impl ComponentLifecycleCallbacks for RuntimeComponents {
         mode: ComponentLifecycleMode,
     ) -> Result<(), String> {
         match component_id {
-            NATIVE_AGENT_RUNTIME_COMPONENT => self
-                .agent_runtime
-                .shutdown()
-                .map_err(|error| error.to_string()),
+            NATIVE_AGENT_RUNTIME_COMPONENT => match mode {
+                ComponentLifecycleMode::Shutdown => self.agent_runtime.shutdown(),
+                _ => self.agent_runtime.suspend(),
+            }
+            .map_err(|error| error.to_string()),
             MODEL_REFRESH_COMPONENT => match mode {
                 ComponentLifecycleMode::Shutdown => self.model_refresh.shutdown(),
                 _ => self.model_refresh.reset_after_clear(),
@@ -722,11 +849,16 @@ impl ComponentLifecycleCallbacks for RuntimeComponents {
                 if let Err(error) = self.session_store_worker.shutdown() {
                     failures.push(error);
                 }
-                if let Some(session_port) = &self.session_port {
-                    session_port.deactivate();
+                if mode == ComponentLifecycleMode::Shutdown
+                    || self.activation_staging.is_session_backend_replacement
+                {
+                    if let Some(session_port) = &self.session_port {
+                        session_port.deactivate();
+                    }
+                    self.session_backend_views = None;
+                    self.session_port = None;
+                    self.activation_staging.is_session_backend_replacement = false;
                 }
-                self.session_backend_views = None;
-                self.session_port = None;
                 if failures.is_empty() {
                     Ok(())
                 } else {
@@ -756,16 +888,19 @@ fn runtime_component_definitions() -> Vec<ComponentDefinition> {
             .provides(RUNTIME_EVENT_STREAM.capability),
         ComponentDefinition::new(RUNTIME_WAKE.component_id).provides(RUNTIME_WAKE.capability),
         ComponentDefinition::new(SESSION_PERSISTENCE.component_id)
+            .requires(RUNTIME_EVENT_STREAM.capability)
             .provides(SESSION_PERSISTENCE.capability),
         ComponentDefinition::new(TOOL_CATALOG.component_id).provides(TOOL_CATALOG.capability),
         ComponentDefinition::new(PERMISSION_POLICY.component_id)
             .requires(APPROVAL_PROVIDER.capability)
+            .requires(RUNTIME_EVENT_STREAM.capability)
             .provides(PERMISSION_POLICY.capability),
         ComponentDefinition::new(PROMPT_ASSEMBLY.component_id)
             .requires(TOOL_CATALOG.capability)
             .observes(SESSION_PERSISTENCE.capability)
             .provides(PROMPT_ASSEMBLY.capability),
         ComponentDefinition::new("native_agent_runtime")
+            .requires(RUNTIME_EVENT_STREAM.capability)
             .requires(LLM_PORT.capability)
             .requires(MODEL_CATALOG.capability)
             .requires(PERMISSION_POLICY.capability)
@@ -773,9 +908,11 @@ fn runtime_component_definitions() -> Vec<ComponentDefinition> {
             .requires(TOOL_CATALOG.capability)
             .observes(SESSION_PERSISTENCE.capability),
         ComponentDefinition::new("model_refresh")
+            .requires(RUNTIME_EVENT_STREAM.capability)
             .requires(LLM_PORT.capability)
             .requires(MODEL_CATALOG.capability),
         ComponentDefinition::new(CONTEXT_BUDGET_COMPONENT)
+            .requires(RUNTIME_EVENT_STREAM.capability)
             .requires(LLM_PORT.capability)
             .requires(MODEL_CATALOG.capability)
             .requires(PROMPT_ASSEMBLY.capability)
@@ -1011,6 +1148,9 @@ mod tests {
             .shutdown()
             .expect("shutdown should dispose all runtime effects");
 
+        components
+            .validate_context_alignment()
+            .expect("shutdown graph and context should both be empty");
         assert!(components.prompt_assembly.manager_snapshot().is_none());
         assert!(components.prompt_assembly.inspection_snapshot().is_empty());
         assert!(components.tool_catalog.definitions().is_empty());
@@ -1023,6 +1163,184 @@ mod tests {
             components.lifecycle.state("prompt_assembly"),
             Some(ComponentState::Disposed)
         );
+    }
+
+    #[test]
+    fn runtime_event_stream_removal_reactively_quiesces_every_notifier_consumer() {
+        let mut options = options_with_provider();
+        let mut components =
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+
+        components
+            .with_lifecycle(|lifecycle, components| {
+                lifecycle.remove_capability(
+                    RUNTIME_EVENT_STREAM.component_id,
+                    &CapabilityKey::from(RUNTIME_EVENT_STREAM.capability),
+                    components,
+                    ComponentLifecycleMode::Reconfigure,
+                )
+            })
+            .expect("event stream removal should quiesce its dependent closure");
+
+        for component_id in [
+            PERMISSION_POLICY.component_id,
+            NATIVE_AGENT_RUNTIME_COMPONENT,
+            MODEL_REFRESH_COMPONENT,
+            CONTEXT_BUDGET_COMPONENT,
+            SESSION_PERSISTENCE.component_id,
+            UI_RUNTIME_BRIDGE_COMPONENT,
+        ] {
+            assert_eq!(
+                components.lifecycle.state(component_id),
+                Some(ComponentState::Pending),
+                "{component_id} must not remain active without runtime_event_stream"
+            );
+        }
+        components
+            .validate_context_alignment()
+            .expect("dependency reaction must keep graph and context aligned");
+        assert!(components.agent_runtime.is_shutdown_for_test());
+        assert!(!components.session_store_worker.is_running());
+    }
+
+    #[test]
+    fn runtime_event_stream_republication_reactivates_consumers_on_the_fresh_generation() {
+        let mut options = options_with_provider();
+        let mut components =
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+        let capability = CapabilityKey::from(RUNTIME_EVENT_STREAM.capability);
+        let initial_generation = components
+            .lifecycle
+            .graph()
+            .capability(&capability)
+            .expect("event stream should initially be visible")
+            .generation;
+
+        components
+            .with_lifecycle(|lifecycle, components| {
+                lifecycle.deactivate_components(
+                    [RUNTIME_EVENT_STREAM.component_id],
+                    components,
+                    ComponentLifecycleMode::Reconfigure,
+                )
+            })
+            .expect("event stream suspension should quiesce its dependent closure");
+        components
+            .with_lifecycle(|lifecycle, components| {
+                lifecycle.activate_components(
+                    [RUNTIME_EVENT_STREAM.component_id],
+                    components,
+                    ComponentLifecycleMode::Reconfigure,
+                )
+            })
+            .expect("event stream provider should publish a fresh generation");
+
+        let replacement_generation = components
+            .lifecycle
+            .graph()
+            .capability(&capability)
+            .expect("event stream should be republished")
+            .generation;
+        assert!(replacement_generation > initial_generation);
+        let event_stream = components
+            .require::<RuntimeEventStreamCapability>()
+            .expect("typed Context should expose the replacement event stream");
+        assert_eq!(event_stream.generation(), replacement_generation);
+        assert_eq!(
+            components
+                .lifecycle
+                .state(RUNTIME_EVENT_STREAM.component_id),
+            Some(ComponentState::Active)
+        );
+        for component_id in [
+            PERMISSION_POLICY.component_id,
+            NATIVE_AGENT_RUNTIME_COMPONENT,
+            MODEL_REFRESH_COMPONENT,
+            CONTEXT_BUDGET_COMPONENT,
+            SESSION_PERSISTENCE.component_id,
+        ] {
+            assert_eq!(
+                components.lifecycle.state(component_id),
+                Some(ComponentState::Active),
+                "{component_id} must reactivate against the replacement event stream"
+            );
+        }
+        components
+            .validate_context_alignment()
+            .expect("republication must keep graph and context aligned");
+        assert!(!components.agent_runtime.is_shutdown_for_test());
+        assert!(components.permission_policy.is_active_for_test());
+        assert!(components.session_store_worker.is_running());
+    }
+
+    #[test]
+    fn event_stream_republication_preserves_session_backend_and_agent_configuration() {
+        let store = Arc::new(session_store::InMemorySessionStore::new());
+        let mut options = AppRuntimeOptions {
+            session_store: Some(store),
+            initial_prompt_assembly: Some(manager_with_section("stable", "stable body")),
+            ..options_with_provider()
+        };
+        let mut components =
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+        let backend_generation = components
+            .lifecycle
+            .graph()
+            .capability(&CapabilityKey::from(SESSION_PERSISTENCE.capability))
+            .expect("session backend should be visible")
+            .generation;
+        let original_system_prompt = components
+            .agent_runtime
+            .system_prompt_for_test()
+            .map(str::to_string);
+        let original_tool_names = components
+            .session_workspace_tools
+            .definitions()
+            .definitions()
+            .map(|definition| definition.name.clone())
+            .collect::<Vec<_>>();
+
+        components
+            .with_lifecycle(|lifecycle, components| {
+                lifecycle.deactivate_components(
+                    [RUNTIME_EVENT_STREAM.component_id],
+                    components,
+                    ComponentLifecycleMode::Reconfigure,
+                )
+            })
+            .expect("event stream suspension should quiesce consumers");
+        components
+            .with_lifecycle(|lifecycle, components| {
+                lifecycle.activate_components(
+                    [RUNTIME_EVENT_STREAM.component_id],
+                    components,
+                    ComponentLifecycleMode::Reconfigure,
+                )
+            })
+            .expect("event stream activation should restore consumers");
+
+        let backend_lease = components
+            .require::<SessionPersistenceCapability>()
+            .expect("session backend should remain visible after dependency replacement");
+        assert_eq!(backend_lease.generation(), backend_generation + 1);
+        assert!(components.session_port.is_some());
+        assert!(components.session_backend_views.is_some());
+        assert_eq!(
+            components.agent_runtime.system_prompt_for_test(),
+            original_system_prompt.as_deref()
+        );
+        assert_eq!(
+            components
+                .session_workspace_tools
+                .definitions()
+                .definitions()
+                .map(|definition| definition.name.clone())
+                .collect::<Vec<_>>(),
+            original_tool_names
+        );
+        components
+            .validate_context_alignment()
+            .expect("restored composition should keep graph and Context aligned");
     }
 
     #[test]
@@ -1072,6 +1390,15 @@ mod tests {
         let components =
             RuntimeComponents::new(&mut options).expect("runtime components should initialize");
 
+        components
+            .validate_context_alignment()
+            .expect("ephemeral composition should align graph and context");
+        assert!(
+            components
+                .optional::<SessionPersistenceCapability>()
+                .expect("typed session lookup should succeed")
+                .is_none()
+        );
         assert!(components.session_port.is_none());
         assert!(components.session_backend_views.is_none());
         assert!(
@@ -1116,6 +1443,9 @@ mod tests {
             .reset_after_clear(&options)
             .expect("reset should install a new generation");
 
+        components
+            .validate_context_alignment()
+            .expect("reset graph and context should align");
         let snapshot = components
             .prompt_assembly
             .session_snapshot()
@@ -1142,6 +1472,9 @@ mod tests {
             .expect_err("injected native mount failure should abort publication");
 
         assert_eq!(error, "injected native mount failure");
+        components
+            .validate_context_alignment()
+            .expect("failed remount should leave graph and context equally absent");
         assert!(components.tool_catalog.definitions().is_empty());
         assert!(components.prompt_assembly.manager_snapshot().is_none());
         assert!(components.prompt_assembly.inspection_snapshot().is_empty());
@@ -1236,6 +1569,9 @@ mod tests {
         components
             .reset_after_clear(&options)
             .expect("a clean retry should mount a fresh composition");
+        components
+            .validate_context_alignment()
+            .expect("retry graph and context should align");
         assert_eq!(
             components.lifecycle.state("native_agent_runtime"),
             Some(ComponentState::Active)
@@ -1278,6 +1614,9 @@ mod tests {
             .expect("replacement provider should mount");
 
         let after = components.permission_policy.inspection_snapshot();
+        components
+            .validate_context_alignment()
+            .expect("permission replacement graph and context should align");
         assert_eq!(
             after
                 .iter()
@@ -1412,6 +1751,14 @@ mod tests {
             .expect("replacement backend capability should be published")
             .generation;
         assert_eq!(after_generation, before_generation + 1);
+        let lease = components
+            .require::<SessionPersistenceCapability>()
+            .expect("replacement backend should be visible through context");
+        assert_eq!(lease.generation(), after_generation);
+        assert_eq!(lease.provider_component(), SESSION_PERSISTENCE.component_id);
+        components
+            .validate_context_alignment()
+            .expect("backend replacement graph and context should align");
         assert!(components.session_backend_views.is_some());
         assert!(!components.agent_runtime.is_shutdown_for_test());
     }
@@ -1494,6 +1841,9 @@ mod tests {
 
         assert!(error.contains("component `llm_port` activation epoch is exhausted"));
         assert_eq!(components.lifecycle.capabilities(), capabilities_before);
+        components
+            .validate_context_alignment()
+            .expect("preflight rejection must preserve graph and context");
         assert_eq!(
             components.lifecycle.state("llm_port"),
             Some(ComponentState::Active)

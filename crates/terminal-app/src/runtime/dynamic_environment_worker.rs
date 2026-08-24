@@ -18,8 +18,13 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle as TokioJoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::dynamic_environment::DynamicEnvironmentObserver;
-use conversation_runtime::RuntimeEventNotifier;
+use crate::{
+    dynamic_environment::DynamicEnvironmentObserver,
+    runtime::context::{CapabilityLease, RuntimeEventStreamCapability},
+};
+
+#[cfg(test)]
+use crate::runtime::context::RuntimeContext;
 
 pub(super) struct DynamicEnvironmentWorker {
     observer: Arc<dyn DynamicEnvironmentObserver>,
@@ -68,16 +73,16 @@ enum DynamicEnvironmentWorkerCommand {
 impl DynamicEnvironmentWorker {
     pub(super) fn new(
         observer: Arc<dyn DynamicEnvironmentObserver>,
-        event_notifier: RuntimeEventNotifier,
+        event_stream: CapabilityLease<RuntimeEventStreamCapability>,
     ) -> Self {
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         let (result_tx, result_rx) = mpsc::unbounded_channel();
-        let worker_event_notifier = event_notifier.clone();
+        let worker_event_stream = event_stream.clone();
         let worker_thread = thread::Builder::new()
             .name("dynamic-environment-runtime".to_string())
             .spawn(move || {
-                let _exit_notification = worker_event_notifier.notify_on_drop();
-                dynamic_environment_worker_loop(command_rx, result_tx, worker_event_notifier);
+                let _exit_notification = worker_event_stream.notify_on_drop();
+                dynamic_environment_worker_loop(command_rx, result_tx, worker_event_stream);
             });
         Self {
             observer,
@@ -138,6 +143,16 @@ impl DynamicEnvironmentWorker {
         }
     }
 
+    /// 仅在 component quiescent 时替换从 Context lease 取得的 notifier。
+    pub(super) fn rebind_event_stream(
+        &mut self,
+        event_stream: CapabilityLease<RuntimeEventStreamCapability>,
+    ) {
+        let observer = Arc::clone(&self.observer);
+        self.shutdown();
+        *self = Self::new(observer, event_stream);
+    }
+
     pub(super) fn try_recv_injection(
         &mut self,
     ) -> Option<Result<DynamicEnvironmentInjection, String>> {
@@ -177,7 +192,7 @@ impl DynamicEnvironmentWorker {
 fn dynamic_environment_worker_loop(
     mut command_rx: mpsc::UnboundedReceiver<DynamicEnvironmentWorkerCommand>,
     result_tx: mpsc::UnboundedSender<DynamicEnvironmentTaskEnvelope>,
-    event_notifier: RuntimeEventNotifier,
+    event_stream: CapabilityLease<RuntimeEventStreamCapability>,
 ) {
     let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -198,7 +213,7 @@ fn dynamic_environment_worker_loop(
                 } => {
                     cancel_and_join_active_task(&mut active_task).await;
                     let result_tx = result_tx.clone();
-                    let task_event_notifier = event_notifier.clone();
+                    let task_event_stream = event_stream.clone();
                     let task_cancellation = cancellation.clone();
                     let handle = tokio::spawn(async move {
                         let result = match AssertUnwindSafe(build_dynamic_environment_injection(
@@ -221,7 +236,7 @@ fn dynamic_environment_worker_loop(
                             .send(DynamicEnvironmentTaskEnvelope { generation, result })
                             .is_ok()
                         {
-                            task_event_notifier.notify();
+                            task_event_stream.notify();
                         }
                     });
                     active_task = Some(ActiveDynamicEnvironmentTask {
@@ -512,7 +527,9 @@ mod tests {
         });
         let mut worker = DynamicEnvironmentWorker::new(
             observer,
-            conversation_runtime::RuntimeEventNotifier::default(),
+            RuntimeContext::test_event_stream_lease(
+                conversation_runtime::RuntimeEventNotifier::default(),
+            ),
         );
 
         worker
@@ -572,7 +589,10 @@ mod tests {
             "2026-07-10",
             "2026-07-10",
         )]));
-        let mut worker = DynamicEnvironmentWorker::new(observer, notifier);
+        let mut worker = DynamicEnvironmentWorker::new(
+            observer,
+            RuntimeContext::test_event_stream_lease(notifier),
+        );
 
         worker
             .load(DynamicEnvironmentRequest {
@@ -606,7 +626,10 @@ mod tests {
         let _wake_binding = notifier.bind_callback(move || {
             let _ = wake_sender.send(());
         });
-        let mut worker = DynamicEnvironmentWorker::new(Arc::new(PanickingObserver), notifier);
+        let mut worker = DynamicEnvironmentWorker::new(
+            Arc::new(PanickingObserver),
+            RuntimeContext::test_event_stream_lease(notifier),
+        );
 
         worker
             .load(DynamicEnvironmentRequest {
@@ -642,7 +665,9 @@ mod tests {
         let observer = Arc::new(FixedObserver::new(Vec::new()));
         let mut worker = DynamicEnvironmentWorker::new(
             observer,
-            conversation_runtime::RuntimeEventNotifier::default(),
+            RuntimeContext::test_event_stream_lease(
+                conversation_runtime::RuntimeEventNotifier::default(),
+            ),
         );
         let (result_tx, result_rx) = mpsc::unbounded_channel();
         drop(result_tx);

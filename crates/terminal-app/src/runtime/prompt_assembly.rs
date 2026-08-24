@@ -85,7 +85,7 @@ impl fmt::Debug for PromptAssemblySessionSnapshot {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct PromptAssembly {
     state: Arc<Mutex<PromptAssemblyState>>,
 }

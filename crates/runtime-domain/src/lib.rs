@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod context_budget;
 pub mod dynamic_environment;
 pub mod envinfo;

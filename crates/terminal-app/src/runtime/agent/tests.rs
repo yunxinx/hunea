@@ -1031,7 +1031,7 @@ fn shared_busy_and_interrupt_contract_runs_for_native_and_replay() {
     let native_request = failing_turn_request();
     let native_target = native_request.target();
     let mut native = native_runtime(RuntimeEventNotifier::default());
-    native.set_pending_turn_for_test(native_request.native_request.clone());
+    native.set_pending_turn_for_test(native_request.conversation_request().clone());
     let native_port: &mut dyn AgentRuntimePort = &mut *native;
     assert_shared_busy_and_interrupt_contract(native_port, native_target, failing_turn_request());
 

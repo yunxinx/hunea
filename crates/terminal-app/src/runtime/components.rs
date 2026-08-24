@@ -1689,11 +1689,11 @@ mod tests {
     };
 
     use super::*;
-    use crate::runtime::agent::{
-        AgentCommand, AgentCommandReceipt, AgentContextBudgetSnapshot, AgentEvent, AgentRuntime,
-        AgentRuntimeError, AgentSessionRestore,
-    };
+    use crate::runtime::agent::{AgentContextBudgetSnapshot, AgentSessionRestore};
     use crate::runtime::lifecycle::{ComponentDefinition, ComponentState};
+    use runtime_domain::agent::{
+        AgentCommand, AgentCommandReceipt, AgentEvent, AgentRuntime, AgentRuntimeError,
+    };
     use runtime_domain::prompt_assembly::{
         PromptPreludeSection, PromptSourceKind, PromptSourceOrigin,
     };

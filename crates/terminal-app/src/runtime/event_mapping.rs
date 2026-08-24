@@ -1,8 +1,9 @@
 //! Agent fact 到 TUI runtime event 的转换。
 
-use runtime_domain::session::RuntimeEvent;
-
-use super::agent::{AgentEvent, AgentEventKind};
+use runtime_domain::{
+    agent::{AgentEvent, AgentEventKind},
+    session::RuntimeEvent,
+};
 
 pub(crate) fn runtime_event_from_agent_event(event: AgentEvent) -> RuntimeEvent {
     let target = event.target;
@@ -89,7 +90,7 @@ mod tests {
     use runtime_domain::session::{ConversationResponse, RuntimeTarget};
 
     use super::*;
-    use crate::runtime::agent::{AgentId, AgentTurnId};
+    use runtime_domain::agent::{AgentId, AgentTurnId};
 
     fn sample_usage() -> ContextWindowUsage {
         ContextWindowUsage {

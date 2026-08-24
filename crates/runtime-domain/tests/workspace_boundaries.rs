@@ -108,6 +108,44 @@ fn event_notifier_has_one_domain_owner() {
     );
 }
 
+#[test]
+fn agent_runtime_contract_has_one_domain_owner() {
+    let workspace = workspace_root();
+    let contract = workspace.join("crates/runtime-domain/src/agent.rs");
+    let terminal_agent = workspace.join("crates/terminal-app/src/runtime/agent/mod.rs");
+
+    assert!(
+        contract.is_file(),
+        "runtime-domain should own the Agent contract module"
+    );
+    let contract_source = fs::read_to_string(contract).expect("agent contract is readable");
+    for forbidden in [
+        "tokio",
+        "terminal_ui",
+        "conversation_runtime",
+        "session_store",
+    ] {
+        assert!(
+            !contract_source.contains(forbidden),
+            "runtime-domain Agent contract must not depend on implementation crate {forbidden}"
+        );
+    }
+
+    let terminal_source =
+        fs::read_to_string(terminal_agent).expect("terminal-app Agent host module is readable");
+    for removed_definition in [
+        "pub(super) enum AgentCommand",
+        "pub(super) struct AgentEvent",
+        "pub(super) trait AgentRuntime {",
+        "pub(super) enum AgentRuntimeError",
+    ] {
+        assert!(
+            !terminal_source.contains(removed_definition),
+            "terminal-app must not redefine the domain Agent contract: {removed_definition}"
+        );
+    }
+}
+
 fn workspace_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()

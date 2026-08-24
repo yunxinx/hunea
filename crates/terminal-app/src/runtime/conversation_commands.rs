@@ -1,12 +1,12 @@
-use runtime_domain::session::{ConversationTurnRequest, RuntimeCommandReceipt, RuntimeTarget};
+use runtime_domain::{
+    agent::{AgentCommand, AgentCommandReceipt, AgentId, AgentTurnId, AgentTurnRequest},
+    session::{ConversationTurnRequest, RuntimeCommandReceipt, RuntimeTarget},
+};
 
 #[cfg(test)]
 use runtime_domain::session::TranscriptUserMessage;
 
-use super::{
-    AppRuntimeCoordinator,
-    agent::{AgentCommand, AgentCommandReceipt, AgentId, AgentTurnId, AgentTurnRequest},
-};
+use super::AppRuntimeCoordinator;
 #[cfg(test)]
 use crate::prompt_assembly::AttachedPromptMessageAssembly;
 

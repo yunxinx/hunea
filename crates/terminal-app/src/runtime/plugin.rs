@@ -762,6 +762,46 @@ impl<I> PluginFactoryCatalog<I> {
     }
 }
 
+/// `PluginCompositionLoader` 是 compile-time composition input 的唯一 owner。
+///
+/// 它只接受已经验证的 desired identity；具体 lifecycle publication 仍由
+/// `RuntimeComponents` 的 authority commit hook 完成。
+pub(super) struct PluginCompositionLoader<I> {
+    catalog: PluginFactoryCatalog<I>,
+    desired: DesiredPluginComposition,
+}
+
+impl<I> PluginCompositionLoader<I> {
+    pub(super) fn try_new(
+        catalog: PluginFactoryCatalog<I>,
+        desired: DesiredPluginComposition,
+    ) -> Result<Self, PluginCatalogError> {
+        catalog.plan_reconciliation(&desired, &ObservedPluginComposition::empty())?;
+        Ok(Self { catalog, desired })
+    }
+
+    #[cfg(test)]
+    pub(super) fn desired(&self) -> &DesiredPluginComposition {
+        &self.desired
+    }
+
+    pub(super) fn prepare_startup(&self) -> Result<PluginComposition<I>, PluginCatalogError> {
+        self.catalog.instantiate(&self.desired)
+    }
+
+    pub(super) fn prepare_reconciliation(
+        &self,
+        desired: &DesiredPluginComposition,
+        observed: &PluginComposition<I>,
+    ) -> Result<PreparedPluginReconciliation<I>, PluginCatalogError> {
+        self.catalog.prepare_reconciliation(desired, observed)
+    }
+
+    pub(super) fn commit_desired(&mut self, desired: DesiredPluginComposition) {
+        self.desired = desired;
+    }
+}
+
 struct PluginInstance<I> {
     component_id: PluginComponentId,
     descriptor: PluginDescriptor,

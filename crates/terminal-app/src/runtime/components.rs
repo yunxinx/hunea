@@ -28,9 +28,10 @@ use super::{
         TERMINAL_APPROVAL_PROVIDER_ID,
     },
     plugin::{
-        DesiredPluginComposition, PluginCatalogError, PluginComposition, PluginDescriptor,
-        PluginDescriptorBuilder, PluginDescriptorSnapshot, PluginFactory, PluginFactoryCatalog,
-        PluginReloadPolicy, PluginTrust, PluginTypeId, PreparedPluginReconciliation,
+        DesiredPluginComposition, PluginCatalogError, PluginComposition, PluginCompositionLoader,
+        PluginDescriptor, PluginDescriptorBuilder, PluginDescriptorSnapshot, PluginFactory,
+        PluginFactoryCatalog, PluginReloadPolicy, PluginTrust, PluginTypeId,
+        PreparedPluginReconciliation,
     },
     prompt_assembly::{PromptAssembly, PromptRegistration},
     session_port::{SessionBackendRegistration, SessionBackendViews, SessionPortHost},
@@ -276,7 +277,7 @@ fn builtin_plugin_catalog()
 fn builtin_plugin_composition()
 -> Result<PluginComposition<RuntimePluginImplementation>, PluginCatalogError> {
     let desired = builtin_desired_composition()?;
-    builtin_plugin_catalog()?.instantiate(&desired)
+    PluginCompositionLoader::try_new(builtin_plugin_catalog()?, desired)?.prepare_startup()
 }
 
 #[derive(Default)]
@@ -315,8 +316,7 @@ pub(super) struct RuntimeComponents {
     pub(super) context_budget_worker: ContextBudgetWorker,
     runtime_event_notifier: RuntimeEventNotifier,
     activation_staging: ComponentActivationStaging,
-    plugin_catalog: PluginFactoryCatalog<RuntimePluginImplementation>,
-    desired_plugins: DesiredPluginComposition,
+    plugin_loader: PluginCompositionLoader<RuntimePluginImplementation>,
     plugins: PluginComposition<RuntimePluginImplementation>,
     prepared_plugin_commit: Option<PreparedPluginCommit>,
     #[cfg(test)]
@@ -329,8 +329,10 @@ impl RuntimeComponents {
     pub(super) fn new(options: &mut AppRuntimeOptions) -> Result<Self, String> {
         let desired_plugins = builtin_desired_composition().map_err(|error| error.to_string())?;
         let plugin_catalog = builtin_plugin_catalog().map_err(|error| error.to_string())?;
-        let plugins = plugin_catalog
-            .instantiate(&desired_plugins)
+        let plugin_loader = PluginCompositionLoader::try_new(plugin_catalog, desired_plugins)
+            .map_err(|error| error.to_string())?;
+        let plugins = plugin_loader
+            .prepare_startup()
             .map_err(|error| error.to_string())?;
         let runtime_event_notifier = RuntimeEventNotifier::default();
         let permission_policy = PermissionPolicy::new();
@@ -403,8 +405,7 @@ impl RuntimeComponents {
                 runtime_wake: None,
                 is_session_backend_replacement: false,
             },
-            plugin_catalog,
-            desired_plugins,
+            plugin_loader,
             plugins,
             prepared_plugin_commit: None,
             #[cfg(test)]
@@ -455,7 +456,7 @@ impl RuntimeComponents {
             return Err("Runtime components are shut down".to_string());
         }
         let reconciliation = self
-            .plugin_catalog
+            .plugin_loader
             .prepare_reconciliation(&desired, &self.plugins)
             .map_err(|error| error.to_string())?;
         self.commit_prepared_plugin_reconciliation(desired, reconciliation, mode)
@@ -1239,7 +1240,7 @@ impl ComponentLifecycleCallbacks for RuntimeComponents {
             .take()
             .expect("plugin authority commit must have a prepared composition");
         self.plugins.commit_reconciliation(prepared.reconciliation);
-        self.desired_plugins = prepared.desired;
+        self.plugin_loader.commit_desired(prepared.desired);
         #[cfg(test)]
         self.record_plugin_transaction_event("authority:commit");
     }
@@ -1659,6 +1660,19 @@ mod tests {
                 .generation
                 > old_generation
         );
+        assert_eq!(
+            components
+                .plugin_loader
+                .desired()
+                .iter()
+                .find(|(component_id, _)| {
+                    component_id.as_str() == RUNTIME_EVENT_STREAM.component_id
+                })
+                .expect("committed desired input should contain runtime event stream")
+                .1
+                .as_str(),
+            FRESH_PLUGIN
+        );
         components
             .validate_context_alignment()
             .expect("plugin, graph, and typed Context should align");
@@ -1834,6 +1848,7 @@ mod tests {
         let mut components =
             RuntimeComponents::new(&mut options).expect("runtime components should initialize");
         let old_descriptors = components.plugin_descriptor_snapshots();
+        let old_desired = components.plugin_loader.desired().clone();
         let old_components = components.lifecycle.components();
         let old_capabilities = components.lifecycle.capabilities();
         let old_context = components.lifecycle.context_snapshots();
@@ -1865,10 +1880,44 @@ mod tests {
         assert_eq!(*constructions.lock().unwrap(), 1);
         assert!(!error.contains("SENSITIVE_FACTORY_FAILURE"));
         assert_eq!(components.plugin_descriptor_snapshots(), old_descriptors);
+        assert_eq!(components.plugin_loader.desired(), &old_desired);
         assert_eq!(components.lifecycle.components(), old_components);
         assert_eq!(components.lifecycle.capabilities(), old_capabilities);
         assert_eq!(components.lifecycle.context_snapshots(), old_context);
         assert_eq!(components.effect_scope_snapshots(), old_scopes);
+    }
+
+    #[test]
+    fn plugin_graph_preflight_failure_preserves_committed_loader_input() {
+        const INVALID_PLUGIN: &str = "runtime-event-stream-invalid";
+        let mut options = AppRuntimeOptions::default();
+        let mut components =
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+        let old_descriptors = components.plugin_descriptor_snapshots();
+        let old_desired = components.plugin_loader.desired().clone();
+        let catalog = PluginFactoryCatalog::try_new([runtime_plugin_factory(
+            builtin_descriptor(INVALID_PLUGIN, "Invalid runtime event stream")
+                .provides(RUNTIME_EVENT_STREAM.capability)
+                .provides(LLM_PORT.capability),
+            RuntimeComponents::activate_runtime_event_stream,
+            RuntimeComponents::quiesce_noop,
+        )])
+        .expect("invalid replacement catalog should validate its descriptor");
+
+        let error = components
+            .reconcile_plugin_composition_with_catalog(
+                &catalog,
+                desired_with_runtime_event_plugin(INVALID_PLUGIN),
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect_err("graph preflight should reject duplicate capability provider");
+
+        assert!(error.contains("graph"));
+        assert_eq!(components.plugin_descriptor_snapshots(), old_descriptors);
+        assert_eq!(components.plugin_loader.desired(), &old_desired);
+        components
+            .validate_context_alignment()
+            .expect("failed desired input must not desynchronize Context");
     }
 
     #[test]
@@ -1898,6 +1947,19 @@ mod tests {
             .find(|snapshot| snapshot.component_id == RUNTIME_EVENT_STREAM.component_id)
             .expect("fresh descriptor should remain authoritative");
         assert_eq!(descriptor.plugin_type, FAILING_PLUGIN);
+        assert_eq!(
+            components
+                .plugin_loader
+                .desired()
+                .iter()
+                .find(|(component_id, _)| {
+                    component_id.as_str() == RUNTIME_EVENT_STREAM.component_id
+                })
+                .expect("fresh desired input should remain committed")
+                .1
+                .as_str(),
+            FAILING_PLUGIN
+        );
         assert_eq!(
             components
                 .lifecycle

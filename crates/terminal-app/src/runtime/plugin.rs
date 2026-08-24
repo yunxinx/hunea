@@ -1,4 +1,5 @@
 use std::{
+    borrow::Borrow,
     collections::{BTreeMap, BTreeSet},
     error::Error,
     fmt,
@@ -64,6 +65,74 @@ impl fmt::Debug for PluginTypeId {
 }
 
 impl fmt::Display for PluginTypeId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// `PluginComponentId` 标识 composition 中稳定、可替换的 component slot。
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(super) struct PluginComponentId(String);
+
+impl PluginComponentId {
+    pub(super) fn try_new(value: impl Into<String>) -> Result<Self, PluginComponentIdError> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err(PluginComponentIdError::Empty);
+        }
+        let bytes = value.as_bytes();
+        if !bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+            || !bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+            || bytes
+                .iter()
+                .any(|byte| !byte.is_ascii_lowercase() && !byte.is_ascii_digit() && *byte != b'_')
+            || bytes.windows(2).any(|pair| pair == b"__")
+        {
+            return Err(PluginComponentIdError::InvalidFormat);
+        }
+        Ok(Self(value))
+    }
+
+    pub(super) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Borrow<str> for PluginComponentId {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+/// `PluginComponentIdError` 不保留未通过校验的原始 slot id。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PluginComponentIdError {
+    Empty,
+    InvalidFormat,
+}
+
+impl fmt::Display for PluginComponentIdError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kind = match self {
+            Self::Empty => "empty_plugin_component_id",
+            Self::InvalidFormat => "invalid_plugin_component_id_format",
+        };
+        formatter.write_str(kind)
+    }
+}
+
+impl Error for PluginComponentIdError {}
+
+impl fmt::Debug for PluginComponentId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("PluginComponentId")
+            .field(&self.0)
+            .finish()
+    }
+}
+
+impl fmt::Display for PluginComponentId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)
     }
@@ -238,19 +307,106 @@ impl fmt::Debug for PluginDescriptor {
     }
 }
 
-/// `DesiredPlugin` 将稳定 composition slot 绑定到一个 registered plugin type。
+/// `DesiredPluginComposition` 是经过完整校验、按 slot id 排序的期望状态。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct DesiredPlugin {
-    component_id: String,
-    plugin_type: PluginTypeId,
+pub(super) struct DesiredPluginComposition {
+    entries: BTreeMap<PluginComponentId, PluginTypeId>,
 }
 
-impl DesiredPlugin {
-    pub(super) fn new(component_id: impl Into<String>, plugin_type: PluginTypeId) -> Self {
-        Self {
-            component_id: component_id.into(),
-            plugin_type,
+impl DesiredPluginComposition {
+    pub(super) fn try_new<S>(
+        entries: impl IntoIterator<Item = (S, PluginTypeId)>,
+    ) -> Result<Self, PluginCatalogError>
+    where
+        S: Into<String>,
+    {
+        let mut validated = BTreeMap::new();
+        for (component_id, plugin_type) in entries {
+            let component_id = PluginComponentId::try_new(component_id)
+                .map_err(|source| PluginCatalogError::InvalidComponentId { source })?;
+            if validated
+                .insert(component_id.clone(), plugin_type)
+                .is_some()
+            {
+                return Err(PluginCatalogError::DuplicateComponent { component_id });
+            }
         }
+        Ok(Self { entries: validated })
+    }
+
+    pub(super) fn iter(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (&PluginComponentId, &PluginTypeId)> {
+        self.entries.iter()
+    }
+}
+
+/// `ObservedPluginComposition` 只投影 live composition 的稳定 identity。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ObservedPluginComposition {
+    entries: BTreeMap<PluginComponentId, PluginTypeId>,
+}
+
+impl ObservedPluginComposition {
+    pub(super) fn empty() -> Self {
+        Self {
+            entries: BTreeMap::new(),
+        }
+    }
+
+    pub(super) fn iter(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (&PluginComponentId, &PluginTypeId)> {
+        self.entries.iter()
+    }
+}
+
+/// `PluginReconciliationAction` 是 loader 与 lifecycle transaction 间的封闭 diff 词汇。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum PluginReconciliationAction {
+    Keep {
+        component_id: PluginComponentId,
+        plugin_type: PluginTypeId,
+    },
+    Add {
+        component_id: PluginComponentId,
+        plugin_type: PluginTypeId,
+    },
+    Remove {
+        component_id: PluginComponentId,
+        plugin_type: PluginTypeId,
+    },
+    Replace {
+        component_id: PluginComponentId,
+        from: PluginTypeId,
+        to: PluginTypeId,
+    },
+}
+
+impl PluginReconciliationAction {
+    fn target_factory(&self) -> Option<(&PluginComponentId, &PluginTypeId)> {
+        match self {
+            Self::Add {
+                component_id,
+                plugin_type,
+            } => Some((component_id, plugin_type)),
+            Self::Replace {
+                component_id, to, ..
+            } => Some((component_id, to)),
+            Self::Keep { .. } | Self::Remove { .. } => None,
+        }
+    }
+}
+
+/// `PluginReconciliationPlan` 只描述 mutation-free planning 结果，不提供执行入口。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PluginReconciliationPlan {
+    actions: Vec<PluginReconciliationAction>,
+}
+
+impl PluginReconciliationPlan {
+    pub(super) fn actions(&self) -> &[PluginReconciliationAction] {
+        &self.actions
     }
 }
 
@@ -302,18 +458,21 @@ impl<I> PluginFactory<I> {
 
 /// Catalog validation error 的 `Debug` 不包含 factory source 或 implementation details。
 pub(super) enum PluginCatalogError {
+    InvalidComponentId {
+        source: PluginComponentIdError,
+    },
     DuplicatePluginType {
         plugin_type: PluginTypeId,
     },
     DuplicateComponent {
-        component_id: String,
+        component_id: PluginComponentId,
     },
     MissingFactory {
-        component_id: String,
+        component_id: PluginComponentId,
         plugin_type: PluginTypeId,
     },
     ConstructionFailed {
-        component_id: String,
+        component_id: PluginComponentId,
         plugin_type: PluginTypeId,
         source: PluginConstructionError,
     },
@@ -322,6 +481,11 @@ pub(super) enum PluginCatalogError {
 impl fmt::Debug for PluginCatalogError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidComponentId { source } => formatter
+                .debug_struct("PluginCatalogError")
+                .field("kind", &"invalid_component_id")
+                .field("reason", source)
+                .finish(),
             Self::DuplicatePluginType { plugin_type } => formatter
                 .debug_struct("PluginCatalogError")
                 .field("kind", &"duplicate_plugin_type")
@@ -358,6 +522,9 @@ impl fmt::Debug for PluginCatalogError {
 impl fmt::Display for PluginCatalogError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidComponentId { source } => {
+                write!(formatter, "plugin component id is invalid: {source}")
+            }
             Self::DuplicatePluginType { plugin_type } => {
                 write!(
                     formatter,
@@ -392,6 +559,7 @@ impl fmt::Display for PluginCatalogError {
 impl Error for PluginCatalogError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::InvalidComponentId { source } => Some(source),
             Self::ConstructionFailed { source, .. } => Some(source),
             _ => None,
         }
@@ -421,30 +589,16 @@ impl<I> PluginFactoryCatalog<I> {
 
     pub(super) fn instantiate(
         &self,
-        desired: impl IntoIterator<Item = DesiredPlugin>,
+        desired: &DesiredPluginComposition,
     ) -> Result<PluginComposition<I>, PluginCatalogError> {
-        let mut entries = BTreeMap::new();
-        for entry in desired {
-            let component_id = entry.component_id.clone();
-            if entries.insert(component_id.clone(), entry).is_some() {
-                return Err(PluginCatalogError::DuplicateComponent { component_id });
-            }
-        }
+        // Startup 是从空 observed state 进行 Add-only prepare；plan preflight 必须先于 constructor。
+        self.plan_reconciliation(desired, &ObservedPluginComposition::empty())?;
 
-        for entry in entries.values() {
-            if !self.factories.contains_key(&entry.plugin_type) {
-                return Err(PluginCatalogError::MissingFactory {
-                    component_id: entry.component_id.clone(),
-                    plugin_type: entry.plugin_type.clone(),
-                });
-            }
-        }
-
-        let mut prepared = Vec::with_capacity(entries.len());
-        for entry in entries.into_values() {
+        let mut prepared = Vec::with_capacity(desired.entries.len());
+        for (component_id, plugin_type) in desired.iter() {
             let factory = self
                 .factories
-                .get(&entry.plugin_type)
+                .get(plugin_type)
                 .expect("factories were resolved before construction");
             let implementation = match (factory.construct)() {
                 Ok(implementation) => implementation,
@@ -453,14 +607,14 @@ impl<I> PluginFactoryCatalog<I> {
                         drop(instance);
                     }
                     return Err(PluginCatalogError::ConstructionFailed {
-                        component_id: entry.component_id,
-                        plugin_type: entry.plugin_type,
+                        component_id: component_id.clone(),
+                        plugin_type: plugin_type.clone(),
                         source,
                     });
                 }
             };
             prepared.push(PluginInstance {
-                component_id: entry.component_id,
+                component_id: component_id.clone(),
                 descriptor: factory.descriptor.clone(),
                 implementation,
             });
@@ -473,17 +627,77 @@ impl<I> PluginFactoryCatalog<I> {
                 .collect(),
         })
     }
+
+    pub(super) fn plan_reconciliation(
+        &self,
+        desired: &DesiredPluginComposition,
+        observed: &ObservedPluginComposition,
+    ) -> Result<PluginReconciliationPlan, PluginCatalogError> {
+        let component_ids = desired
+            .iter()
+            .map(|(component_id, _)| component_id)
+            .chain(observed.iter().map(|(component_id, _)| component_id))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let actions = component_ids
+            .into_iter()
+            .map(|component_id| {
+                match (
+                    desired.entries.get(&component_id),
+                    observed.entries.get(&component_id),
+                ) {
+                    (Some(desired_type), Some(observed_type)) if desired_type == observed_type => {
+                        PluginReconciliationAction::Keep {
+                            component_id,
+                            plugin_type: desired_type.clone(),
+                        }
+                    }
+                    (Some(desired_type), Some(observed_type)) => {
+                        PluginReconciliationAction::Replace {
+                            component_id,
+                            from: observed_type.clone(),
+                            to: desired_type.clone(),
+                        }
+                    }
+                    (Some(plugin_type), None) => PluginReconciliationAction::Add {
+                        component_id,
+                        plugin_type: plugin_type.clone(),
+                    },
+                    (None, Some(plugin_type)) => PluginReconciliationAction::Remove {
+                        component_id,
+                        plugin_type: plugin_type.clone(),
+                    },
+                    (None, None) => unreachable!("component id came from desired/observed union"),
+                }
+            })
+            .collect::<Vec<_>>();
+        let plan = PluginReconciliationPlan { actions };
+
+        for action in plan.actions() {
+            let Some((component_id, plugin_type)) = action.target_factory() else {
+                continue;
+            };
+            if !self.factories.contains_key(plugin_type) {
+                return Err(PluginCatalogError::MissingFactory {
+                    component_id: component_id.clone(),
+                    plugin_type: plugin_type.clone(),
+                });
+            }
+        }
+
+        Ok(plan)
+    }
 }
 
 struct PluginInstance<I> {
-    component_id: String,
+    component_id: PluginComponentId,
     descriptor: PluginDescriptor,
     implementation: I,
 }
 
 /// `PluginComposition` 是已完整 prepare、尚未 publication 的 immutable instance 集合。
 pub(super) struct PluginComposition<I> {
-    instances: BTreeMap<String, PluginInstance<I>>,
+    instances: BTreeMap<PluginComponentId, PluginInstance<I>>,
 }
 
 impl<I> PluginComposition<I> {
@@ -493,7 +707,7 @@ impl<I> PluginComposition<I> {
             .map(|instance| {
                 instance
                     .descriptor
-                    .definition(instance.component_id.clone())
+                    .definition(instance.component_id.as_str().to_string())
             })
             .collect()
     }
@@ -505,10 +719,30 @@ impl<I> PluginComposition<I> {
     }
 
     pub(super) fn descriptor_snapshots(&self) -> Vec<PluginDescriptorSnapshot> {
-        self.instances
-            .values()
-            .map(|instance| instance.descriptor.snapshot(instance.component_id.clone()))
+        let observed = self.observed();
+        observed
+            .iter()
+            .map(|(component_id, plugin_type)| {
+                let instance = self
+                    .instances
+                    .get(component_id)
+                    .expect("observed identity was projected from prepared instances");
+                debug_assert_eq!(plugin_type, &instance.descriptor.type_id);
+                instance
+                    .descriptor
+                    .snapshot(instance.component_id.as_str().to_string())
+            })
             .collect()
+    }
+
+    pub(super) fn observed(&self) -> ObservedPluginComposition {
+        let mut observed = ObservedPluginComposition::empty();
+        observed
+            .entries
+            .extend(self.instances.iter().map(|(component_id, instance)| {
+                (component_id.clone(), instance.descriptor.type_id.clone())
+            }));
+        observed
     }
 }
 
@@ -552,6 +786,34 @@ mod tests {
         PluginFactory::new(descriptor(type_id), move || Ok(value))
     }
 
+    fn desired<const N: usize>(
+        entries: [(&'static str, &'static str); N],
+    ) -> DesiredPluginComposition {
+        DesiredPluginComposition::try_new(
+            entries
+                .into_iter()
+                .map(|(component_id, type_id)| (component_id, plugin_type(type_id))),
+        )
+        .expect("test desired composition should be valid")
+    }
+
+    fn observed<const N: usize>(
+        entries: [(&'static str, &'static str); N],
+    ) -> ObservedPluginComposition {
+        let desired = desired(entries);
+        let factories = entries
+            .iter()
+            .map(|(_, type_id)| *type_id)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|type_id| factory(type_id, 0));
+        PluginFactoryCatalog::try_new(factories)
+            .expect("observed catalog should validate")
+            .instantiate(&desired)
+            .expect("observed composition should prepare")
+            .observed()
+    }
+
     #[test]
     fn descriptor_is_the_only_component_definition_source() {
         let catalog = PluginFactoryCatalog::try_new([PluginFactory::new(
@@ -564,14 +826,15 @@ mod tests {
             || Ok(()),
         )])
         .expect("catalog should validate");
+        let desired = desired([("main_agent", "agent")]);
         let composition = catalog
-            .instantiate([DesiredPlugin::new("main-agent", plugin_type("agent"))])
+            .instantiate(&desired)
             .expect("composition should prepare");
 
         assert_eq!(
             composition.definitions(),
             vec![
-                ComponentDefinition::new("main-agent")
+                ComponentDefinition::new("main_agent")
                     .requires("llm")
                     .observes("metrics")
                     .provides("agent")
@@ -608,6 +871,77 @@ mod tests {
         assert!(PluginTypeId::try_new("valid-plugin-2").is_ok());
         assert!(PluginTypeId::try_new("invalid--plugin").is_err());
         assert!(PluginTypeId::try_new("invalid-").is_err());
+    }
+
+    #[test]
+    fn component_id_rejects_invalid_slot_ids_without_retaining_the_source() {
+        assert_eq!(
+            PluginComponentId::try_new("").expect_err("empty id should fail"),
+            PluginComponentIdError::Empty
+        );
+        for invalid_source in [
+            "SENSITIVE/COMPONENT/PATH",
+            "UPPERCASE",
+            "with-hyphen",
+            " leading_space",
+            "trailing_space ",
+            "repeated__separator",
+            "_leading_separator",
+            "trailing_separator_",
+            "line\nbreak",
+        ] {
+            let error = PluginComponentId::try_new(invalid_source)
+                .expect_err("invalid component id should fail");
+            assert_eq!(error, PluginComponentIdError::InvalidFormat);
+            assert!(!error.to_string().contains(invalid_source));
+            assert!(!format!("{error:?}").contains(invalid_source));
+
+            let catalog_error =
+                DesiredPluginComposition::try_new([(invalid_source, plugin_type("agent"))])
+                    .expect_err("invalid desired slot should fail");
+            assert!(!catalog_error.to_string().contains(invalid_source));
+            assert!(!format!("{catalog_error:?}").contains(invalid_source));
+        }
+
+        for valid in ["agent", "agent_2", "2_agent", "runtime_event_stream"] {
+            assert_eq!(
+                PluginComponentId::try_new(valid)
+                    .expect("valid component id should pass")
+                    .as_str(),
+                valid
+            );
+        }
+    }
+
+    #[test]
+    fn desired_and_observed_compositions_are_immutable_sorted_identity_projections() {
+        let desired = desired([("z_component", "z-plugin"), ("a_component", "a-plugin")]);
+        assert_eq!(
+            desired
+                .iter()
+                .map(|(component_id, plugin_type)| {
+                    (component_id.as_str(), plugin_type.as_str())
+                })
+                .collect::<Vec<_>>(),
+            vec![("a_component", "a-plugin"), ("z_component", "z-plugin")]
+        );
+
+        let catalog =
+            PluginFactoryCatalog::try_new([factory("z-plugin", 2), factory("a-plugin", 1)])
+                .expect("catalog should validate");
+        let composition = catalog
+            .instantiate(&desired)
+            .expect("composition should prepare");
+        let observed = composition.observed();
+        assert_eq!(
+            observed
+                .iter()
+                .map(|(component_id, plugin_type)| {
+                    (component_id.as_str(), plugin_type.as_str())
+                })
+                .collect::<Vec<_>>(),
+            vec![("a_component", "a-plugin"), ("z_component", "z-plugin")]
+        );
     }
 
     #[test]
@@ -652,16 +986,15 @@ mod tests {
             })])
             .expect("catalog should validate");
 
-        let duplicate = catalog
-            .instantiate([
-                DesiredPlugin::new("main", plugin_type("agent")),
-                DesiredPlugin::new("main", plugin_type("agent")),
-            ])
-            .err()
-            .expect("duplicate component should fail");
+        let duplicate = DesiredPluginComposition::try_new([
+            ("main", plugin_type("agent")),
+            ("main", plugin_type("agent")),
+        ])
+        .expect_err("duplicate component should fail");
         assert!(matches!(
             duplicate,
-            PluginCatalogError::DuplicateComponent { component_id } if component_id == "main"
+            PluginCatalogError::DuplicateComponent { component_id }
+                if component_id.as_str() == "main"
         ));
         assert!(
             constructions
@@ -670,8 +1003,9 @@ mod tests {
                 .is_empty()
         );
 
+        let missing_desired = desired([("missing", "missing")]);
         let missing = catalog
-            .instantiate([DesiredPlugin::new("missing", plugin_type("missing"))])
+            .instantiate(&missing_desired)
             .err()
             .expect("missing factory should fail");
         assert!(matches!(
@@ -679,7 +1013,8 @@ mod tests {
             PluginCatalogError::MissingFactory {
                 component_id,
                 plugin_type: actual_plugin_type,
-            } if component_id == "missing" && actual_plugin_type == plugin_type("missing")
+            } if component_id.as_str() == "missing"
+                && actual_plugin_type == plugin_type("missing")
         ));
         assert!(
             constructions
@@ -687,6 +1022,213 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn reconciliation_plan_is_empty_for_empty_compositions() {
+        let catalog =
+            PluginFactoryCatalog::<usize>::try_new([]).expect("empty catalog should validate");
+        let desired = desired([]);
+        let observed = ObservedPluginComposition::empty();
+
+        let plan = catalog
+            .plan_reconciliation(&desired, &observed)
+            .expect("empty composition should plan");
+
+        assert!(plan.actions().is_empty());
+    }
+
+    #[test]
+    fn reconciliation_plan_classifies_each_slot_once_in_stable_order() {
+        let catalog =
+            PluginFactoryCatalog::try_new([factory("added", 1), factory("replacement", 2)])
+                .expect("target catalog should validate");
+        let desired = desired([
+            ("replace_slot", "replacement"),
+            ("keep_slot", "stable"),
+            ("add_slot", "added"),
+        ]);
+        let observed = observed([
+            ("remove_slot", "retired"),
+            ("keep_slot", "stable"),
+            ("replace_slot", "previous"),
+        ]);
+
+        let plan = catalog
+            .plan_reconciliation(&desired, &observed)
+            .expect("mixed composition should plan");
+
+        assert_eq!(
+            plan.actions(),
+            &[
+                PluginReconciliationAction::Add {
+                    component_id: PluginComponentId::try_new("add_slot")
+                        .expect("component id should validate"),
+                    plugin_type: plugin_type("added"),
+                },
+                PluginReconciliationAction::Keep {
+                    component_id: PluginComponentId::try_new("keep_slot")
+                        .expect("component id should validate"),
+                    plugin_type: plugin_type("stable"),
+                },
+                PluginReconciliationAction::Remove {
+                    component_id: PluginComponentId::try_new("remove_slot")
+                        .expect("component id should validate"),
+                    plugin_type: plugin_type("retired"),
+                },
+                PluginReconciliationAction::Replace {
+                    component_id: PluginComponentId::try_new("replace_slot")
+                        .expect("component id should validate"),
+                    from: plugin_type("previous"),
+                    to: plugin_type("replacement"),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn reconciliation_is_idempotent_and_independent_of_input_order() {
+        let catalog = PluginFactoryCatalog::try_new([factory("fresh-a", 1), factory("fresh-z", 2)])
+            .expect("target catalog should validate");
+        let desired_forward = desired([
+            ("z_slot", "fresh-z"),
+            ("a_slot", "fresh-a"),
+            ("keep_slot", "stable"),
+        ]);
+        let desired_reverse = desired([
+            ("keep_slot", "stable"),
+            ("a_slot", "fresh-a"),
+            ("z_slot", "fresh-z"),
+        ]);
+        let observed_forward = observed([
+            ("z_slot", "old-z"),
+            ("keep_slot", "stable"),
+            ("removed_slot", "retired"),
+        ]);
+        let observed_reverse = observed([
+            ("removed_slot", "retired"),
+            ("keep_slot", "stable"),
+            ("z_slot", "old-z"),
+        ]);
+
+        let first = catalog
+            .plan_reconciliation(&desired_forward, &observed_forward)
+            .expect("first plan should succeed");
+        let repeated = catalog
+            .plan_reconciliation(&desired_forward, &observed_forward)
+            .expect("repeated plan should succeed");
+        let reordered = catalog
+            .plan_reconciliation(&desired_reverse, &observed_reverse)
+            .expect("reordered plan should succeed");
+
+        assert_eq!(first, repeated);
+        assert_eq!(first, reordered);
+        assert_eq!(format!("{first:?}"), format!("{repeated:?}"));
+    }
+
+    #[test]
+    fn reconciliation_preflights_add_and_replace_without_construction_or_mutation() {
+        let constructions = Arc::new(Mutex::new(0_u32));
+        let observed_constructions = Arc::clone(&constructions);
+        let catalog =
+            PluginFactoryCatalog::try_new([PluginFactory::new(descriptor("known"), move || {
+                *observed_constructions
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+                Ok(())
+            })])
+            .expect("catalog should validate");
+
+        let empty_observed = ObservedPluginComposition::empty();
+        let add_desired = desired([("a_known", "known"), ("z_missing", "missing-add-target")]);
+        let add_error = catalog
+            .plan_reconciliation(&add_desired, &empty_observed)
+            .expect_err("missing Add factory should fail preflight");
+        assert!(matches!(
+            add_error,
+            PluginCatalogError::MissingFactory {
+                component_id,
+                plugin_type: missing_type,
+            } if component_id.as_str() == "z_missing"
+                && missing_type == plugin_type("missing-add-target")
+        ));
+        assert_eq!(
+            *constructions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            0
+        );
+
+        let observed = observed([("replace_slot", "previous")]);
+        let original_observed = observed.clone();
+        let replace_desired = desired([("replace_slot", "missing-replacement-target")]);
+        let replace_error = catalog
+            .plan_reconciliation(&replace_desired, &observed)
+            .expect_err("missing Replace factory should fail preflight");
+        assert!(matches!(
+            replace_error,
+            PluginCatalogError::MissingFactory {
+                component_id,
+                plugin_type: missing_type,
+            } if component_id.as_str() == "replace_slot"
+                && missing_type == plugin_type("missing-replacement-target")
+        ));
+        assert_eq!(observed, original_observed);
+        assert_eq!(
+            *constructions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            0
+        );
+    }
+
+    #[test]
+    fn observed_and_plan_debug_omit_descriptor_and_implementation_internals() {
+        struct SensitiveImplementation;
+
+        impl fmt::Debug for SensitiveImplementation {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("SENSITIVE_IMPLEMENTATION_SENTINEL")
+            }
+        }
+
+        let catalog = PluginFactoryCatalog::try_new([PluginFactory::new(
+            PluginDescriptor::builder(
+                plugin_type("safe-plugin"),
+                "SENSITIVE_DISPLAY_SENTINEL",
+                NonZeroU32::MIN,
+                PluginReloadPolicy::Replace,
+                PluginTrust::Builtin,
+            )
+            .requires("SENSITIVE_CAPABILITY_SENTINEL")
+            .build()
+            .expect("descriptor should validate"),
+            || Ok(SensitiveImplementation),
+        )])
+        .expect("catalog should validate");
+        let desired = desired([("safe_slot", "safe-plugin")]);
+        let composition = catalog
+            .instantiate(&desired)
+            .expect("composition should prepare");
+        let observed = composition.observed();
+        let planning_catalog = PluginFactoryCatalog::<SensitiveImplementation>::try_new([])
+            .expect("empty planning catalog should validate");
+        let plan = planning_catalog
+            .plan_reconciliation(&desired, &observed)
+            .expect("Keep does not need a factory");
+
+        let observed_debug = format!("{observed:?}");
+        let plan_debug = format!("{plan:?}");
+        for sentinel in [
+            "SENSITIVE_DISPLAY_SENTINEL",
+            "SENSITIVE_CAPABILITY_SENTINEL",
+            "SENSITIVE_IMPLEMENTATION_SENTINEL",
+        ] {
+            assert!(!observed_debug.contains(sentinel));
+            assert!(!plan_debug.contains(sentinel));
+        }
+        assert!(observed_debug.contains("safe_slot"));
+        assert!(observed_debug.contains("safe-plugin"));
     }
 
     #[derive(Clone)]
@@ -728,12 +1270,9 @@ mod tests {
         ])
         .expect("catalog should validate");
 
+        let desired = desired([("a", "first"), ("b", "second"), ("c", "third")]);
         let error = catalog
-            .instantiate([
-                DesiredPlugin::new("a", plugin_type("first")),
-                DesiredPlugin::new("b", plugin_type("second")),
-                DesiredPlugin::new("c", plugin_type("third")),
-            ])
+            .instantiate(&desired)
             .err()
             .expect("construction should fail");
 
@@ -762,11 +1301,9 @@ mod tests {
     fn composition_order_is_independent_of_factory_and_desired_order() {
         let catalog = PluginFactoryCatalog::try_new([factory("z", 2), factory("a", 1)])
             .expect("catalog should validate");
+        let desired = desired([("z_component", "z"), ("a_component", "a")]);
         let composition = catalog
-            .instantiate([
-                DesiredPlugin::new("z-component", plugin_type("z")),
-                DesiredPlugin::new("a-component", plugin_type("a")),
-            ])
+            .instantiate(&desired)
             .expect("composition should prepare");
 
         let definitions = composition.definitions();
@@ -775,10 +1312,10 @@ mod tests {
                 .iter()
                 .map(|definition| definition.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["a-component", "z-component"]
+            vec!["a_component", "z_component"]
         );
-        assert_eq!(composition.implementation("a-component"), Some(&1));
-        assert_eq!(composition.implementation("z-component"), Some(&2));
+        assert_eq!(composition.implementation("a_component"), Some(&1));
+        assert_eq!(composition.implementation("z_component"), Some(&2));
     }
 
     #[test]

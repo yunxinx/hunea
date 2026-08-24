@@ -25,7 +25,7 @@ use super::{
         TERMINAL_APPROVAL_PROVIDER_ID,
     },
     plugin::{
-        DesiredPlugin, PluginCatalogError, PluginComposition, PluginDescriptor,
+        DesiredPluginComposition, PluginCatalogError, PluginComposition, PluginDescriptor,
         PluginDescriptorBuilder, PluginDescriptorSnapshot, PluginFactory, PluginFactoryCatalog,
         PluginReloadPolicy, PluginTrust, PluginTypeId,
     },
@@ -131,8 +131,31 @@ fn builtin_descriptor(
     )
 }
 
-fn desired_builtin(component_id: &'static str, plugin_type: &'static str) -> DesiredPlugin {
-    DesiredPlugin::new(component_id, builtin_plugin_type(plugin_type))
+fn desired_builtin(
+    component_id: &'static str,
+    plugin_type: &'static str,
+) -> (&'static str, PluginTypeId) {
+    (component_id, builtin_plugin_type(plugin_type))
+}
+
+fn builtin_desired_composition() -> Result<DesiredPluginComposition, PluginCatalogError> {
+    DesiredPluginComposition::try_new([
+        desired_builtin(APPROVAL_PROVIDER.component_id, APPROVAL_PROVIDER_PLUGIN),
+        desired_builtin(LLM_PORT.component_id, LLM_PORT_PLUGIN),
+        desired_builtin(
+            RUNTIME_EVENT_STREAM.component_id,
+            RUNTIME_EVENT_STREAM_PLUGIN,
+        ),
+        desired_builtin(RUNTIME_WAKE.component_id, RUNTIME_WAKE_PLUGIN),
+        desired_builtin(SESSION_PERSISTENCE.component_id, SESSION_PERSISTENCE_PLUGIN),
+        desired_builtin(TOOL_CATALOG.component_id, TOOL_CATALOG_PLUGIN),
+        desired_builtin(PERMISSION_POLICY.component_id, PERMISSION_POLICY_PLUGIN),
+        desired_builtin(PROMPT_ASSEMBLY.component_id, PROMPT_ASSEMBLY_PLUGIN),
+        desired_builtin(NATIVE_AGENT_RUNTIME_COMPONENT, NATIVE_AGENT_RUNTIME_PLUGIN),
+        desired_builtin(MODEL_REFRESH_COMPONENT, MODEL_REFRESH_PLUGIN),
+        desired_builtin(CONTEXT_BUDGET_COMPONENT, CONTEXT_BUDGET_PLUGIN),
+        desired_builtin(UI_RUNTIME_BRIDGE_COMPONENT, UI_RUNTIME_BRIDGE_PLUGIN),
+    ])
 }
 
 fn runtime_plugin_factory(
@@ -151,6 +174,7 @@ fn runtime_plugin_factory(
 
 fn builtin_plugin_composition()
 -> Result<PluginComposition<RuntimePluginImplementation>, PluginCatalogError> {
+    let desired = builtin_desired_composition()?;
     let catalog = PluginFactoryCatalog::try_new([
         runtime_plugin_factory(
             builtin_descriptor(APPROVAL_PROVIDER_PLUGIN, "Terminal approval provider")
@@ -245,23 +269,7 @@ fn builtin_plugin_composition()
         ),
     ])?;
 
-    catalog.instantiate([
-        desired_builtin(APPROVAL_PROVIDER.component_id, APPROVAL_PROVIDER_PLUGIN),
-        desired_builtin(LLM_PORT.component_id, LLM_PORT_PLUGIN),
-        desired_builtin(
-            RUNTIME_EVENT_STREAM.component_id,
-            RUNTIME_EVENT_STREAM_PLUGIN,
-        ),
-        desired_builtin(RUNTIME_WAKE.component_id, RUNTIME_WAKE_PLUGIN),
-        desired_builtin(SESSION_PERSISTENCE.component_id, SESSION_PERSISTENCE_PLUGIN),
-        desired_builtin(TOOL_CATALOG.component_id, TOOL_CATALOG_PLUGIN),
-        desired_builtin(PERMISSION_POLICY.component_id, PERMISSION_POLICY_PLUGIN),
-        desired_builtin(PROMPT_ASSEMBLY.component_id, PROMPT_ASSEMBLY_PLUGIN),
-        desired_builtin(NATIVE_AGENT_RUNTIME_COMPONENT, NATIVE_AGENT_RUNTIME_PLUGIN),
-        desired_builtin(MODEL_REFRESH_COMPONENT, MODEL_REFRESH_PLUGIN),
-        desired_builtin(CONTEXT_BUDGET_COMPONENT, CONTEXT_BUDGET_PLUGIN),
-        desired_builtin(UI_RUNTIME_BRIDGE_COMPONENT, UI_RUNTIME_BRIDGE_PLUGIN),
-    ])
+    catalog.instantiate(&desired)
 }
 
 #[derive(Default)]
@@ -1316,6 +1324,33 @@ mod tests {
     fn builtin_plugin_descriptors_define_the_exact_default_graph() {
         let composition =
             builtin_plugin_composition().expect("builtin plugin composition should prepare");
+        let observed = composition.observed();
+
+        assert_eq!(
+            observed
+                .iter()
+                .map(|(component_id, plugin_type)| {
+                    (component_id.as_str(), plugin_type.as_str())
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (APPROVAL_PROVIDER.component_id, APPROVAL_PROVIDER_PLUGIN),
+                (CONTEXT_BUDGET_COMPONENT, CONTEXT_BUDGET_PLUGIN),
+                (LLM_PORT.component_id, LLM_PORT_PLUGIN),
+                (MODEL_REFRESH_COMPONENT, MODEL_REFRESH_PLUGIN),
+                (NATIVE_AGENT_RUNTIME_COMPONENT, NATIVE_AGENT_RUNTIME_PLUGIN),
+                (PERMISSION_POLICY.component_id, PERMISSION_POLICY_PLUGIN),
+                (PROMPT_ASSEMBLY.component_id, PROMPT_ASSEMBLY_PLUGIN),
+                (
+                    RUNTIME_EVENT_STREAM.component_id,
+                    RUNTIME_EVENT_STREAM_PLUGIN,
+                ),
+                (RUNTIME_WAKE.component_id, RUNTIME_WAKE_PLUGIN),
+                (SESSION_PERSISTENCE.component_id, SESSION_PERSISTENCE_PLUGIN),
+                (TOOL_CATALOG.component_id, TOOL_CATALOG_PLUGIN),
+                (UI_RUNTIME_BRIDGE_COMPONENT, UI_RUNTIME_BRIDGE_PLUGIN),
+            ]
+        );
 
         assert_eq!(
             composition.definitions(),

@@ -3,7 +3,7 @@
 use std::time::Instant;
 
 use color_eyre::eyre::Result;
-use runtime_domain::session::RuntimeCommand;
+use runtime_domain::{runtime_wake::RuntimeWake, session::RuntimeCommand};
 
 use super::{
     AppEvent, Model, ModelOptions, STARTUP_PROBE_TIMEOUT, StartupBannerOptions, StyleMode,
@@ -32,7 +32,7 @@ pub(crate) use input::TerminalInputCoalescing;
 use input::{TerminalInputAction, coalesced_input_actions_with_options};
 use loop_event_pump::{LoopEvent, LoopEventPump};
 use model_refresh::apply_model_provider_refresh_event;
-pub use runtime_port::{NoopUiRuntimePort, RuntimeWake, UiRuntimePort};
+pub use runtime_port::{NoopUiRuntimePort, UiRuntimePort};
 pub(crate) use terminal::TerminalMouseModePreference;
 use terminal::{TerminalMouseMode, TerminalSession};
 

@@ -9,6 +9,7 @@ pub mod phrases;
 pub mod prompt_assembly;
 pub mod provider;
 pub mod request_policy;
+pub mod runtime_wake;
 pub mod session;
 pub mod text;
 pub mod time;

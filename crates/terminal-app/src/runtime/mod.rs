@@ -33,6 +33,7 @@ use runtime_domain::{
     model_catalog::{ModelProviderRefreshEvent, ModelSelection, ProviderSyncRequest},
     prompt_assembly::PromptAssemblyManagerSnapshot,
     request_policy::RuntimeRequestPolicy,
+    runtime_wake::RuntimeWake,
     session::{
         RuntimeCommand, RuntimeCommandReceipt, RuntimeEvent, SessionBranchTreePayload,
         SessionPickerRow, SessionPreviewPayload, SessionResumePayload, SessionTreePayload,
@@ -43,7 +44,7 @@ use session_store::{
     ResolvedSessionState, SessionBranchTreeSnapshot, SessionHeader, SessionId, SessionMeta,
     SessionStore, SessionTreeSnapshot, SessionTreeSnapshotRow,
 };
-use terminal_ui::{RuntimeWake, UiRuntimePort};
+use terminal_ui::UiRuntimePort;
 use tool_runtime::{ToolDefinition, ToolExecutorRegistry, builtin::ManagedRipgrepConfig};
 
 use self::{

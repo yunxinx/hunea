@@ -11,7 +11,9 @@ use super::input::{
     coalesced_input_actions_with_options,
 };
 use super::*;
-use super::{RuntimeWake, UiRuntimePort};
+use runtime_domain::runtime_wake::RuntimeWake;
+
+use super::UiRuntimePort;
 use crate::{
     AppEffect, AppEvent, ReasoningDisplayMode, Sender, StatusLineItem,
     runtime::RuntimeEventApply,

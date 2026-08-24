@@ -42,7 +42,7 @@ use super::{
     tool_catalog::{ToolCatalog, ToolRegistration},
     workspace_tools::conversation_workspace_tool_catalog,
 };
-use terminal_ui::RuntimeWake;
+use runtime_domain::runtime_wake::RuntimeWake;
 
 #[derive(Clone, Copy)]
 struct CapabilityOwner {

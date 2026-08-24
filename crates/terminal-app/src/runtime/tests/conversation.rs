@@ -105,9 +105,11 @@ fn shutdown_is_idempotent_with_session_persistence_enabled() {
         .shutdown()
         .expect("repeated shutdown should remain a no-op");
 
-    let error =
-        RuntimePort::bind_runtime_wake(&mut coordinator, terminal_ui::RuntimeWake::new(|| {}))
-            .expect_err("a disposed runtime owner must reject new effects");
+    let error = RuntimePort::bind_runtime_wake(
+        &mut coordinator,
+        runtime_domain::runtime_wake::RuntimeWake::new(|| {}),
+    )
+    .expect_err("a disposed runtime owner must reject new effects");
     assert_eq!(error, "Runtime components are shut down");
 }
 

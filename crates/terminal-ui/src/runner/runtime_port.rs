@@ -1,33 +1,9 @@
-use std::sync::Arc;
-
 use runtime_domain::{
     model_catalog::{ModelProviderRefreshEvent, ModelSelection, ProviderSyncRequest},
     session::{RuntimeCommand, RuntimeCommandReceipt, RuntimeEvent},
 };
 
-type RuntimeWakeCallback = dyn Fn() + Send + Sync + 'static;
-
-/// `RuntimeWake` 是 runtime 通知 TUI 重新 drain 事件的通用回调。
-///
-/// 该类型隐藏 terminal event pump，避免 runtime adapter 依赖 TUI 的具体 wake 实现。
-#[derive(Clone)]
-pub struct RuntimeWake {
-    callback: Arc<RuntimeWakeCallback>,
-}
-
-impl RuntimeWake {
-    /// `new` 创建一个可跨线程调用的 runtime wake 回调。
-    pub fn new(callback: impl Fn() + Send + Sync + 'static) -> Self {
-        Self {
-            callback: Arc::new(callback),
-        }
-    }
-
-    /// `wake` 通知 TUI runner 重新观察 runtime 事件。
-    pub fn wake(&self) {
-        (self.callback)();
-    }
-}
+pub use runtime_domain::runtime_wake::RuntimeWake;
 
 /// `UiRuntimePort` 是 TUI 消费 runtime 能力的稳定 seam。
 ///

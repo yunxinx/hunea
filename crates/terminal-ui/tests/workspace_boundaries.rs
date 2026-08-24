@@ -43,6 +43,14 @@ fn tui_runtime_port_hides_concrete_runtime_implementations() {
         runtime_port.contains("pub trait UiRuntimePort"),
         "terminal-ui should own the runtime port consumed by its runner"
     );
+    assert!(
+        runtime_port.contains("pub use runtime_domain::runtime_wake::RuntimeWake"),
+        "terminal-ui should use the domain-owned wake port"
+    );
+    assert!(
+        !runtime_port.contains("pub struct RuntimeWake"),
+        "terminal-ui must not define a second wake port"
+    );
     for concrete_type in ["ConversationWorker", "ProviderClient", "SessionStore"] {
         assert!(
             !runtime_port.contains(concrete_type),

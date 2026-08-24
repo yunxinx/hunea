@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use runtime_domain::runtime_wake::RuntimeWake;
 use runtime_domain::{
     model_catalog::{ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource},
     prompt_assembly::{
@@ -9,7 +10,7 @@ use runtime_domain::{
     },
     provider::ProviderKind,
 };
-use terminal_ui::{RuntimeWake, UiRuntimePort};
+use terminal_ui::UiRuntimePort;
 
 use super::support::*;
 use crate::runtime::{

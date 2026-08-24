@@ -10,7 +10,7 @@ use std::{
 };
 
 use conversation_runtime::RuntimeEventNotifier;
-use terminal_ui::RuntimeWake;
+use runtime_domain::runtime_wake::RuntimeWake;
 
 use super::{
     effect_scope::EffectScope,

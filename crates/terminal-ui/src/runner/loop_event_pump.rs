@@ -37,7 +37,7 @@ struct LoopEventWakeState {
 
 /// `LoopEventWaker` 让后台 producer 通知 TUI runner 重新 drain 自身 receiver。
 #[derive(Clone)]
-pub struct LoopEventWaker {
+pub(super) struct LoopEventWaker {
     state: Arc<LoopEventWakeState>,
 }
 
@@ -45,7 +45,7 @@ impl LoopEventWaker {
     /// 通常合并重复 wake，并在 event pump 已关闭时安静返回。
     ///
     /// 满队列恢复容量的竞态中允许无害的重复 marker，以保证不会丢失 wake。
-    pub fn wake(&self) {
+    pub(super) fn wake(&self) {
         self.wake_with_full_queue_hook(|| {});
     }
 

@@ -6,7 +6,7 @@ use tool_runtime::builtin::{
     ManagedRipgrepConfig, WorkspaceToolRegistryOptions, workspace_tool_registry_with_options,
 };
 
-use super::tool_catalog::{ToolCatalog, ToolCatalogError, ToolRegistration};
+use tool_runtime::{ToolCatalog, ToolCatalogError, ToolRegistration};
 
 pub(crate) fn conversation_workspace_tool_catalog(
     managed_ripgrep: &ManagedRipgrepConfig,

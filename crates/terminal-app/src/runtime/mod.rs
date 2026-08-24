@@ -20,7 +20,6 @@ mod session_commands;
 mod session_port;
 mod session_tree_load;
 mod session_worker;
-mod tool_catalog;
 mod workspace_tools;
 
 use std::{
@@ -55,10 +54,10 @@ use self::{
     },
     session_port::SessionBackendViews,
     session_worker::SessionStoreWorkerEvent,
-    tool_catalog::ToolCatalog,
     workspace_tools::conversation_workspace_tool_catalog,
 };
 use crate::prompt_assembly::PromptAssemblyEditSession;
+use tool_runtime::ToolCatalog;
 
 /// `tool_definitions_for_managed_ripgrep` 在 coordinator 创建前收集内置工具定义，
 /// 供初始 prompt assembly 加载使用。

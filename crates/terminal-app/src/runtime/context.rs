@@ -18,8 +18,8 @@ use super::{
     permission_policy::PermissionPolicy,
     prompt_assembly::PromptAssembly,
     session_port::SessionBackendViews,
-    tool_catalog::ToolCatalog,
 };
+use tool_runtime::ToolCatalog;
 
 /// Typed capability marker；稳定 key 与 concrete value type 只在 runtime crate 内绑定。
 pub(super) trait RuntimeCapability {

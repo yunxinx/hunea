@@ -5,7 +5,7 @@ use std::sync::Mutex;
 
 use conversation_runtime::ModelRefreshWorker;
 use runtime_domain::event_notifier::{RuntimeEventBinding, RuntimeEventNotifier};
-use tool_runtime::ToolExecutorRegistry;
+use tool_runtime::{ToolCatalog, ToolExecutorRegistry, ToolRegistration};
 
 use super::{
     AppRuntimeOptions,
@@ -40,7 +40,6 @@ use super::{
     session_port::{SessionBackendRegistration, SessionBackendViews, SessionPortHost},
     session_tools_for_manager,
     session_worker::SessionStoreWorker,
-    tool_catalog::{ToolCatalog, ToolRegistration},
     workspace_tools::conversation_workspace_tool_catalog,
 };
 use runtime_domain::runtime_wake::RuntimeWake;

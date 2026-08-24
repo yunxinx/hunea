@@ -1,5 +1,6 @@
 pub mod builtin;
 
+mod catalog;
 mod definition;
 mod execution;
 mod executor;
@@ -10,6 +11,7 @@ mod registry;
 mod schema;
 mod tool_error;
 
+pub use catalog::{ToolCatalog, ToolCatalogError, ToolRegistration};
 pub use definition::ToolDefinition;
 pub use execution::{
     ToolCall, ToolImageDetail, ToolResult, ToolResultContent, ToolResultContentBlocks,

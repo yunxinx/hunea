@@ -897,6 +897,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "extension-runtime"
+version = "0.12.1-alpha.4"
+dependencies = [
+ "extension-protocol",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "tool-runtime",
+]
+
+[[package]]
 name = "eyre"
 version = "0.6.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"

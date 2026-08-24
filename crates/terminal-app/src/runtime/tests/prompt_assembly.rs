@@ -887,7 +887,7 @@ fn session_tools_for_manager_filters_disabled_tools_and_keeps_full_registry() {
         }
     }
 
-    let tool_catalog = super::super::tool_catalog::ToolCatalog::default();
+    let tool_catalog = tool_runtime::ToolCatalog::default();
     let _bash_registration = tool_catalog
         .register("fixture", StubTool { name: "bash" })
         .expect("bash should register");

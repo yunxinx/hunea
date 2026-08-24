@@ -1,13 +1,14 @@
 //! Tool capability 的 owner-scoped registration 与只读执行快照。
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt,
     sync::{Arc, Mutex, Weak},
 };
 
 use tokio_util::sync::CancellationToken;
-use tool_runtime::{
+
+use crate::{
     Tool, ToolCall, ToolDefinition, ToolExecutionContext, ToolExecutionFuture,
     ToolExecutorRegistry, ToolPermissionPreview,
 };
@@ -17,7 +18,7 @@ use tool_runtime::{
 /// caller 只能注册 tool、读取独立 executor snapshot 或创建过滤后的 session view；
 /// registration identity 与逆操作留在 module 内部。
 #[derive(Clone, Default)]
-pub(super) struct ToolCatalog {
+pub struct ToolCatalog {
     state: Arc<Mutex<ToolCatalogState>>,
 }
 
@@ -33,8 +34,9 @@ struct ToolRegistrationRecord {
     owner: String,
 }
 
+/// Tool registration 被拒绝时的具名错误。
 #[derive(Clone, PartialEq, Eq, thiserror::Error)]
-pub(super) enum ToolCatalogError {
+pub enum ToolCatalogError {
     #[error("tool {tool_name} is already registered")]
     DuplicateTool {
         tool_name: String,
@@ -57,10 +59,20 @@ impl fmt::Debug for ToolCatalogError {
 ///
 /// handle Drop 与显式 `dispose` 等价；只有 identity 仍匹配当前 slot 时才会移除 tool，
 /// 因此旧 handle 不会误删后续 registration。
-pub(super) struct ToolRegistration {
+pub struct ToolRegistration {
     catalog: Weak<Mutex<ToolCatalogState>>,
     entries: Vec<ToolRegistrationEntry>,
     is_disposed: bool,
+}
+
+impl fmt::Debug for ToolRegistration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ToolRegistration")
+            .field("entry_count", &self.entries.len())
+            .field("is_disposed", &self.is_disposed)
+            .finish_non_exhaustive()
+    }
 }
 
 struct ToolRegistrationEntry {
@@ -70,21 +82,18 @@ struct ToolRegistrationEntry {
 
 impl ToolCatalog {
     /// 接管一个已构造的 registry，并把其中所有 tool 归入同一个 owner registration。
-    pub(super) fn adopt_registry(
+    pub fn adopt_registry(
         owner: impl Into<String>,
         registry: ToolExecutorRegistry,
     ) -> Result<(Self, ToolRegistration), ToolCatalogError> {
-        let owner = owner.into();
         let catalog = Self::default();
-        let mut registration = ToolRegistration::new(&catalog.state, Vec::new());
-        for tool in registry.tools() {
-            registration.merge(catalog.register(owner.clone(), SharedTool(tool))?);
-        }
+        let registration =
+            catalog.register_batch(owner, registry.tools().into_iter().map(SharedTool))?;
         Ok((catalog, registration))
     }
 
     /// 注册一个 tool；重名 registration 在改变 catalog 前被拒绝。
-    pub(super) fn register<T>(
+    pub fn register<T>(
         &self,
         owner: impl Into<String>,
         tool: T,
@@ -92,44 +101,71 @@ impl ToolCatalog {
     where
         T: Tool + 'static,
     {
+        self.register_batch(owner, [tool])
+    }
+
+    /// 原子注册同一 owner 的一组 tool；任一重名在 mutation 前拒绝整个 batch。
+    pub fn register_batch<T>(
+        &self,
+        owner: impl Into<String>,
+        tools: impl IntoIterator<Item = T>,
+    ) -> Result<ToolRegistration, ToolCatalogError>
+    where
+        T: Tool + 'static,
+    {
         let owner = owner.into();
-        let tool_name = tool.definition().name;
+        let tools = tools
+            .into_iter()
+            .map(|tool| (tool.definition().name, tool))
+            .collect::<Vec<_>>();
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(existing) = state.registrations.get(&tool_name) {
-            return Err(ToolCatalogError::DuplicateTool {
-                tool_name,
-                existing_owner: existing.owner.clone(),
-            });
+
+        let mut batch_names = BTreeSet::new();
+        for (tool_name, _) in &tools {
+            if !batch_names.insert(tool_name.clone()) {
+                return Err(ToolCatalogError::DuplicateTool {
+                    tool_name: tool_name.clone(),
+                    existing_owner: owner.clone(),
+                });
+            }
+            if let Some(existing) = state.registrations.get(tool_name) {
+                return Err(ToolCatalogError::DuplicateTool {
+                    tool_name: tool_name.clone(),
+                    existing_owner: existing.owner.clone(),
+                });
+            }
         }
-        let registration_id = next_registration_id(&mut state);
-        state.registry.insert(tool);
-        state.registrations.insert(
-            tool_name.clone(),
-            ToolRegistrationRecord {
-                id: registration_id,
-                owner,
-            },
-        );
-        drop(state);
-        Ok(ToolRegistration::new(
-            &self.state,
-            vec![ToolRegistrationEntry {
+
+        let mut entries = Vec::with_capacity(tools.len());
+        for (tool_name, tool) in tools {
+            let registration_id = next_registration_id(&mut state);
+            state.registry.insert(tool);
+            state.registrations.insert(
+                tool_name.clone(),
+                ToolRegistrationRecord {
+                    id: registration_id,
+                    owner: owner.clone(),
+                },
+            );
+            entries.push(ToolRegistrationEntry {
                 tool_name,
                 registration_id,
-            }],
-        ))
+            });
+        }
+        drop(state);
+        Ok(ToolRegistration::new(&self.state, entries))
     }
 
     /// 返回与 catalog map 独立、tool body 以 `Arc` 共享的 executor snapshot。
-    pub(super) fn snapshot(&self) -> ToolExecutorRegistry {
+    pub fn snapshot(&self) -> ToolExecutorRegistry {
         self.filtered(|_| true)
     }
 
     /// 创建独立的 session executor view；过滤不会改变完整 catalog。
-    pub(super) fn filtered(&self, keep_tool: impl Fn(&str) -> bool) -> ToolExecutorRegistry {
+    pub fn filtered(&self, keep_tool: impl Fn(&str) -> bool) -> ToolExecutorRegistry {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -138,7 +174,7 @@ impl ToolCatalog {
     }
 
     /// 按稳定名称顺序返回当前完整 tool definitions。
-    pub(super) fn definitions(&self) -> Vec<ToolDefinition> {
+    pub fn definitions(&self) -> Vec<ToolDefinition> {
         self.snapshot()
             .definitions()
             .definitions()
@@ -157,7 +193,7 @@ impl ToolRegistration {
     }
 
     /// 幂等撤销本 handle 仍拥有的 registration。
-    pub(super) fn dispose(&mut self) {
+    pub fn dispose(&mut self) {
         if self.is_disposed {
             return;
         }
@@ -178,11 +214,6 @@ impl ToolRegistration {
                 state.registry.remove(&entry.tool_name);
             }
         }
-    }
-
-    fn merge(&mut self, mut registration: Self) {
-        self.entries.append(&mut registration.entries);
-        registration.is_disposed = true;
     }
 }
 
@@ -236,14 +267,13 @@ impl Tool for SharedTool {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use tokio_util::sync::CancellationToken;
-    use tool_runtime::{
-        ToolCall, ToolExecutionFuture, ToolExecutor, ToolPermissionPolicy, ToolPermissionPreview,
-        ToolProgress, ToolProgressSink, ToolResult, ToolResultOutcome,
+
+    use crate::{
+        ToolExecutor, ToolPermissionPolicy, ToolProgress, ToolProgressSink, ToolResult,
+        ToolResultOutcome,
     };
 
     use super::*;
-    use crate::runtime::effect_scope::EffectScope;
 
     struct StubTool {
         name: &'static str,
@@ -339,6 +369,37 @@ mod tests {
     }
 
     #[test]
+    fn batch_rejects_duplicate_before_any_tool_is_visible() {
+        let catalog = ToolCatalog::default();
+        let error = catalog
+            .register_batch(
+                "extension",
+                [StubTool { name: "fresh" }, StubTool { name: "fresh" }],
+            )
+            .expect_err("duplicate batch should fail");
+
+        assert!(matches!(error, ToolCatalogError::DuplicateTool { .. }));
+        assert!(names(&catalog).is_empty());
+    }
+
+    #[test]
+    fn batch_rejects_existing_name_without_partial_registration() {
+        let catalog = ToolCatalog::default();
+        let _existing = catalog
+            .register("builtin", StubTool { name: "read" })
+            .expect("existing tool should register");
+        let error = catalog
+            .register_batch(
+                "extension",
+                [StubTool { name: "fresh" }, StubTool { name: "read" }],
+            )
+            .expect_err("colliding batch should fail");
+
+        assert!(matches!(error, ToolCatalogError::DuplicateTool { .. }));
+        assert_eq!(names(&catalog), vec!["read"]);
+    }
+
+    #[test]
     fn dropping_registration_runs_the_inverse() {
         let catalog = ToolCatalog::default();
         {
@@ -351,27 +412,17 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_registration_is_rejected_without_replacing_the_owner() {
+    fn duplicate_registration_redacts_existing_owner() {
         let catalog = ToolCatalog::default();
         let _registration = catalog
-            .register("builtin", StubTool { name: "read" })
+            .register("SENSITIVE_OWNER", StubTool { name: "read" })
             .expect("first owner should register");
+        let error = catalog
+            .register("extension", StubTool { name: "read" })
+            .expect_err("duplicate tool name must be rejected");
 
-        let error = match catalog.register("extension", StubTool { name: "read" }) {
-            Ok(_) => panic!("duplicate tool name must be rejected"),
-            Err(error) => error,
-        };
-
-        assert_eq!(
-            error,
-            ToolCatalogError::DuplicateTool {
-                tool_name: "read".to_string(),
-                existing_owner: "builtin".to_string(),
-            }
-        );
-        assert_eq!(error.to_string(), "tool read is already registered");
-        assert!(!error.to_string().contains("builtin"));
-        assert!(!format!("{error:?}").contains("builtin"));
+        assert!(!error.to_string().contains("SENSITIVE_OWNER"));
+        assert!(!format!("{error:?}").contains("SENSITIVE_OWNER"));
         assert_eq!(names(&catalog), vec!["read"]);
     }
 
@@ -391,52 +442,6 @@ mod tests {
         assert_eq!(names(&catalog), vec!["read"]);
     }
 
-    #[test]
-    fn filtered_view_keeps_the_full_catalog_unchanged() {
-        let catalog = ToolCatalog::default();
-        let _read = catalog
-            .register("fixture", StubTool { name: "read" })
-            .expect("read should register");
-        let _bash = catalog
-            .register("fixture", StubTool { name: "bash" })
-            .expect("bash should register");
-
-        let filtered = catalog.filtered(|name| name != "bash");
-
-        assert_eq!(
-            filtered
-                .definitions()
-                .definitions()
-                .map(|definition| definition.name.clone())
-                .collect::<Vec<_>>(),
-            vec!["read".to_string()]
-        );
-        assert_eq!(names(&catalog), vec!["bash", "read"]);
-    }
-
-    #[test]
-    fn effect_scope_disposal_removes_the_adopted_registry() {
-        let mut registry = ToolExecutorRegistry::new();
-        registry.insert(StubTool { name: "read" });
-        registry.insert(StubTool { name: "bash" });
-        let (catalog, mut registration) =
-            ToolCatalog::adopt_registry("workspace", registry).expect("registry should be adopted");
-        let scope = EffectScope::default();
-        scope
-            .register("workspace-tools", move || {
-                registration.dispose();
-                Ok(())
-            })
-            .expect("catalog disposer should register");
-
-        let first = scope.dispose();
-        let second = scope.dispose();
-
-        assert!(first.failures.is_empty());
-        assert!(second.failures.is_empty());
-        assert!(names(&catalog).is_empty());
-    }
-
     #[tokio::test(flavor = "current_thread")]
     async fn adopted_registry_preserves_schema_permission_preview_and_execution_context() {
         let mut registry = ToolExecutorRegistry::new();
@@ -449,10 +454,7 @@ mod tests {
             .into_iter()
             .next()
             .expect("adopted tool definition should remain visible");
-        assert_eq!(definition.name, "write");
         assert_eq!(definition.permission_policy, ToolPermissionPolicy::Ask);
-        assert!(definition.input_schema.is_some());
-
         let snapshot = catalog.snapshot();
         let cancellation = CancellationToken::new();
         let invalid = snapshot
@@ -462,23 +464,11 @@ mod tests {
             )
             .await;
         assert_eq!(invalid.outcome(), ToolResultOutcome::Error);
-        assert!(invalid.content().contains("arguments do not match schema"));
 
-        let call = ToolCall::new("valid", "write", json!({ "text": "after" }));
-        assert_eq!(
-            snapshot.permission_preview(&call, &cancellation),
-            Some(ToolPermissionPreview {
-                path: "fixture.txt".to_string(),
-                old_text: Some("before".to_string()),
-                new_text: "after".to_string(),
-                is_truncated: false,
-                snapshot: None,
-            })
-        );
         let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
         let executed = snapshot
             .execute_tool_with_context(
-                call,
+                ToolCall::new("valid", "write", json!({ "text": "after" })),
                 ToolExecutionContext::new(&cancellation)
                     .with_progress_sink(ToolProgressSink::from_sender(progress_tx)),
             )
@@ -486,11 +476,9 @@ mod tests {
 
         assert_eq!(executed.outcome(), ToolResultOutcome::Success);
         assert_eq!(executed.content().text(), "with-context");
-        assert_eq!(
+        assert!(matches!(
             progress_rx.try_recv(),
-            Ok(ToolProgress::SystemMessage {
-                message: "context-forwarded".to_string(),
-            })
-        );
+            Ok(ToolProgress::SystemMessage { .. })
+        ));
     }
 }

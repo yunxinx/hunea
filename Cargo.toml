@@ -2,6 +2,7 @@
 members = [
     "crates/provider-protocol",
     "crates/extension-protocol",
+    "crates/extension-runtime",
     "crates/session-store",
     "crates/openai-compat-provider",
     "crates/tool-loop-runtime",
@@ -58,6 +59,8 @@ grep-searcher = "0.1.17"
 ignore = "0.4.26"
 libc = "0.2"
 tool-loop-runtime = { path = "crates/tool-loop-runtime" }
+extension-protocol = { path = "crates/extension-protocol" }
+extension-runtime = { path = "crates/extension-runtime" }
 provider-protocol = { path = "crates/provider-protocol" }
 openai-compat-provider = { path = "crates/openai-compat-provider" }
 terminal-app = { path = "crates/terminal-app" }

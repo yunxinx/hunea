@@ -10,6 +10,7 @@ color-eyre.workspace = true
 app-config.workspace = true
 runtime-domain.workspace = true
 conversation-runtime.workspace = true
+extension-runtime.workspace = true
 tool-loop-runtime.workspace = true
 session-store.workspace = true
 tool-runtime.workspace = true
@@ -28,5 +29,6 @@ yaml_serde.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+extension-protocol.workspace = true
 libc.workspace = true
 proptest.workspace = true

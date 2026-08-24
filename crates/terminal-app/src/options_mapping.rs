@@ -123,6 +123,7 @@ pub(crate) fn runtime_options_from_app_config_and_models(
         initial_prompt_assembly: None,
         dynamic_environment_observer:
             crate::dynamic_environment::default_dynamic_environment_observer(),
+        extension_tool_set: None,
     }
 }
 

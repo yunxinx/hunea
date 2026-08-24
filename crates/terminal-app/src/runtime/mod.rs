@@ -28,6 +28,7 @@ use std::{
 };
 
 use conversation_runtime::models as provider_models;
+use extension_runtime::ExtensionToolSet;
 use runtime_domain::{
     model_catalog::{ModelProviderRefreshEvent, ModelSelection, ProviderSyncRequest},
     prompt_assembly::PromptAssemblyManagerSnapshot,
@@ -103,7 +104,6 @@ fn session_tools_for_manager(
 }
 
 /// `AppRuntimeOptions` 保存 app 层对话运行时所需的配置。
-#[derive(Clone)]
 pub(crate) struct AppRuntimeOptions {
     pub(crate) loaded_models: provider_models::LoadedModelCatalog,
     pub(crate) runtime_request_policy: RuntimeRequestPolicy,
@@ -117,6 +117,8 @@ pub(crate) struct AppRuntimeOptions {
     pub(crate) initial_prompt_assembly: Option<PromptAssemblyManagerSnapshot>,
     pub(crate) dynamic_environment_observer:
         Arc<dyn crate::dynamic_environment::DynamicEnvironmentObserver>,
+    /// Host-prepared extension set；`None` keeps the default composition unchanged.
+    pub(crate) extension_tool_set: Option<ExtensionToolSet>,
 }
 
 /// `AppRuntimeCoordinator` 负责把 TUI runtime command 连接到对话运行时。
@@ -140,6 +142,7 @@ impl Default for AppRuntimeOptions {
             initial_prompt_assembly: None,
             dynamic_environment_observer:
                 crate::dynamic_environment::default_dynamic_environment_observer(),
+            extension_tool_set: None,
         }
     }
 }
@@ -147,19 +150,27 @@ impl Default for AppRuntimeOptions {
 impl AppRuntimeCoordinator {
     pub(crate) fn new(mut options: AppRuntimeOptions) -> Result<Self, String> {
         let components = RuntimeComponents::new(&mut options)?;
-        let coordinator = Self {
+        let mut coordinator = Self {
             options,
             components,
             pending_runtime_events: Vec::new(),
             next_agent_turn_id: 1,
             prompt_assembly_edit_session: None,
         };
+        if let Some(tool_set) = coordinator.options.extension_tool_set.take() {
+            coordinator.mount_extension_tool_set(tool_set)?;
+        }
         coordinator.components.validate_context_alignment()?;
         coordinator
             .inspect_composition()
             .validate()
             .map_err(|error| format!("invalid runtime composition: {error}"))?;
         Ok(coordinator)
+    }
+
+    /// 将 host 已完成 discovery 的 extension tool set 交给 component lifecycle。
+    pub fn mount_extension_tool_set(&mut self, tool_set: ExtensionToolSet) -> Result<(), String> {
+        self.components.mount_extension_tool_set(tool_set)
     }
 
     fn handle_runtime_command(

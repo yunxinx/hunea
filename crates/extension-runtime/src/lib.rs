@@ -1,7 +1,7 @@
 //! 版本化 extension tool protocol 的 transport-neutral host adapter。
 //!
-//! 本 crate 拥有 protocol negotiation、host tool metadata、取消与生命周期；具体 process/stdio
-//! transport 由后续 integration layer 提供。
+//! 本 crate 拥有 protocol negotiation、host tool metadata、取消与生命周期；stdio process
+//! transport 仍被隔离在本 crate 的 concrete adapter module，不进入 protocol-neutral contract。
 
 use std::{
     collections::BTreeSet,
@@ -30,6 +30,12 @@ use tool_runtime::{
     ToolPermissionPolicy, ToolResult, ToolResultContent,
 };
 
+mod stdio;
+
+pub use stdio::{
+    StdioExtensionSource, StdioExtensionTransport, StdioTransportError, StdioTransportOptions,
+};
+
 /// 一个 request 在 transport 中等待的 future。
 pub type ExtensionRequestFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ExtensionResponse, ExtensionTransportError>> + Send + 'a>>;
@@ -44,6 +50,14 @@ pub trait ExtensionRequestTransport: Send + Sync {
 
     /// 停止 transport；重复调用必须安全。
     fn shutdown(&self) -> Result<(), ExtensionTransportError>;
+}
+
+/// 用于 lifecycle dependency 恢复的 host-owned extension discovery source。
+///
+/// source 只返回已完成 handshake/descriptor validation 的 opaque set；具体 launch policy
+/// 与 transport implementation 留在 extension-runtime 或更上层 host。
+pub trait ExtensionToolSetSource: Send + Sync {
+    fn discover(&self) -> Result<ExtensionToolSet, ExtensionDiscoveryError>;
 }
 
 /// transport 错误的 closed projection；不携带 I/O、process、path 或 endpoint source。
@@ -226,6 +240,7 @@ impl ExtensionToolClient {
             transport_guard: Some(ExtensionTransportGuard::new(Arc::clone(
                 &self.inner.transport,
             ))),
+            source: None,
         })
     }
 
@@ -375,6 +390,7 @@ pub struct ExtensionToolSet {
     client: ExtensionToolClient,
     descriptors: Vec<ToolDescriptor>,
     transport_guard: Option<ExtensionTransportGuard>,
+    source: Option<Arc<dyn ExtensionToolSetSource>>,
 }
 
 impl fmt::Debug for ExtensionToolSet {
@@ -382,11 +398,23 @@ impl fmt::Debug for ExtensionToolSet {
         formatter
             .debug_struct("ExtensionToolSet")
             .field("tool_count", &self.descriptors.len())
+            .field("has_rediscovery_source", &self.source.is_some())
             .finish_non_exhaustive()
     }
 }
 
 impl ExtensionToolSet {
+    /// 绑定一个可在 dependency generation 恢复时重新 discover 的 host source。
+    pub fn with_rediscovery_source(mut self, source: Arc<dyn ExtensionToolSetSource>) -> Self {
+        self.source = Some(source);
+        self
+    }
+
+    /// 返回 source 的 opaque handle；不会暴露 launch 参数或 process internals。
+    pub fn rediscovery_source(&self) -> Option<Arc<dyn ExtensionToolSetSource>> {
+        self.source.clone()
+    }
+
     /// 返回 host-owned tool definitions；permission 仅来自 options。
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         self.descriptors

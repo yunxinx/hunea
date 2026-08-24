@@ -3423,6 +3423,8 @@ dependencies = [
  "color-eyre",
  "conversation-runtime",
  "crossterm",
+ "extension-protocol",
+ "extension-runtime",
  "futures-util",
  "libc",
  "openai-compat-provider",

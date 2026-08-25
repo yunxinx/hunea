@@ -114,6 +114,19 @@ impl<'a> ToolExecutionContext<'a> {
         self
     }
 
+    /// `with_cancellation` 替换取消来源，同时保留本次执行的进度、权限与文件快照。
+    pub fn with_cancellation<'b>(
+        self,
+        cancellation: &'b CancellationToken,
+    ) -> ToolExecutionContext<'b> {
+        ToolExecutionContext {
+            cancellation,
+            progress_sink: self.progress_sink,
+            permission_snapshot: self.permission_snapshot,
+            permission_handler: self.permission_handler,
+        }
+    }
+
     /// `cancellation` 返回本次工具调用的取消 token。
     pub const fn cancellation(&self) -> &'a CancellationToken {
         self.cancellation
@@ -386,5 +399,29 @@ mod tests {
 
         assert_eq!(registry.definitions().definitions().count(), 1);
         assert_eq!(filtered.definitions().definitions().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn cancellation_rebinding_preserves_the_remaining_execution_context() {
+        let original_cancellation = CancellationToken::new();
+        let rebound_cancellation = CancellationToken::new();
+        let (progress_sender, mut progress_receiver) = mpsc::unbounded_channel();
+        let context = ToolExecutionContext::new(&original_cancellation)
+            .with_progress_sink(ToolProgressSink::from_sender(progress_sender))
+            .with_cancellation(&rebound_cancellation);
+
+        rebound_cancellation.cancel();
+        assert!(context.cancellation().is_cancelled());
+        assert!(!original_cancellation.is_cancelled());
+
+        context.emit(ToolProgress::SystemMessage {
+            message: "progress remains connected".to_string(),
+        });
+        assert_eq!(
+            progress_receiver.recv().await,
+            Some(ToolProgress::SystemMessage {
+                message: "progress remains connected".to_string(),
+            })
+        );
     }
 }

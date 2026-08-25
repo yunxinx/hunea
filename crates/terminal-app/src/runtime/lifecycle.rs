@@ -9,6 +9,12 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(super) struct CapabilityKey(String);
 
+impl CapabilityKey {
+    pub(super) fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
 impl From<&str> for CapabilityKey {
     fn from(value: &str) -> Self {
         Self(value.to_string())

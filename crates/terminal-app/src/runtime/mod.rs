@@ -1,4 +1,12 @@
 mod agent;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "scoped context foundation is consumed by the later child Agent orchestration slice"
+    )
+)]
+mod agent_capability_context;
 mod components;
 mod context;
 mod context_budget;

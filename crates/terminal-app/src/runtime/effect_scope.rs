@@ -1,12 +1,16 @@
 use std::{
+    collections::BTreeMap,
     fmt,
+    panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     sync::{Arc, Condvar, Mutex, Weak},
     thread::ThreadId,
 };
 
 use thiserror::Error;
+use tokio_util::sync::CancellationToken;
 
 type EffectDisposer = Box<dyn FnMut() -> Result<(), String> + Send + 'static>;
+type DisposalObserver = Box<dyn FnOnce() + Send + 'static>;
 
 /// `EffectScope` 拥有一个 component 的可逆副作用及其 child scope。
 ///
@@ -17,6 +21,7 @@ pub(super) struct EffectScope {
     parent: Option<ParentLink>,
 }
 
+#[derive(Clone)]
 struct ParentLink {
     shared: Weak<EffectScopeShared>,
     entry_id: usize,
@@ -25,6 +30,7 @@ struct ParentLink {
 struct EffectScopeShared {
     state: Mutex<EffectScopeState>,
     disposal_completed: Condvar,
+    lifecycle_cancellation: CancellationToken,
 }
 
 struct EffectScopeState {
@@ -34,6 +40,8 @@ struct EffectScopeState {
     next_id: usize,
     entries: Vec<ScopeEntry>,
     in_flight: Vec<ScopeEntryInspection>,
+    activation_owners: Vec<ThreadId>,
+    disposal_observers: BTreeMap<usize, DisposalObserver>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -81,6 +89,50 @@ pub(super) enum EffectScopeError {
     DuplicateEffect { label: String },
     #[error("effect scope entry identity is exhausted")]
     EntryIdExhausted,
+    #[error("effect activation failed before publication")]
+    ActivationFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum EffectScopeActivationStatus {
+    Active,
+    Finalizing,
+}
+
+pub(super) struct EffectScopeDisposalSubscription {
+    shared: Weak<EffectScopeShared>,
+    observer_id: usize,
+}
+
+#[derive(Clone)]
+pub(super) struct EffectScopeCleanupHandle {
+    shared: Weak<EffectScopeShared>,
+    parent: Option<ParentLink>,
+}
+
+impl EffectScopeCleanupHandle {
+    pub(super) fn dispose(&self) -> EffectDisposeReport {
+        let Some(shared) = self.shared.upgrade() else {
+            return EffectDisposeReport::success();
+        };
+        let report = dispose_shared(&shared);
+        if report.is_success() {
+            detach_from_parent(self.parent.as_ref());
+        }
+        report
+    }
+}
+
+impl Drop for EffectScopeDisposalSubscription {
+    fn drop(&mut self) {
+        let Some(shared) = self.shared.upgrade() else {
+            return;
+        };
+        let mut state = lock_state(&shared);
+        if state.lifecycle == EffectScopeLifecycle::Active {
+            state.disposal_observers.remove(&self.observer_id);
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -157,6 +209,7 @@ impl EffectScopeShared {
         Self {
             state: Mutex::new(EffectScopeState::new(owner)),
             disposal_completed: Condvar::new(),
+            lifecycle_cancellation: CancellationToken::new(),
         }
     }
 }
@@ -170,6 +223,8 @@ impl EffectScopeState {
             next_id: 0,
             entries: Vec::new(),
             in_flight: Vec::new(),
+            activation_owners: Vec::new(),
+            disposal_observers: BTreeMap::new(),
         }
     }
 
@@ -265,6 +320,87 @@ impl EffectScope {
         Ok(())
     }
 
+    /// 先在 scope 中预留 ownership，再执行 effect activation 并接管其 inverse。
+    ///
+    /// disposal 与 activation 并发时，scope 会先 fail closed，再等待 inverse 进入已预留的
+    /// entry。返回 `Finalizing` 表示 inverse 已被 owner 保留，caller 不得发布 activation 结果。
+    pub(super) fn activate_revertible_effect<D, E>(
+        &self,
+        label: impl Into<String>,
+        activate: impl FnOnce() -> Result<D, E>,
+    ) -> Result<EffectScopeActivationStatus, EffectScopeError>
+    where
+        D: FnMut() -> Result<(), String> + Send + 'static,
+    {
+        let label = label.into();
+        let activation_owner = std::thread::current().id();
+        let entry_id = {
+            let mut state = lock_state(&self.shared);
+            ensure_active(state.lifecycle)?;
+            if state.entries.iter().any(|entry| {
+                matches!(
+                    &entry.kind,
+                    ScopeEntryKind::Effect {
+                        label: registered_label,
+                        ..
+                    } if registered_label == &label
+                )
+            }) {
+                return Err(EffectScopeError::DuplicateEffect { label });
+            }
+
+            let entry_id = state.allocate_entry_id()?;
+            state.entries.push(ScopeEntry {
+                id: entry_id,
+                kind: ScopeEntryKind::Effect {
+                    label,
+                    disposer: None,
+                },
+            });
+            state.activation_owners.push(activation_owner);
+            entry_id
+        };
+
+        let activation = catch_unwind(AssertUnwindSafe(activate));
+        match activation {
+            Ok(Ok(disposer)) => {
+                let lifecycle = finish_effect_activation(
+                    &self.shared,
+                    entry_id,
+                    activation_owner,
+                    Some(Box::new(disposer)),
+                );
+                let status = match lifecycle {
+                    EffectScopeLifecycle::Active => EffectScopeActivationStatus::Active,
+                    EffectScopeLifecycle::Finalizing => EffectScopeActivationStatus::Finalizing,
+                    EffectScopeLifecycle::Disposed => {
+                        unreachable!("disposal waits for reserved effect activation")
+                    }
+                };
+                if status == EffectScopeActivationStatus::Finalizing {
+                    let _ = self.dispose();
+                }
+                Ok(status)
+            }
+            Ok(Err(_error)) => {
+                let lifecycle =
+                    finish_effect_activation(&self.shared, entry_id, activation_owner, None);
+                if lifecycle == EffectScopeLifecycle::Finalizing {
+                    let _ = self.dispose();
+                }
+                Err(EffectScopeError::ActivationFailed)
+            }
+            Err(payload) => {
+                let lifecycle =
+                    finish_effect_activation(&self.shared, entry_id, activation_owner, None);
+                if lifecycle == EffectScopeLifecycle::Finalizing {
+                    let _ = self.dispose();
+                }
+                resume_unwind(payload)
+            }
+        }
+    }
+
     /// 撤销当前 ownership tree；`Finalizing` 时只重试 pending entries，`Disposed` 后为 no-op。
     pub(super) fn dispose(&self) -> EffectDisposeReport {
         let report = dispose_shared(&self.shared);
@@ -279,26 +415,60 @@ impl EffectScope {
         snapshot_shared(&self.shared)
     }
 
-    #[cfg(test)]
-    fn is_active(&self) -> bool {
+    pub(super) fn is_active(&self) -> bool {
         lock_state(&self.shared).lifecycle == EffectScopeLifecycle::Active
     }
 
-    fn detach_from_parent(&self) {
-        let Some(parent) = &self.parent else {
-            return;
-        };
-        let Some(parent_shared) = parent.shared.upgrade() else {
-            return;
-        };
-        let mut parent_state = lock_state(&parent_shared);
-        if let Some(index) = parent_state
-            .entries
-            .iter()
-            .position(|entry| entry.id == parent.entry_id)
-        {
-            parent_state.entries.remove(index);
+    pub(super) fn cancellation_token(&self) -> CancellationToken {
+        self.shared.lifecycle_cancellation.clone()
+    }
+
+    pub(super) fn cleanup_handle(&self) -> EffectScopeCleanupHandle {
+        EffectScopeCleanupHandle {
+            shared: Arc::downgrade(&self.shared),
+            parent: self.parent.clone(),
         }
+    }
+
+    /// 注册只在 cleanup 全部成功后触发的 observer。
+    ///
+    /// scope 已进入 `Finalizing` 时，subscription Drop 不会移除 observer；ownership
+    /// 转移给 scope，确保 cleanup failure 仍保留后续收敛所需的 authority。
+    pub(super) fn subscribe_disposed(
+        &self,
+        callback: impl FnOnce() + Send + 'static,
+    ) -> Result<EffectScopeDisposalSubscription, EffectScopeError> {
+        let mut state = lock_state(&self.shared);
+        ensure_active(state.lifecycle)?;
+        let observer_id = state.allocate_entry_id()?;
+        state
+            .disposal_observers
+            .insert(observer_id, Box::new(callback));
+        Ok(EffectScopeDisposalSubscription {
+            shared: Arc::downgrade(&self.shared),
+            observer_id,
+        })
+    }
+
+    fn detach_from_parent(&self) {
+        detach_from_parent(self.parent.as_ref());
+    }
+}
+
+fn detach_from_parent(parent: Option<&ParentLink>) {
+    let Some(parent) = parent else {
+        return;
+    };
+    let Some(parent_shared) = parent.shared.upgrade() else {
+        return;
+    };
+    let mut parent_state = lock_state(&parent_shared);
+    if let Some(index) = parent_state
+        .entries
+        .iter()
+        .position(|entry| entry.id == parent.entry_id)
+    {
+        parent_state.entries.remove(index);
     }
 }
 
@@ -324,6 +494,7 @@ fn lock_state(shared: &Arc<EffectScopeShared>) -> std::sync::MutexGuard<'_, Effe
 }
 
 fn dispose_shared(shared: &Arc<EffectScopeShared>) -> EffectDisposeReport {
+    begin_finalizing_shared(shared);
     let current_thread = std::thread::current().id();
     let (scope_owner, entries) = loop {
         let mut state = lock_state(shared);
@@ -343,7 +514,18 @@ fn dispose_shared(shared: &Arc<EffectScopeShared>) -> EffectDisposeReport {
                 );
             }
             None => {
-                state.lifecycle = EffectScopeLifecycle::Finalizing;
+                if state.activation_owners.contains(&current_thread) {
+                    return cleanup_in_progress_report(state.owner.clone());
+                }
+                if !state.activation_owners.is_empty() {
+                    drop(
+                        shared
+                            .disposal_completed
+                            .wait(state)
+                            .unwrap_or_else(std::sync::PoisonError::into_inner),
+                    );
+                    continue;
+                }
                 state.disposal_owner = Some(current_thread);
                 let entries = std::mem::take(&mut state.entries);
                 state.in_flight = entries.iter().map(ScopeEntryInspection::from).collect();
@@ -410,10 +592,86 @@ fn dispose_shared(shared: &Arc<EffectScopeShared>) -> EffectDisposeReport {
     } else {
         EffectScopeLifecycle::Finalizing
     };
+    let disposal_observers = if state.lifecycle == EffectScopeLifecycle::Disposed {
+        std::mem::take(&mut state.disposal_observers)
+            .into_values()
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     state.disposal_owner = None;
     drop(state);
+    for observer in disposal_observers {
+        let _ = catch_unwind(AssertUnwindSafe(observer));
+    }
     shared.disposal_completed.notify_all();
     report
+}
+
+fn begin_finalizing_shared(shared: &Arc<EffectScopeShared>) {
+    let (should_cancel, children) = {
+        let mut state = lock_state(shared);
+        if state.lifecycle == EffectScopeLifecycle::Disposed {
+            return;
+        }
+        let should_cancel = state.lifecycle == EffectScopeLifecycle::Active;
+        state.lifecycle = EffectScopeLifecycle::Finalizing;
+        let mut children = Vec::new();
+        for entry in &state.entries {
+            if let ScopeEntryKind::Child { shared, .. } = &entry.kind {
+                children.push(Arc::clone(shared));
+            }
+        }
+        for entry in &state.in_flight {
+            if let ScopeEntryInspectionKind::Child(shared) = &entry.kind {
+                children.push(Arc::clone(shared));
+            }
+        }
+        (should_cancel, children)
+    };
+
+    if should_cancel {
+        shared.lifecycle_cancellation.cancel();
+    }
+    for child in children {
+        begin_finalizing_shared(&child);
+    }
+}
+
+fn finish_effect_activation(
+    shared: &Arc<EffectScopeShared>,
+    entry_id: usize,
+    activation_owner: ThreadId,
+    disposer: Option<EffectDisposer>,
+) -> EffectScopeLifecycle {
+    let mut state = lock_state(shared);
+    let entry_index = state
+        .entries
+        .iter()
+        .position(|entry| entry.id == entry_id)
+        .expect("reserved activation entry must remain owned until activation completes");
+    if let Some(disposer) = disposer {
+        let ScopeEntryKind::Effect {
+            disposer: registered_disposer,
+            ..
+        } = &mut state.entries[entry_index].kind
+        else {
+            unreachable!("activation reservation must be an effect entry")
+        };
+        *registered_disposer = Some(disposer);
+    } else {
+        state.entries.remove(entry_index);
+    }
+    let activation_index = state
+        .activation_owners
+        .iter()
+        .rposition(|owner| owner == &activation_owner)
+        .expect("activation owner must remain registered until activation completes");
+    state.activation_owners.remove(activation_index);
+    let lifecycle = state.lifecycle;
+    drop(state);
+    shared.disposal_completed.notify_all();
+    lifecycle
 }
 
 fn cleanup_in_progress_report(scope_owner: String) -> EffectDisposeReport {
@@ -487,10 +745,10 @@ mod tests {
     use std::{
         sync::{
             Arc, Mutex,
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
             mpsc,
         },
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     use super::*;
@@ -636,6 +894,173 @@ mod tests {
         );
         root.dispose();
         assert_eq!(scope_error(root.child("late")), EffectScopeError::Disposed);
+    }
+
+    #[test]
+    fn rejected_revertible_activation_never_loses_its_inverse() {
+        let root = EffectScope::default();
+        let child = root.child("owner").expect("child should mount");
+        let side_effect_is_active = Arc::new(AtomicUsize::new(0));
+        let cleanup_calls = Arc::new(AtomicUsize::new(0));
+        let active_probe = Arc::clone(&side_effect_is_active);
+        let cleanup_probe = Arc::clone(&cleanup_calls);
+
+        let activation = child.activate_revertible_effect("worker", || {
+            active_probe.store(1, Ordering::SeqCst);
+            let parent_report = root.dispose();
+            assert!(!parent_report.is_success());
+            Ok::<_, ()>(move || {
+                active_probe.store(0, Ordering::SeqCst);
+                cleanup_probe.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        });
+
+        assert_eq!(activation, Ok(EffectScopeActivationStatus::Finalizing));
+        assert_eq!(side_effect_is_active.load(Ordering::SeqCst), 0);
+        assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1);
+        assert!(root.dispose().is_success());
+        assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1);
+
+        let rejected_activation_calls = Arc::new(AtomicUsize::new(0));
+        let rejected_probe = Arc::clone(&rejected_activation_calls);
+        assert_eq!(
+            child.activate_revertible_effect("late", move || {
+                rejected_probe.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, ()>(|| Ok(()))
+            }),
+            Err(EffectScopeError::Disposed)
+        );
+        assert_eq!(rejected_activation_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn fallible_activation_failure_removes_its_reservation_and_redacts_source() {
+        let scope = EffectScope::default();
+        let failure = scope
+            .activate_revertible_effect("worker", || {
+                Err::<fn() -> Result<(), String>, _>("PRIVATE_ACTIVATION_FAILURE")
+            })
+            .expect_err("failed activation must not publish an effect");
+
+        assert_eq!(failure, EffectScopeError::ActivationFailed);
+        assert!(!format!("{failure:?}").contains("PRIVATE_ACTIVATION_FAILURE"));
+        let snapshot = scope.snapshot().expect("scope should remain active");
+        assert!(snapshot.effects.is_empty());
+        assert!(scope.dispose().is_success());
+    }
+
+    #[test]
+    fn disposal_subscription_is_revertible_and_fires_once_after_successful_cleanup() {
+        let root = EffectScope::default();
+        let child = root.child("child").expect("child should mount");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dropped_probe = Arc::clone(&calls);
+        let dropped = child
+            .subscribe_disposed(move || {
+                dropped_probe.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("observer should subscribe");
+        drop(dropped);
+        let active_probe = Arc::clone(&calls);
+        let _active = child
+            .subscribe_disposed(move || {
+                active_probe.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("observer should subscribe");
+
+        assert!(root.dispose().is_success());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(root.dispose().is_success());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn failed_cleanup_transfers_disposal_observer_ownership_to_the_scope() {
+        let root = EffectScope::default();
+        let child = root.child("child").expect("child should mount");
+        let cleanup_may_succeed = Arc::new(AtomicBool::new(false));
+        let cleanup_gate = Arc::clone(&cleanup_may_succeed);
+        child
+            .register("worker", move || {
+                if cleanup_gate.load(Ordering::SeqCst) {
+                    Ok(())
+                } else {
+                    Err("PRIVATE_TRANSIENT_CLEANUP".to_string())
+                }
+            })
+            .expect("effect should register");
+        let observer_calls = Arc::new(AtomicUsize::new(0));
+        let observer_probe = Arc::clone(&observer_calls);
+        let subscription = child
+            .subscribe_disposed(move || {
+                observer_probe.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("observer should subscribe");
+
+        assert!(!child.dispose().is_success());
+        assert_eq!(observer_calls.load(Ordering::SeqCst), 0);
+        drop(subscription);
+        cleanup_may_succeed.store(true, Ordering::SeqCst);
+
+        assert!(child.dispose().is_success());
+        assert_eq!(observer_calls.load(Ordering::SeqCst), 1);
+        assert!(root.dispose().is_success());
+    }
+
+    #[test]
+    fn concurrent_disposal_waits_for_activation_to_publish_its_inverse() {
+        let scope = Arc::new(EffectScope::default());
+        let cleanup_calls = Arc::new(AtomicUsize::new(0));
+        let (activation_started_tx, activation_started_rx) = mpsc::channel();
+        let (release_activation_tx, release_activation_rx) = mpsc::channel();
+        let activated_scope = Arc::clone(&scope);
+        let cleanup_probe = Arc::clone(&cleanup_calls);
+        let activation = std::thread::spawn(move || {
+            activated_scope.activate_revertible_effect("worker", || {
+                activation_started_tx
+                    .send(())
+                    .expect("activation observer should remain connected");
+                release_activation_rx
+                    .recv()
+                    .expect("activation release should arrive");
+                Ok::<_, ()>(move || {
+                    cleanup_probe.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            })
+        });
+        activation_started_rx
+            .recv()
+            .expect("activation should reserve ownership before blocking");
+
+        let disposed_scope = Arc::clone(&scope);
+        let disposal = std::thread::spawn(move || disposed_scope.dispose());
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while scope.is_active() && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(
+            !scope.is_active(),
+            "disposal must make the scope fail closed before activation completes"
+        );
+        release_activation_tx
+            .send(())
+            .expect("blocked activation should still be owned");
+
+        assert_eq!(
+            activation.join().expect("activation thread should finish"),
+            Ok(EffectScopeActivationStatus::Finalizing)
+        );
+        assert!(
+            disposal
+                .join()
+                .expect("disposal thread should finish")
+                .is_success()
+        );
+        assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1);
+        assert!(scope.dispose().is_success());
+        assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]

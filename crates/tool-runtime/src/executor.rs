@@ -346,7 +346,21 @@ impl ToolExecutor for ToolExecutorRegistry {
 
 #[cfg(test)]
 mod tests {
+    use crate::{ToolPermissionFuture, ToolPermissionHandler};
+
     use super::*;
+
+    struct AllowingPermissionHandler;
+
+    impl ToolPermissionHandler for AllowingPermissionHandler {
+        fn request_permission<'a>(
+            &'a self,
+            _request: ToolPermissionRequest,
+            _cancellation: &'a CancellationToken,
+        ) -> ToolPermissionFuture<'a> {
+            Box::pin(async { ToolPermissionDecision::Allow })
+        }
+    }
 
     struct StubTool {
         name: &'static str,
@@ -406,8 +420,15 @@ mod tests {
         let original_cancellation = CancellationToken::new();
         let rebound_cancellation = CancellationToken::new();
         let (progress_sender, mut progress_receiver) = mpsc::unbounded_channel();
+        let permission_snapshot = ToolPermissionFileSnapshot {
+            content_hash: 17,
+            byte_len: 23,
+            modified_at: None,
+        };
         let context = ToolExecutionContext::new(&original_cancellation)
             .with_progress_sink(ToolProgressSink::from_sender(progress_sender))
+            .with_permission_snapshot(Some(permission_snapshot.clone()))
+            .with_permission_handler(Some(Arc::new(AllowingPermissionHandler)))
             .with_cancellation(&rebound_cancellation);
 
         rebound_cancellation.cancel();
@@ -422,6 +443,16 @@ mod tests {
             Some(ToolProgress::SystemMessage {
                 message: "progress remains connected".to_string(),
             })
+        );
+        assert_eq!(context.permission_snapshot(), Some(&permission_snapshot));
+        assert_eq!(
+            context
+                .request_permission(ToolPermissionRequest::new(
+                    ToolCall::new("call", "approval", serde_json::json!({})),
+                    ToolDefinition::new("approval"),
+                ))
+                .await,
+            ToolPermissionDecision::Allow
         );
     }
 }

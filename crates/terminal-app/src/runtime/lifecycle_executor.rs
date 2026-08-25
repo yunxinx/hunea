@@ -10,11 +10,11 @@ use super::{
         CapabilityLease, ComponentActivationContext, RuntimeCapability, RuntimeCapabilitySnapshot,
         RuntimeContext, RuntimeContextError,
     },
-    effect_scope::{EffectScope, EffectScopeSnapshot},
+    effect_scope::{EffectScope, EffectScopeLifecycleSnapshot, EffectScopeSnapshot},
     lifecycle::{
-        ActivationToken, CapabilityKey, ComponentDefinition, ComponentFailureReason,
-        ComponentGraph, ComponentGraphError, DeactivationToken, PreparedDefinitionReconciliation,
-        ReconciliationReport,
+        ActivationToken, CapabilityKey, ComponentDefinition, ComponentFailureOperation,
+        ComponentFailureReason, ComponentGraph, ComponentGraphError, DeactivationToken,
+        PreparedDefinitionReconciliation, ReconciliationReport,
     },
 };
 
@@ -87,21 +87,19 @@ impl LifecycleExecutionOperation {
 struct LifecycleExecutionFailure {
     component_id: String,
     operation: LifecycleExecutionOperation,
-    message: String,
 }
 
-/// `LifecycleExecutionError` 保留 operational source text，但 `Debug` 只投影安全 metadata。
+/// Lifecycle error 只投影 component 与 operation，不保留 callback 或 resource error text。
 pub(super) struct LifecycleExecutionError {
     failures: Vec<LifecycleExecutionFailure>,
 }
 
 impl LifecycleExecutionError {
-    fn graph(component_id: impl Into<String>, error: ComponentGraphError) -> Self {
+    fn graph(component_id: impl Into<String>, _error: ComponentGraphError) -> Self {
         Self {
             failures: vec![LifecycleExecutionFailure {
                 component_id: component_id.into(),
                 operation: LifecycleExecutionOperation::Graph,
-                message: error.to_string(),
             }],
         }
     }
@@ -119,17 +117,15 @@ impl LifecycleExecutionError {
             failures: vec![LifecycleExecutionFailure {
                 component_id: "runtime_composition".to_string(),
                 operation: LifecycleExecutionOperation::Graph,
-                message: "component lifecycle executor is shut down".to_string(),
             }],
         }
     }
 
-    fn authority_preparation(message: String) -> Self {
+    fn authority_preparation() -> Self {
         Self {
             failures: vec![LifecycleExecutionFailure {
                 component_id: "runtime_composition".to_string(),
                 operation: LifecycleExecutionOperation::AuthorityPreparation,
-                message,
             }],
         }
     }
@@ -156,10 +152,9 @@ impl fmt::Display for LifecycleExecutionError {
             }
             write!(
                 f,
-                "component {} {} failed: {}",
+                "component {} {} failed",
                 failure.component_id,
-                failure.operation.as_str(),
-                failure.message
+                failure.operation.as_str()
             )?;
         }
         Ok(())
@@ -189,13 +184,32 @@ impl LifecycleExecutionState {
 }
 
 /// `ComponentLifecycleExecutor` 是 graph action 与 concrete reversible effects 的唯一桥梁。
-#[derive(Default)]
 pub(super) struct ComponentLifecycleExecutor {
     graph: ComponentGraph,
     context: RuntimeContext,
     root_scope: EffectScope,
     component_scopes: BTreeMap<String, EffectScope>,
-    is_shutdown: bool,
+    finalization: LifecycleFinalization,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum LifecycleFinalization {
+    #[default]
+    Open,
+    Finalizing,
+    Succeeded,
+}
+
+impl Default for ComponentLifecycleExecutor {
+    fn default() -> Self {
+        Self {
+            graph: ComponentGraph::default(),
+            context: RuntimeContext::default(),
+            root_scope: EffectScope::default(),
+            component_scopes: BTreeMap::new(),
+            finalization: LifecycleFinalization::Open,
+        }
+    }
 }
 
 impl Deref for ComponentLifecycleExecutor {
@@ -282,6 +296,25 @@ impl ComponentLifecycleExecutor {
             }
             return Err(error);
         }
+        let definitions = definitions.into_iter().collect::<Vec<_>>();
+        match self
+            .graph
+            .prepare_definition_reconciliation(definitions.clone())
+        {
+            Ok(_) | Err(ComponentGraphError::DefinitionCleanupBlocked { .. }) => {}
+            Err(error) => {
+                if should_commit_authority {
+                    callbacks.abort_authority();
+                }
+                return Err(LifecycleExecutionError::graph("runtime_composition", error));
+            }
+        }
+        if let Err(error) = self.retry_pending_cleanup(callbacks, mode) {
+            if should_commit_authority {
+                callbacks.abort_authority();
+            }
+            return Err(error);
+        }
         let prepared = match self.graph.prepare_definition_reconciliation(definitions) {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -318,9 +351,9 @@ impl ComponentLifecycleExecutor {
             return Err(error);
         }
 
-        if should_commit_authority && let Err(message) = callbacks.prepare_authority() {
+        if should_commit_authority && callbacks.prepare_authority().is_err() {
             callbacks.abort_authority();
-            return Err(LifecycleExecutionError::authority_preparation(message));
+            return Err(LifecycleExecutionError::authority_preparation());
         }
 
         let activation_order =
@@ -381,11 +414,10 @@ impl ComponentLifecycleExecutor {
             .map_err(|error| LifecycleExecutionError::graph(provider_component, error))?;
         self.context
             .hide_batch(&[snapshot])
-            .map_err(|error| LifecycleExecutionError {
+            .map_err(|_error| LifecycleExecutionError {
                 failures: vec![LifecycleExecutionFailure {
                     component_id: provider_component.to_string(),
                     operation: LifecycleExecutionOperation::Graph,
-                    message: error.to_string(),
                 }],
             })?;
         self.graph = tentative_graph;
@@ -430,6 +462,7 @@ impl ComponentLifecycleExecutor {
         mode: ComponentLifecycleMode,
     ) -> Result<(), LifecycleExecutionError> {
         self.ensure_running()?;
+        self.retry_pending_cleanup(callbacks, mode)?;
         self.deactivate_components_inner(component_ids, callbacks, mode)
     }
 
@@ -479,6 +512,7 @@ impl ComponentLifecycleExecutor {
         mode: ComponentLifecycleMode,
     ) -> Result<(), LifecycleExecutionError> {
         self.ensure_running()?;
+        self.retry_pending_cleanup(callbacks, mode)?;
         let requested = component_ids
             .into_iter()
             .map(Into::into)
@@ -493,7 +527,18 @@ impl ComponentLifecycleExecutor {
         let mut reports = Vec::new();
 
         for component_id in order {
-            match self.graph.activate(&component_id) {
+            let is_recoverable_activation_failure =
+                self.graph.failures().into_iter().any(|failure| {
+                    failure.component_id == component_id
+                        && failure.operation == ComponentFailureOperation::Activation
+                        && failure.recoverable
+                });
+            let report = if is_recoverable_activation_failure {
+                self.graph.retry(&component_id)
+            } else {
+                self.graph.activate(&component_id)
+            };
+            match report {
                 Ok(report) => reports.push(report),
                 Err(error) => {
                     failures.extend(
@@ -514,36 +559,163 @@ impl ComponentLifecycleExecutor {
         &mut self,
         callbacks: &mut impl ComponentLifecycleCallbacks,
     ) -> Result<(), LifecycleExecutionError> {
-        if self.is_shutdown {
+        if self.finalization == LifecycleFinalization::Succeeded {
             return Ok(());
         }
-        self.is_shutdown = true;
-        callbacks.abort_authority();
-        let component_ids = self.graph.deactivation_order();
+        if self.finalization == LifecycleFinalization::Open {
+            self.finalization = LifecycleFinalization::Finalizing;
+            callbacks.abort_authority();
+        }
         let mut failures = self
-            .deactivate_components_inner(component_ids, callbacks, ComponentLifecycleMode::Shutdown)
+            .retry_pending_cleanup(callbacks, ComponentLifecycleMode::Shutdown)
             .err()
             .map(|error| error.failures)
             .unwrap_or_default();
+        let activation_failed = self
+            .graph
+            .failures()
+            .into_iter()
+            .filter(|failure| failure.operation == ComponentFailureOperation::Activation)
+            .map(|failure| failure.component_id)
+            .collect::<BTreeSet<_>>();
+        let cleanup_blocked = self
+            .component_scopes
+            .iter()
+            .filter_map(|(component_id, scope)| {
+                scope.snapshot().and_then(|snapshot| {
+                    (snapshot.lifecycle == EffectScopeLifecycleSnapshot::Finalizing
+                        || activation_failed.contains(component_id))
+                    .then(|| component_id.clone())
+                })
+            })
+            .collect::<BTreeSet<_>>();
+        let deactivation_failed = self
+            .graph
+            .failures()
+            .into_iter()
+            .filter(|failure| failure.operation == ComponentFailureOperation::Deactivation)
+            .map(|failure| failure.component_id)
+            .collect::<BTreeSet<_>>();
+        let component_ids = self
+            .graph
+            .deactivation_order()
+            .into_iter()
+            .filter(|component_id| {
+                !cleanup_blocked.contains(component_id)
+                    && !deactivation_failed.contains(component_id)
+            })
+            .collect::<Vec<_>>();
+        failures.extend(
+            self.deactivate_components_inner(
+                component_ids,
+                callbacks,
+                ComponentLifecycleMode::Shutdown,
+            )
+            .err()
+            .map(|error| error.failures)
+            .unwrap_or_default(),
+        );
         let has_graph_failure = failures
             .iter()
             .any(|failure| failure.operation == LifecycleExecutionOperation::Graph);
-        if !has_graph_failure && let Some(message) = self.root_scope.dispose().error_message() {
-            failures.push(LifecycleExecutionFailure {
-                component_id: "runtime_composition".to_string(),
-                operation: LifecycleExecutionOperation::EffectDisposal,
-                message,
-            });
+        if !has_graph_failure && failures.is_empty() && self.component_scopes.is_empty() {
+            let report = self.root_scope.dispose();
+            if !report.is_success() {
+                failures.push(cleanup_pending_failure(
+                    "runtime_composition".to_string(),
+                    LifecycleExecutionOperation::EffectDisposal,
+                ));
+            }
+        }
+        if failures.is_empty()
+            && self.component_scopes.is_empty()
+            && self.root_scope.snapshot().is_none()
+        {
+            self.finalization = LifecycleFinalization::Succeeded;
         }
         LifecycleExecutionError::finish(failures)
     }
 
     fn ensure_running(&self) -> Result<(), LifecycleExecutionError> {
-        if self.is_shutdown {
+        if self.finalization != LifecycleFinalization::Open {
             Err(LifecycleExecutionError::executor_shutdown())
         } else {
             Ok(())
         }
+    }
+
+    fn retry_pending_cleanup(
+        &mut self,
+        callbacks: &mut impl ComponentLifecycleCallbacks,
+        mode: ComponentLifecycleMode,
+    ) -> Result<(), LifecycleExecutionError> {
+        let mut failures = Vec::new();
+        let graph_failures = self
+            .graph
+            .failures()
+            .into_iter()
+            .map(|failure| (failure.component_id.clone(), failure))
+            .collect::<BTreeMap<_, _>>();
+        let cleanup_order = self.graph.deactivation_order();
+        let pending_scopes = cleanup_order
+            .iter()
+            .filter_map(|component_id| {
+                let failure = graph_failures.get(component_id)?;
+                let scope = self.component_scopes.get(component_id)?;
+                let lifecycle = scope.snapshot()?.lifecycle;
+                (failure.operation == ComponentFailureOperation::Activation)
+                    .then(|| (component_id.clone(), lifecycle))
+            })
+            .collect::<Vec<_>>();
+
+        for (component_id, lifecycle) in pending_scopes {
+            if lifecycle == EffectScopeLifecycleSnapshot::Active
+                && callbacks.quiesce_component(&component_id, mode).is_err()
+            {
+                failures.push(cleanup_pending_failure(
+                    component_id,
+                    LifecycleExecutionOperation::Quiescence,
+                ));
+                continue;
+            }
+            let report = self
+                .component_scopes
+                .get(&component_id)
+                .expect("pending scope should remain owned")
+                .dispose();
+            if report.is_success() {
+                self.component_scopes.remove(&component_id);
+            } else {
+                failures.push(cleanup_pending_failure(
+                    component_id,
+                    LifecycleExecutionOperation::EffectDisposal,
+                ));
+            }
+        }
+
+        for component_id in cleanup_order {
+            let Some(failure) = graph_failures.get(&component_id) else {
+                continue;
+            };
+            if failure.operation != ComponentFailureOperation::Deactivation || !failure.recoverable
+            {
+                continue;
+            }
+            let report = match self.graph.retry(&component_id) {
+                Ok(report) => report,
+                Err(error) => {
+                    failures.extend(
+                        LifecycleExecutionError::graph(component_id.clone(), error).failures,
+                    );
+                    continue;
+                }
+            };
+            if let Err(error) = self.execute_report(report, callbacks, mode) {
+                failures.extend(error.failures);
+            }
+        }
+
+        LifecycleExecutionError::finish(failures)
     }
 
     fn execute_report(
@@ -628,11 +800,10 @@ impl ComponentLifecycleExecutor {
         let component_id = token.component_id().to_string();
         let scope = match self.root_scope.child(component_id.clone()) {
             Ok(scope) => scope,
-            Err(error) => {
+            Err(_error) => {
                 state.failures.push(LifecycleExecutionFailure {
                     component_id: component_id.clone(),
                     operation: LifecycleExecutionOperation::Activation,
-                    message: error.to_string(),
                 });
                 self.reject_activation(token, &component_id, pending, state);
                 return;
@@ -645,12 +816,13 @@ impl ComponentLifecycleExecutor {
                 state
                     .failures
                     .extend(LifecycleExecutionError::graph(component_id.clone(), error).failures);
-                if let Some(message) = scope.dispose().error_message() {
-                    state.failures.push(LifecycleExecutionFailure {
-                        component_id: component_id.clone(),
-                        operation: LifecycleExecutionOperation::EffectDisposal,
-                        message,
-                    });
+                let disposal = scope.dispose();
+                if !disposal.is_success() {
+                    state.failures.push(cleanup_pending_failure(
+                        component_id.clone(),
+                        LifecycleExecutionOperation::EffectDisposal,
+                    ));
+                    self.component_scopes.insert(component_id.clone(), scope);
                 }
                 self.reject_activation(token, &component_id, pending, state);
                 return;
@@ -666,11 +838,10 @@ impl ComponentLifecycleExecutor {
             mode,
         ) {
             Ok(outcome) => outcome,
-            Err(message) => {
+            Err(_message) => {
                 state.failures.push(LifecycleExecutionFailure {
                     component_id: component_id.clone(),
                     operation: LifecycleExecutionOperation::Activation,
-                    message,
                 });
                 self.rollback_activation(token, scope, callbacks, mode, pending, state);
                 return;
@@ -680,11 +851,10 @@ impl ComponentLifecycleExecutor {
         let publishes_capabilities = outcome == ComponentActivationOutcome::PublishCapabilities;
         let staged = match activation_context.finish(publishes_capabilities) {
             Ok(staged) => staged,
-            Err(error) => {
+            Err(_error) => {
                 state.failures.push(LifecycleExecutionFailure {
                     component_id: component_id.clone(),
                     operation: LifecycleExecutionOperation::Activation,
-                    message: error.to_string(),
                 });
                 self.rollback_activation(token, scope, callbacks, mode, pending, state);
                 return;
@@ -702,14 +872,13 @@ impl ComponentLifecycleExecutor {
         };
         match completion {
             Ok((tentative_graph, reports)) => {
-                if let Err(error) = self
+                if let Err(_error) = self
                     .context
                     .commit(&staged, &tentative_graph.capabilities())
                 {
                     state.failures.push(LifecycleExecutionFailure {
                         component_id: component_id.clone(),
                         operation: LifecycleExecutionOperation::Activation,
-                        message: error.to_string(),
                     });
                     self.rollback_activation(token, scope, callbacks, mode, pending, state);
                     return;
@@ -718,11 +887,10 @@ impl ComponentLifecycleExecutor {
                 self.component_scopes.insert(component_id.clone(), scope);
                 pending.extend(reports);
             }
-            Err(error) => {
+            Err(_error) => {
                 state.failures.push(LifecycleExecutionFailure {
                     component_id: component_id.clone(),
                     operation: LifecycleExecutionOperation::Graph,
-                    message: error.to_string(),
                 });
                 self.rollback_activation(token, scope, callbacks, mode, pending, state);
             }
@@ -739,19 +907,22 @@ impl ComponentLifecycleExecutor {
         state: &mut LifecycleExecutionState,
     ) {
         let component_id = token.component_id().to_string();
-        if let Err(message) = callbacks.quiesce_component(&component_id, mode) {
-            state.failures.push(LifecycleExecutionFailure {
-                component_id: component_id.clone(),
-                operation: LifecycleExecutionOperation::Quiescence,
-                message,
-            });
+        if callbacks.quiesce_component(&component_id, mode).is_err() {
+            state.failures.push(cleanup_pending_failure(
+                component_id.clone(),
+                LifecycleExecutionOperation::Quiescence,
+            ));
+            self.component_scopes.insert(component_id.clone(), scope);
+            self.reject_activation(token, &component_id, pending, state);
+            return;
         }
-        if let Some(message) = scope.dispose().error_message() {
-            state.failures.push(LifecycleExecutionFailure {
-                component_id: component_id.clone(),
-                operation: LifecycleExecutionOperation::EffectDisposal,
-                message,
-            });
+        let disposal = scope.dispose();
+        if !disposal.is_success() {
+            state.failures.push(cleanup_pending_failure(
+                component_id.clone(),
+                LifecycleExecutionOperation::EffectDisposal,
+            ));
+            self.component_scopes.insert(component_id.clone(), scope);
         }
         self.reject_activation(token, &component_id, pending, state);
     }
@@ -799,24 +970,23 @@ impl ComponentLifecycleExecutor {
                     .prepare_capability_removals(&component_id, active)
                 {
                     Ok((tentative_graph, reports)) => {
-                        if let Err(error) = self.context.hide_batch(&snapshots) {
-                            Err(error.to_string())
+                        if self.context.hide_batch(&snapshots).is_err() {
+                            Err(())
                         } else {
                             self.graph = tentative_graph;
                             dependent_reports.extend(reports);
                             Ok(())
                         }
                     }
-                    Err(error) => Err(error.to_string()),
+                    Err(_) => Err(()),
                 }
             }
-            Err(error) => Err(error.to_string()),
+            Err(_) => Err(()),
         };
-        if let Err(message) = preparation {
+        if preparation.is_err() {
             state.failures.push(LifecycleExecutionFailure {
                 component_id: component_id.clone(),
                 operation: LifecycleExecutionOperation::Graph,
-                message,
             });
             if let Err(error) = self.graph.rollback_deactivation(token) {
                 state
@@ -828,46 +998,62 @@ impl ComponentLifecycleExecutor {
         self.execute_reports_inner(dependent_reports, callbacks, mode, state);
         let quiescence_error = callbacks
             .quiesce_component(&component_id, mode)
-            .err()
-            .inspect(|message| {
-                state.failures.push(LifecycleExecutionFailure {
-                    component_id: component_id.clone(),
-                    operation: LifecycleExecutionOperation::Quiescence,
-                    message: message.clone(),
-                });
+            .is_err()
+            .then(|| {
+                state.failures.push(cleanup_pending_failure(
+                    component_id.clone(),
+                    LifecycleExecutionOperation::Quiescence,
+                ));
             });
-        let disposal_error = self
-            .component_scopes
-            .remove(&component_id)
-            .and_then(|scope| scope.dispose().error_message())
-            .inspect(|message| {
-                state.failures.push(LifecycleExecutionFailure {
-                    component_id: component_id.clone(),
-                    operation: LifecycleExecutionOperation::EffectDisposal,
-                    message: message.clone(),
-                });
-            });
+        let disposal_error = quiescence_error.is_none().then(|| {
+            self.component_scopes
+                .get(&component_id)
+                .is_some_and(|scope| {
+                    let report = scope.dispose();
+                    if report.is_success() {
+                        false
+                    } else {
+                        state.failures.push(cleanup_pending_failure(
+                            component_id.clone(),
+                            LifecycleExecutionOperation::EffectDisposal,
+                        ));
+                        true
+                    }
+                })
+        });
+        let has_disposal_error = disposal_error.unwrap_or(false);
+        if quiescence_error.is_none() && !has_disposal_error {
+            self.component_scopes.remove(&component_id);
+        }
 
         let result = if quiescence_error.is_some() {
             self.graph
-                .fail_deactivation(token, ComponentFailureReason::QuiescenceRejected, false)
-        } else if disposal_error.is_some() {
+                .fail_deactivation(token, ComponentFailureReason::QuiescenceRejected, true)
+        } else if has_disposal_error {
             self.graph.fail_deactivation(
                 token,
                 ComponentFailureReason::EffectDisposalRejected,
-                false,
+                true,
             )
         } else {
             self.graph.complete_deactivation(token)
         };
         match result {
             Ok(report) => pending.push_back(report),
-            Err(error) => state.failures.push(LifecycleExecutionFailure {
-                component_id,
-                operation: LifecycleExecutionOperation::Graph,
-                message: error.to_string(),
-            }),
+            Err(error) => state
+                .failures
+                .extend(LifecycleExecutionError::graph(component_id, error).failures),
         }
+    }
+}
+
+fn cleanup_pending_failure(
+    component_id: String,
+    operation: LifecycleExecutionOperation,
+) -> LifecycleExecutionFailure {
+    LifecycleExecutionFailure {
+        component_id,
+        operation,
     }
 }
 
@@ -910,7 +1096,7 @@ mod tests {
         publishers: BTreeSet<String>,
         activation_failures: BTreeSet<String>,
         quiescence_failures: BTreeSet<String>,
-        disposal_failures: BTreeSet<String>,
+        disposal_failures: Arc<Mutex<BTreeSet<String>>>,
     }
 
     impl FakeCallbacks {
@@ -951,6 +1137,13 @@ mod tests {
                 .unwrap_or_else(|| format!("{phase}:{component_id}"));
             self.record(event);
         }
+
+        fn fail_next_disposal(&self, component_id: &str) {
+            self.disposal_failures
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(component_id.to_string());
+        }
     }
 
     impl ComponentLifecycleCallbacks for FakeCallbacks {
@@ -987,15 +1180,19 @@ mod tests {
         ) -> Result<ComponentActivationOutcome, String> {
             self.record_lifecycle("activate", component_id);
             let events = Arc::clone(&self.events);
+            let disposal_failures = Arc::clone(&self.disposal_failures);
             let disposed_component = component_id.to_string();
-            let should_fail_disposal = self.disposal_failures.contains(component_id);
             scope
                 .register("owned_effect", move || {
                     events
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .push(format!("dispose:{disposed_component}"));
-                    if should_fail_disposal {
+                    if disposal_failures
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .remove(&disposed_component)
+                    {
                         Err("DISPOSER_SECRET".to_string())
                     } else {
                         Ok(())
@@ -1021,12 +1218,31 @@ mod tests {
             _mode: ComponentLifecycleMode,
         ) -> Result<(), String> {
             self.record_lifecycle("quiesce", component_id);
-            if self.quiescence_failures.contains(component_id) {
+            if self.quiescence_failures.remove(component_id) {
                 Err("QUIESCENCE_SECRET".to_string())
             } else {
                 Ok(())
             }
         }
+    }
+
+    fn assert_closed_lifecycle_error(
+        error: &LifecycleExecutionError,
+        component_id: &str,
+        operation: &str,
+        forbidden: &[&str],
+    ) {
+        let display = error.to_string();
+        let debug = format!("{error:?}");
+        assert!(
+            display.contains(&format!("component {component_id} {operation} failed")),
+            "unexpected lifecycle error projection: {display}"
+        );
+        for sentinel in forbidden {
+            assert!(!display.contains(sentinel));
+            assert!(!debug.contains(sentinel));
+        }
+        assert!(std::error::Error::source(error).is_none());
     }
 
     const HOOK_PROVIDER_COMPONENT: &str = "extension-hooks";
@@ -1532,7 +1748,12 @@ mod tests {
         assert_eq!(callbacks.authority_preparations, 1);
         assert_eq!(callbacks.authority_commits, 0);
         assert_eq!(callbacks.authority_aborts, 1);
-        assert!(!format!("{error:?}").contains("AUTHORITY_PREPARATION_SECRET"));
+        assert_closed_lifecycle_error(
+            &error,
+            "runtime_composition",
+            "authority_preparation",
+            &["AUTHORITY_PREPARATION_SECRET"],
+        );
         assert_eq!(executor.graph().state("storage"), None);
         assert_eq!(
             executor.graph().state("database"),
@@ -1774,7 +1995,6 @@ mod tests {
                 "quiesce:ui",
                 "dispose:ui",
                 "quiesce:service",
-                "dispose:service",
                 "quiesce:database",
                 "dispose:database",
             ]
@@ -1797,27 +2017,50 @@ mod tests {
         assert!(service.optional.is_empty());
         assert!(executor.graph().capabilities().is_empty());
         assert!(executor.context_snapshots().is_empty());
-        assert!(executor.scope_snapshots().is_empty());
-        assert!(error.to_string().contains("QUIESCENCE_SECRET"));
-        assert!(!format!("{error:?}").contains("QUIESCENCE_SECRET"));
+        let scopes = executor.scope_snapshots();
+        assert_eq!(scopes.len(), 1);
+        assert_eq!(scopes[0].owner, "service");
+        assert_eq!(scopes[0].lifecycle, EffectScopeLifecycleSnapshot::Active);
+        assert_closed_lifecycle_error(&error, "service", "quiescence", &["QUIESCENCE_SECRET"]);
 
-        let events_before_retry = callbacks.snapshot();
-        let retry = executor
+        executor
             .reconcile_definitions(
                 storage_definitions(),
                 &mut callbacks,
                 ComponentLifecycleMode::Reconfigure,
             )
-            .expect_err("terminal cleanup failure must block replacement retry");
-        assert!(retry.to_string().contains("unresolved cleanup failure"));
-        assert_eq!(callbacks.snapshot(), events_before_retry);
+            .expect("transient cleanup failure should converge before replacement");
+        assert_eq!(
+            callbacks.snapshot(),
+            vec![
+                "quiesce:ui",
+                "dispose:ui",
+                "quiesce:service",
+                "quiesce:database",
+                "dispose:database",
+                "quiesce:service",
+                "dispose:service",
+                "activate:storage",
+                "activate:service",
+                "activate:ui",
+            ]
+        );
+        assert_eq!(executor.graph().state("database"), None);
+        assert_eq!(
+            executor.graph().state("storage"),
+            Some(ComponentState::Active)
+        );
+        assert_eq!(
+            executor.graph().state("service"),
+            Some(ComponentState::Active)
+        );
     }
 
     #[test]
     fn definition_disposal_failure_keeps_old_authority_and_blocks_fresh_activation() {
         let mut executor = ComponentLifecycleExecutor::default();
         let mut callbacks = FakeCallbacks::publishing(&["database", "storage", "service"]);
-        callbacks.disposal_failures.insert("service".to_string());
+        callbacks.fail_next_disposal("service");
         executor
             .reconcile_definitions(
                 definitions(),
@@ -1868,9 +2111,86 @@ mod tests {
         assert!(service.optional.is_empty());
         assert!(executor.graph().capabilities().is_empty());
         assert!(executor.context_snapshots().is_empty());
-        assert!(executor.scope_snapshots().is_empty());
-        assert!(error.to_string().contains("DISPOSER_SECRET"));
-        assert!(!format!("{error:?}").contains("DISPOSER_SECRET"));
+        let scopes = executor.scope_snapshots();
+        assert_eq!(scopes.len(), 1);
+        assert_eq!(scopes[0].owner, "service");
+        assert_eq!(
+            scopes[0].lifecycle,
+            EffectScopeLifecycleSnapshot::Finalizing
+        );
+        assert_closed_lifecycle_error(&error, "service", "effect_disposal", &["DISPOSER_SECRET"]);
+
+        executor
+            .reconcile_definitions(
+                storage_definitions(),
+                &mut callbacks,
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect("transient disposer failure should converge before replacement");
+        assert_eq!(
+            executor.graph().state("storage"),
+            Some(ComponentState::Active)
+        );
+        assert_eq!(
+            executor.graph().state("service"),
+            Some(ComponentState::Active)
+        );
+    }
+
+    #[test]
+    fn invalid_definition_preflight_does_not_retry_pending_cleanup() {
+        let mut executor = ComponentLifecycleExecutor::default();
+        let mut callbacks = FakeCallbacks::publishing(&["database", "storage", "service"]);
+        callbacks.fail_next_disposal("service");
+        executor
+            .reconcile_definitions(
+                definitions(),
+                &mut callbacks,
+                ComponentLifecycleMode::Initial,
+            )
+            .expect("initial composition should activate");
+        executor
+            .reconcile_definitions(
+                storage_definitions(),
+                &mut callbacks,
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect_err("transient disposal failure should remain pending");
+        callbacks
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        let components_before = executor.graph().components();
+        let capabilities_before = executor.graph().capabilities();
+        let context_before = executor.context_snapshots();
+        let scopes_before = executor.scope_snapshots();
+
+        let error = executor
+            .reconcile_definitions(
+                [
+                    ComponentDefinition::new("provider-a").provides("shared"),
+                    ComponentDefinition::new("provider-b").provides("shared"),
+                ],
+                &mut callbacks,
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect_err("invalid desired definitions must fail before cleanup retry");
+
+        assert_closed_lifecycle_error(&error, "runtime_composition", "graph", &["shared"]);
+        assert!(callbacks.snapshot().is_empty());
+        assert_eq!(executor.graph().components(), components_before);
+        assert_eq!(executor.graph().capabilities(), capabilities_before);
+        assert_eq!(executor.context_snapshots(), context_before);
+        assert_eq!(executor.scope_snapshots(), scopes_before);
+
+        executor
+            .reconcile_definitions(
+                storage_definitions(),
+                &mut callbacks,
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect("valid desired definitions should retry and converge cleanup");
     }
 
     #[test]
@@ -1992,11 +2312,7 @@ mod tests {
                 ComponentLifecycleMode::Reconfigure,
             )
             .expect_err("activation epoch exhaustion must fail during preflight");
-        assert!(
-            error
-                .to_string()
-                .contains("component `service` activation epoch is exhausted")
-        );
+        assert_closed_lifecycle_error(&error, "runtime_composition", "graph", &["service"]);
         assert!(callbacks.snapshot().is_empty());
         assert_eq!(executor.graph().components(), components_before);
         assert_eq!(executor.graph().capabilities(), capabilities_before);
@@ -2058,11 +2374,7 @@ mod tests {
             )
             .expect_err("downstream epoch exhaustion should reject before deactivation");
 
-        assert!(
-            error
-                .to_string()
-                .contains("component `leaf` activation epoch is exhausted")
-        );
+        assert_closed_lifecycle_error(&error, "leaf", "graph", &["epoch is exhausted"]);
         assert_eq!(
             executor.graph().state("database"),
             Some(ComponentState::Active)
@@ -2285,8 +2597,7 @@ mod tests {
         );
         assert!(executor.graph().capabilities().is_empty());
         assert!(executor.scope_snapshots().is_empty());
-        assert!(error.to_string().contains("ACTIVATION_SECRET"));
-        assert!(!format!("{error:?}").contains("ACTIVATION_SECRET"));
+        assert_closed_lifecycle_error(&error, "database", "activation", &["ACTIVATION_SECRET"]);
     }
 
     #[test]
@@ -2307,8 +2618,12 @@ mod tests {
         assert_eq!(executor.graph().state("database"), None);
         assert!(executor.graph().capabilities().is_empty());
         assert!(executor.scope_snapshots().is_empty());
-        assert!(error.to_string().contains("generation is exhausted"));
-        assert!(!format!("{error:?}").contains("generation is exhausted"));
+        assert_closed_lifecycle_error(
+            &error,
+            "runtime_composition",
+            "graph",
+            &["generation is exhausted"],
+        );
     }
 
     #[test]
@@ -2353,8 +2668,7 @@ mod tests {
         assert_eq!(executor.graph().capabilities(), capabilities_before);
         assert_eq!(executor.context_snapshots(), context_before);
         assert_eq!(executor.scope_snapshots(), scopes_before);
-        assert!(error.to_string().contains("visibility does not match"));
-        assert!(!format!("{error:?}").contains("visibility does not match"));
+        assert_closed_lifecycle_error(&error, "database", "graph", &["visibility does not match"]);
     }
 
     #[test]
@@ -2403,11 +2717,11 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(graph, context);
-        assert!(error.to_string().contains("visibility does not match"));
+        assert_closed_lifecycle_error(&error, "ui", "graph", &["visibility does not match"]);
     }
 
     #[test]
-    fn shutdown_cleanup_failure_remains_a_safe_terminal_fact() {
+    fn shutdown_retries_transient_cleanup_before_succeeding() {
         let mut executor = ComponentLifecycleExecutor::default();
         let mut callbacks = FakeCallbacks::publishing(&["database"]);
         callbacks.quiescence_failures.insert("service".to_string());
@@ -2433,19 +2747,118 @@ mod tests {
         assert_eq!(executor.graph().failures().len(), 1);
         executor
             .shutdown(&mut callbacks)
-            .expect("repeated shutdown should not erase or repeat failure cleanup");
+            .expect("repeated shutdown should retry pending cleanup");
+        assert_eq!(
+            executor.graph().state("service"),
+            Some(ComponentState::Disposed)
+        );
+        assert!(executor.graph().failures().is_empty());
+        assert!(executor.scope_snapshots().is_empty());
+    }
+
+    #[test]
+    fn activation_rollback_retains_failed_disposer_until_retry() {
+        let mut executor = ComponentLifecycleExecutor::default();
+        let mut callbacks = FakeCallbacks::default();
+        callbacks.activation_failures.insert("service".to_string());
+        callbacks.fail_next_disposal("service");
+
+        executor
+            .reconcile_definitions(
+                [ComponentDefinition::new("service")],
+                &mut callbacks,
+                ComponentLifecycleMode::Initial,
+            )
+            .expect_err("activation rollback cleanup should remain pending");
+
         assert_eq!(
             executor.graph().state("service"),
             Some(ComponentState::Failed)
         );
-        assert_eq!(executor.graph().failures().len(), 1);
+        let scopes = executor.scope_snapshots();
+        assert_eq!(scopes.len(), 1);
+        assert_eq!(scopes[0].owner, "service");
+        assert_eq!(
+            scopes[0].lifecycle,
+            EffectScopeLifecycleSnapshot::Finalizing
+        );
+        callbacks.activation_failures.remove("service");
+
+        executor
+            .activate_components(
+                ["service"],
+                &mut callbacks,
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect("pending rollback cleanup should finish before fresh activation");
+        assert_eq!(
+            executor.graph().state("service"),
+            Some(ComponentState::Active)
+        );
+        assert_eq!(
+            callbacks.snapshot(),
+            vec![
+                "activate:service",
+                "quiesce:service",
+                "dispose:service",
+                "dispose:service",
+                "activate:service",
+            ]
+        );
+        assert_eq!(executor.scope_snapshots().len(), 1);
+        assert_eq!(
+            executor.scope_snapshots()[0].lifecycle,
+            EffectScopeLifecycleSnapshot::Active
+        );
+    }
+
+    #[test]
+    fn shutdown_does_not_bypass_pending_activation_quiescence() {
+        let mut executor = ComponentLifecycleExecutor::default();
+        let mut callbacks = FakeCallbacks::default();
+        callbacks.activation_failures.insert("service".to_string());
+        callbacks.quiescence_failures.insert("service".to_string());
+
+        executor
+            .reconcile_definitions(
+                [ComponentDefinition::new("service")],
+                &mut callbacks,
+                ComponentLifecycleMode::Initial,
+            )
+            .expect_err("activation rollback quiescence should remain pending");
+        callbacks.quiescence_failures.insert("service".to_string());
+
+        executor
+            .shutdown(&mut callbacks)
+            .expect_err("shutdown must retain a still-unquiesced activation scope");
+        assert_eq!(
+            executor.graph().state("service"),
+            Some(ComponentState::Failed)
+        );
+        assert_eq!(
+            executor.graph().failures()[0].operation,
+            ComponentFailureOperation::Activation
+        );
+        let scopes = executor.scope_snapshots();
+        assert_eq!(scopes.len(), 1);
+        assert_eq!(scopes[0].owner, "service");
+        assert_eq!(scopes[0].lifecycle, EffectScopeLifecycleSnapshot::Active);
+
+        executor
+            .shutdown(&mut callbacks)
+            .expect("shutdown should converge after quiescence recovers");
+        assert_eq!(
+            executor.graph().state("service"),
+            Some(ComponentState::Disposed)
+        );
+        assert!(executor.scope_snapshots().is_empty());
     }
 
     #[test]
     fn cleanup_failures_do_not_skip_siblings_and_inspection_is_redacted() {
         let mut executor = ComponentLifecycleExecutor::default();
         let mut callbacks = FakeCallbacks::publishing(&["database"]);
-        callbacks.disposal_failures.insert("a-consumer".to_string());
+        callbacks.fail_next_disposal("a-consumer");
         executor
             .reconcile_definitions(
                 [
@@ -2479,7 +2892,6 @@ mod tests {
             callbacks.snapshot(),
             vec![
                 "quiesce:z-consumer",
-                "dispose:z-consumer",
                 "quiesce:a-consumer",
                 "dispose:a-consumer",
             ]
@@ -2492,12 +2904,33 @@ mod tests {
             executor.graph().state("a-consumer"),
             Some(ComponentState::Failed)
         );
-        assert_eq!(executor.scope_snapshots().len(), 1);
-        assert!(error.to_string().contains("QUIESCENCE_SECRET"));
-        assert!(error.to_string().contains("DISPOSER_SECRET"));
-        let diagnostic = format!("{error:?}");
-        assert!(!diagnostic.contains("QUIESCENCE_SECRET"));
-        assert!(!diagnostic.contains("DISPOSER_SECRET"));
+        let scopes = executor
+            .scope_snapshots()
+            .into_iter()
+            .filter(|scope| scope.owner != "database")
+            .collect::<Vec<_>>();
+        assert_eq!(scopes.len(), 2);
+        assert_eq!(
+            scopes
+                .iter()
+                .map(|scope| (scope.owner.as_str(), scope.lifecycle))
+                .collect::<Vec<_>>(),
+            vec![
+                ("a-consumer", EffectScopeLifecycleSnapshot::Finalizing),
+                ("z-consumer", EffectScopeLifecycleSnapshot::Active),
+            ]
+        );
+        assert_closed_lifecycle_error(
+            &error,
+            "a-consumer",
+            "effect_disposal",
+            &["QUIESCENCE_SECRET", "DISPOSER_SECRET"],
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("component z-consumer quiescence failed")
+        );
         let failures = executor.graph().failures();
         assert_eq!(failures.len(), 2);
         assert!(failures.iter().all(|failure| {
@@ -2507,5 +2940,17 @@ mod tests {
                     | ComponentFailureReason::EffectDisposalRejected
             )
         }));
+
+        executor
+            .deactivate_components(
+                ["a-consumer", "z-consumer"],
+                &mut callbacks,
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect("transient sibling cleanup failures should both converge");
+        let scopes = executor.scope_snapshots();
+        assert_eq!(scopes.len(), 1);
+        assert_eq!(scopes[0].owner, "database");
+        assert_eq!(scopes[0].lifecycle, EffectScopeLifecycleSnapshot::Active);
     }
 }

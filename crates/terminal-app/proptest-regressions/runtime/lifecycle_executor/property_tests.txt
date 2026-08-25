@@ -1,0 +1,17 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 40213ddd7342a1a15e0d2d1ca4d524ecdb7fa3ae225d9848211a7af611e8e8c6 # shrinks to actions = [], component = AlphaSource, failure_kind = Quiescence
+cc e3b6bf36c555bc5fa870afb19ffe2a114978b8b154f6e0ae4f3571d0e5798014 # shrinks to actions = [FailNextQuiescence(AlphaSource), Reconfigure(Alpha)], root = Alpha
+cc a396659a8f66fdc1f0066f72a248bd253b780cd7a73ee1f09665e68758d522b7 # shrinks to actions = [FailNextQuiescence(AlphaSource)]
+cc 031ee9e75e363089740b513f083539ffa914ff7fccbad0d89833761282d16a30 # shrinks to actions = [FailNextQuiescence(AlphaSource), Reconfigure(Alpha)], root = Alpha
+cc 6f6e742bdfec8af3e96a49456c2c0f13823fbe396f45ad81f7516ff0a4ac216b # shrinks to actions = [Deactivate(Beta), FailNextQuiescence(BetaSource), FailPublication(Beta), FailPublication(Alpha)]
+cc 13d1ce49aec789b0105c9a83fd77324a8c722af6aa9370bff47efd851e41d4ea # shrinks to actions = [FailNextQuiescence(LeftBranch), Deactivate(Alpha), FailNextDisposal(LeftBranch), Reconfigure(Beta)], root = Alpha
+cc cb4ed823ddd35488dcd3d6ab20f48272fc07f325fa7846e43f232f030f7f7781 # shrinks to actions = [FailNextActivation(BetaSource), Reconfigure(Beta), Activate(Beta)]
+cc 99365d50cb1049053e2a0eaeefe16b59f04dce2ea70bb0aee71275732641a848 # shrinks to actions = [Reconfigure(Alpha), FailNextActivation(RightBranch), Reconfigure(Alpha), Activate(Alpha)]
+cc ac4eb9af55219aa735390b7346f72e5053efe9c7d2b598999cb2254971e6086f # shrinks to actions = [FailPublication(Alpha), FailNextDisposal(AlphaSource), Activate(Alpha), FailNextDisposal(AlphaSource), Reconfigure(Alpha)]
+cc 06075d4834e79f92dfa4841cb6a9a329be8d6b1ee3a456ca4229f149f1b3773d # shrinks to actions = [Deactivate(Alpha), FailNextActivation(LeftBranch), FailNextDisposal(LeftBranch), Activate(Alpha), FailNextDisposal(LeftBranch), FailNextQuiescence(RightBranch), Reconfigure(Alpha)], root = Alpha
+cc a528522f911074bbd90953fbf47eb5ee7369a5ebf2dac8eecec4833e678fdb32 # shrinks to actions = [FailNextQuiescence(LeftBranch), FailNextDisposal(LeftBranch), FailPublication(Alpha)]

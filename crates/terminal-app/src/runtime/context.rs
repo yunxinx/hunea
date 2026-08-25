@@ -541,10 +541,10 @@ impl ComponentActivationContext<'_> {
         C: RuntimeCapability + 'static,
     {
         let lease = self.context.require::<C>()?;
-        let retained_lease = lease.clone();
+        let mut retained_lease = Some(lease.clone());
         self.scope
             .register(format!("dependency:{}", C::KEY), move || {
-                drop(retained_lease);
+                retained_lease.take();
                 Ok(())
             })
             .map_err(|_| RuntimeContextError::DependencyRetentionRejected { capability: C::KEY })?;

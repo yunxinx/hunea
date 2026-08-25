@@ -289,6 +289,7 @@ struct ComponentRecord {
     definition: ComponentDefinition,
     state: ComponentState,
     failure: Option<ComponentFailureSnapshot>,
+    cleanup_disposition: Option<DeactivationDisposition>,
 }
 
 struct DefinitionIndexes {
@@ -425,6 +426,7 @@ impl ComponentGraph {
                 definition,
                 state: ComponentState::Declared,
                 failure: None,
+                cleanup_disposition: None,
             },
         );
         self.component_epochs.entry(id.clone()).or_insert(0);
@@ -491,6 +493,23 @@ impl ComponentGraph {
             .filter(|component_id| activation_set.contains(component_id))
             .collect::<Vec<_>>();
 
+        for component_id in &activation_order {
+            if self.component_epoch(component_id) == u64::MAX {
+                return Err(ComponentGraphError::ActivationEpochExhausted {
+                    component_id: component_id.clone(),
+                });
+            }
+            let definition = desired_definitions
+                .get(component_id)
+                .expect("activation order should reference a desired component");
+            for capability in &definition.provides {
+                if self.capability_generations.get(capability) == Some(&u64::MAX) {
+                    return Err(ComponentGraphError::CapabilityGenerationExhausted {
+                        capability: capability.to_string(),
+                    });
+                }
+            }
+        }
         for component_id in &retirement_order {
             let record = self
                 .components
@@ -512,23 +531,6 @@ impl ComponentGraph {
                 return Err(ComponentGraphError::DefinitionCleanupBlocked {
                     component_id: component_id.clone(),
                 });
-            }
-        }
-        for component_id in &activation_order {
-            if self.component_epoch(component_id) == u64::MAX {
-                return Err(ComponentGraphError::ActivationEpochExhausted {
-                    component_id: component_id.clone(),
-                });
-            }
-            let definition = desired_definitions
-                .get(component_id)
-                .expect("activation order should reference a desired component");
-            for capability in &definition.provides {
-                if self.capability_generations.get(capability) == Some(&u64::MAX) {
-                    return Err(ComponentGraphError::CapabilityGenerationExhausted {
-                        capability: capability.to_string(),
-                    });
-                }
             }
         }
 
@@ -583,6 +585,7 @@ impl ComponentGraph {
                     definition,
                     state: ComponentState::Declared,
                     failure: None,
+                    cleanup_disposition: None,
                 },
             };
             desired_records.insert(component_id, record);
@@ -807,6 +810,10 @@ impl ComponentGraph {
         self.validate_deactivation_token(&token)?;
         let component_id = token.component_id.clone();
         let mut report = self.report_for_component(component_id.clone());
+        self.components
+            .get_mut(&component_id)
+            .expect("validated component should remain declared")
+            .cleanup_disposition = None;
         self.transition(&component_id, ComponentState::Disposed, &mut report);
         match token.disposition {
             DeactivationDisposition::Reconcile => {
@@ -829,6 +836,10 @@ impl ComponentGraph {
         self.validate_deactivation_token(&token)?;
         let component_id = token.component_id;
         let mut report = self.report_for_component(component_id.clone());
+        self.components
+            .get_mut(&component_id)
+            .expect("validated component should remain declared")
+            .cleanup_disposition = None;
         self.transition(&component_id, ComponentState::Active, &mut report);
         self.refresh_report_failures(&mut report);
         Ok(report)
@@ -863,6 +874,10 @@ impl ComponentGraph {
         let mut report = self.report_for_component(component_id.to_string());
         match state {
             ComponentState::Active => {
+                self.components
+                    .get_mut(component_id)
+                    .expect("component should remain declared")
+                    .cleanup_disposition = Some(disposition);
                 self.transition(component_id, ComponentState::Deactivating, &mut report);
                 let epoch = self.component_epoch(component_id);
                 report.deactivation_requests.push(DeactivationToken {
@@ -881,6 +896,10 @@ impl ComponentGraph {
                 };
                 if state != target {
                     self.clear_failure(component_id);
+                    self.components
+                        .get_mut(component_id)
+                        .expect("component should remain declared")
+                        .cleanup_disposition = None;
                     self.transition(component_id, target, &mut report);
                 }
             }
@@ -924,6 +943,10 @@ impl ComponentGraph {
             .get_mut(&component_id)
             .expect("validated component should remain declared")
             .failure = Some(failure);
+        self.components
+            .get_mut(&component_id)
+            .expect("validated component should remain declared")
+            .cleanup_disposition = None;
         let mut report = self.report_for_component(component_id.clone());
         self.transition(&component_id, ComponentState::Failed, &mut report);
         self.refresh_report_failures(&mut report);
@@ -950,6 +973,10 @@ impl ComponentGraph {
             .get_mut(&component_id)
             .expect("validated component should remain declared")
             .failure = Some(failure);
+        self.components
+            .get_mut(&component_id)
+            .expect("validated component should remain declared")
+            .cleanup_disposition = Some(token.disposition);
         let mut report = self.report_for_component(component_id.clone());
         self.transition(&component_id, ComponentState::Failed, &mut report);
         self.refresh_report_failures(&mut report);
@@ -981,8 +1008,32 @@ impl ComponentGraph {
             });
         }
 
+        let operation = record
+            .failure
+            .as_ref()
+            .expect("failed component should retain a failure")
+            .operation;
+        let cleanup_disposition = record.cleanup_disposition;
         let mut report = self.report_for_component(component_id.to_string());
-        self.begin_activation(component_id, &mut report)?;
+        match operation {
+            ComponentFailureOperation::Activation => {
+                self.begin_activation(component_id, &mut report)?;
+            }
+            ComponentFailureOperation::Deactivation => {
+                let disposition = cleanup_disposition.ok_or_else(|| {
+                    ComponentGraphError::FailureNotRecoverable {
+                        component_id: component_id.to_string(),
+                    }
+                })?;
+                self.clear_failure(component_id);
+                self.transition(component_id, ComponentState::Deactivating, &mut report);
+                report.deactivation_requests.push(DeactivationToken {
+                    component_id: component_id.to_string(),
+                    epoch: self.component_epoch(component_id),
+                    disposition,
+                });
+            }
+        }
         self.refresh_report_failures(&mut report);
         Ok(report)
     }
@@ -1315,6 +1366,10 @@ impl ComponentGraph {
             .get_mut(id)
             .expect("component should remain declared during activation")
             .failure = None;
+        self.components
+            .get_mut(id)
+            .expect("component should remain declared during activation")
+            .cleanup_disposition = None;
         self.transition(id, ComponentState::Activating, report);
         report.activation_requests.push(ActivationToken {
             component_id: id.to_string(),
@@ -1993,6 +2048,99 @@ mod tests {
                 component_id: "agent".to_string(),
             })
         );
+    }
+
+    #[test]
+    fn deactivation_retry_preserves_suspend_and_dispose_dispositions() {
+        let mut graph = ComponentGraph::default();
+        let declaration = graph
+            .declare(ComponentDefinition::new("agent"))
+            .expect("component should declare");
+        graph
+            .complete_activation(declaration.activation_requests[0].clone())
+            .expect("initial activation should complete");
+
+        let suspended = graph.suspend("agent").expect("suspend should start");
+        let suspend_token = suspended.deactivation_requests[0].clone();
+        graph
+            .fail_deactivation(
+                suspend_token,
+                ComponentFailureReason::QuiescenceRejected,
+                true,
+            )
+            .expect("suspend cleanup should fail recoverably");
+        let suspend_retry = graph.retry("agent").expect("suspend cleanup should retry");
+        assert_eq!(
+            suspend_retry.deactivation_requests[0].disposition,
+            DeactivationDisposition::Suspend
+        );
+        graph
+            .complete_deactivation(suspend_retry.deactivation_requests[0].clone())
+            .expect("suspend cleanup retry should complete");
+        assert_eq!(graph.state("agent"), Some(ComponentState::Pending));
+
+        let reactivation = graph
+            .activate("agent")
+            .expect("component should reactivate");
+        graph
+            .complete_activation(reactivation.activation_requests[0].clone())
+            .expect("reactivation should complete");
+        let disposed = graph.deactivate("agent").expect("disposal should start");
+        let dispose_token = disposed.deactivation_requests[0].clone();
+        graph
+            .fail_deactivation(
+                dispose_token,
+                ComponentFailureReason::EffectDisposalRejected,
+                true,
+            )
+            .expect("disposal cleanup should fail recoverably");
+        let dispose_retry = graph.retry("agent").expect("disposal cleanup should retry");
+        assert_eq!(
+            dispose_retry.deactivation_requests[0].disposition,
+            DeactivationDisposition::Dispose
+        );
+        graph
+            .complete_deactivation(dispose_retry.deactivation_requests[0].clone())
+            .expect("disposal cleanup retry should complete");
+        assert_eq!(graph.state("agent"), Some(ComponentState::Disposed));
+    }
+
+    #[test]
+    fn deactivation_retry_preserves_dependency_reconciliation() {
+        let mut graph = ComponentGraph::default();
+        declare_provider(&mut graph, "llm-provider", "llm");
+        graph
+            .add_capability("llm-provider", "llm")
+            .expect("initial capability should add");
+        let declaration = graph
+            .declare(ComponentDefinition::new("agent").requires("llm"))
+            .expect("consumer should declare");
+        graph
+            .complete_activation(declaration.activation_requests[0].clone())
+            .expect("initial activation should complete");
+
+        let removed = graph
+            .remove_capability("llm-provider", &CapabilityKey::from("llm"))
+            .expect("dependency removal should begin reconciliation");
+        graph
+            .fail_deactivation(
+                removed.deactivation_requests[0].clone(),
+                ComponentFailureReason::QuiescenceRejected,
+                true,
+            )
+            .expect("reconciliation cleanup should fail recoverably");
+        let retry = graph
+            .retry("agent")
+            .expect("reconciliation cleanup should retry");
+        assert_eq!(
+            retry.deactivation_requests[0].disposition,
+            DeactivationDisposition::Reconcile
+        );
+        graph
+            .complete_deactivation(retry.deactivation_requests[0].clone())
+            .expect("reconciliation cleanup retry should complete");
+        assert_eq!(graph.state("agent"), Some(ComponentState::Pending));
+        assert_eq!(graph.pending()[0].missing_dependencies, vec!["llm"]);
     }
 
     #[test]

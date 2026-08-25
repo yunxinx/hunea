@@ -61,16 +61,6 @@ impl TestComponent {
             Self::AlphaSource | Self::BetaSource | Self::LeftBranch | Self::RightBranch
         )
     }
-
-    const fn capability(self) -> Option<&'static str> {
-        match self {
-            Self::AlphaSource => Some("alpha"),
-            Self::BetaSource => Some("beta"),
-            Self::LeftBranch => Some("left"),
-            Self::RightBranch => Some("right"),
-            Self::DiamondLeaf | Self::Observer => None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -330,15 +320,21 @@ impl ComponentLifecycleCallbacks for PropertyCallbacks {
         let disposer_state = Arc::clone(&self.state);
         if let Err(error) = scope.register(RESOURCE_EFFECT, move || {
             let mut state = lock_callback_state(&disposer_state);
-            let Some((live_key, resource)) = state.resources.remove(&component) else {
+            let Some((live_key, _)) = state.resources.get(&component) else {
                 state.missing_disposals.insert(key);
                 return Err(DISPOSER_SENTINEL.to_string());
             };
-            if live_key != key {
+            if *live_key != key {
                 state.mismatched_disposals.insert(key);
-                state.resources.insert(component, (live_key, resource));
                 return Err(DISPOSER_SENTINEL.to_string());
             }
+            if state.disposal_failures.remove(&component) {
+                return Err(DISPOSER_SENTINEL.to_string());
+            }
+            let (_, resource) = state
+                .resources
+                .remove(&component)
+                .expect("validated resource should remain owned");
             if !resource.is_quiesced {
                 state.disposed_without_quiescence.insert(key);
             }
@@ -346,11 +342,7 @@ impl ComponentLifecycleCallbacks for PropertyCallbacks {
                 kind: ResourceEventKind::Dispose,
                 key,
             });
-            if state.disposal_failures.remove(&component) {
-                Err(DISPOSER_SENTINEL.to_string())
-            } else {
-                Ok(())
-            }
+            Ok(())
         }) {
             lock_callback_state(&self.state)
                 .resources
@@ -381,6 +373,9 @@ impl ComponentLifecycleCallbacks for PropertyCallbacks {
     ) -> Result<(), String> {
         let component = TestComponent::from_id(component_id);
         let mut state = lock_callback_state(&self.state);
+        if state.quiescence_failures.remove(&component) {
+            return Err(QUIESCENCE_SENTINEL.to_string());
+        }
         let Some((key, resource)) = state.resources.get_mut(&component) else {
             state.missing_quiescence.insert(component);
             return Err(QUIESCENCE_SENTINEL.to_string());
@@ -393,11 +388,7 @@ impl ComponentLifecycleCallbacks for PropertyCallbacks {
             kind: ResourceEventKind::Quiesce,
             key,
         });
-        if state.quiescence_failures.remove(&component) {
-            Err(QUIESCENCE_SENTINEL.to_string())
-        } else {
-            Ok(())
-        }
+        Ok(())
     }
 }
 
@@ -599,7 +590,7 @@ fn apply_lifecycle_action(
             )?;
         }
         LifecycleAction::FailPublication(root) => {
-            let _deactivation = run_deactivation_phase(
+            let mut deactivation = run_deactivation_phase(
                 executor,
                 callbacks,
                 DeactivationExpectation::RequiredClosure(root.component()),
@@ -611,11 +602,14 @@ fn apply_lifecycle_action(
                     )
                 },
             )?;
-            if executor.is_shutdown {
+            if executor.finalization != LifecycleFinalization::Open {
                 return assert_stable_boundary(executor, &callbacks.snapshot());
             }
-            if executor.graph().state(root.component().as_str()) == Some(ComponentState::Failed) {
-                let _deactivation = run_deactivation_phase(
+            for _ in 0..3 {
+                if deactivation.is_ok() {
+                    break;
+                }
+                deactivation = run_deactivation_phase(
                     executor,
                     callbacks,
                     DeactivationExpectation::RequiredClosure(root.component()),
@@ -628,6 +622,7 @@ fn apply_lifecycle_action(
                     },
                 )?;
             }
+            prop_assert!(deactivation.is_ok());
             callbacks.disarm_activation_failure(root.component());
             executor.inject_generation_exhaustion(CapabilityKey::from(root.capability()));
             let result = run_activation_phase(
@@ -686,13 +681,68 @@ fn run_deactivation_phase(
 ) -> Result<Result<(), LifecycleExecutionError>, TestCaseError> {
     let before_active = active_components(executor);
     let before_callbacks = callbacks.snapshot();
-    let expected_components = match expectation {
-        DeactivationExpectation::RequiredClosure(root) => required_closure(root)
-            .intersection(&before_active)
-            .copied()
-            .collect(),
-        DeactivationExpectation::AllActive => before_active.clone(),
+    let can_execute = executor.finalization == LifecycleFinalization::Open
+        || expectation == DeactivationExpectation::AllActive;
+    let expected_components = if !can_execute {
+        BTreeSet::new()
+    } else {
+        match expectation {
+            DeactivationExpectation::RequiredClosure(root) => required_closure(root)
+                .intersection(&before_active)
+                .copied()
+                .collect(),
+            DeactivationExpectation::AllActive => before_active.clone(),
+        }
     };
+    let retained_scope_lifecycles = executor
+        .scope_snapshots()
+        .into_iter()
+        .map(|scope| (TestComponent::from_id(&scope.owner), scope.lifecycle))
+        .collect::<BTreeMap<_, _>>();
+    let retry_deactivations = executor
+        .graph()
+        .failures()
+        .into_iter()
+        .filter(|failure| {
+            can_execute
+                && failure.recoverable
+                && failure.operation == ComponentFailureOperation::Deactivation
+        })
+        .map(|failure| TestComponent::from_id(&failure.component_id))
+        .collect::<BTreeSet<_>>();
+    let retry_activation_active = executor
+        .graph()
+        .failures()
+        .into_iter()
+        .filter(|failure| {
+            can_execute
+                && failure.recoverable
+                && failure.operation == ComponentFailureOperation::Activation
+                && retained_scope_lifecycles.get(&TestComponent::from_id(&failure.component_id))
+                    == Some(&EffectScopeLifecycleSnapshot::Active)
+        })
+        .map(|failure| TestComponent::from_id(&failure.component_id))
+        .collect::<BTreeSet<_>>();
+    let retry_activation_finalizing = executor
+        .graph()
+        .failures()
+        .into_iter()
+        .filter(|failure| {
+            can_execute
+                && failure.recoverable
+                && failure.operation == ComponentFailureOperation::Activation
+                && retained_scope_lifecycles.get(&TestComponent::from_id(&failure.component_id))
+                    == Some(&EffectScopeLifecycleSnapshot::Finalizing)
+        })
+        .map(|failure| TestComponent::from_id(&failure.component_id))
+        .collect::<BTreeSet<_>>();
+    let retried_components = retry_deactivations
+        .union(&retry_activation_active)
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .union(&retry_activation_finalizing)
+        .copied()
+        .collect::<BTreeSet<_>>();
     let event_offset = callbacks.snapshot().events.len();
     let result = operation(executor, callbacks);
     if let Err(error) = &result {
@@ -700,14 +750,70 @@ fn run_deactivation_phase(
     }
     let state = callbacks.snapshot();
     let events = &state.events[event_offset..];
-    let expected = ordered_components(executor.graph().deactivation_order(), &expected_components);
+    let retry_quiescence_candidates = retry_deactivations
+        .union(&retry_activation_active)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let retry_quiescence = retry_quiescence_candidates
+        .difference(&before_callbacks.quiescence_failures)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let retry_disposal_candidates = retry_quiescence
+        .union(&retry_activation_finalizing)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let retry_disposal = retry_disposal_candidates
+        .difference(&before_callbacks.disposal_failures)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let retry_failed = retry_quiescence_candidates
+        .iter()
+        .any(|component| before_callbacks.quiescence_failures.contains(component))
+        || retry_disposal_candidates
+            .iter()
+            .any(|component| before_callbacks.disposal_failures.contains(component));
+    let retry_blocks_fresh = retry_failed && expectation != DeactivationExpectation::AllActive;
+    let fresh_components = if retry_blocks_fresh {
+        BTreeSet::new()
+    } else {
+        expected_components
+            .difference(&retried_components)
+            .copied()
+            .collect::<BTreeSet<_>>()
+    };
+    let fresh_quiescence = fresh_components
+        .difference(&before_callbacks.quiescence_failures)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let fresh_disposal = fresh_quiescence
+        .difference(&before_callbacks.disposal_failures)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let expected_quiescence = retry_quiescence
+        .union(&fresh_quiescence)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let expected_disposal = retry_disposal
+        .union(&fresh_disposal)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let actual_quiescence = event_components(events, ResourceEventKind::Quiesce);
+    let actual_disposal = event_components(events, ResourceEventKind::Dispose);
+    prop_assert_eq!(actual_quiescence.len(), expected_quiescence.len());
     prop_assert_eq!(
-        event_components(events, ResourceEventKind::Quiesce),
-        expected.clone()
+        actual_quiescence
+            .iter()
+            .map(|component| TestComponent::from_id(component))
+            .collect::<BTreeSet<_>>(),
+        expected_quiescence
     );
+    prop_assert_eq!(actual_disposal.len(), expected_disposal.len());
     prop_assert_eq!(
-        event_components(events, ResourceEventKind::Dispose),
-        expected
+        actual_disposal
+            .iter()
+            .map(|component| TestComponent::from_id(component))
+            .collect::<BTreeSet<_>>(),
+        expected_disposal
     );
     prop_assert!(
         events
@@ -717,7 +823,10 @@ fn run_deactivation_phase(
     assert_deactivation_failures(
         executor,
         &before_callbacks,
-        &expected_components,
+        &fresh_components
+            .union(&retry_deactivations)
+            .copied()
+            .collect(),
         result.is_err(),
     )?;
     assert_resource_event_history(&state)?;
@@ -755,7 +864,7 @@ fn assert_deactivation_failures(
         let failure = failure.expect("checked generated deactivation failure must exist");
         prop_assert_eq!(failure.operation, ComponentFailureOperation::Deactivation);
         prop_assert_eq!(failure.reason, reason);
-        prop_assert!(!failure.recoverable);
+        prop_assert!(failure.recoverable);
         prop_assert_eq!(
             executor.graph().state(component.as_str()),
             Some(ComponentState::Failed)
@@ -790,11 +899,16 @@ fn run_activation_phase(
         let expected =
             ordered_components(executor.graph().activation_order(), &expected_components);
         prop_assert_eq!(actual, expected);
-        prop_assert!(
-            events
-                .iter()
-                .all(|event| event.kind == ResourceEventKind::Activate)
-        );
+        if let Some(first_activation) = events
+            .iter()
+            .position(|event| event.kind == ResourceEventKind::Activate)
+        {
+            prop_assert!(
+                events[first_activation..]
+                    .iter()
+                    .all(|event| event.kind == ResourceEventKind::Activate)
+            );
+        }
     }
     assert_resource_event_history(&state)?;
     Ok(result)
@@ -826,6 +940,24 @@ fn expected_activation_components(
         .into_iter()
         .map(|component| (TestComponent::from_id(&component.id), component.state))
         .collect::<BTreeMap<_, _>>();
+    let retryable_deactivation_failures = executor
+        .graph()
+        .failures()
+        .into_iter()
+        .filter(|failure| {
+            failure.recoverable && failure.operation == ComponentFailureOperation::Deactivation
+        })
+        .map(|failure| TestComponent::from_id(&failure.component_id))
+        .collect::<BTreeSet<_>>();
+    let retryable_activation_failures = executor
+        .graph()
+        .failures()
+        .into_iter()
+        .filter(|failure| {
+            failure.recoverable && failure.operation == ComponentFailureOperation::Activation
+        })
+        .map(|failure| TestComponent::from_id(&failure.component_id))
+        .collect::<BTreeSet<_>>();
     let before_active = active_components(executor);
     let mut expected_active = before_active.clone();
     let reachable = required_closure(root);
@@ -841,6 +973,10 @@ fn expected_activation_components(
                 continue;
             };
             let can_activate = matches!(state, ComponentState::Declared | ComponentState::Pending)
+                || (state == ComponentState::Failed
+                    && (retryable_deactivation_failures.contains(&component)
+                        || (component == root
+                            && retryable_activation_failures.contains(&component))))
                 || (component == root && state == ComponentState::Disposed);
             if can_activate
                 && required_providers(component)
@@ -904,20 +1040,38 @@ fn assert_resource_event_history(callbacks: &CallbackState) -> TestCaseResult {
             .push(event.kind);
     }
     for (key, kinds) in events_by_resource {
-        let is_live = callbacks
+        let live_resource = callbacks
             .resources
             .get(&key.component)
-            .is_some_and(|(live_key, _)| *live_key == key);
-        let expected = if is_live {
-            vec![ResourceEventKind::Activate]
+            .filter(|(live_key, _)| *live_key == key);
+        prop_assert_eq!(kinds.first(), Some(&ResourceEventKind::Activate));
+        prop_assert_eq!(
+            kinds
+                .iter()
+                .filter(|kind| **kind == ResourceEventKind::Activate)
+                .count(),
+            1
+        );
+        if let Some((_, resource)) = live_resource {
+            prop_assert!(!kinds.contains(&ResourceEventKind::Dispose));
+            if resource.is_quiesced {
+                prop_assert!(
+                    kinds[1..]
+                        .iter()
+                        .all(|kind| *kind == ResourceEventKind::Quiesce)
+                );
+                prop_assert!(kinds.len() >= 2);
+            } else {
+                prop_assert_eq!(kinds, vec![ResourceEventKind::Activate]);
+            }
         } else {
-            vec![
-                ResourceEventKind::Activate,
-                ResourceEventKind::Quiesce,
-                ResourceEventKind::Dispose,
-            ]
-        };
-        prop_assert_eq!(kinds, expected);
+            prop_assert_eq!(kinds.last(), Some(&ResourceEventKind::Dispose));
+            prop_assert!(
+                kinds[1..kinds.len() - 1]
+                    .iter()
+                    .all(|kind| *kind == ResourceEventKind::Quiesce)
+            );
+        }
     }
     Ok(())
 }
@@ -942,34 +1096,20 @@ fn assert_stable_boundary(
         .filter(|component| component.state == ComponentState::Active)
         .map(|component| TestComponent::from_id(&component.id))
         .collect::<BTreeSet<_>>();
-    let scope_owners = executor
+    let scope_lifecycles = executor
         .scope_snapshots()
         .into_iter()
         .map(|scope| {
             let component = TestComponent::from_id(&scope.owner);
-            let expected_effects = if component.publishes_capability() {
-                vec![
-                    format!(
-                        "capability:{}",
-                        component
-                            .capability()
-                            .expect("publishing test component should declare a capability")
-                    ),
-                    RESOURCE_EFFECT.to_string(),
-                ]
-            } else {
-                vec![RESOURCE_EFFECT.to_string()]
-            };
-            prop_assert_eq!(scope.effects, expected_effects);
+            prop_assert!(scope.effects.contains(&RESOURCE_EFFECT.to_string()));
             prop_assert!(scope.children.is_empty());
-            Ok(component)
+            Ok((component, scope.lifecycle))
         })
-        .collect::<Result<BTreeSet<_>, TestCaseError>>()?;
-    prop_assert_eq!(scope_owners, active.clone());
-    prop_assert_eq!(
-        callbacks.resources.keys().copied().collect::<BTreeSet<_>>(),
-        active,
-    );
+        .collect::<Result<BTreeMap<_, _>, TestCaseError>>()?;
+    let scope_owners = scope_lifecycles.keys().copied().collect::<BTreeSet<_>>();
+    let resource_owners = callbacks.resources.keys().copied().collect::<BTreeSet<_>>();
+    prop_assert_eq!(&scope_owners, &resource_owners);
+    prop_assert!(active.is_subset(&resource_owners));
     let graph_capabilities = executor
         .graph()
         .capabilities()
@@ -999,9 +1139,21 @@ fn assert_stable_boundary(
         let snapshot = component_by_id
             .get(component.as_str())
             .expect("resource owner must remain declared");
-        prop_assert_eq!(snapshot.state, ComponentState::Active);
+        let lifecycle = scope_lifecycles
+            .get(component)
+            .expect("live resource must retain its scope owner");
+        match snapshot.state {
+            ComponentState::Active => {
+                prop_assert_eq!(*lifecycle, EffectScopeLifecycleSnapshot::Active);
+                prop_assert!(!resource.is_quiesced);
+            }
+            ComponentState::Failed => match lifecycle {
+                EffectScopeLifecycleSnapshot::Active => prop_assert!(!resource.is_quiesced),
+                EffectScopeLifecycleSnapshot::Finalizing => prop_assert!(resource.is_quiesced),
+            },
+            state => prop_assert!(false, "resource owner reached invalid state {state:?}"),
+        }
         prop_assert_eq!(snapshot.epoch, key.epoch);
-        prop_assert!(!resource.is_quiesced);
     }
     let all_components_are_stable = components.iter().all(|component| {
         !matches!(
@@ -1137,9 +1289,9 @@ fn execute_authority_scenario(
                 callbacks.abort_authority();
                 return Err(error);
             }
-            if let Err(message) = callbacks.prepare_authority() {
+            if callbacks.prepare_authority().is_err() {
                 callbacks.abort_authority();
-                return Err(LifecycleExecutionError::authority_preparation(message));
+                return Err(LifecycleExecutionError::authority_preparation());
             }
             executor
                 .graph
@@ -1290,6 +1442,13 @@ proptest! {
             DeactivationExpectation::AllActive,
             |executor, callbacks| executor.shutdown(callbacks),
         )?;
+        for _ in 0..3 {
+            if executor.finalization == LifecycleFinalization::Succeeded {
+                break;
+            }
+            let _ = executor.shutdown(&mut callbacks);
+        }
+        prop_assert!(executor.finalization == LifecycleFinalization::Succeeded);
         let final_state = callbacks.snapshot();
         assert_stable_boundary(&executor, &final_state)?;
         prop_assert!(executor.scope_snapshots().is_empty());

@@ -67,9 +67,17 @@ struct RegisteredEffect {
     outcome: DisposerOutcome,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum ScopeLifecycleModel {
+    #[default]
+    Active,
+    Finalizing,
+    Disposed,
+}
+
 #[derive(Default)]
 struct ScopeModel {
-    is_active: bool,
+    lifecycle: ScopeLifecycleModel,
     effects: BTreeMap<EffectLabel, RegisteredEffect>,
 }
 
@@ -84,7 +92,7 @@ impl Default for EffectModel {
     fn default() -> Self {
         Self {
             root: ScopeModel {
-                is_active: true,
+                lifecycle: ScopeLifecycleModel::Active,
                 ..ScopeModel::default()
             },
             children: BTreeMap::new(),
@@ -105,25 +113,32 @@ impl EffectModel {
         let Some(child) = self.children.get_mut(&owner) else {
             return 0;
         };
-        if !child.is_active {
+        if child.lifecycle == ScopeLifecycleModel::Disposed {
             return 0;
         }
-        child.is_active = false;
-        take_failure_count(&mut child.effects)
+        dispose_scope(child)
     }
 
     fn dispose_root(&mut self) -> usize {
-        if !self.root.is_active {
+        if self.root.lifecycle == ScopeLifecycleModel::Disposed {
             return 0;
         }
-        self.root.is_active = false;
-        let mut failures = take_failure_count(&mut self.root.effects);
+        let mut failures = dispose_effects(&mut self.root.effects);
         for child in self.children.values_mut() {
-            if child.is_active {
-                child.is_active = false;
-                failures += take_failure_count(&mut child.effects);
+            if child.lifecycle != ScopeLifecycleModel::Disposed {
+                failures += dispose_scope(child);
             }
         }
+        self.root.lifecycle = if self.root.effects.is_empty()
+            && self
+                .children
+                .values()
+                .all(|child| child.lifecycle == ScopeLifecycleModel::Disposed)
+        {
+            ScopeLifecycleModel::Disposed
+        } else {
+            ScopeLifecycleModel::Finalizing
+        };
         failures
     }
 
@@ -134,7 +149,6 @@ impl EffectModel {
             .chain(
                 self.children
                     .values()
-                    .filter(|child| child.is_active)
                     .flat_map(|child| child.effects.values()),
             )
             .map(|effect| effect.identity)
@@ -145,6 +159,8 @@ impl EffectModel {
 #[derive(Default)]
 struct ExternalRegistry {
     active: BTreeSet<EffectIdentity>,
+    transient_failures: BTreeSet<EffectIdentity>,
+    failed_attempts: BTreeSet<EffectIdentity>,
     disposal_counts: BTreeMap<EffectIdentity, usize>,
     missing_disposals: BTreeSet<EffectIdentity>,
 }
@@ -195,17 +211,22 @@ fn register_effect(
     let registry_for_dispose = Arc::clone(registry);
     let registration = scope.register(label.as_str(), move || {
         let mut registry = lock_registry(&registry_for_dispose);
+        *registry.disposal_counts.entry(identity).or_default() += 1;
+        if registry.transient_failures.contains(&identity) {
+            registry.failed_attempts.insert(identity);
+            return Err(DISPOSER_SENTINEL.to_string());
+        }
         if !registry.active.remove(&identity) {
             registry.missing_disposals.insert(identity);
         }
-        *registry.disposal_counts.entry(identity).or_default() += 1;
-        match outcome {
-            DisposerOutcome::Success => Ok(()),
-            DisposerOutcome::Failure => Err(DISPOSER_SENTINEL.to_string()),
-        }
+        Ok(())
     });
     if registration.is_ok() {
-        assert!(lock_registry(registry).active.insert(identity));
+        let mut registry = lock_registry(registry);
+        assert!(registry.active.insert(identity));
+        if outcome == DisposerOutcome::Failure {
+            registry.transient_failures.insert(identity);
+        }
     }
     registration
 }
@@ -219,11 +240,11 @@ fn apply_action(
 ) -> TestCaseResult {
     match action {
         EffectAction::CreateChild(owner) => {
-            let expected_success = model.root.is_active
+            let expected_success = model.root.lifecycle == ScopeLifecycleModel::Active
                 && !model
                     .children
                     .get(&owner)
-                    .is_some_and(|child| child.is_active);
+                    .is_some_and(|child| child.lifecycle != ScopeLifecycleModel::Disposed);
             match root.child(owner.as_str()) {
                 Ok(child) => {
                     prop_assert!(expected_success);
@@ -231,19 +252,19 @@ fn apply_action(
                     model.children.insert(
                         owner,
                         ScopeModel {
-                            is_active: true,
+                            lifecycle: ScopeLifecycleModel::Active,
                             ..ScopeModel::default()
                         },
                     );
                 }
                 Err(error) => {
                     prop_assert!(!expected_success);
-                    let expected = if model.root.is_active {
-                        EffectScopeError::DuplicateChild {
+                    let expected = match model.root.lifecycle {
+                        ScopeLifecycleModel::Active => EffectScopeError::DuplicateChild {
                             owner: owner.as_str().to_string(),
-                        }
-                    } else {
-                        EffectScopeError::Disposed
+                        },
+                        ScopeLifecycleModel::Finalizing => EffectScopeError::CleanupPending,
+                        ScopeLifecycleModel::Disposed => EffectScopeError::Disposed,
                     };
                     prop_assert_eq!(error, expected);
                 }
@@ -251,9 +272,10 @@ fn apply_action(
         }
         EffectAction::RegisterRoot(label, outcome) => {
             let identity = model.allocate_identity();
-            let expected_success = model.root.is_active && !model.root.effects.contains_key(&label);
+            let expected_success = model.root.lifecycle == ScopeLifecycleModel::Active
+                && !model.root.effects.contains_key(&label);
             let actual = register_effect(root, label, outcome, identity, registry);
-            assert_registration_result(actual, expected_success, model.root.is_active, label)?;
+            assert_registration_result(actual, expected_success, &model.root, label)?;
             if expected_success {
                 model
                     .root
@@ -265,19 +287,19 @@ fn apply_action(
         EffectAction::RegisterChild(owner, label, outcome) => {
             let identity = model.allocate_identity();
             let model_child = model.children.get_mut(&owner);
-            let expected_success = model_child
-                .as_ref()
-                .is_some_and(|child| child.is_active && !child.effects.contains_key(&label));
+            let expected_success = model_child.as_ref().is_some_and(|child| {
+                child.lifecycle == ScopeLifecycleModel::Active
+                    && !child.effects.contains_key(&label)
+            });
             let Some(child) = children.get(&owner) else {
                 prop_assert!(!expected_success);
                 return assert_consistency(root, model, registry);
             };
-            let is_active = model_child.as_ref().is_some_and(|child| child.is_active);
             let actual = register_effect(child, label, outcome, identity, registry);
-            assert_registration_result(actual, expected_success, is_active, label)?;
+            let model_child = model_child.expect("stored child handle must have a model");
+            assert_registration_result(actual, expected_success, model_child, label)?;
             if expected_success {
                 model_child
-                    .expect("successful child must exist")
                     .effects
                     .insert(label, RegisteredEffect { identity, outcome });
                 model.accepted.insert(identity);
@@ -302,18 +324,18 @@ fn apply_action(
 fn assert_registration_result(
     actual: Result<(), EffectScopeError>,
     expected_success: bool,
-    is_active: bool,
+    scope: &ScopeModel,
     label: EffectLabel,
 ) -> TestCaseResult {
     if expected_success {
         prop_assert_eq!(actual, Ok(()));
     } else {
-        let expected = if is_active {
-            EffectScopeError::DuplicateEffect {
+        let expected = match scope.lifecycle {
+            ScopeLifecycleModel::Active => EffectScopeError::DuplicateEffect {
                 label: label.as_str().to_string(),
-            }
-        } else {
-            EffectScopeError::Disposed
+            },
+            ScopeLifecycleModel::Finalizing => EffectScopeError::CleanupPending,
+            ScopeLifecycleModel::Disposed => EffectScopeError::Disposed,
         };
         prop_assert_eq!(actual, Err(expected));
     }
@@ -333,19 +355,21 @@ fn assert_consistency(
     registry: &Arc<Mutex<ExternalRegistry>>,
 ) -> TestCaseResult {
     let snapshot = root.snapshot();
-    if !model.root.is_active {
+    if model.root.lifecycle == ScopeLifecycleModel::Disposed {
         prop_assert_eq!(snapshot, None);
     } else {
-        let snapshot = snapshot.expect("active root must have a snapshot");
+        let snapshot = snapshot.expect("owned root must have a snapshot");
         prop_assert_eq!(snapshot.owner, "runtime_composition");
+        prop_assert_eq!(snapshot.lifecycle, snapshot_lifecycle(model.root.lifecycle));
         prop_assert_eq!(snapshot.effects, labels(model.root.effects.keys().copied()));
         let expected_children = model
             .children
             .iter()
-            .filter(|(_, child)| child.is_active)
+            .filter(|(_, child)| child.lifecycle != ScopeLifecycleModel::Disposed)
             .map(|(owner, child)| {
                 (
                     owner.as_str().to_string(),
+                    snapshot_lifecycle(child.lifecycle),
                     labels(child.effects.keys().copied()),
                 )
             })
@@ -353,7 +377,7 @@ fn assert_consistency(
         let actual_children = snapshot
             .children
             .into_iter()
-            .map(|child| (child.owner, child.effects))
+            .map(|child| (child.owner, child.lifecycle, child.effects))
             .collect::<Vec<_>>();
         prop_assert_eq!(actual_children, expected_children);
     }
@@ -372,13 +396,46 @@ fn labels(labels: impl IntoIterator<Item = EffectLabel>) -> Vec<String> {
         .collect()
 }
 
-fn take_failure_count(effects: &mut BTreeMap<EffectLabel, RegisteredEffect>) -> usize {
-    let failures = effects
-        .values()
-        .filter(|effect| effect.outcome == DisposerOutcome::Failure)
-        .count();
-    effects.clear();
+fn dispose_scope(scope: &mut ScopeModel) -> usize {
+    let failures = dispose_effects(&mut scope.effects);
+    scope.lifecycle = if scope.effects.is_empty() {
+        ScopeLifecycleModel::Disposed
+    } else {
+        ScopeLifecycleModel::Finalizing
+    };
     failures
+}
+
+fn dispose_effects(effects: &mut BTreeMap<EffectLabel, RegisteredEffect>) -> usize {
+    let failed_labels = effects
+        .iter()
+        .filter_map(|(label, effect)| {
+            (effect.outcome == DisposerOutcome::Failure).then_some(*label)
+        })
+        .collect::<Vec<_>>();
+    let failures = failed_labels.len();
+    effects.retain(|_, effect| effect.outcome == DisposerOutcome::Failure);
+    failures
+}
+
+fn snapshot_lifecycle(lifecycle: ScopeLifecycleModel) -> EffectScopeLifecycleSnapshot {
+    match lifecycle {
+        ScopeLifecycleModel::Active => EffectScopeLifecycleSnapshot::Active,
+        ScopeLifecycleModel::Finalizing => EffectScopeLifecycleSnapshot::Finalizing,
+        ScopeLifecycleModel::Disposed => unreachable!("disposed scope has no snapshot"),
+    }
+}
+
+fn make_cleanup_succeed(model: &mut EffectModel, registry: &Arc<Mutex<ExternalRegistry>>) {
+    for effect in model.root.effects.values_mut().chain(
+        model
+            .children
+            .values_mut()
+            .flat_map(|child| child.effects.values_mut()),
+    ) {
+        effect.outcome = DisposerOutcome::Success;
+    }
+    lock_registry(registry).transient_failures.clear();
 }
 
 fn lock_registry(
@@ -415,8 +472,10 @@ proptest! {
             )?;
         }
 
+        make_cleanup_succeed(&mut model, &registry);
         let expected_failures = model.dispose_root();
-        assert_dispose_report(&root.dispose(), expected_failures)?;
+        prop_assert_eq!(expected_failures, 0);
+        assert_dispose_report(&root.dispose(), 0)?;
         assert_dispose_report(&root.dispose(), 0)?;
         assert_consistency(&root, &model, &registry)?;
 
@@ -427,6 +486,13 @@ proptest! {
             registry.disposal_counts.keys().copied().collect::<BTreeSet<_>>(),
             model.accepted,
         );
-        prop_assert!(registry.disposal_counts.values().all(|count| *count == 1));
+        prop_assert!(registry.disposal_counts.values().all(|count| *count >= 1));
+        let all_failed_effects_were_retried = registry.failed_attempts.iter().all(|identity| {
+            registry
+                .disposal_counts
+                .get(identity)
+                .is_some_and(|count| *count >= 2)
+        });
+        prop_assert!(all_failed_effects_were_retried);
     }
 }

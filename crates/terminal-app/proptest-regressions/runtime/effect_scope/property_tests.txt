@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc d022cb983d256ce9e607ef229b5b95f820ecc199d622d6415e76686da3087c95 # shrinks to actions = [CreateChild(Gamma), RegisterRoot(First, Failure)]

@@ -9,7 +9,7 @@ use super::{
         LlmPortCapability, PermissionPolicyCapability, PromptAssemblyCapability,
         ToolCatalogCapability,
     },
-    effect_scope::EffectScopeSnapshot,
+    effect_scope::{EffectScopeLifecycleSnapshot, EffectScopeSnapshot},
     lifecycle::{
         CapabilityKey, ComponentFailureSnapshot, ComponentSnapshot, OptionalCapabilitySnapshot,
         PendingComponentSnapshot,
@@ -18,7 +18,7 @@ use super::{
     prompt_assembly::PromptContributionSnapshot,
 };
 
-const COMPOSITION_SNAPSHOT_VERSION: u32 = 9;
+const COMPOSITION_SNAPSHOT_VERSION: u32 = 10;
 
 /// `RuntimeCompositionSnapshot` 是默认 runtime composition 的只读诊断投影。
 ///
@@ -269,6 +269,7 @@ struct FailureSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct EffectScopeOwnershipSnapshot {
     owner: String,
+    lifecycle: String,
     effects: Vec<String>,
     children: Vec<EffectScopeOwnershipSnapshot>,
 }
@@ -566,6 +567,11 @@ impl AppRuntimeCoordinator {
 fn effect_scope_snapshot(snapshot: EffectScopeSnapshot) -> EffectScopeOwnershipSnapshot {
     EffectScopeOwnershipSnapshot {
         owner: snapshot.owner,
+        lifecycle: match snapshot.lifecycle {
+            EffectScopeLifecycleSnapshot::Active => "active",
+            EffectScopeLifecycleSnapshot::Finalizing => "finalizing",
+        }
+        .to_string(),
         effects: snapshot.effects,
         children: snapshot
             .children
@@ -581,6 +587,12 @@ fn validate_effect_scopes(scopes: &[EffectScopeOwnershipSnapshot]) -> Result<(),
         "effect scope owner",
     )?;
     for scope in scopes {
+        if !matches!(scope.lifecycle.as_str(), "active" | "finalizing") {
+            return Err(format!(
+                "effect scope {} has invalid lifecycle {}",
+                scope.owner, scope.lifecycle
+            ));
+        }
         ensure_sorted_unique(scope.effects.iter(), "effect label")?;
         validate_effect_scopes(&scope.children)?;
     }

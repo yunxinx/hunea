@@ -189,7 +189,7 @@ fn composition_snapshot_is_deterministic_and_redacted() {
 
     let snapshot: serde_json::Value =
         serde_json::from_str(&json).expect("snapshot JSON should decode");
-    assert_eq!(snapshot["schema_version"], 9);
+    assert_eq!(snapshot["schema_version"], 10);
     assert_eq!(snapshot["failures"], serde_json::json!([]));
     assert_eq!(
         snapshot["capabilities"],
@@ -379,61 +379,73 @@ fn composition_snapshot_is_deterministic_and_redacted() {
         serde_json::json!([
             {
                 "owner": "agent_runtime",
+                "lifecycle": "active",
                 "effects": ["dependency:extension_hooks", "dependency:runtime_event_stream"],
                 "children": [],
             },
             {
                 "owner": "approval_provider",
+                "lifecycle": "active",
                 "effects": ["approval_provider_registration", "capability:approval_provider"],
                 "children": [],
             },
             {
                 "owner": "context_budget",
+                "lifecycle": "active",
                 "effects": ["dependency:runtime_event_stream"],
                 "children": [],
             },
             {
                 "owner": "extension_hooks",
+                "lifecycle": "active",
                 "effects": ["capability:extension_hooks"],
                 "children": [],
             },
             {
                 "owner": "llm_port",
+                "lifecycle": "active",
                 "effects": ["capability:llm_port", "capability:model_catalog", "provider_registrations"],
                 "children": [],
             },
             {
                 "owner": "model_refresh",
+                "lifecycle": "active",
                 "effects": ["dependency:runtime_event_stream"],
                 "children": [],
             },
             {
                 "owner": "permission_policy",
+                "lifecycle": "active",
                 "effects": ["capability:permission_policy", "dependency:runtime_event_stream"],
                 "children": [],
             },
             {
                 "owner": "prompt_assembly",
+                "lifecycle": "active",
                 "effects": ["capability:prompt_assembly", "prompt_registration"],
                 "children": [],
             },
             {
                 "owner": "runtime_event_stream",
+                "lifecycle": "active",
                 "effects": ["capability:runtime_event_stream"],
                 "children": [],
             },
             {
                 "owner": "runtime_wake_binding",
+                "lifecycle": "active",
                 "effects": [],
                 "children": [],
             },
             {
                 "owner": "session_persistence",
+                "lifecycle": "active",
                 "effects": ["backend_registration", "capability:session_persistence", "dependency:runtime_event_stream"],
                 "children": [],
             },
             {
                 "owner": "tool_catalog",
+                "lifecycle": "active",
                 "effects": ["capability:tool_catalog", "tool_registrations"],
                 "children": [],
             },

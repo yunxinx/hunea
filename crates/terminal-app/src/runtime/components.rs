@@ -680,8 +680,15 @@ pub(super) struct RuntimeComponents {
     #[cfg(test)]
     agent_grant_materialization_probe: Option<Arc<AgentRuntimeGrantMaterializationProbe>>,
     pub(super) lifecycle: ComponentLifecycleExecutor,
-    is_shutdown: bool,
-    shutdown_lifecycle_error: Option<String>,
+    finalization: RuntimeFinalization,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum RuntimeFinalization {
+    #[default]
+    Open,
+    Finalizing,
+    Succeeded,
 }
 
 fn construct_agent_runtime(
@@ -890,8 +897,7 @@ impl RuntimeComponents {
             #[cfg(test)]
             agent_grant_materialization_probe: None,
             lifecycle: ComponentLifecycleExecutor::default(),
-            is_shutdown: false,
-            shutdown_lifecycle_error: None,
+            finalization: RuntimeFinalization::Open,
         };
         if let Err(error) = components.initialize_lifecycle(has_session_backend) {
             let error = match components.shutdown() {
@@ -908,7 +914,7 @@ impl RuntimeComponents {
     /// discovery/stdio 启动在 async 边界外完成；此处只接收 opaque set，并让 graph 决定
     /// `tool_catalog` 缺失时的 Pending 状态。默认 composition 不包含该 component。
     pub(super) fn mount_extension_bundle(&mut self, bundle: ExtensionBundle) -> Result<(), String> {
-        if self.is_shutdown {
+        if self.finalization != RuntimeFinalization::Open {
             return Err("Runtime components are shut down".to_string());
         }
         let source = bundle
@@ -1053,7 +1059,7 @@ impl RuntimeComponents {
         desired: DesiredPluginComposition,
         mode: ComponentLifecycleMode,
     ) -> Result<(), String> {
-        if self.is_shutdown {
+        if self.finalization != RuntimeFinalization::Open {
             return Err("Runtime components are shut down".to_string());
         }
         let agent_action = self.classify_agent_plugin_reconciliation(&desired)?;
@@ -1148,7 +1154,7 @@ impl RuntimeComponents {
     }
 
     pub(super) fn bind_runtime_wake(&mut self, wake: RuntimeWake) -> Result<(), String> {
-        if self.is_shutdown {
+        if self.finalization != RuntimeFinalization::Open {
             return Err("Runtime components are shut down".to_string());
         }
         let capability = CapabilityKey::from(RUNTIME_WAKE.capability);
@@ -1275,7 +1281,7 @@ impl RuntimeComponents {
     }
 
     pub(super) fn reset_after_clear(&mut self, options: &AppRuntimeOptions) -> Result<(), String> {
-        if self.is_shutdown {
+        if self.finalization != RuntimeFinalization::Open {
             return Err("Runtime components are shut down".to_string());
         }
         let replaced = [LLM_PORT, MODEL_CATALOG, PROMPT_ASSEMBLY, TOOL_CATALOG];
@@ -1359,7 +1365,7 @@ impl RuntimeComponents {
         options: &AppRuntimeOptions,
         store: Arc<dyn session_store::SessionStore>,
     ) -> Result<(), String> {
-        if self.is_shutdown {
+        if self.finalization != RuntimeFinalization::Open {
             return Err("Runtime components are shut down".to_string());
         }
         self.lifecycle
@@ -1381,6 +1387,14 @@ impl RuntimeComponents {
         }) {
             let cleanup_error = error.to_string();
             self.activation_staging.is_session_backend_replacement = false;
+            self.with_lifecycle(|lifecycle, components| {
+                lifecycle.deactivate_components(
+                    [AGENT_RUNTIME_COMPONENT, SESSION_PERSISTENCE.component_id],
+                    components,
+                    ComponentLifecycleMode::Reconfigure,
+                )
+            })
+            .map_err(|retry_error| format!("{cleanup_error}; {retry_error}"))?;
             self.restore_ephemeral_session_consumers(options)
                 .map_err(|fallback_error| format!("{cleanup_error}; {fallback_error}"))?;
             return Err(cleanup_error);
@@ -1501,7 +1515,7 @@ impl RuntimeComponents {
         provider_id: impl Into<String>,
         factory: Arc<dyn super::permission_policy::ApprovalProviderFactory>,
     ) -> Result<(), String> {
-        if self.is_shutdown {
+        if self.finalization != RuntimeFinalization::Open {
             return Err("Runtime components are shut down".to_string());
         }
         let replaced = [APPROVAL_PROVIDER, PERMISSION_POLICY];
@@ -1962,21 +1976,27 @@ impl RuntimeComponents {
     }
 
     pub(super) fn shutdown(&mut self) -> Result<(), String> {
-        if !self.is_shutdown {
-            self.is_shutdown = true;
-            self.shutdown_lifecycle_error = self
-                .with_lifecycle(|lifecycle, components| lifecycle.shutdown(components))
-                .err()
-                .map(|error| format!("{error:?}"));
+        if self.finalization == RuntimeFinalization::Succeeded {
+            return Ok(());
         }
-        let agent_error = self
-            .agent_runtime
-            .shutdown()
+        self.finalization = RuntimeFinalization::Finalizing;
+        let lifecycle_error = self
+            .with_lifecycle(|lifecycle, components| lifecycle.shutdown(components))
             .err()
-            .map(|_| "Agent runtime finalization failed".to_string());
+            .map(|error| format!("{error:?}"));
+        let agent_error = lifecycle_error.is_none().then(|| {
+            self.agent_runtime
+                .shutdown()
+                .err()
+                .map(|_| "Agent runtime finalization failed".to_string())
+        });
+        let agent_error = agent_error.flatten();
         self.is_agent_replacement_activating = false;
-        match (self.shutdown_lifecycle_error.clone(), agent_error) {
-            (None, None) => Ok(()),
+        match (lifecycle_error, agent_error) {
+            (None, None) => {
+                self.finalization = RuntimeFinalization::Succeeded;
+                Ok(())
+            }
             (Some(error), None) | (None, Some(error)) => Err(error),
             (Some(lifecycle), Some(agent)) => Err(format!("{lifecycle}; {agent}")),
         }
@@ -2830,6 +2850,19 @@ mod tests {
                 lifecycle_trace,
                 activation_failure: false,
                 shutdown_failures_remaining: usize::MAX,
+                shutdown_calls: None,
+                drop_count: None,
+                owned_grants: None,
+                is_shutdown: true,
+                is_finalized: false,
+            }
+        }
+
+        fn with_transient_shutdown_failure(lifecycle_trace: Arc<Mutex<Vec<&'static str>>>) -> Self {
+            Self {
+                lifecycle_trace,
+                activation_failure: false,
+                shutdown_failures_remaining: 1,
                 shutdown_calls: None,
                 drop_count: None,
                 owned_grants: None,
@@ -5106,18 +5139,56 @@ mod tests {
 
         assert!(!first.contains("SENSITIVE_AGENT_CLEANUP_FAILURE"));
         assert!(!second.contains("SENSITIVE_AGENT_CLEANUP_FAILURE"));
-        assert!(components.is_shutdown);
-        let cached_lifecycle_error = components
-            .shutdown_lifecycle_error
-            .as_deref()
-            .expect("first shutdown failure must remain observable");
-        assert!(first.contains(cached_lifecycle_error));
-        assert!(second.contains(cached_lifecycle_error));
+        assert!(components.finalization == RuntimeFinalization::Finalizing);
+        assert!(first.contains("LifecycleExecutionError"));
+        assert!(second.contains("LifecycleExecutionError"));
         assert_eq!(
             *lifecycle_trace
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
-            ["activate", "shutdown", "shutdown", "shutdown"]
+            ["activate", "shutdown", "shutdown"]
+        );
+    }
+
+    #[test]
+    fn repeated_shutdown_converges_after_transient_agent_cleanup_failure() {
+        let mut options = AppRuntimeOptions::default();
+        let lifecycle_trace = Arc::new(Mutex::new(Vec::new()));
+        let factory_trace = Arc::clone(&lifecycle_trace);
+        let mut components = RuntimeComponents::new_with_agent_runtime_factory(
+            &mut options,
+            AgentRuntimeFactory::new(move |_grants| {
+                Ok(Box::new(
+                    RecordingAgentRuntime::with_transient_shutdown_failure(Arc::clone(
+                        &factory_trace,
+                    )),
+                ))
+            }),
+        )
+        .expect("runtime should activate through the transient shutdown fixture");
+
+        components
+            .shutdown()
+            .expect_err("first Agent cleanup attempt should remain pending");
+        assert!(components.finalization == RuntimeFinalization::Finalizing);
+        components
+            .shutdown()
+            .expect("second Agent cleanup attempt should converge");
+        assert!(components.finalization == RuntimeFinalization::Succeeded);
+        let completed_trace = lifecycle_trace
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(completed_trace, ["activate", "shutdown", "shutdown"]);
+
+        components
+            .shutdown()
+            .expect("completed shutdown should remain idempotent");
+        assert_eq!(
+            *lifecycle_trace
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            completed_trace
         );
     }
 
@@ -6185,7 +6256,8 @@ mod tests {
             )
             .expect_err("old backend flush failure must abort replacement");
 
-        assert!(error.contains("injected flush failure"));
+        assert!(error.contains("component session_persistence quiescence failed"));
+        assert!(!error.contains("injected flush failure"));
         assert!(components.session_port.is_none());
         assert!(components.session_backend_views.is_none());
         assert!(
@@ -6342,7 +6414,8 @@ mod tests {
             .reset_after_clear(&options)
             .expect_err("provider epoch exhaustion should reject reset before cleanup");
 
-        assert!(error.contains("component `llm_port` activation epoch is exhausted"));
+        assert!(error.contains("component llm_port graph failed"));
+        assert!(!error.contains("activation epoch is exhausted"));
         assert_eq!(components.lifecycle.capabilities(), capabilities_before);
         components
             .validate_context_alignment()
@@ -6379,7 +6452,8 @@ mod tests {
             )
             .expect_err("observed consumer exhaustion should reject replacement before cleanup");
 
-        assert!(error.contains("component `agent_runtime` activation epoch is exhausted"));
+        assert!(error.contains("component agent_runtime graph failed"));
+        assert!(!error.contains("activation epoch is exhausted"));
         assert_eq!(components.lifecycle.capabilities(), capabilities_before);
         assert!(components.session_port.is_some());
         assert!(components.session_backend_views.is_some());

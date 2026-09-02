@@ -1,5 +1,6 @@
 pub mod builtin;
 
+mod activity_policy;
 mod catalog;
 mod definition;
 mod execution;
@@ -11,6 +12,7 @@ mod registry;
 mod schema;
 mod tool_error;
 
+pub use activity_policy::ToolActivityPayloadPolicy;
 pub use catalog::{ToolCatalog, ToolCatalogError, ToolRegistration};
 pub use definition::ToolDefinition;
 pub use execution::{

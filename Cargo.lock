@@ -2868,6 +2868,8 @@ dependencies = [
  "thiserror 2.0.20",
  "tiktoken",
  "toml",
+ "unicode-segmentation",
+ "unicode-width",
 ]
 
 [[package]]

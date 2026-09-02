@@ -2,6 +2,8 @@ use crate::prompt_assembly::PromptSourceOrigin;
 use provider_protocol::{ContentBlock, ConversationItem, ImageDetail};
 use serde::{Deserialize, Serialize};
 
+use crate::agent::{AgentLaunchSnapshot, AgentOutcomeSnapshot};
+
 use super::activity::{RuntimeTerminalSnapshot, RuntimeToolActivity};
 
 /// `transcript_image_label_text` 返回 transcript 中本地图片附件的可见占位符。
@@ -75,6 +77,8 @@ pub enum TranscriptReplayItem {
     System {
         content: String,
     },
+    AgentLaunch(AgentLaunchSnapshot),
+    AgentOutcome(AgentOutcomeSnapshot),
 }
 
 impl TranscriptReplayItem {
@@ -95,6 +99,12 @@ impl TranscriptReplayItem {
                 .filter(|command| !command.is_empty())
                 .or_else(|| (!snapshot.output.is_empty()).then_some(snapshot.output.as_str()))
                 .unwrap_or(snapshot.terminal_id.as_str()),
+            Self::AgentLaunch(snapshot) => snapshot
+                .children
+                .first()
+                .map(|child| child.title.as_str())
+                .unwrap_or("Agent launch"),
+            Self::AgentOutcome(snapshot) => snapshot.title.as_str(),
         }
     }
 }

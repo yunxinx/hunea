@@ -11,7 +11,7 @@ use std::{
 
 use tokio_util::sync::CancellationToken;
 use tool_runtime::{
-    ToolCall, ToolDefinition, ToolExecutionContext, ToolExecutionFuture, ToolExecutor,
+    Tool, ToolCall, ToolDefinition, ToolExecutionContext, ToolExecutionFuture, ToolExecutor,
     ToolExecutorRegistry, ToolPermissionPreview, ToolResult,
 };
 
@@ -51,12 +51,13 @@ impl fmt::Display for AgentCapabilityKey {
     }
 }
 
-/// Agent context owner 是 control-plane 创建的稳定 static identity，不接受 delivery text。
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(super) struct AgentContextOwner(&'static str);
+/// Agent context owner 是 control-plane 创建的稳定 identity，不接受 delivery text。
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(super) struct AgentContextOwner(String);
 
 impl AgentContextOwner {
-    pub(super) fn try_new(value: &'static str) -> Result<Self, AgentContextOwnerError> {
+    pub(super) fn try_new(value: impl Into<String>) -> Result<Self, AgentContextOwnerError> {
+        let value = value.into();
         if value.is_empty() {
             return Err(AgentContextOwnerError::Empty);
         }
@@ -79,8 +80,8 @@ impl AgentContextOwner {
         Ok(Self(value))
     }
 
-    pub(super) const fn as_str(self) -> &'static str {
-        self.0
+    pub(super) fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -95,7 +96,7 @@ impl fmt::Debug for AgentContextOwner {
 
 impl fmt::Display for AgentContextOwner {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.0)
+        formatter.write_str(&self.0)
     }
 }
 
@@ -561,6 +562,36 @@ impl AgentCapabilityContext {
         }
     }
 
+    /// 将额外的 runtime capability generation 纳入 root context 的 reactive ownership。
+    ///
+    /// provider generation 撤销时会立即关闭整棵 Agent context tree；callback 只持有
+    /// cleanup handle，不把 capability value 或 child runtime authority带回 Context。
+    pub(super) fn retain_generation(
+        &self,
+        guard: CapabilityGenerationGuard,
+    ) -> Result<(), AgentCapabilityContextError> {
+        self.validate()?;
+        let cleanup = self.state.scope.cleanup_handle();
+        let subscription = guard
+            .subscribe_revocation(move || cleanup.dispose().is_success().then_some(()).ok_or(()))
+            .map_err(|_| AgentCapabilityContextError::Unavailable)?;
+        self.state
+            .revocation_subscriptions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(subscription);
+        if self.validate().is_err() {
+            let _ = self.dispose();
+            return Err(AgentCapabilityContextError::Unavailable);
+        }
+        Ok(())
+    }
+
+    /// 先关闭 descendant admission 并取消 in-flight work，inverse 留给后续 dispose。
+    pub(super) fn begin_disposal(&self) {
+        self.state.scope.begin_disposal();
+    }
+
     pub(super) fn dispose(&self) -> AgentContextDisposeReport {
         let report = self.state.scope.dispose();
         AgentContextDisposeReport::from_effect_report(report)
@@ -578,7 +609,7 @@ impl AgentCapabilityContext {
             })
             .collect::<Vec<_>>();
         AgentCapabilityContextSnapshot {
-            owner: self.state.owner,
+            owner: self.state.owner.clone(),
             epoch: self.state.epoch,
             capability_count: capabilities.len(),
             effect_count: scope_snapshot
@@ -597,6 +628,11 @@ impl AgentCapabilityContext {
         } else {
             Err(AgentCapabilityContextError::Unavailable)
         }
+    }
+
+    /// Child adapter 在每个 command boundary 验证其 owner context 仍然有效。
+    pub(super) fn is_current(&self) -> bool {
+        self.validate().is_ok()
     }
 }
 
@@ -680,6 +716,25 @@ pub(super) struct AgentScopedToolView {
 }
 
 impl AgentScopedToolView {
+    /// Construction boundary 使用的同源 filtered registry snapshot。
+    ///
+    /// 该 snapshot 只能由已验证 token 的 scoped view 生成；child adapter 不接触 host
+    /// catalog。context disposal 会先取消 child scope，再由 orchestrator quiesce adapter。
+    pub(super) fn construction_registry(
+        &self,
+    ) -> Result<ToolExecutorRegistry, AgentCapabilityContextError> {
+        self.token.validate()?;
+        let mut registry = ToolExecutorRegistry::new();
+        for tool in self.registry.tools() {
+            registry.insert(AgentScopedTool {
+                tool,
+                token: self.token.clone(),
+                cancellation: self.cancellation.clone(),
+            });
+        }
+        Ok(registry)
+    }
+
     pub(super) fn definitions(&self) -> Result<Vec<ToolDefinition>, AgentCapabilityContextError> {
         self.token.validate()?;
         Ok(self.registry.definitions().definitions().cloned().collect())
@@ -692,6 +747,74 @@ impl AgentScopedToolView {
     ) -> Result<Option<ToolPermissionPreview>, AgentCapabilityContextError> {
         self.token.validate()?;
         Ok(self.registry.permission_preview(call, cancellation))
+    }
+}
+
+/// Native child loop 仍消费既有 `ToolExecutorRegistry`，因此每个导出 tool 都用同一个
+/// context token 与 lifecycle cancellation 包装；definitions、preview 与 execution 不会
+/// 绕过 scoped authority。
+struct AgentScopedTool {
+    tool: Arc<dyn Tool>,
+    token: AgentContextToken,
+    cancellation: CancellationToken,
+}
+
+impl Tool for AgentScopedTool {
+    fn definition(&self) -> ToolDefinition {
+        self.tool.definition()
+    }
+
+    fn execute<'a>(
+        &'a self,
+        call: ToolCall,
+        cancellation: &'a CancellationToken,
+    ) -> ToolExecutionFuture<'a> {
+        self.execute_with_context(call, ToolExecutionContext::new(cancellation))
+    }
+
+    fn execute_with_context<'a>(
+        &'a self,
+        call: ToolCall,
+        context: ToolExecutionContext<'a>,
+    ) -> ToolExecutionFuture<'a> {
+        if self.token.validate().is_err() {
+            return Box::pin(
+                async move { ToolResult::error(call.call_id, SCOPED_TOOL_UNAVAILABLE) },
+            );
+        }
+
+        let call_id = call.call_id.clone();
+        let tool = Arc::clone(&self.tool);
+        let token = self.token.clone();
+        let scope_cancellation = self.cancellation.clone();
+        let execution_cancellation = context.cancellation().child_token();
+        Box::pin(async move {
+            let context = context.with_cancellation(&execution_cancellation);
+            let result = tokio::select! {
+                biased;
+                () = scope_cancellation.cancelled() => {
+                    execution_cancellation.cancel();
+                    return ToolResult::error(call_id, SCOPED_TOOL_UNAVAILABLE);
+                }
+                result = tool.execute_with_context(call, context) => result,
+            };
+            if token.validate().is_ok() {
+                result
+            } else {
+                ToolResult::error(call_id, SCOPED_TOOL_UNAVAILABLE)
+            }
+        })
+    }
+
+    fn permission_preview(
+        &self,
+        call: &ToolCall,
+        cancellation: &CancellationToken,
+    ) -> Option<ToolPermissionPreview> {
+        if self.token.validate().is_err() || self.cancellation.is_cancelled() {
+            return None;
+        }
+        self.tool.permission_preview(call, cancellation)
     }
 }
 
@@ -1388,7 +1511,11 @@ mod tests {
                 AgentChildCapabilityGrants::empty().shadow_tools(registry),
             )
             .expect("blocking child should mount");
-        let tools = child.tools().expect("blocking tools should resolve");
+        let tools = child
+            .tools()
+            .expect("blocking tools should resolve")
+            .construction_registry()
+            .expect("Native child registry should retain scoped authority");
         let execution = tokio::spawn(async move {
             let cancellation = CancellationToken::new();
             tools
@@ -1967,7 +2094,9 @@ mod tests {
             .expect("blocking child should mount");
         let blocking_tools = blocking_child
             .tools()
-            .expect("blocking tools should resolve");
+            .expect("blocking tools should resolve")
+            .construction_registry()
+            .expect("Native child registry should retain scoped authority");
         let execution = tokio::spawn(async move {
             blocking_tools
                 .execute_tool(

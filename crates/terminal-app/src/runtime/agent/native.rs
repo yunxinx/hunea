@@ -23,9 +23,9 @@ use tool_runtime::{ToolDefinition, ToolExecutorRegistry};
 #[cfg(test)]
 use super::AgentRuntimeTestHarness;
 use super::{
-    AgentCommand, AgentCommandReceipt, AgentContextBudgetSnapshot,
-    AgentEmptySessionConfigurationOutcome, AgentEvent, AgentEventKind, AgentId,
-    AgentPermissionConstructionGrant, AgentPromptConstructionGrant, AgentRuntime,
+    AgentChildRuntimeConstructionGrants, AgentCommand, AgentCommandReceipt,
+    AgentContextBudgetSnapshot, AgentEmptySessionConfigurationOutcome, AgentEvent, AgentEventKind,
+    AgentId, AgentPermissionConstructionGrant, AgentPromptConstructionGrant, AgentRuntime,
     AgentRuntimeActivationGrants, AgentRuntimeActivity, AgentRuntimeConstructionGrants,
     AgentRuntimeError, AgentRuntimePort, AgentSessionCapability, AgentSessionConstructionGrant,
     AgentSessionRestore, AgentSessionSnapshot, AgentToolConstructionGrant, AgentTurnId,
@@ -61,8 +61,15 @@ struct ActiveNativeTurn {
     target: RuntimeTarget,
 }
 
+enum NativeAgentAuthority {
+    Main,
+    Child(crate::runtime::agent_capability_context::AgentCapabilityContext),
+}
+
 /// `NativeAgentRuntime` 封装当前 conversation worker 的完整 turn choreography。
 pub struct NativeAgentRuntime {
+    owned_agent_id: AgentId,
+    authority: NativeAgentAuthority,
     worker: ConversationWorker,
     extension_hooks: Option<ExtensionHookRegistry>,
     llm_port: LlmPort,
@@ -93,16 +100,71 @@ pub struct NativeAgentRuntime {
 pub(in crate::runtime) fn construct_native_agent_runtime(
     grants: AgentRuntimeConstructionGrants,
 ) -> Result<Box<dyn AgentRuntimePort>, String> {
-    NativeAgentRuntime::new(grants).map(|runtime| Box::new(runtime) as Box<dyn AgentRuntimePort>)
+    NativeAgentRuntime::new_for_agent(
+        AgentId::MAIN,
+        NativeAgentAuthority::Main,
+        grants,
+        RuntimeEventNotifier::default(),
+    )
+    .map(|runtime| Box::new(runtime) as Box<dyn AgentRuntimePort>)
+}
+
+/// Native plugin 提供的 typed child construction capability。
+pub(in crate::runtime) fn construct_native_child_agent_runtime(
+    grants: AgentChildRuntimeConstructionGrants,
+) -> Result<Box<dyn AgentRuntimePort>, String> {
+    let AgentChildRuntimeConstructionGrants {
+        owned_agent_id,
+        capability_context,
+        event_notifier,
+        extension_hooks,
+        llm_port,
+        permission_policy,
+        permission_provider_id,
+        request_policy,
+        loaded_models,
+        dynamic_environment_observer,
+        hunea_config_dir,
+    } = grants;
+    let tools = capability_context
+        .tools()
+        .map_err(|error| error.to_string())?
+        .construction_registry()
+        .map_err(|error| error.to_string())?;
+    let prompt_assembly = capability_context
+        .prompt()
+        .map_err(|error| error.to_string())?
+        .session_snapshot()
+        .map_err(|error| error.to_string())?;
+    let prompt_assembly_tool_definitions = tools
+        .definitions()
+        .definitions()
+        .cloned()
+        .collect::<Vec<_>>();
+    let native_grants = AgentRuntimeConstructionGrants::empty()
+        .with_extension_hooks(extension_hooks)
+        .with_llm_port(llm_port)
+        .with_loaded_models(loaded_models)
+        .with_permission(request_policy, permission_policy, permission_provider_id)
+        .with_prompt(
+            dynamic_environment_observer,
+            hunea_config_dir,
+            prompt_assembly,
+        )
+        .with_tools(tools, prompt_assembly_tool_definitions)
+        // Child Agents are intentionally sessionless in this slice. They use an in-memory
+        // ProviderConversation and never become a second user-session composition root.
+        .with_session(None, None);
+    NativeAgentRuntime::new_for_agent(
+        owned_agent_id,
+        NativeAgentAuthority::Child(capability_context),
+        native_grants,
+        event_notifier,
+    )
+    .map(|runtime| Box::new(runtime) as Box<dyn AgentRuntimePort>)
 }
 
 impl NativeAgentRuntime {
-    // provider identity 必须与传入的 PermissionPolicy generation 成对传递；将其
-    // 隐藏到全局默认值会让 provider replacement 后的 turn 错误地访问旧注册。
-    fn new(grants: AgentRuntimeConstructionGrants) -> Result<Self, String> {
-        Self::new_with_notifier(grants, RuntimeEventNotifier::default())
-    }
-
     #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_for_test(
@@ -133,13 +195,27 @@ impl NativeAgentRuntime {
             )
             .with_tools(session_workspace_tools, prompt_assembly_tool_definitions)
             .with_session(options.session_header_template.clone(), session_port);
-        Self::new_with_notifier(grants, event_notifier)
+        Self::new_for_agent(
+            AgentId::MAIN,
+            NativeAgentAuthority::Main,
+            grants,
+            event_notifier,
+        )
     }
 
-    fn new_with_notifier(
+    fn new_for_agent(
+        owned_agent_id: AgentId,
+        authority: NativeAgentAuthority,
         grants: AgentRuntimeConstructionGrants,
         event_notifier: RuntimeEventNotifier,
     ) -> Result<Self, String> {
+        let has_valid_authority = match &authority {
+            NativeAgentAuthority::Main => owned_agent_id == AgentId::MAIN,
+            NativeAgentAuthority::Child(_) => owned_agent_id != AgentId::MAIN,
+        };
+        if !has_valid_authority {
+            return Err("Native Agent construction identity is invalid".to_string());
+        }
         let AgentRuntimeConstructionGrants {
             extension_hooks,
             llm_port,
@@ -189,6 +265,8 @@ impl NativeAgentRuntime {
         let event_stream =
             RuntimeContext::event_stream_lease(event_notifier.clone(), "native_agent_bootstrap");
         Ok(Self {
+            owned_agent_id,
+            authority,
             worker: ConversationWorker::new((*event_stream).clone()),
             extension_hooks: Some(extension_hooks),
             llm_port,
@@ -326,7 +404,7 @@ impl NativeAgentRuntime {
         let request = AgentTurnRequest::from_conversation_request(request);
         let (provider_request, transcript_user_message) = request.into_parts();
         self.pending_turn = Some(PendingNativeTurn {
-            agent_id: AgentId::MAIN,
+            agent_id: self.owned_agent_id,
             turn_id: AgentTurnId::new(1),
             target: provider_request.target(),
             provider_request,
@@ -369,7 +447,7 @@ impl NativeAgentRuntime {
         if self.is_shutdown {
             return Err(AgentRuntimeError::Disposed);
         }
-        if agent_id != AgentId::MAIN {
+        if agent_id != self.owned_agent_id {
             return Err(AgentRuntimeError::UnknownAgent);
         }
         if self.is_busy() {
@@ -513,7 +591,7 @@ impl NativeAgentRuntime {
         if self.is_shutdown {
             return Err(AgentRuntimeError::Disposed);
         }
-        if agent_id != AgentId::MAIN {
+        if agent_id != self.owned_agent_id {
             return Err(AgentRuntimeError::UnknownAgent);
         }
         Ok(())
@@ -911,7 +989,6 @@ impl AgentRuntimePort for NativeAgentRuntime {
         if self.is_shutdown {
             return Ok(());
         }
-        self.is_shutdown = true;
         self.pending_turn = None;
         self.pending_events.clear();
         self.dynamic_environment_worker.shutdown();
@@ -921,8 +998,11 @@ impl AgentRuntimePort for NativeAgentRuntime {
             .map_err(AgentRuntimeError::Shutdown);
         self.cancel_permission_turn();
         self.active_turn = None;
-        self.extension_hooks = None;
-        self.event_stream = None;
+        if worker_result.is_ok() {
+            self.is_shutdown = true;
+            self.extension_hooks = None;
+            self.event_stream = None;
+        }
         worker_result
     }
 
@@ -935,11 +1015,17 @@ impl AgentRuntimePort for NativeAgentRuntime {
     }
 
     fn session(&self) -> Option<&dyn AgentSessionCapability> {
-        Some(self)
+        match &self.authority {
+            NativeAgentAuthority::Main => Some(self),
+            NativeAgentAuthority::Child(_) => None,
+        }
     }
 
     fn session_mut(&mut self) -> Option<&mut dyn AgentSessionCapability> {
-        Some(self)
+        match &self.authority {
+            NativeAgentAuthority::Main => Some(self),
+            NativeAgentAuthority::Child(_) => None,
+        }
     }
 
     #[cfg(test)]
@@ -1060,6 +1146,11 @@ impl AgentRuntime for NativeAgentRuntime {
         &mut self,
         command: AgentCommand,
     ) -> Result<AgentCommandReceipt, AgentRuntimeError> {
+        if let NativeAgentAuthority::Child(context) = &self.authority
+            && !context.is_current()
+        {
+            return Err(AgentRuntimeError::Disposed);
+        }
         match command {
             AgentCommand::SubmitTurn {
                 agent_id,
@@ -1091,9 +1182,11 @@ impl AgentRuntime for NativeAgentRuntime {
 
     fn shutdown(&mut self) -> Result<(), AgentRuntimeError> {
         let worker_result = <Self as AgentRuntimePort>::suspend(self);
-        self.provider_conversation = ProviderConversation::default();
-        self.session_workspace_tools = ToolExecutorRegistry::new();
-        self.prompt_assembly_tool_definitions.clear();
+        if worker_result.is_ok() {
+            self.provider_conversation = ProviderConversation::default();
+            self.session_workspace_tools = ToolExecutorRegistry::new();
+            self.prompt_assembly_tool_definitions.clear();
+        }
         worker_result
     }
 }

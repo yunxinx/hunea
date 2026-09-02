@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use super::{ToolKind, ToolPermissionPolicy};
+use super::{ToolActivityPayloadPolicy, ToolKind, ToolPermissionPolicy};
 
 /// `ToolDefinition` 描述可暴露给 runtime/agent 的工具元数据。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -11,6 +11,8 @@ pub struct ToolDefinition {
     pub description: Option<String>,
     pub input_schema: Option<Value>,
     pub permission_policy: ToolPermissionPolicy,
+    /// 控制 tool activity 是否可投影参数、结果与由其派生的展示内容。
+    pub activity_payload_policy: ToolActivityPayloadPolicy,
     /// 动态注入 system prompt 的工具使用指南；为 None 时不参与 tool guidelines 装配。
     pub prompt_guidelines: Option<String>,
 }
@@ -25,6 +27,7 @@ impl ToolDefinition {
             description: None,
             input_schema: None,
             permission_policy: ToolPermissionPolicy::Never,
+            activity_payload_policy: ToolActivityPayloadPolicy::default(),
             prompt_guidelines: None,
         }
     }
@@ -56,6 +59,12 @@ impl ToolDefinition {
     /// `with_permission_policy` 设置工具执行前的权限策略。
     pub const fn with_permission_policy(mut self, policy: ToolPermissionPolicy) -> Self {
         self.permission_policy = policy;
+        self
+    }
+
+    /// `with_activity_payload_policy` 设置 tool activity 的 payload 投影策略。
+    pub const fn with_activity_payload_policy(mut self, policy: ToolActivityPayloadPolicy) -> Self {
+        self.activity_payload_policy = policy;
         self
     }
 

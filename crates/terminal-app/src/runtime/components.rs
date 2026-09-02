@@ -12,9 +12,12 @@ use tool_runtime::{ToolCatalog, ToolExecutorRegistry, ToolRegistration};
 use super::{
     AppRuntimeOptions,
     agent::{
-        AgentRuntimeActivationGrants, AgentRuntimeConstructionGrants, AgentRuntimeFactory,
-        AgentRuntimePort, AgentSessionCapability, construct_native_agent_runtime,
+        AgentChildRuntimeLeases, AgentChildRuntimeStaticGrants, AgentRuntimeActivationGrants,
+        AgentRuntimeConstructionGrants, AgentRuntimeFactory, AgentRuntimePort,
+        AgentSessionCapability, construct_native_agent_runtime,
+        construct_native_child_agent_runtime,
     },
+    agent_orchestrator::AgentOrchestrator,
     context::{
         ApprovalProviderCapability, CapabilityLease, ComponentActivationContext,
         ExtensionHookRegistryCapability, LlmPortCapability, ModelCatalogCapability,
@@ -199,6 +202,13 @@ impl RuntimePluginImplementation {
             }
         }
     }
+
+    fn child_factory(&self) -> Option<super::agent::ChildAgentFactory> {
+        match &self.kind {
+            RuntimePluginImplementationKind::AgentRuntime(factory) => factory.child_factory(),
+            RuntimePluginImplementationKind::Component => None,
+        }
+    }
 }
 
 fn builtin_plugin_type(type_id: &'static str) -> PluginTypeId {
@@ -369,8 +379,9 @@ fn extension_hooks_replacement_factory(
 
 fn builtin_plugin_catalog()
 -> Result<PluginFactoryCatalog<RuntimePluginImplementation>, PluginCatalogError> {
-    builtin_plugin_catalog_with_agent_factory(AgentRuntimeFactory::new(
+    builtin_plugin_catalog_with_agent_factory(AgentRuntimeFactory::with_child_constructor(
         construct_native_agent_runtime,
+        construct_native_child_agent_runtime,
     ))
 }
 
@@ -510,6 +521,8 @@ enum PreparedAgentRuntimeCommit {
 
 struct PreparedAgentRuntimeReplacement {
     candidate: Option<Box<dyn AgentRuntimePort>>,
+    child_factory: Option<Option<super::agent::ChildAgentFactory>>,
+    child_static_grants: Option<Option<AgentChildRuntimeStaticGrants>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -654,7 +667,7 @@ impl<'a> AgentRuntimeGrantSource<'a> {
 /// 同一所有权边界，让 reset/shutdown 不再依赖 coordinator 手工枚举底层 conversation
 /// resources。
 pub(super) struct RuntimeComponents {
-    agent_runtime: Box<dyn AgentRuntimePort>,
+    agent_orchestrator: AgentOrchestrator,
     pub(super) model_refresh: ModelRefreshWorker,
     extension_hooks: ExtensionHookRegistry,
     llm_port: LlmPort,
@@ -710,6 +723,30 @@ fn construct_committed_agent_runtime(
     construct_agent_runtime(instance, grant_source)
 }
 
+fn committed_agent_child_factory(
+    plugins: &PluginComposition<RuntimePluginImplementation>,
+) -> Option<super::agent::ChildAgentFactory> {
+    plugins
+        .instance(AGENT_RUNTIME_COMPONENT)
+        .and_then(|instance| instance.implementation().child_factory())
+}
+
+fn agent_child_static_grants(
+    child_factory: Option<&super::agent::ChildAgentFactory>,
+    options: &AppRuntimeOptions,
+    permission_provider_id: &str,
+) -> Option<AgentChildRuntimeStaticGrants> {
+    child_factory.map(|_| {
+        AgentChildRuntimeStaticGrants::new(
+            options.runtime_request_policy.clone(),
+            options.loaded_models.clone(),
+            Arc::clone(&options.dynamic_environment_observer),
+            options.hunea_config_dir.clone(),
+            permission_provider_id,
+        )
+    })
+}
+
 fn classify_agent_plugin_reconciliation(
     observed: Option<&PluginTypeId>,
     desired: Option<&PluginTypeId>,
@@ -724,23 +761,94 @@ fn classify_agent_plugin_reconciliation(
 }
 
 impl RuntimeComponents {
-    pub(super) fn agent_port(&self) -> &dyn AgentRuntimePort {
-        &*self.agent_runtime
+    pub(super) fn dispatch_main_agent(
+        &mut self,
+        command: runtime_domain::agent::AgentCommand,
+    ) -> Result<runtime_domain::agent::AgentCommandReceipt, runtime_domain::agent::AgentRuntimeError>
+    {
+        self.agent_orchestrator.dispatch_main(command)
     }
 
+    pub(super) fn drain_main_agent_events(&mut self) -> Vec<runtime_domain::agent::AgentEvent> {
+        self.agent_orchestrator.drain_main_events()
+    }
+
+    /// Child Agent facts stay inside the orchestrator until a typed observer consumes them.
+    #[allow(dead_code)]
+    pub(super) fn drain_child_agent_events(&mut self) -> Vec<runtime_domain::agent::AgentEvent> {
+        self.agent_orchestrator.drain_child_events()
+    }
+
+    #[allow(dead_code)]
+    pub(super) fn dispatch_child_agent(
+        &mut self,
+        command: runtime_domain::agent::AgentCommand,
+    ) -> Result<runtime_domain::agent::AgentCommandReceipt, runtime_domain::agent::AgentRuntimeError>
+    {
+        self.agent_orchestrator.dispatch_child(command)
+    }
+
+    #[allow(dead_code)]
+    pub(super) fn spawn_child_agent(
+        &mut self,
+        parent_agent_id: runtime_domain::agent::AgentId,
+        turn_id: runtime_domain::agent::AgentTurnId,
+        title: runtime_domain::agent::AgentTitle,
+        grants: crate::runtime::agent_capability_context::AgentChildCapabilityGrants,
+        request: runtime_domain::agent::AgentTurnRequest,
+    ) -> Result<
+        (
+            runtime_domain::agent::AgentId,
+            runtime_domain::agent::AgentCommandReceipt,
+        ),
+        runtime_domain::agent::AgentRuntimeError,
+    > {
+        self.agent_orchestrator
+            .spawn_child(parent_agent_id, turn_id, title, grants, request)
+    }
+
+    #[allow(dead_code)]
+    pub(super) fn stop_child_agent(
+        &mut self,
+        agent_id: runtime_domain::agent::AgentId,
+    ) -> Result<(), runtime_domain::agent::AgentRuntimeError> {
+        self.agent_orchestrator.stop_child(agent_id)
+    }
+
+    pub(super) fn dispose_child_agents_for_session_transition(&mut self) -> Result<(), String> {
+        self.agent_orchestrator
+            .dispose_children_for_session_transition()
+            .map_err(|_| "Child Agent cleanup is pending".to_string())
+    }
+
+    pub(super) fn agent_activity(&self) -> super::agent::AgentRuntimeActivity {
+        self.agent_orchestrator.activity()
+    }
+
+    #[cfg(test)]
+    pub(super) fn agent_orchestrator_has_pending_work(&self) -> bool {
+        self.agent_orchestrator.has_pending_work()
+    }
+
+    #[cfg(test)]
+    pub(super) fn agent_port(&self) -> &dyn AgentRuntimePort {
+        self.agent_orchestrator.main_port()
+    }
+
+    #[cfg(test)]
     pub(super) fn agent_port_mut(&mut self) -> &mut dyn AgentRuntimePort {
-        &mut *self.agent_runtime
+        self.agent_orchestrator.main_port_mut()
     }
 
     pub(super) fn agent_session(&self) -> Result<&dyn AgentSessionCapability, String> {
-        self.agent_runtime
-            .session()
+        self.agent_orchestrator
+            .main_session()
             .ok_or_else(|| "Agent adapter does not provide session capability".to_string())
     }
 
     pub(super) fn agent_session_mut(&mut self) -> Result<&mut dyn AgentSessionCapability, String> {
-        self.agent_runtime
-            .session_mut()
+        self.agent_orchestrator
+            .main_session_mut()
             .ok_or_else(|| "Agent adapter does not provide session capability".to_string())
     }
 
@@ -767,8 +875,8 @@ impl RuntimeComponents {
 
     #[cfg(test)]
     pub(super) fn agent_test_harness(&mut self) -> &mut dyn super::agent::AgentRuntimeTestHarness {
-        self.agent_runtime
-            .session_mut()
+        self.agent_orchestrator
+            .main_session_mut()
             .expect("runtime test requires an Agent session capability")
             .test_harness()
             .expect("runtime test requires an Agent fixture harness")
@@ -776,11 +884,43 @@ impl RuntimeComponents {
 
     #[cfg(test)]
     pub(super) fn agent_test_harness_ref(&self) -> &dyn super::agent::AgentRuntimeTestHarness {
-        self.agent_runtime
-            .session()
+        self.agent_orchestrator
+            .main_session()
             .expect("runtime test requires an Agent session capability")
             .test_harness_ref()
             .expect("runtime test requires an Agent fixture harness")
+    }
+
+    #[cfg(test)]
+    pub(super) fn agent_root_context_for_test(
+        &self,
+    ) -> Option<crate::runtime::agent_capability_context::AgentCapabilityContext> {
+        self.agent_orchestrator.root_context()
+    }
+
+    #[cfg(test)]
+    pub(super) fn register_child_agent_for_test(
+        &mut self,
+        agent_id: runtime_domain::agent::AgentId,
+        parent_agent_id: runtime_domain::agent::AgentId,
+        turn_id: runtime_domain::agent::AgentTurnId,
+        title: runtime_domain::agent::AgentTitle,
+        context: crate::runtime::agent_capability_context::AgentCapabilityContext,
+        runtime: Box<dyn AgentRuntimePort>,
+    ) {
+        self.agent_orchestrator.register_child_for_test(
+            agent_id,
+            parent_agent_id,
+            turn_id,
+            title,
+            context,
+            runtime,
+        );
+    }
+
+    #[cfg(test)]
+    pub(super) fn child_agent_count_for_test(&self) -> usize {
+        self.agent_orchestrator.child_count()
     }
 
     pub(super) fn new(options: &mut AppRuntimeOptions) -> Result<Self, String> {
@@ -844,6 +984,7 @@ impl RuntimeComponents {
         let session_store_worker = SessionStoreWorker::new(RuntimeEventNotifier::default());
         let context_budget_worker = ContextBudgetWorker::new(RuntimeEventNotifier::default())
             .map_err(|error| error.to_string())?;
+        let child_factory = committed_agent_child_factory(&plugins);
         let agent_runtime = construct_committed_agent_runtime(
             &plugins,
             AgentRuntimeGrantSource::new(
@@ -860,8 +1001,17 @@ impl RuntimeComponents {
         )?;
         let model_refresh = ModelRefreshWorker::new(RuntimeEventNotifier::default());
         let has_session_backend = session_backend_views.is_some();
+        let agent_child_static_grants = agent_child_static_grants(
+            child_factory.as_ref(),
+            options,
+            TERMINAL_APPROVAL_PROVIDER_ID,
+        );
         let mut components = Self {
-            agent_runtime,
+            agent_orchestrator: AgentOrchestrator::new(
+                agent_runtime,
+                child_factory,
+                agent_child_static_grants,
+            ),
             model_refresh,
             extension_hooks,
             llm_port,
@@ -1123,6 +1273,8 @@ impl RuntimeComponents {
             AgentPluginReconciliation::Replace => {
                 PreparedAgentRuntimeCommit::Replace(Box::new(PreparedAgentRuntimeReplacement {
                     candidate: None,
+                    child_factory: None,
+                    child_static_grants: None,
                 }))
             }
         }
@@ -1306,6 +1458,7 @@ impl RuntimeComponents {
             )
         })
         .map_err(|error| error.to_string())?;
+        self.finalize_agent_runtime_replacement()?;
 
         let fresh_llm_port = LlmPort::new();
         let fresh_provider_registrations = fresh_llm_port
@@ -1340,7 +1493,19 @@ impl RuntimeComponents {
                 &self.permission_provider_id,
             ),
         )?;
-        self.agent_runtime = fresh_agent_runtime;
+        let fresh_child_factory = committed_agent_child_factory(&self.plugins);
+        let fresh_child_static_grants = agent_child_static_grants(
+            fresh_child_factory.as_ref(),
+            options,
+            &self.permission_provider_id,
+        );
+        self.agent_orchestrator
+            .replace_main(
+                fresh_agent_runtime,
+                fresh_child_factory,
+                fresh_child_static_grants,
+            )
+            .map_err(|error| error.to_string())?;
         self.llm_port = fresh_llm_port;
         self.tool_catalog = fresh_tool_catalog;
         self.prompt_assembly = fresh_prompt_assembly;
@@ -1399,6 +1564,7 @@ impl RuntimeComponents {
                 .map_err(|fallback_error| format!("{cleanup_error}; {fallback_error}"))?;
             return Err(cleanup_error);
         }
+        self.finalize_agent_runtime_replacement()?;
 
         let (fresh_session_port, fresh_views, fresh_registration) =
             match mount_session_backend(Some(store)) {
@@ -1426,7 +1592,19 @@ impl RuntimeComponents {
         };
 
         self.session_store_worker = SessionStoreWorker::default();
-        self.agent_runtime = fresh_agent_runtime;
+        let fresh_child_factory = committed_agent_child_factory(&self.plugins);
+        let fresh_child_static_grants = agent_child_static_grants(
+            fresh_child_factory.as_ref(),
+            options,
+            &self.permission_provider_id,
+        );
+        self.agent_orchestrator
+            .replace_main(
+                fresh_agent_runtime,
+                fresh_child_factory,
+                fresh_child_static_grants,
+            )
+            .map_err(|error| error.to_string())?;
         self.session_port = fresh_session_port;
         self.session_backend_views = Some(fresh_views);
         self.activation_staging.session_backend_registration = fresh_registration;
@@ -1489,10 +1667,23 @@ impl RuntimeComponents {
         &mut self,
         options: &AppRuntimeOptions,
     ) -> Result<(), String> {
+        self.finalize_agent_runtime_replacement()?;
         let fresh_agent_runtime = self
             .fresh_agent_runtime(options, None)
             .map_err(|error| format!("restore ephemeral Agent after backend failure: {error}"))?;
-        self.agent_runtime = fresh_agent_runtime;
+        let fresh_child_factory = committed_agent_child_factory(&self.plugins);
+        let fresh_child_static_grants = agent_child_static_grants(
+            fresh_child_factory.as_ref(),
+            options,
+            &self.permission_provider_id,
+        );
+        self.agent_orchestrator
+            .replace_main(
+                fresh_agent_runtime,
+                fresh_child_factory,
+                fresh_child_static_grants,
+            )
+            .map_err(|error| error.to_string())?;
         self.session_store_worker = SessionStoreWorker::default();
         self.with_lifecycle(|lifecycle, components| {
             lifecycle.activate_components(
@@ -1538,6 +1729,7 @@ impl RuntimeComponents {
             )
         })
         .map_err(|error| error.to_string())?;
+        self.finalize_agent_runtime_replacement()?;
 
         let provider_id = provider_id.into();
         let fresh_policy = PermissionPolicy::new();
@@ -1566,9 +1758,18 @@ impl RuntimeComponents {
             }
         };
 
+        let fresh_child_factory = committed_agent_child_factory(&self.plugins);
+        let fresh_child_static_grants =
+            agent_child_static_grants(fresh_child_factory.as_ref(), options, &provider_id);
         self.permission_policy = fresh_policy;
         self.permission_provider_id = provider_id;
-        self.agent_runtime = fresh_agent_runtime;
+        self.agent_orchestrator
+            .replace_main(
+                fresh_agent_runtime,
+                fresh_child_factory,
+                fresh_child_static_grants,
+            )
+            .map_err(|error| error.to_string())?;
         self.activation_staging.approval_registration = Some(fresh_registration);
         self.with_lifecycle(|lifecycle, components| {
             lifecycle.activate_components(
@@ -1802,7 +2003,7 @@ impl RuntimeComponents {
 
     fn activate_agent_runtime(
         &mut self,
-        _scope: &EffectScope,
+        scope: &EffectScope,
         context: &mut ComponentActivationContext<'_>,
         _mode: ComponentLifecycleMode,
     ) -> Result<ComponentActivationOutcome, String> {
@@ -1820,22 +2021,70 @@ impl RuntimeComponents {
                 )
             })
             .ok_or_else(|| "Agent component has no committed plugin implementation".to_string())?;
-        let mut grants = AgentRuntimeActivationGrants::empty();
-        if requires_event_stream {
-            grants = grants.with_event_stream(
+        let event_stream = if requires_event_stream {
+            Some(
                 context
                     .require::<RuntimeEventStreamCapability>()
                     .map_err(|error| error.to_string())?,
-            );
-        }
-        if requires_extension_hooks {
-            grants = grants.with_extension_hooks(
+            )
+        } else {
+            None
+        };
+        let extension_hooks = if requires_extension_hooks {
+            Some(
                 context
                     .require::<ExtensionHookRegistryCapability>()
                     .map_err(|error| error.to_string())?,
-            );
+            )
+        } else {
+            None
+        };
+        let mut grants = AgentRuntimeActivationGrants::empty();
+        if let Some(lease) = event_stream.clone() {
+            grants = grants.with_event_stream(lease);
         }
-        self.agent_runtime.activate(grants)?;
+        if let Some(lease) = extension_hooks.clone() {
+            grants = grants.with_extension_hooks(lease);
+        }
+
+        let (root_context, child_leases) = if self.agent_orchestrator.has_child_factory() {
+            let tool_lease = context
+                .require::<ToolCatalogCapability>()
+                .map_err(|error| error.to_string())?;
+            let prompt_lease = context
+                .require::<PromptAssemblyCapability>()
+                .map_err(|error| error.to_string())?;
+            let llm_lease = context
+                .require::<LlmPortCapability>()
+                .map_err(|error| error.to_string())?;
+            let permission_lease = context
+                .require::<PermissionPolicyCapability>()
+                .map_err(|error| error.to_string())?;
+            let root_context = self.agent_orchestrator.build_root_context(
+                scope,
+                &tool_lease,
+                &prompt_lease,
+                self.session_workspace_tools
+                    .definitions()
+                    .definitions()
+                    .map(|definition| definition.name.clone())
+                    .collect::<Vec<_>>(),
+            )?;
+            let child_leases = AgentChildRuntimeLeases::new(
+                event_stream.ok_or_else(|| {
+                    "Agent child capability requires runtime event stream".to_string()
+                })?,
+                extension_hooks
+                    .ok_or_else(|| "Agent child capability requires extension hooks".to_string())?,
+                llm_lease,
+                permission_lease,
+            );
+            (Some(root_context), Some(child_leases))
+        } else {
+            (None, None)
+        };
+        self.agent_orchestrator
+            .activate_main(grants, root_context, child_leases)?;
         self.is_agent_replacement_activating = false;
         Ok(ComponentActivationOutcome::Ready)
     }
@@ -1871,18 +2120,18 @@ impl RuntimeComponents {
     fn quiesce_agent_runtime(&mut self, mode: ComponentLifecycleMode) -> Result<(), String> {
         match mode {
             ComponentLifecycleMode::Shutdown => self
-                .agent_runtime
+                .agent_orchestrator
                 .shutdown()
                 .map_err(|_| "Agent adapter failed to shut down".to_string()),
             _ => self
-                .agent_runtime
+                .agent_orchestrator
                 .suspend()
                 .map_err(|_| "Agent adapter failed to suspend".to_string()),
         }
     }
 
     fn finalize_agent_runtime_replacement(&mut self) -> Result<(), String> {
-        self.agent_runtime
+        self.agent_orchestrator
             .shutdown()
             .map_err(|_| "Agent adapter failed to finalize for replacement".to_string())
     }
@@ -1985,7 +2234,7 @@ impl RuntimeComponents {
             .err()
             .map(|error| format!("{error:?}"));
         let agent_error = lifecycle_error.is_none().then(|| {
-            self.agent_runtime
+            self.agent_orchestrator
                 .shutdown()
                 .err()
                 .map(|_| "Agent runtime finalization failed".to_string())
@@ -2024,7 +2273,7 @@ impl RuntimeComponents {
             }
             self.finalize_agent_runtime_replacement()?;
 
-            let candidate = {
+            let (candidate, child_factory, child_static_grants) = {
                 let options = agent_options.ok_or_else(|| {
                     "Agent replacement construction options are missing".to_string()
                 })?;
@@ -2038,11 +2287,25 @@ impl RuntimeComponents {
                     .ok_or_else(|| {
                         "Agent replacement has no prospective plugin instance".to_string()
                     })?;
+                let child_factory = instance.implementation().child_factory();
+                let child_static_grants = child_factory.as_ref().map(|_| {
+                    AgentChildRuntimeStaticGrants::new(
+                        options.runtime_request_policy.clone(),
+                        options.loaded_models.clone(),
+                        Arc::clone(&options.dynamic_environment_observer),
+                        options.hunea_config_dir.clone(),
+                        self.permission_provider_id.clone(),
+                    )
+                });
                 let grant_source = self.agent_runtime_grant_source(
                     options,
                     self.session_backend_views.as_ref().map(|views| &views.port),
                 );
-                construct_agent_runtime(instance, grant_source)?
+                (
+                    construct_agent_runtime(instance, grant_source)?,
+                    child_factory,
+                    child_static_grants,
+                )
             };
             let prepared = self
                 .prepared_plugin_commit
@@ -2053,6 +2316,8 @@ impl RuntimeComponents {
                 unreachable!("Agent replacement kind must remain stable during construction")
             };
             replacement.candidate = Some(candidate);
+            replacement.child_factory = Some(child_factory);
+            replacement.child_static_grants = Some(child_static_grants);
         }
         #[cfg(test)]
         self.record_plugin_transaction_event("prepare:authority");
@@ -2064,19 +2329,28 @@ impl RuntimeComponents {
             .prepared_plugin_commit
             .take()
             .expect("plugin authority commit must have a prepared composition");
-        let candidate = match &mut prepared.agent_runtime {
+        let replacement = match &mut prepared.agent_runtime {
             PreparedAgentRuntimeCommit::Keep => None,
-            PreparedAgentRuntimeCommit::Replace(replacement) => Some(
+            PreparedAgentRuntimeCommit::Replace(replacement) => Some((
                 replacement
                     .candidate
                     .take()
                     .expect("Agent replacement must prepare its adapter before authority commit"),
-            ),
+                replacement
+                    .child_factory
+                    .take()
+                    .expect("Agent replacement must prepare child factory before authority commit"),
+                replacement.child_static_grants.take().expect(
+                    "Agent replacement must prepare child static grants before authority commit",
+                ),
+            )),
         };
         self.plugins.commit_reconciliation(prepared.reconciliation);
         self.plugin_loader.commit_desired(prepared.desired);
-        if let Some(candidate) = candidate {
-            self.agent_runtime = candidate;
+        if let Some((candidate, child_factory, child_static_grants)) = replacement {
+            self.agent_orchestrator
+                .replace_main(candidate, child_factory, child_static_grants)
+                .expect("prepared Agent replacement must retain the cleanup barrier");
             self.is_agent_replacement_activating = true;
         }
         #[cfg(test)]
@@ -2316,6 +2590,7 @@ mod tests {
 
     use super::*;
     use crate::runtime::agent::{AgentRuntimeActivity, AgentSessionRestore};
+    use crate::runtime::agent_capability_context::{AgentChildCapabilityGrants, AgentContextOwner};
     use crate::runtime::lifecycle::{ComponentDefinition, ComponentState};
     use agent_kernel_protocol::{
         AgentKernelCapability, AgentKernelCommand, AgentKernelCommandParams,
@@ -2348,6 +2623,7 @@ mod tests {
     use runtime_domain::prompt_assembly::{
         PromptPreludeSection, PromptSourceKind, PromptSourceOrigin,
     };
+    use runtime_domain::session::ConversationTurnRequest;
 
     #[derive(Default)]
     struct ComponentKernelSource {
@@ -3000,10 +3276,300 @@ mod tests {
         count: Arc<AtomicUsize>,
     }
 
+    #[derive(Default)]
+    struct ChildAcceptingRuntime {
+        is_shutdown: bool,
+        events: Vec<AgentEvent>,
+        shutdown_calls: Option<Arc<AtomicUsize>>,
+    }
+
+    impl AgentRuntime for ChildAcceptingRuntime {
+        fn dispatch(
+            &mut self,
+            command: AgentCommand,
+        ) -> Result<AgentCommandReceipt, AgentRuntimeError> {
+            if self.is_shutdown {
+                return Err(AgentRuntimeError::Disposed);
+            }
+            match command {
+                AgentCommand::SubmitTurn {
+                    agent_id,
+                    turn_id,
+                    request,
+                } => {
+                    let target = request.target();
+                    self.events.push(AgentEvent {
+                        agent_id,
+                        turn_id,
+                        target: target.clone(),
+                        kind: AgentEventKind::TurnFinished {
+                            response: runtime_domain::session::ConversationResponse::assistant_text(
+                                "child complete",
+                            ),
+                            metrics: None,
+                            context_usage: None,
+                        },
+                    });
+                    Ok(AgentCommandReceipt::TurnStarted {
+                        turn_id,
+                        target,
+                        activity_label: request.activity_label().to_string(),
+                    })
+                }
+                AgentCommand::Interrupt { target, .. } => {
+                    Ok(AgentCommandReceipt::Interrupted { target })
+                }
+                AgentCommand::RespondPermission { .. } => Ok(AgentCommandReceipt::Accepted),
+            }
+        }
+
+        fn drain_events(&mut self) -> Vec<AgentEvent> {
+            std::mem::take(&mut self.events)
+        }
+
+        fn shutdown(&mut self) -> Result<(), AgentRuntimeError> {
+            if !self.is_shutdown
+                && let Some(shutdown_calls) = &self.shutdown_calls
+            {
+                shutdown_calls.fetch_add(1, Ordering::SeqCst);
+            }
+            self.is_shutdown = true;
+            Ok(())
+        }
+    }
+
+    impl AgentRuntimePort for ChildAcceptingRuntime {
+        fn activate(&mut self, _grants: AgentRuntimeActivationGrants) -> Result<(), String> {
+            self.is_shutdown = false;
+            Ok(())
+        }
+
+        fn suspend(&mut self) -> Result<(), AgentRuntimeError> {
+            self.is_shutdown = true;
+            Ok(())
+        }
+
+        fn activity(&self) -> AgentRuntimeActivity {
+            AgentRuntimeActivity::Idle
+        }
+
+        fn session(&self) -> Option<&dyn AgentSessionCapability> {
+            None
+        }
+
+        fn session_mut(&mut self) -> Option<&mut dyn AgentSessionCapability> {
+            None
+        }
+
+        fn has_pending_work(&self) -> bool {
+            !self.events.is_empty()
+        }
+    }
+
     impl Drop for DropCounter {
         fn drop(&mut self) {
             self.count.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    #[test]
+    fn child_spawn_commits_identity_index_and_terminal_projection() {
+        let factory = AgentRuntimeFactory::with_child_constructor(
+            construct_native_agent_runtime,
+            |_grants| Ok(Box::new(ChildAcceptingRuntime::default())),
+        );
+        let mut options = options_with_provider();
+        let mut components =
+            RuntimeComponents::new_with_agent_runtime_factory(&mut options, factory)
+                .expect("runtime components should initialize with child factory");
+        let request = AgentTurnRequest::from_conversation_request(
+            ConversationTurnRequest::new_user_text("local", "qwen3", "delivery objective"),
+        );
+        let title = runtime_domain::agent::AgentTitle::resolve(
+            &runtime_domain::agent::AgentObjective::new("delivery objective")
+                .expect("objective should be valid"),
+            None,
+        )
+        .expect("title should resolve");
+        let (child_id, receipt) = components
+            .spawn_child_agent(
+                AgentId::MAIN,
+                AgentTurnId::new(41),
+                title,
+                AgentChildCapabilityGrants::empty()
+                    .inherit_tools()
+                    .inherit_prompt(),
+                request,
+            )
+            .expect("child spawn should commit and dispatch");
+
+        assert_eq!(child_id, AgentId::new(2));
+        assert!(matches!(receipt, AgentCommandReceipt::TurnStarted { .. }));
+        assert_eq!(
+            components.agent_orchestrator.children_of(AgentId::MAIN),
+            vec![child_id]
+        );
+        let events = components.drain_child_agent_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].agent_id, child_id);
+        assert_eq!(
+            components.agent_orchestrator.child_status(child_id),
+            Some(runtime_domain::agent::AgentProjectionStatus::Completed)
+        );
+        assert!(matches!(
+            components.dispatch_child_agent(AgentCommand::Interrupt {
+                agent_id: AgentId::MAIN,
+                target: None,
+            }),
+            Err(AgentRuntimeError::UnknownAgent)
+        ));
+
+        components.shutdown().expect("runtime should shut down");
+    }
+
+    #[test]
+    fn runtime_reset_quiesces_child_tree_before_main_replacement() {
+        let shutdown_calls = Arc::new(AtomicUsize::new(0));
+        let child_shutdown_calls = Arc::clone(&shutdown_calls);
+        let factory = AgentRuntimeFactory::with_child_constructor(
+            construct_native_agent_runtime,
+            move |_grants| {
+                Ok(Box::new(ChildAcceptingRuntime {
+                    shutdown_calls: Some(Arc::clone(&child_shutdown_calls)),
+                    ..ChildAcceptingRuntime::default()
+                }))
+            },
+        );
+        let mut options = options_with_provider();
+        let mut components =
+            RuntimeComponents::new_with_agent_runtime_factory(&mut options, factory).unwrap();
+        let request = AgentTurnRequest::from_conversation_request(
+            ConversationTurnRequest::new_user_text("local", "qwen3", "reset child"),
+        );
+        let title = runtime_domain::agent::AgentTitle::resolve(
+            &runtime_domain::agent::AgentObjective::new("reset child").unwrap(),
+            None,
+        )
+        .unwrap();
+        components
+            .spawn_child_agent(
+                AgentId::MAIN,
+                AgentTurnId::new(42),
+                title,
+                AgentChildCapabilityGrants::empty()
+                    .inherit_tools()
+                    .inherit_prompt(),
+                request,
+            )
+            .unwrap();
+
+        components
+            .reset_after_clear(&options)
+            .expect("reset should converge child cleanup before replacement");
+
+        assert_eq!(shutdown_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(components.agent_orchestrator.child_count(), 0);
+        assert!(components.agent_orchestrator.has_child_factory());
+    }
+
+    #[test]
+    fn required_capability_revocation_quiesces_child_tree_before_provider_removal() {
+        let shutdown_calls = Arc::new(AtomicUsize::new(0));
+        let child_shutdown_calls = Arc::clone(&shutdown_calls);
+        let factory = AgentRuntimeFactory::with_child_constructor(
+            construct_native_agent_runtime,
+            move |_grants| {
+                Ok(Box::new(ChildAcceptingRuntime {
+                    shutdown_calls: Some(Arc::clone(&child_shutdown_calls)),
+                    ..ChildAcceptingRuntime::default()
+                }))
+            },
+        );
+        let mut options = options_with_provider();
+        let mut components =
+            RuntimeComponents::new_with_agent_runtime_factory(&mut options, factory).unwrap();
+        let request = AgentTurnRequest::from_conversation_request(
+            ConversationTurnRequest::new_user_text("local", "qwen3", "revoked child"),
+        );
+        let title = runtime_domain::agent::AgentTitle::resolve(
+            &runtime_domain::agent::AgentObjective::new("revoked child").unwrap(),
+            None,
+        )
+        .unwrap();
+        components
+            .spawn_child_agent(
+                AgentId::MAIN,
+                AgentTurnId::new(43),
+                title,
+                AgentChildCapabilityGrants::empty()
+                    .inherit_tools()
+                    .inherit_prompt(),
+                request,
+            )
+            .unwrap();
+
+        components
+            .with_lifecycle(|lifecycle, components| {
+                lifecycle.deactivate_components(
+                    [RUNTIME_EVENT_STREAM.component_id],
+                    components,
+                    ComponentLifecycleMode::Reconfigure,
+                )
+            })
+            .expect("provider removal should wait for child cleanup");
+
+        assert_eq!(shutdown_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(components.agent_orchestrator.child_count(), 0);
+        assert_eq!(
+            components.lifecycle.state(AGENT_RUNTIME_COMPONENT),
+            Some(ComponentState::Pending)
+        );
+    }
+
+    #[test]
+    fn plugin_replacement_quiesces_child_tree_before_committing_fresh_authority() {
+        let shutdown_calls = Arc::new(AtomicUsize::new(0));
+        let child_shutdown_calls = Arc::clone(&shutdown_calls);
+        let factory = AgentRuntimeFactory::with_child_constructor(
+            construct_native_agent_runtime,
+            move |_grants| {
+                Ok(Box::new(ChildAcceptingRuntime {
+                    shutdown_calls: Some(Arc::clone(&child_shutdown_calls)),
+                    ..ChildAcceptingRuntime::default()
+                }))
+            },
+        );
+        let mut options = options_with_provider();
+        let mut components =
+            RuntimeComponents::new_with_agent_runtime_factory(&mut options, factory).unwrap();
+        let request = AgentTurnRequest::from_conversation_request(
+            ConversationTurnRequest::new_user_text("local", "qwen3", "replace child"),
+        );
+        let title = runtime_domain::agent::AgentTitle::resolve(
+            &runtime_domain::agent::AgentObjective::new("replace child").unwrap(),
+            None,
+        )
+        .unwrap();
+        components
+            .spawn_child_agent(
+                AgentId::MAIN,
+                AgentTurnId::new(44),
+                title,
+                AgentChildCapabilityGrants::empty()
+                    .inherit_tools()
+                    .inherit_prompt(),
+                request,
+            )
+            .unwrap();
+        let replay = ReplayFixture::new(vec![AgentEventKind::TurnInterrupted]).unwrap();
+
+        components
+            .replace_agent_with_replay_for_test(&options, replay)
+            .expect("plugin replacement should wait for the child tree");
+
+        assert_eq!(shutdown_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(components.agent_orchestrator.child_count(), 0);
+        assert!(!components.agent_orchestrator.has_child_factory());
     }
 
     #[test]
@@ -3104,13 +3670,14 @@ mod tests {
         let concrete_owner = ["agent_runtime: ", "NativeAgentRuntime"].concat();
         let concrete_constructor = ["NativeAgentRuntime", "::new("].concat();
         let plugin_factory_wiring = [
-            "builtin_plugin_catalog_with_agent_factory(AgentRuntimeFactory::new(\n",
+            "builtin_plugin_catalog_with_agent_factory(AgentRuntimeFactory::with_child_constructor(\n",
             "        construct_native_agent_runtime,\n",
+            "        construct_native_child_agent_runtime,\n",
             "    ))",
         ]
         .concat();
         let native_factory_definition = ["fn construct_native_", "agent_runtime("].concat();
-        let native_construction = ["NativeAgentRuntime", "::new(grants)"].concat();
+        let native_construction = ["NativeAgentRuntime", "::new_for_agent("].concat();
         let erased_native_owner = ["Box::new(runtime) as Box<dyn Agent", "RuntimePort>"].concat();
         let concrete_materialization = ["Self", " {"].concat();
         let plugin_factory_dispatch = [
@@ -3172,12 +3739,7 @@ mod tests {
             "test adapters must enter the Agent slot through plugin reconciliation"
         );
 
-        assert_eq!(
-            production_source
-                .matches("agent_runtime: Box<dyn AgentRuntimePort>")
-                .count(),
-            1
-        );
+        assert!(production_source.contains("agent_orchestrator: AgentOrchestrator"));
         assert!(!production_source.contains(&concrete_owner));
         assert!(!production_source.contains(&concrete_constructor));
         assert!(!production_source.contains(&broad_mount));
@@ -3196,8 +3758,8 @@ mod tests {
         assert!(!production_source.contains("AgentRuntimeConstructionInputs"));
         assert!(!production_source.contains("agent_construction_inputs"));
         assert_eq!(native_source.matches(&native_factory_definition).count(), 1);
-        assert_eq!(native_source.matches(&native_construction).count(), 1);
-        assert_eq!(native_source.matches(&erased_native_owner).count(), 1);
+        assert_eq!(native_source.matches(&native_construction).count(), 2);
+        assert_eq!(native_source.matches(&erased_native_owner).count(), 2);
         assert_eq!(native_source.matches(&concrete_materialization).count(), 1);
         assert_eq!(
             production_source
@@ -3224,12 +3786,7 @@ mod tests {
         }
         let concrete_binding = ["agent_runtime", ".bind_event_stream"].concat();
         assert!(!production_source.contains(&concrete_binding));
-        assert_eq!(
-            production_source
-                .matches("self.agent_runtime.activate(grants)?")
-                .count(),
-            1
-        );
+        assert!(production_source.contains(".activate_main(grants, root_context, child_leases)?"));
         assert!(!production_source.contains("AgentDependencyReconstruction"));
         let hook_quiescence_source = production_source
             .split_once("fn quiesce_extension_hooks(")
@@ -3293,7 +3850,7 @@ mod tests {
         for publication in [
             "self.plugins.commit_reconciliation(prepared.reconciliation)",
             "self.plugin_loader.commit_desired(prepared.desired)",
-            "self.agent_runtime = candidate",
+            "self.agent_orchestrator\n                .replace_main(candidate, child_factory, child_static_grants)",
         ] {
             assert!(
                 commit_authority_source.contains(publication),
@@ -3595,7 +4152,8 @@ mod tests {
             .expect("fresh generation hook should register");
         assert_eq!(
             components
-                .agent_runtime
+                .agent_orchestrator
+                .main_port()
                 .extension_hooks_for_test()
                 .expect("Native should retain the active hook lease")
                 .snapshot(),
@@ -3673,7 +4231,8 @@ mod tests {
         assert!(components.extension_hooks.snapshot().is_empty());
         assert!(
             components
-                .agent_runtime
+                .agent_orchestrator
+                .main_port()
                 .extension_hooks_for_test()
                 .is_none()
         );
@@ -3734,7 +4293,8 @@ mod tests {
             .expect("restored generation hook should register");
         assert_eq!(
             components
-                .agent_runtime
+                .agent_orchestrator
+                .main_port()
                 .extension_hooks_for_test()
                 .expect("Native should retain the restored hook lease")
                 .snapshot(),
@@ -4286,6 +4846,69 @@ mod tests {
     }
 
     #[test]
+    fn native_agent_factory_constructs_sessionless_children_from_scoped_context() {
+        let mut options = AppRuntimeOptions::default();
+        let mut components =
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+        assert!(components.agent_orchestrator.has_child_factory());
+        let root = components
+            .agent_orchestrator
+            .root_context()
+            .expect("Native activation should install a root Agent context");
+
+        let omitted_context = root
+            .child(
+                AgentContextOwner::try_new("omitted-child").expect("owner should be valid"),
+                AgentChildCapabilityGrants::empty(),
+            )
+            .expect("omitted capabilities should still form a valid child scope");
+        let construction_error = match components
+            .agent_orchestrator
+            .construct_child(AgentId::new(2), omitted_context.clone())
+        {
+            Ok(_) => panic!("Native child construction must require scoped tools and prompt"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            construction_error,
+            "Agent plugin failed to construct its child adapter"
+        );
+        assert!(omitted_context.dispose().is_success());
+
+        let child_context = root
+            .child(
+                AgentContextOwner::try_new("working-child").expect("owner should be valid"),
+                AgentChildCapabilityGrants::empty()
+                    .inherit_tools()
+                    .inherit_prompt(),
+            )
+            .expect("inherited capabilities should form a valid child scope");
+        let child_id = AgentId::new(2);
+        let mut child = components
+            .agent_orchestrator
+            .construct_child(child_id, child_context.clone())
+            .expect("Native child should be constructed from scoped capabilities");
+        assert!(child.session().is_none());
+        assert!(matches!(
+            child.dispatch(AgentCommand::Interrupt {
+                agent_id: AgentId::MAIN,
+                target: None,
+            }),
+            Err(AgentRuntimeError::UnknownAgent)
+        ));
+        assert!(matches!(
+            child.dispatch(AgentCommand::Interrupt {
+                agent_id: child_id,
+                target: None,
+            }),
+            Ok(AgentCommandReceipt::Accepted)
+        ));
+        child.shutdown().expect("child adapter should shut down");
+        assert!(child_context.dispose().is_success());
+        components.shutdown().expect("runtime should shut down");
+    }
+
+    #[test]
     fn replay_agent_uses_the_plugin_owner_and_reactive_lifecycle() {
         const REPLAY_AGENT: &str = "replay-agent-loop";
         const REPLACEMENT_HOOKS: &str = "typed-extension-hooks-for-replay";
@@ -4340,6 +4963,7 @@ mod tests {
         );
         assert_eq!(replay_lifecycle.constructions(), 1);
         assert_eq!(replay_lifecycle.activations(), 1);
+        assert!(!components.agent_orchestrator.has_child_factory());
         assert_eq!(
             Arc::strong_count(&observer),
             observer_owners_without_agent,
@@ -4443,7 +5067,7 @@ mod tests {
             .agent_port_mut()
             .drain_events()
             .into_iter()
-            .map(crate::runtime::event_mapping::runtime_event_from_agent_event)
+            .filter_map(crate::runtime::event_mapping::runtime_event_from_main_agent_event)
             .collect::<Vec<_>>();
         assert!(matches!(
             &projected[0],
@@ -4527,6 +5151,7 @@ mod tests {
             "Native restoration should materialize exactly its declared grant groups"
         );
         assert!(components.agent_session().is_ok());
+        assert!(components.agent_orchestrator.has_child_factory());
         assert!(components.agent_port_mut().drain_events().is_empty());
         assert_eq!(
             components
@@ -4566,6 +5191,7 @@ mod tests {
                 ComponentLifecycleMode::Reconfigure,
             )
             .expect("external Agent should replace Native");
+        assert!(!components.agent_orchestrator.has_child_factory());
         assert_eq!(source.connect_count.load(Ordering::SeqCst), 1);
         let session_error = match components.agent_session() {
             Ok(_) => panic!("external Agent must not fabricate session capability"),

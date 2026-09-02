@@ -410,6 +410,14 @@ impl EffectScope {
         report
     }
 
+    /// 关闭当前 ownership tree 的 admission 并传播 cancellation，但暂不执行 inverse。
+    ///
+    /// 需要先等待 worker quiescence、再撤销 registration 的 owner 使用这个边界拆分
+    /// disposal transaction。后续仍由 [`EffectScope::dispose`] 执行并重试 inverse。
+    pub(super) fn begin_disposal(&self) {
+        begin_finalizing_shared(&self.shared);
+    }
+
     /// 返回当前 active ownership tree 的稳定、脱敏投影。
     pub(super) fn snapshot(&self) -> Option<EffectScopeSnapshot> {
         snapshot_shared(&self.shared)

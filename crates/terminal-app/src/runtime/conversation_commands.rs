@@ -37,8 +37,7 @@ impl AppRuntimeCoordinator {
         option_id: Option<String>,
     ) -> Result<(), String> {
         self.components
-            .agent_port_mut()
-            .dispatch(AgentCommand::RespondPermission {
+            .dispatch_main_agent(AgentCommand::RespondPermission {
                 agent_id: AgentId::MAIN,
                 target: target.cloned(),
                 request_id: request_id.to_string(),
@@ -63,8 +62,7 @@ impl AppRuntimeCoordinator {
         let turn_id = AgentTurnId::new(self.next_agent_turn_id);
         let receipt = self
             .components
-            .agent_port_mut()
-            .dispatch(AgentCommand::SubmitTurn {
+            .dispatch_main_agent(AgentCommand::SubmitTurn {
                 agent_id: AgentId::MAIN,
                 turn_id,
                 request: Box::new(request),
@@ -79,8 +77,7 @@ impl AppRuntimeCoordinator {
         target: Option<RuntimeTarget>,
     ) -> Result<RuntimeCommandReceipt, String> {
         self.components
-            .agent_port_mut()
-            .dispatch(AgentCommand::Interrupt {
+            .dispatch_main_agent(AgentCommand::Interrupt {
                 agent_id: AgentId::MAIN,
                 target,
             })

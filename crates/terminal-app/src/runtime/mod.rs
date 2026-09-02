@@ -7,6 +7,7 @@ mod agent;
     )
 )]
 mod agent_capability_context;
+mod agent_orchestrator;
 mod components;
 mod context;
 mod context_budget;
@@ -59,7 +60,7 @@ use self::{
     components::RuntimeComponents,
     context::{LlmPortCapability, SessionPersistenceCapability, ToolCatalogCapability},
     event_mapping::{
-        runtime_event_from_agent_event, should_defer_runtime_event_for_render_barrier,
+        runtime_event_from_main_agent_event, should_defer_runtime_event_for_render_barrier,
     },
     session_port::SessionBackendViews,
     session_worker::SessionStoreWorkerEvent,
@@ -313,7 +314,7 @@ impl AppRuntimeCoordinator {
 
     #[cfg(test)]
     pub(crate) fn has_pending_work_for_test(&self) -> bool {
-        self.components.agent_port().has_pending_work()
+        self.components.agent_orchestrator_has_pending_work()
             || self.components.model_refresh.is_running()
             || self.components.session_store_worker.has_pending_work()
             || self.components.context_budget_worker.has_pending_work()
@@ -453,8 +454,10 @@ impl RuntimeEventPort for AppRuntimeCoordinator {
         let mut events = std::mem::take(&mut self.pending_runtime_events);
         self.drain_context_budget_events_into(&mut events);
         self.drain_session_store_events_into(&mut events);
-        let agent_events = self.components.agent_port_mut().drain_events();
-        let mut agent_events = agent_events.into_iter().map(runtime_event_from_agent_event);
+        let agent_events = self.components.drain_main_agent_events();
+        let mut agent_events = agent_events
+            .into_iter()
+            .filter_map(runtime_event_from_main_agent_event);
         while let Some(runtime_event) = agent_events.next() {
             if should_defer_runtime_event_for_render_barrier(&events, &runtime_event) {
                 self.defer_runtime_events_until_next_render(runtime_event, agent_events);
@@ -535,7 +538,8 @@ impl AppRuntimeCoordinator {
                 SessionStoreWorkerEvent::Restored { restore, payload } => {
                     let restore_result = self
                         .components
-                        .agent_session_mut()
+                        .dispose_child_agents_for_session_transition()
+                        .and_then(|()| self.components.agent_session_mut())
                         .and_then(|session| session.restore_session(restore));
                     project_session_restore_result(
                         events,
@@ -551,7 +555,8 @@ impl AppRuntimeCoordinator {
                 } => {
                     let restore_result = self
                         .components
-                        .agent_session_mut()
+                        .dispose_child_agents_for_session_transition()
+                        .and_then(|()| self.components.agent_session_mut())
                         .and_then(|session| session.restore_session(restore));
                     project_session_restore_result(
                         events,

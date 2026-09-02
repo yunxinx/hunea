@@ -5,6 +5,7 @@
 
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
@@ -17,8 +18,22 @@ use crate::{
     },
 };
 
+mod child;
+
+pub use child::{
+    AGENT_LAUNCH_BATCH_LIMIT, AGENT_TITLE_MAX_DISPLAY_WIDTH, AgentActivitySummary,
+    AgentInstructions, AgentLaunchBatch, AgentLaunchChildSnapshot, AgentLaunchGroupId,
+    AgentLaunchInputError, AgentLaunchRequest, AgentLaunchSnapshot, AgentObjective,
+    AgentObservationId, AgentOutcome, AgentOutcomeSnapshot, AgentOutcomeSummary,
+    AgentOverviewDelta, AgentOverviewDeltaKind, AgentOverviewRow, AgentOverviewSnapshot,
+    AgentPermissionRequest, AgentPermissionState, AgentPermissionTarget, AgentPreviewSnapshot,
+    AgentProjectionRevision, AgentProjectionStatus, AgentRuntimeGeneration, AgentTitle,
+    AgentTranscriptItem, AgentTranscriptSnapshot,
+};
+
 /// `AgentId` 标识一个由 runtime host 管理的 Agent handle。
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct AgentId(u64);
 
 impl fmt::Debug for AgentId {
@@ -43,7 +58,8 @@ impl AgentId {
 }
 
 /// `AgentTurnId` 标识一次 Agent turn，避免事件依赖“唯一活跃 worker”的隐式假设。
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct AgentTurnId(u64);
 
 impl fmt::Debug for AgentTurnId {
@@ -219,6 +235,17 @@ impl fmt::Debug for AgentCommand {
                 .field("has_request_id", &!request_id.is_empty())
                 .field("has_option", &option_id.is_some())
                 .finish(),
+        }
+    }
+}
+
+impl AgentCommand {
+    /// 返回 command 明确寻址的 logical Agent identity。
+    pub const fn agent_id(&self) -> AgentId {
+        match self {
+            Self::SubmitTurn { agent_id, .. }
+            | Self::Interrupt { agent_id, .. }
+            | Self::RespondPermission { agent_id, .. } => *agent_id,
         }
     }
 }

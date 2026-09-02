@@ -29,7 +29,7 @@ impl AppRuntimeCoordinator {
         session_id: &str,
     ) -> Result<RuntimeCommandReceipt, String> {
         self.components.agent_session()?;
-        if self.components.agent_port().activity().is_busy() {
+        if self.components.agent_activity().is_busy() {
             return Err("Cannot resume session while a request is running".to_string());
         }
         self.ensure_session_mutation_available("resume session")?;
@@ -190,7 +190,7 @@ impl AppRuntimeCoordinator {
         leaf_id: &str,
     ) -> Result<RuntimeCommandReceipt, String> {
         let session_snapshot = self.components.agent_session()?.snapshot();
-        if self.components.agent_port().activity().is_busy() {
+        if self.components.agent_activity().is_busy() {
             return Err("Cannot switch branch while a request is running".to_string());
         }
         self.ensure_session_mutation_available("switch branch")?;
@@ -214,7 +214,7 @@ impl AppRuntimeCoordinator {
         entry_id: &str,
     ) -> Result<RuntimeCommandReceipt, String> {
         let session_snapshot = self.components.agent_session()?.snapshot();
-        if self.components.agent_port().activity().is_busy() {
+        if self.components.agent_activity().is_busy() {
             return Err("Cannot rewind session while a request is running".to_string());
         }
         self.ensure_session_mutation_available("rewind session")?;

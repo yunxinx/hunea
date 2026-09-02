@@ -1055,7 +1055,7 @@ fn provider_failure_is_redacted_before_runtime_event_projection() {
         .expect("native turn should start through LlmPort");
     let projected = collect_until_terminal(&mut runtime)
         .into_iter()
-        .map(crate::runtime::event_mapping::runtime_event_from_agent_event)
+        .filter_map(crate::runtime::event_mapping::runtime_event_from_main_agent_event)
         .collect::<Vec<_>>();
 
     assert!(projected.iter().any(|event| matches!(
@@ -1140,6 +1140,53 @@ fn native_restore_cleanup_failure_reverts_turn_effects_without_installing_candid
     runtime
         .shutdown()
         .expect("failed restore must still leave a quiescent disposable owner");
+}
+
+#[test]
+fn native_shutdown_retry_reaches_quiescence_after_worker_panic() {
+    let llm_port = crate::runtime::llm_port::LlmPort::new();
+    let _registration = llm_port
+        .register(
+            "native-shutdown-retry-test",
+            "panic-fixture",
+            std::sync::Arc::new(NativePanicFactory),
+        )
+        .expect("panic fixture provider should register");
+    let notifier = RuntimeEventNotifier::default();
+    let (exit_sender, exit_receiver) = mpsc::channel();
+    let _binding = notifier.bind_callback(move || {
+        let _ = exit_sender.send(());
+    });
+    let mut runtime = native_runtime_with_llm_port(notifier, llm_port);
+    runtime
+        .dispatch(AgentCommand::SubmitTurn {
+            agent_id: AgentId::MAIN,
+            turn_id: AgentTurnId::new(21),
+            request: Box::new(AgentTurnRequest::from_conversation_request(
+                ConversationTurnRequest::new(
+                    "panic-fixture",
+                    "fixture-model",
+                    ConversationItem::text(Role::User, "shutdown should be retryable"),
+                ),
+            )),
+        })
+        .expect("panic fixture turn should start");
+    exit_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("panicked worker should wake the runtime consumer");
+
+    let shutdown_error = runtime
+        .shutdown()
+        .expect_err("first shutdown should retain the panicked worker owner");
+    assert!(matches!(
+        shutdown_error,
+        AgentRuntimeError::Shutdown(message)
+            if message == "conversation worker thread panicked"
+    ));
+    runtime
+        .shutdown()
+        .expect("retry should finish cleanup after the worker has exited");
+    assert!(!runtime.has_pending_work());
 }
 
 #[test]
@@ -1578,7 +1625,7 @@ fn replay_projection_uses_the_existing_agent_event_mapper() {
     let projected = initial_facts
         .into_iter()
         .chain(remaining_facts)
-        .map(crate::runtime::event_mapping::runtime_event_from_agent_event)
+        .filter_map(crate::runtime::event_mapping::runtime_event_from_main_agent_event)
         .collect::<Vec<_>>();
     assert!(projected.iter().any(|event| matches!(
         event,
@@ -1617,7 +1664,7 @@ fn replay_failure_fact_uses_the_existing_failed_event_projection() {
     let projected = runtime
         .drain_events()
         .into_iter()
-        .map(crate::runtime::event_mapping::runtime_event_from_agent_event)
+        .filter_map(crate::runtime::event_mapping::runtime_event_from_main_agent_event)
         .collect::<Vec<_>>();
     assert!(projected.iter().any(|event| matches!(
         event,

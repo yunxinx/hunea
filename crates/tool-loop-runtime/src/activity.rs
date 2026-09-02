@@ -6,8 +6,8 @@ use runtime_domain::session::{
 };
 use serde_json::Value;
 use tool_runtime::{
-    ProcessedToolError, ToolDefinition as HuneaToolDefinition, ToolKind, ToolPermissionRequest,
-    ToolRegistry, ToolResult,
+    ProcessedToolError, ToolActivityPayloadPolicy, ToolDefinition as HuneaToolDefinition, ToolKind,
+    ToolPermissionRequest, ToolRegistry, ToolResult,
 };
 
 /// `runtime_tool_activity_from_call` creates a TUI-visible activity from a provider tool call.
@@ -18,7 +18,10 @@ pub fn runtime_tool_activity_from_call(
     let definition = tool_definitions.definition(&call.name);
     let parsed = ParsedArguments::from_call(call);
     let arguments = parsed.value();
-    let content = if runtime_kind_for(definition) == RuntimeToolKind::Execute {
+    let includes_payload = activity_payload_policy_for(definition).includes_payload();
+    let content = if !includes_payload {
+        Vec::new()
+    } else if runtime_kind_for(definition) == RuntimeToolKind::Execute {
         vec![RuntimeToolActivityContent::Terminal {
             terminal_id: call.call_id.clone(),
         }]
@@ -28,12 +31,17 @@ pub fn runtime_tool_activity_from_call(
 
     RuntimeToolActivity {
         activity_id: call.call_id.clone(),
-        title: tool_title_for(&call.name, definition, arguments),
+        title: tool_title_for(&call.name, definition, arguments, includes_payload),
         kind: runtime_kind_for(definition),
         status: RuntimeToolActivityStatus::InProgress,
         content,
-        locations: tool_locations_for(arguments),
-        raw_input: Some(RuntimeToolActivityRawValue::from(call.arguments.clone())),
+        locations: if includes_payload {
+            tool_locations_for(arguments)
+        } else {
+            Vec::new()
+        },
+        raw_input: includes_payload
+            .then(|| RuntimeToolActivityRawValue::from(call.arguments.clone())),
         raw_output: None,
     }
 }
@@ -48,22 +56,26 @@ pub fn runtime_tool_activity_update_from_result(
     let definition = tool_definitions.definition(&call.name);
     let parsed = ParsedArguments::from_call(call);
     let arguments = parsed.value();
+    let includes_payload = activity_payload_policy_for(definition).includes_payload();
     let status = Some(if processed_error.is_some() || result.is_error() {
         RuntimeToolActivityStatus::Failed
     } else {
         RuntimeToolActivityStatus::Completed
     });
-    let content = match processed_error {
-        Some(processed) => vec![RuntimeToolActivityContent::Text(format!(
-            "Failed: {}",
-            processed.display_reason
-        ))],
-        None => runtime_tool_activity_content_for_result(arguments, result, definition),
+    let content = if !includes_payload {
+        Vec::new()
+    } else {
+        match processed_error {
+            Some(processed) => vec![RuntimeToolActivityContent::Text(format!(
+                "Failed: {}",
+                processed.display_reason
+            ))],
+            None => runtime_tool_activity_content_for_result(arguments, result, definition),
+        }
     };
-    let raw_input = processed_error
-        .is_none()
+    let raw_input = (processed_error.is_none() && includes_payload)
         .then(|| RuntimeToolActivityRawValue::from(call.arguments.clone()));
-    let raw_output = processed_error.is_none().then(|| {
+    let raw_output = (processed_error.is_none() && includes_payload).then(|| {
         RuntimeToolActivityRawValue::tool_result_with_display_content(
             result.text_content(),
             result.display_content().map(str::to_string),
@@ -73,11 +85,20 @@ pub fn runtime_tool_activity_update_from_result(
 
     RuntimeToolActivityUpdate {
         activity_id: call.call_id.clone(),
-        title: Some(tool_title_for(&call.name, definition, arguments)),
+        title: Some(tool_title_for(
+            &call.name,
+            definition,
+            arguments,
+            includes_payload,
+        )),
         kind: Some(runtime_kind_for(definition)),
         status,
         content: Some(content),
-        locations: Some(tool_locations_for(arguments)),
+        locations: Some(if includes_payload {
+            tool_locations_for(arguments)
+        } else {
+            Vec::new()
+        }),
         raw_input,
         raw_output,
     }
@@ -159,6 +180,10 @@ pub fn runtime_tool_activity_update_from_permission_request(
 ) -> RuntimeToolActivityUpdate {
     let tool_name = &request.call.name;
     let arguments = &request.call.arguments;
+    let includes_payload = request
+        .definition
+        .activity_payload_policy
+        .includes_payload();
     let content = request.preview.as_ref().map_or_else(
         || RuntimeToolActivityContent::Text(tool_input_summary(arguments)),
         |preview| RuntimeToolActivityContent::Diff {
@@ -174,12 +199,17 @@ pub fn runtime_tool_activity_update_from_permission_request(
             tool_name,
             Some(&request.definition),
             arguments,
+            includes_payload,
         )),
         kind: Some(runtime_kind_for(Some(&request.definition))),
         status: Some(RuntimeToolActivityStatus::Pending),
-        content: Some(vec![content]),
-        locations: Some(tool_locations_for(arguments)),
-        raw_input: Some(RuntimeToolActivityRawValue::from(arguments.clone())),
+        content: Some(includes_payload.then_some(content).into_iter().collect()),
+        locations: Some(if includes_payload {
+            tool_locations_for(arguments)
+        } else {
+            Vec::new()
+        }),
+        raw_input: includes_payload.then(|| RuntimeToolActivityRawValue::from(arguments.clone())),
         raw_output: None,
     }
 }
@@ -200,15 +230,28 @@ fn runtime_kind_for(definition: Option<&HuneaToolDefinition>) -> RuntimeToolKind
     }
 }
 
+fn activity_payload_policy_for(
+    definition: Option<&HuneaToolDefinition>,
+) -> ToolActivityPayloadPolicy {
+    definition
+        .map(|definition| definition.activity_payload_policy)
+        .unwrap_or_default()
+}
+
 fn tool_title_for(
     tool_name: &str,
     definition: Option<&HuneaToolDefinition>,
     arguments: &Value,
+    includes_payload: bool,
 ) -> String {
     let base = definition
         .and_then(|definition| definition.label.as_ref())
         .cloned()
         .unwrap_or_else(|| tool_name.to_string());
+
+    if !includes_payload {
+        return base;
+    }
 
     if let Some(path) = arguments
         .get("path")
@@ -305,8 +348,8 @@ mod tests {
         RuntimeToolActivityContent, RuntimeToolActivityStatus, RuntimeToolKind,
     };
     use tool_runtime::{
-        ToolDefinition, ToolKind, ToolPermissionPreview, ToolPermissionRequest, ToolRegistry,
-        ToolResult,
+        ToolActivityPayloadPolicy, ToolDefinition, ToolKind, ToolPermissionPreview,
+        ToolPermissionRequest, ToolRegistry, ToolResult,
     };
 
     use super::{runtime_tool_activity_from_call, runtime_tool_activity_update_from_result};
@@ -590,5 +633,69 @@ mod tests {
         let parsed = super::ParsedArguments::from_call(&call);
         assert!(matches!(parsed.value(), serde_json::Value::Object(_)));
         assert!(parsed.input_summary().contains("Cargo.toml"));
+    }
+
+    #[test]
+    fn metadata_only_policy_redacts_arguments_results_locations_and_derived_content() {
+        let mut registry = ToolRegistry::new();
+        registry.insert(
+            ToolDefinition::new("spawn_agents")
+                .with_label("Spawn agents")
+                .with_activity_payload_policy(ToolActivityPayloadPolicy::MetadataOnly),
+        );
+        let call = ToolCall::new(
+            "call-1",
+            "spawn_agents",
+            r#"{"instructions":"control secret","objective":"delivery secret","path":"secret/path"}"#,
+        );
+
+        let started = runtime_tool_activity_from_call(&call, &registry);
+        assert_eq!(started.title, "Spawn agents");
+        assert!(started.content.is_empty());
+        assert!(started.locations.is_empty());
+        assert!(started.raw_input.is_none());
+
+        let result = ToolResult::success("call-1", "delivery result secret").with_details(
+            serde_json::json!({"raw": "secret result metadata", "path": "secret/path"}),
+        );
+        let update = runtime_tool_activity_update_from_result(&call, &result, None, &registry);
+        assert_eq!(update.title.as_deref(), Some("Spawn agents"));
+        assert_eq!(update.content, Some(Vec::new()));
+        assert_eq!(update.locations, Some(Vec::new()));
+        assert!(update.raw_input.is_none());
+        assert!(update.raw_output.is_none());
+    }
+
+    #[test]
+    fn metadata_only_permission_projection_does_not_leak_preview_or_arguments() {
+        let definition = ToolDefinition::new("spawn_agents")
+            .with_label("Spawn agents")
+            .with_activity_payload_policy(ToolActivityPayloadPolicy::MetadataOnly);
+        let request = ToolPermissionRequest::new(
+            tool_runtime::ToolCall::new(
+                "call-1",
+                "spawn_agents",
+                serde_json::json!({
+                    "instructions": "control secret",
+                    "objective": "delivery secret"
+                }),
+            ),
+            definition,
+        )
+        .with_preview(ToolPermissionPreview {
+            path: "secret/path".to_string(),
+            old_text: Some("secret old".to_string()),
+            new_text: "secret new".to_string(),
+            is_truncated: false,
+            snapshot: None,
+        });
+
+        let update =
+            super::runtime_tool_activity_update_from_permission_request("call-1", &request);
+
+        assert_eq!(update.title.as_deref(), Some("Spawn agents"));
+        assert_eq!(update.content, Some(Vec::new()));
+        assert_eq!(update.locations, Some(Vec::new()));
+        assert!(update.raw_input.is_none());
     }
 }

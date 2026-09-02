@@ -4,7 +4,13 @@ use std::{fs, time::Duration};
 mod support;
 
 use provider_protocol::{ContentBlock, ConversationItem, Role, ToolCall};
-use runtime_domain::session::{TranscriptReplayItem, TranscriptReplayRole};
+use runtime_domain::{
+    agent::{
+        AgentId, AgentLaunchChildSnapshot, AgentLaunchGroupId, AgentLaunchSnapshot, AgentOutcome,
+        AgentOutcomeSnapshot, AgentOutcomeSummary,
+    },
+    session::{TranscriptReplayItem, TranscriptReplayRole},
+};
 use session_store::{
     ConfigSnapshot, InMemorySessionStore, ProjectDir, ResolveError, SessionCatalogStore,
     SessionFlushStore, SessionLifecycleStore, SessionListOptions, SessionPort, SessionStoreError,
@@ -108,6 +114,68 @@ async fn in_memory_store_satisfies_session_port_contract() {
         sample_header(&work_dir, "contract-model", Some("memory port contract")),
     )
     .await;
+}
+
+#[tokio::test]
+async fn agent_replay_facts_keep_order_and_do_not_change_session_meta() {
+    let root = TestSessionRoot::new("agent-replay-facts");
+    let work_dir = root.workspace_path("repo");
+    let store = open_store(&root).await;
+    let session_id = store
+        .create_session(sample_header(&work_dir, "qwen3", None))
+        .await
+        .expect("session should be created");
+    let launch = TranscriptReplayItem::AgentLaunch(AgentLaunchSnapshot {
+        group_id: AgentLaunchGroupId::new(7),
+        parent_agent_id: AgentId::MAIN,
+        children: vec![AgentLaunchChildSnapshot {
+            agent_id: AgentId::new(8),
+            title: runtime_domain::agent::AgentTitle::resolve(
+                &runtime_domain::agent::AgentObjective::new("write a haiku").unwrap(),
+                None,
+            )
+            .unwrap(),
+        }],
+        occurred_at_ms: 10,
+    });
+    let outcome = TranscriptReplayItem::AgentOutcome(AgentOutcomeSnapshot {
+        agent_id: AgentId::new(8),
+        title: match &launch {
+            TranscriptReplayItem::AgentLaunch(snapshot) => snapshot.children[0].title.clone(),
+            _ => unreachable!(),
+        },
+        outcome: AgentOutcome::Completed,
+        occurred_at_ms: 20,
+        summary: Some(AgentOutcomeSummary::new("done").unwrap()),
+    });
+
+    store
+        .append_transcript_replay(&session_id, launch.clone())
+        .await
+        .expect("launch fact should append");
+    store
+        .append_transcript_replay(&session_id, outcome.clone())
+        .await
+        .expect("outcome fact should append");
+
+    let restored = store
+        .load_session(&session_id, None)
+        .await
+        .expect("session should load");
+    assert_eq!(restored.transcript, vec![launch, outcome]);
+
+    let project_dir = ProjectDir::from_work_dir(&work_dir);
+    let rows = store
+        .list_sessions(&project_dir, SessionListOptions::default())
+        .await
+        .expect("session metadata should load");
+    let row = rows
+        .into_iter()
+        .find(|row| row.session_id == session_id)
+        .expect("created session should be listed");
+    assert_eq!(row.title, session_id.to_string());
+    assert_eq!(row.preview, None);
+    assert_eq!(row.last_assistant_preview, None);
 }
 
 #[tokio::test]

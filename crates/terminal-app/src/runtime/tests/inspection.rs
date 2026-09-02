@@ -380,8 +380,20 @@ fn composition_snapshot_is_deterministic_and_redacted() {
             {
                 "owner": "agent_runtime",
                 "lifecycle": "active",
-                "effects": ["dependency:extension_hooks", "dependency:runtime_event_stream"],
-                "children": [],
+                "effects": [
+                    "dependency:extension_hooks",
+                    "dependency:llm_port",
+                    "dependency:permission_policy",
+                    "dependency:prompt_assembly",
+                    "dependency:runtime_event_stream",
+                    "dependency:tool_catalog",
+                ],
+                "children": [{
+                    "owner": "main-agent",
+                    "lifecycle": "active",
+                    "effects": [],
+                    "children": [],
+                }],
             },
             {
                 "owner": "approval_provider",

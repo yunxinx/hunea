@@ -1,7 +1,68 @@
 use super::support::*;
+use runtime_domain::agent::{
+    AgentCommand, AgentCommandReceipt, AgentEvent, AgentId, AgentRuntime, AgentRuntimeError,
+    AgentTitle, AgentTurnId,
+};
 use runtime_domain::prompt_assembly::{
     PromptPreludeSection, PromptPreludeSnapshot, PromptSourceKind, PromptSourceOrigin,
 };
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use crate::runtime::{
+    agent::{
+        AgentRuntimeActivationGrants, AgentRuntimeActivity, AgentRuntimePort,
+        AgentSessionCapability,
+    },
+    agent_capability_context::{AgentChildCapabilityGrants, AgentContextOwner},
+};
+
+struct ResumeOwnedChildRuntime {
+    shutdowns: Arc<AtomicUsize>,
+}
+
+impl AgentRuntime for ResumeOwnedChildRuntime {
+    fn dispatch(
+        &mut self,
+        _command: AgentCommand,
+    ) -> Result<AgentCommandReceipt, AgentRuntimeError> {
+        Ok(AgentCommandReceipt::Accepted)
+    }
+
+    fn drain_events(&mut self) -> Vec<AgentEvent> {
+        Vec::new()
+    }
+
+    fn shutdown(&mut self) -> Result<(), AgentRuntimeError> {
+        self.shutdowns.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+impl AgentRuntimePort for ResumeOwnedChildRuntime {
+    fn activate(&mut self, _grants: AgentRuntimeActivationGrants) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn suspend(&mut self) -> Result<(), AgentRuntimeError> {
+        Ok(())
+    }
+
+    fn activity(&self) -> AgentRuntimeActivity {
+        AgentRuntimeActivity::Idle
+    }
+
+    fn session(&self) -> Option<&dyn AgentSessionCapability> {
+        None
+    }
+
+    fn session_mut(&mut self) -> Option<&mut dyn AgentSessionCapability> {
+        None
+    }
+
+    fn has_pending_work(&self) -> bool {
+        false
+    }
+}
 
 #[test]
 fn resume_session_emits_transcript_and_restored_model() {
@@ -111,6 +172,71 @@ fn resume_session_emits_transcript_and_restored_model() {
         agent_system_prompt(&coordinator).as_deref(),
         Some("historical prompt")
     );
+    cleanup(&work_dir);
+}
+
+#[test]
+fn resume_session_disposes_the_old_runtime_child_tree_before_restore() {
+    let work_dir = temp_test_dir("resume-child-tree-work");
+    let store = Arc::new(InMemorySessionStore::new());
+    let store_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let header = SessionHeader {
+        session_id: SessionId::new(),
+        work_dir: work_dir.clone(),
+        session_name: None,
+        initial_model: "qwen3".to_string(),
+        git_head: None,
+        cli_version: None,
+    };
+    let session_id = store_runtime
+        .block_on(store.create_session(header.clone()))
+        .unwrap();
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        session_store: Some(store),
+        session_header_template: Some(header),
+        ..AppRuntimeOptions::default()
+    });
+    let root = coordinator
+        .components
+        .agent_root_context_for_test()
+        .expect("Native Agent should own a root context");
+    let child_context = root
+        .child(
+            AgentContextOwner::try_new("resume-owned-child").unwrap(),
+            AgentChildCapabilityGrants::empty()
+                .inherit_tools()
+                .inherit_prompt(),
+        )
+        .unwrap();
+    let shutdowns = Arc::new(AtomicUsize::new(0));
+    let title = AgentTitle::resolve(
+        &runtime_domain::agent::AgentObjective::new("resume owned child").unwrap(),
+        None,
+    )
+    .unwrap();
+    coordinator.components.register_child_agent_for_test(
+        AgentId::new(2),
+        AgentId::MAIN,
+        AgentTurnId::new(1),
+        title,
+        child_context,
+        Box::new(ResumeOwnedChildRuntime {
+            shutdowns: Arc::clone(&shutdowns),
+        }),
+    );
+
+    coordinator
+        .handle_runtime_command(RuntimeCommand::ResumeSession {
+            session_id: session_id.to_string(),
+        })
+        .unwrap();
+    let _ = wait_for_session_resumed(&mut coordinator);
+
+    assert_eq!(shutdowns.load(Ordering::SeqCst), 1);
+    assert_eq!(coordinator.components.child_agent_count_for_test(), 0);
     cleanup(&work_dir);
 }
 

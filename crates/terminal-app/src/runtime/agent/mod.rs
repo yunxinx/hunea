@@ -32,7 +32,11 @@ use runtime_domain::session::{ConversationTurnRequest, TranscriptUserMessage};
 use crate::{
     dynamic_environment::DynamicEnvironmentObserver,
     runtime::{
-        context::{CapabilityLease, ExtensionHookRegistryCapability, RuntimeEventStreamCapability},
+        agent_capability_context::AgentCapabilityContext,
+        context::{
+            CapabilityGenerationGuard, CapabilityLease, ExtensionHookRegistryCapability,
+            LlmPortCapability, PermissionPolicyCapability, RuntimeEventStreamCapability,
+        },
         llm_port::LlmPort,
         permission_policy::PermissionPolicy,
         prompt_assembly::PromptAssemblySessionSnapshot,
@@ -42,6 +46,7 @@ use crate::{
 #[cfg(test)]
 pub(super) use native::NativeAgentRuntime;
 pub(super) use native::construct_native_agent_runtime;
+pub(super) use native::construct_native_child_agent_runtime;
 #[cfg(test)]
 pub(super) use replay::{ReplayAgentRuntime, ReplayFixture, ReplayLifecycleProbe};
 
@@ -122,6 +127,151 @@ pub(super) struct AgentRuntimeConstructionGrants {
     prompt: Option<AgentPromptConstructionGrant>,
     tools: Option<AgentToolConstructionGrant>,
     session: Option<AgentSessionConstructionGrant>,
+}
+
+/// Native child adapter 的 typed construction input。
+///
+/// `AgentCapabilityContext` 是 child 的 authority owner；其 scoped views 在 construction
+/// boundary 生成工具与 prompt snapshot，不能由 factory 回查 host registry。其余字段是当前
+/// committed plugin generation 的 typed provider handles，不包含 session authority。
+pub(super) struct AgentChildRuntimeConstructionGrants {
+    pub(super) owned_agent_id: AgentId,
+    pub(super) capability_context: AgentCapabilityContext,
+    pub(super) event_notifier: runtime_domain::event_notifier::RuntimeEventNotifier,
+    pub(super) extension_hooks: ExtensionHookRegistry,
+    pub(super) llm_port: LlmPort,
+    pub(super) permission_policy: PermissionPolicy,
+    pub(super) permission_provider_id: String,
+    pub(super) request_policy: RuntimeRequestPolicy,
+    pub(super) loaded_models: conversation_runtime::models::LoadedModelCatalog,
+    pub(super) dynamic_environment_observer: Arc<dyn DynamicEnvironmentObserver>,
+    pub(super) hunea_config_dir: PathBuf,
+}
+
+/// Child adapter 与 plugin generation 同步替换的 immutable host defaults。
+///
+/// 它不包含 tool、prompt 或 session authority；这些只能在 launch 时从
+/// `AgentCapabilityContext` 的 scoped view 投影。
+#[derive(Clone)]
+pub(super) struct AgentChildRuntimeStaticGrants {
+    request_policy: RuntimeRequestPolicy,
+    loaded_models: conversation_runtime::models::LoadedModelCatalog,
+    dynamic_environment_observer: Arc<dyn DynamicEnvironmentObserver>,
+    hunea_config_dir: PathBuf,
+    permission_provider_id: String,
+}
+
+impl AgentChildRuntimeStaticGrants {
+    pub(super) fn new(
+        request_policy: RuntimeRequestPolicy,
+        loaded_models: conversation_runtime::models::LoadedModelCatalog,
+        dynamic_environment_observer: Arc<dyn DynamicEnvironmentObserver>,
+        hunea_config_dir: PathBuf,
+        permission_provider_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            request_policy,
+            loaded_models,
+            dynamic_environment_observer,
+            hunea_config_dir,
+            permission_provider_id: permission_provider_id.into(),
+        }
+    }
+}
+
+impl fmt::Debug for AgentChildRuntimeStaticGrants {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentChildRuntimeStaticGrants")
+            .field("has_request_policy", &true)
+            .field("has_loaded_models", &true)
+            .field("has_dynamic_environment_observer", &true)
+            .field("has_permission_provider", &true)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Child adapter 只保留 active component graph 当前 generation 的 typed leases。
+#[derive(Clone)]
+pub(super) struct AgentChildRuntimeLeases {
+    event_stream: CapabilityLease<RuntimeEventStreamCapability>,
+    extension_hooks: CapabilityLease<ExtensionHookRegistryCapability>,
+    llm_port: CapabilityLease<LlmPortCapability>,
+    permission_policy: CapabilityLease<PermissionPolicyCapability>,
+}
+
+impl AgentChildRuntimeLeases {
+    pub(super) fn new(
+        event_stream: CapabilityLease<RuntimeEventStreamCapability>,
+        extension_hooks: CapabilityLease<ExtensionHookRegistryCapability>,
+        llm_port: CapabilityLease<LlmPortCapability>,
+        permission_policy: CapabilityLease<PermissionPolicyCapability>,
+    ) -> Self {
+        Self {
+            event_stream,
+            extension_hooks,
+            llm_port,
+            permission_policy,
+        }
+    }
+
+    pub(super) fn construction_grants(
+        &self,
+        owned_agent_id: AgentId,
+        capability_context: AgentCapabilityContext,
+        static_grants: &AgentChildRuntimeStaticGrants,
+    ) -> AgentChildRuntimeConstructionGrants {
+        AgentChildRuntimeConstructionGrants {
+            owned_agent_id,
+            capability_context,
+            event_notifier: (*self.event_stream).clone(),
+            extension_hooks: (*self.extension_hooks).clone(),
+            llm_port: (*self.llm_port).clone(),
+            permission_policy: (*self.permission_policy).clone(),
+            permission_provider_id: static_grants.permission_provider_id.clone(),
+            request_policy: static_grants.request_policy.clone(),
+            loaded_models: static_grants.loaded_models.clone(),
+            dynamic_environment_observer: Arc::clone(&static_grants.dynamic_environment_observer),
+            hunea_config_dir: static_grants.hunea_config_dir.clone(),
+        }
+    }
+
+    /// 为每个 child adapter 生成独立的 activation lease。
+    ///
+    /// lease 本身是 generation-bound 的 clone；child 不会获得 host registry 或第二份
+    /// capability authority。orchestrator 在 child record 提交前调用该方法，确保 activation
+    /// 失败时仍可回收已构造的 context。
+    #[allow(dead_code)]
+    pub(super) fn activation_grants(&self) -> AgentRuntimeActivationGrants {
+        AgentRuntimeActivationGrants::empty()
+            .with_event_stream(self.event_stream.clone())
+            .with_extension_hooks(self.extension_hooks.clone())
+    }
+
+    /// Child tree 必须随任一 construction/activation provider generation 一同失效。
+    pub(super) fn generation_guards(&self) -> [CapabilityGenerationGuard; 4] {
+        [
+            self.event_stream.generation_guard(),
+            self.extension_hooks.generation_guard(),
+            self.llm_port.generation_guard(),
+            self.permission_policy.generation_guard(),
+        ]
+    }
+}
+
+impl fmt::Debug for AgentChildRuntimeConstructionGrants {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentChildRuntimeConstructionGrants")
+            .field("has_owned_agent_id", &true)
+            .field("has_capability_context", &true)
+            .field("has_event_notifier", &true)
+            .field("has_extension_hooks", &true)
+            .field("has_llm_port", &true)
+            .field("has_permission_policy", &true)
+            .field("has_loaded_models", &true)
+            .finish_non_exhaustive()
+    }
 }
 
 impl AgentRuntimeConstructionGrants {
@@ -228,12 +378,17 @@ type AgentRuntimeConstructor = dyn Fn(AgentRuntimeConstructionGrants) -> Result<
     + Send
     + Sync;
 
+type AgentChildRuntimeConstructor = dyn Fn(AgentChildRuntimeConstructionGrants) -> Result<Box<dyn AgentRuntimePort>, String>
+    + Send
+    + Sync;
+
 const AGENT_RUNTIME_CONSTRUCTION_FAILED: &str = "Agent plugin failed to construct its adapter";
 
 /// `AgentRuntimeFactory` 是 Agent plugin implementation 独占的 adapter construction authority。
 #[derive(Clone)]
 pub(super) struct AgentRuntimeFactory {
     construct: Arc<AgentRuntimeConstructor>,
+    child_construct: Option<Arc<AgentChildRuntimeConstructor>>,
 }
 
 impl AgentRuntimeFactory {
@@ -245,6 +400,25 @@ impl AgentRuntimeFactory {
     ) -> Self {
         Self {
             construct: Arc::new(construct),
+            child_construct: None,
+        }
+    }
+
+    pub(super) fn with_child_constructor(
+        construct: impl Fn(AgentRuntimeConstructionGrants) -> Result<Box<dyn AgentRuntimePort>, String>
+        + Send
+        + Sync
+        + 'static,
+        child_construct: impl Fn(
+            AgentChildRuntimeConstructionGrants,
+        ) -> Result<Box<dyn AgentRuntimePort>, String>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        Self {
+            construct: Arc::new(construct),
+            child_construct: Some(Arc::new(child_construct)),
         }
     }
 
@@ -253,6 +427,14 @@ impl AgentRuntimeFactory {
         grants: AgentRuntimeConstructionGrants,
     ) -> Result<Box<dyn AgentRuntimePort>, String> {
         (self.construct)(grants).map_err(|_| AGENT_RUNTIME_CONSTRUCTION_FAILED.to_string())
+    }
+
+    pub(super) fn child_factory(&self) -> Option<ChildAgentFactory> {
+        self.child_construct
+            .as_ref()
+            .map(|construct| ChildAgentFactory {
+                construct: Arc::clone(construct),
+            })
     }
 
     /// 为 host 显式提供的 kernel source 创建 construction authority。
@@ -299,6 +481,22 @@ impl AgentRuntimeFactory {
             };
             Ok(Box::new(runtime))
         })
+    }
+}
+
+/// 一个 active Agent plugin generation 提供的 typed child construction capability。
+#[derive(Clone)]
+pub(super) struct ChildAgentFactory {
+    construct: Arc<AgentChildRuntimeConstructor>,
+}
+
+impl ChildAgentFactory {
+    pub(super) fn construct(
+        &self,
+        grants: AgentChildRuntimeConstructionGrants,
+    ) -> Result<Box<dyn AgentRuntimePort>, String> {
+        (self.construct)(grants)
+            .map_err(|_| "Agent plugin failed to construct its child adapter".to_string())
     }
 }
 

@@ -564,7 +564,9 @@ fn transcript_replay_item_terminal_snapshot(
         | TranscriptReplayItem::Reasoning { .. }
         | TranscriptReplayItem::ToolActivity { .. }
         | TranscriptReplayItem::ToolResult { .. }
-        | TranscriptReplayItem::System { .. } => None,
+        | TranscriptReplayItem::System { .. }
+        | TranscriptReplayItem::AgentLaunch(_)
+        | TranscriptReplayItem::AgentOutcome(_) => None,
     }
 }
 
@@ -623,6 +625,8 @@ fn append_transcript_replay_item(
         TranscriptReplayItem::System { content } => {
             transcript.append_system_message(content);
         }
+        // Agent facts在专用 transcript item 接入前保持 typed，不降级成 error-styled system text。
+        TranscriptReplayItem::AgentLaunch(_) | TranscriptReplayItem::AgentOutcome(_) => {}
     }
 }
 

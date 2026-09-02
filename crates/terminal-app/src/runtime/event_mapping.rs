@@ -5,67 +5,74 @@ use runtime_domain::{
     session::RuntimeEvent,
 };
 
-pub(crate) fn runtime_event_from_agent_event(event: AgentEvent) -> RuntimeEvent {
+pub(crate) fn runtime_event_from_main_agent_event(event: AgentEvent) -> Option<RuntimeEvent> {
+    if event.agent_id != runtime_domain::agent::AgentId::MAIN {
+        return None;
+    }
     let target = event.target;
     match event.kind {
-        AgentEventKind::SystemMessage { message } => RuntimeEvent::SystemMessage {
+        AgentEventKind::SystemMessage { message } => Some(RuntimeEvent::SystemMessage {
             target: Some(target),
             message,
-        },
-        AgentEventKind::Retrying { message } => RuntimeEvent::Retrying {
+        }),
+        AgentEventKind::Retrying { message } => Some(RuntimeEvent::Retrying {
             target: Some(target),
             message,
-        },
-        AgentEventKind::OutputTokenEstimate { total_tokens } => RuntimeEvent::OutputTokenEstimate {
-            target: Some(target),
-            total_tokens,
-        },
-        AgentEventKind::InputTokenEstimate { total_tokens } => RuntimeEvent::InputTokenEstimate {
-            target: Some(target),
-            total_tokens,
-        },
-        AgentEventKind::Thinking { is_thinking } => RuntimeEvent::Thinking {
+        }),
+        AgentEventKind::OutputTokenEstimate { total_tokens } => {
+            Some(RuntimeEvent::OutputTokenEstimate {
+                target: Some(target),
+                total_tokens,
+            })
+        }
+        AgentEventKind::InputTokenEstimate { total_tokens } => {
+            Some(RuntimeEvent::InputTokenEstimate {
+                target: Some(target),
+                total_tokens,
+            })
+        }
+        AgentEventKind::Thinking { is_thinking } => Some(RuntimeEvent::Thinking {
             target: Some(target),
             is_thinking,
-        },
+        }),
         AgentEventKind::AssistantDelta { content } => {
-            RuntimeEvent::AssistantDelta { target, content }
+            Some(RuntimeEvent::AssistantDelta { target, content })
         }
         AgentEventKind::ReasoningDelta { content } => {
-            RuntimeEvent::ReasoningDelta { target, content }
+            Some(RuntimeEvent::ReasoningDelta { target, content })
         }
         AgentEventKind::ToolActivityStarted { activity } => {
-            RuntimeEvent::ToolActivityStarted { target, activity }
+            Some(RuntimeEvent::ToolActivityStarted { target, activity })
         }
         AgentEventKind::ToolActivityUpdated { update } => {
-            RuntimeEvent::ToolActivityUpdated { target, update }
+            Some(RuntimeEvent::ToolActivityUpdated { target, update })
         }
         AgentEventKind::TerminalUpdated { snapshot } => {
-            RuntimeEvent::TerminalUpdated { target, snapshot }
+            Some(RuntimeEvent::TerminalUpdated { target, snapshot })
         }
         AgentEventKind::PermissionRequested { request } => {
-            RuntimeEvent::PermissionRequested { target, request }
+            Some(RuntimeEvent::PermissionRequested { target, request })
         }
         AgentEventKind::PreparationWarning { message } | AgentEventKind::TurnFailed { message } => {
-            RuntimeEvent::Failed {
+            Some(RuntimeEvent::Failed {
                 target: Some(target),
                 message,
-            }
+            })
         }
         AgentEventKind::TurnFinished {
             response,
             metrics,
             context_usage,
-        } => RuntimeEvent::MessageFinished {
+        } => Some(RuntimeEvent::MessageFinished {
             target: Some(target),
             response,
             finish_reason: None,
             metrics,
             context_usage,
-        },
-        AgentEventKind::TurnInterrupted => RuntimeEvent::Interrupted {
+        }),
+        AgentEventKind::TurnInterrupted => Some(RuntimeEvent::Interrupted {
             target: Some(target),
-        },
+        }),
     }
 }
 
@@ -102,7 +109,7 @@ mod tests {
     #[test]
     fn finished_event_carries_context_usage() {
         let usage = sample_usage();
-        let event = runtime_event_from_agent_event(AgentEvent {
+        let event = runtime_event_from_main_agent_event(AgentEvent {
             agent_id: AgentId::MAIN,
             turn_id: AgentTurnId::new(1),
             target: RuntimeTarget::provider("openai", "gpt-4o-mini"),
@@ -113,15 +120,15 @@ mod tests {
             },
         });
 
-        let RuntimeEvent::MessageFinished { context_usage, .. } = event else {
-            panic!("finished conversation event should map to MessageFinished, got {event:?}");
+        let Some(RuntimeEvent::MessageFinished { context_usage, .. }) = event else {
+            panic!("finished conversation event should map to MessageFinished");
         };
         assert_eq!(context_usage, Some(usage));
     }
 
     #[test]
     fn finished_event_without_usage_keeps_context_usage_hidden() {
-        let event = runtime_event_from_agent_event(AgentEvent {
+        let event = runtime_event_from_main_agent_event(AgentEvent {
             agent_id: AgentId::MAIN,
             turn_id: AgentTurnId::new(1),
             target: RuntimeTarget::provider("openai", "gpt-4o-mini"),
@@ -132,9 +139,21 @@ mod tests {
             },
         });
 
-        let RuntimeEvent::MessageFinished { context_usage, .. } = event else {
-            panic!("finished conversation event should map to MessageFinished, got {event:?}");
+        let Some(RuntimeEvent::MessageFinished { context_usage, .. }) = event else {
+            panic!("finished conversation event should map to MessageFinished");
         };
         assert_eq!(context_usage, None);
+    }
+
+    #[test]
+    fn non_main_event_is_dropped_instead_of_panicking_or_retargeting() {
+        let event = runtime_event_from_main_agent_event(AgentEvent {
+            agent_id: AgentId::new(2),
+            turn_id: AgentTurnId::new(1),
+            target: RuntimeTarget::provider("private", "model"),
+            kind: AgentEventKind::TurnInterrupted,
+        });
+
+        assert!(event.is_none());
     }
 }

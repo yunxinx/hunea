@@ -74,6 +74,7 @@ pub(super) enum CommandPanelAction {
     OpenCoarseRewind,
     OpenModelPanel,
     OpenToolApprovalDebug,
+    OpenAgentsPanel,
 }
 
 impl CommandPanelAction {
@@ -535,6 +536,7 @@ impl Model {
                 Some(AppEffect::BeginPromptAssemblyEdit)
             }
             CommandPanelAction::OpenMessageHistory => Some(AppEffect::OpenMessageHistory),
+            CommandPanelAction::OpenAgentsPanel => Some(AppEffect::OpenAgentsPanel),
             CommandPanelAction::OpenEntryRewind => Some(AppEffect::OpenEntryRewind),
             CommandPanelAction::OpenCoarseRewind => self.open_coarse_rewind_from_command(),
             CommandPanelAction::OpenModelPanel => {
@@ -1236,6 +1238,12 @@ fn all_command_panel_items(
         aliases: Vec::new(),
         description: "Select model for this session".to_string(),
         action: CommandPanelAction::OpenModelPanel,
+    });
+    items.push(CommandPanelItem {
+        name: "/agents".to_string(),
+        aliases: Vec::new(),
+        description: "Open the Agents overview panel".to_string(),
+        action: CommandPanelAction::OpenAgentsPanel,
     });
     items.push(CommandPanelItem {
         name: "/prompt".to_string(),

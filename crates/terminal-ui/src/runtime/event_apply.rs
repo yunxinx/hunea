@@ -308,13 +308,15 @@ impl RuntimeEventApply for Model {
                 self.accept_streamed_runtime_reasoning_from_runtime();
                 self.finish_stream_activity_with_work_summary();
                 self.reset_runtime_final_body_divider_state();
+                // runtime 替换后旧 generation observation 全部失效，注销并关闭 panel。
+                self.close_agents_panel();
                 if let Some(message) = message {
                     self.show_toast(ToastSeverity::Error, format!("Runtime stopped: {message}"));
                 }
             }
             // Agent projection port：document facts 追加语义 transcript item；
-            // observation/permission 投影属于后续 surface（/agents、attention pill），
-            // 本阶段只保证被无害吸收，不渲染、不改变会话状态。
+            // observation/permission 投影由 `/agents` panel 消费（AgentPermissionUpdated
+            // 属 Slice 8，本阶段保持无害吸收）。
             RuntimeEvent::AgentProjection(projection) => match *projection {
                 AgentProjectionEvent::AgentLaunchFact { snapshot } => {
                     // 事实行必须落在 buffered 流式正文之后，避免流式文本覆盖事实。
@@ -325,12 +327,30 @@ impl RuntimeEventApply for Model {
                     self.flush_runtime_response_buffer();
                     self.append_agent_outcome_fact_from_runtime(snapshot);
                 }
-                AgentProjectionEvent::AgentsOverviewSnapshotLoaded { .. }
-                | AgentProjectionEvent::AgentsOverviewUpdated { .. }
-                | AgentProjectionEvent::AgentViewSnapshotLoaded { .. }
-                | AgentProjectionEvent::AgentViewUpdated { .. }
-                | AgentProjectionEvent::AgentPermissionUpdated { .. }
-                | AgentProjectionEvent::AgentObservationRejected { .. } => {}
+                AgentProjectionEvent::AgentsOverviewSnapshotLoaded {
+                    request_id,
+                    snapshot,
+                } => {
+                    if self.agents_panel_overview_request_matches(request_id) {
+                        self.apply_agents_overview_snapshot(request_id, snapshot);
+                    }
+                }
+                AgentProjectionEvent::AgentsOverviewUpdated { delta } => {
+                    self.apply_agents_overview_delta(delta);
+                }
+                AgentProjectionEvent::AgentViewSnapshotLoaded {
+                    request_id,
+                    snapshot,
+                } => {
+                    self.apply_agent_view_snapshot_loaded(request_id, snapshot);
+                }
+                AgentProjectionEvent::AgentViewUpdated { snapshot } => {
+                    self.apply_agent_view_updated(snapshot);
+                }
+                AgentProjectionEvent::AgentPermissionUpdated { .. } => {}
+                AgentProjectionEvent::AgentObservationRejected { request_id, reason } => {
+                    self.apply_agent_observation_rejected(request_id, reason);
+                }
             },
         }
     }
@@ -373,6 +393,8 @@ impl Model {
         self.close_runtime_permission_approval_panel();
         // 切换会话后旧的待办提示不再成立，pill 状态归零。
         self.reset_attention_pills();
+        // resume 建立新的会话上下文，旧 observation 一律注销（R12）。
+        self.close_agents_panel();
         // 上下文占用描述的是切换前会话的历史;v1 不在 resume 路径恢复
         // 新会话的占用数据,因此切换后先隐藏,等待下一次请求完成再显示。
         self.set_last_context_usage(None);

@@ -72,3 +72,60 @@ fn clear_search_keeps_search_mode_active() {
     assert!(state.search_query().is_empty());
     assert_eq!(state.filtered_indices_for_test(), &[0, 1, 2]);
 }
+
+#[test]
+fn upsert_row_replaces_in_place_and_keeps_selection_identity() {
+    let mut state = FullscreenSearchListState::default();
+    state.replace_rows(sample_rows(), row_text_matches, |row| row.id);
+    state.selected = 2;
+    state.sync_selected_id(|row| row.id);
+    assert_eq!(state.selected_row().map(|row| row.id), Some("three"));
+
+    // 既有行原位替换：行序与 selection 不变。
+    state.upsert_row(
+        Row {
+            id: "one",
+            text: "alpha updated",
+        },
+        row_text_matches,
+        |row| row.id,
+    );
+
+    assert_eq!(state.filtered_count(), 3);
+    assert_eq!(state.selected_row().map(|row| row.id), Some("three"));
+    assert_eq!(state.rows()[0].text, "alpha updated");
+}
+
+#[test]
+fn upsert_row_appends_new_row_without_resetting_selection() {
+    let mut state = FullscreenSearchListState::default();
+    state.replace_rows(sample_rows(), row_text_matches, |row| row.id);
+    state.selected = 1;
+    state.sync_selected_id(|row| row.id);
+
+    state.upsert_row(
+        Row {
+            id: "four",
+            text: "gamma",
+        },
+        row_text_matches,
+        |row| row.id,
+    );
+
+    assert_eq!(state.filtered_count(), 4);
+    assert_eq!(state.selected_row().map(|row| row.id), Some("two"));
+}
+
+#[test]
+fn remove_row_clamps_selection_to_remaining_rows() {
+    let mut state = FullscreenSearchListState::default();
+    state.replace_rows(sample_rows(), row_text_matches, |row| row.id);
+    state.selected = 1;
+    state.sync_selected_id(|row| row.id);
+
+    state.remove_row("two", row_text_matches, |row| row.id);
+
+    assert_eq!(state.filtered_count(), 2);
+    // selected position clamp：被移除行之后回落到剩余列表的同一位置。
+    assert_eq!(state.selected_row().map(|row| row.id), Some("three"));
+}

@@ -96,6 +96,14 @@ pub struct Model {
     pub(super) copy_picker: Option<CopyPickerState>,
     pub(super) message_history_picker:
         Option<crate::message_history_picker::MessageHistoryPickerState>,
+    pub(super) agents_panel: Option<crate::agents_panel::AgentsPanelState>,
+    pub(super) next_agent_observation_request_id: u64,
+    /// `/agents` panel 关闭路径置位的 observation 注销集合，runner 消费派发。
+    pub(super) pending_stop_observing_agents:
+        Option<crate::agents_panel::PendingAgentObservationStops>,
+    /// panel 关闭时仍在 loading 的 per-agent view 请求；回包送达后按 observation id 补 stop。
+    pub(super) pending_agent_view_stop_requests:
+        Vec<runtime_domain::agent::AgentObservationRequestId>,
     pub(super) prompt_assembly: PromptAssemblyManagerSnapshot,
     pub(super) prompt_overlay: Option<crate::prompt_overlay::PromptOverlayState>,
     pub(super) next_session_load_request_id: u64,
@@ -268,6 +276,10 @@ impl Model {
             pending_prompt_assembly_commit: false,
             copy_picker: None,
             message_history_picker: None,
+            agents_panel: None,
+            next_agent_observation_request_id: 1,
+            pending_stop_observing_agents: None,
+            pending_agent_view_stop_requests: Vec::new(),
             prompt_assembly,
             prompt_overlay: None,
             next_session_load_request_id: 1,
@@ -483,6 +495,7 @@ impl Model {
         self.sync_entry_tree_preview_width(width);
         self.sync_message_history_picker_preview_width(width);
         self.sync_prompt_overlay_preview_width(width);
+        self.sync_agents_panel_surface_width(width);
         self.composer.set_width(width);
         if width_changed {
             self.sync_transcript_render();
@@ -511,6 +524,7 @@ impl Model {
         }
         self.sync_copy_picker_preview_palette(palette);
         self.sync_entry_tree_preview_palette(palette);
+        self.sync_agents_panel_surface_palette(palette);
         if palette_changed {
             self.sync_transcript_render();
         }
@@ -551,6 +565,10 @@ impl Model {
         self.session_preview = None;
         self.entry_tree = None;
         self.copy_picker = None;
+        // panel 关闭统一走 close：注销 observation 并清空 generation-bound state。
+        self.close_agents_panel();
+        // runtime Reset 后旧请求的回包不再送达，关闭时留下的补 stop 跟踪一并清理。
+        self.pending_agent_view_stop_requests.clear();
         self.tool_approval_panel = ToolApprovalPanelState::default();
         self.tool_approval_panel_revision = self.tool_approval_panel_revision.saturating_add(1);
         self.message_revisit = MessageRevisitState::default();
@@ -698,6 +716,22 @@ impl Model {
         self.next_session_load_request_id = self.next_session_load_request_id.wrapping_add(1);
         if self.next_session_load_request_id == 0 {
             self.next_session_load_request_id = 1;
+        }
+        request_id
+    }
+
+    /// Agent observation 请求标识分配器；对齐 `SessionLoadRequestId` 模式：
+    /// TUI 单调分配，runtime 原样回显。
+    pub(crate) fn next_agent_observation_request_id(
+        &mut self,
+    ) -> runtime_domain::agent::AgentObservationRequestId {
+        let request_id = runtime_domain::agent::AgentObservationRequestId::new(
+            self.next_agent_observation_request_id,
+        );
+        self.next_agent_observation_request_id =
+            self.next_agent_observation_request_id.wrapping_add(1);
+        if self.next_agent_observation_request_id == 0 {
+            self.next_agent_observation_request_id = 1;
         }
         request_id
     }

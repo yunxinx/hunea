@@ -8,6 +8,7 @@ mod benchmark;
 #[doc(hidden)]
 pub mod benchmark;
 
+mod agents_panel;
 mod attached_prompt_picker_row;
 mod attention_pill;
 mod bounded_lru_cache;

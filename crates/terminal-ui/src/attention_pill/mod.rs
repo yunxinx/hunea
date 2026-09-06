@@ -124,6 +124,8 @@ impl Model {
                 Some(ModalLayer::CopyPicker) => self.copy_picker = None,
                 Some(ModalLayer::EntryTree) => self.entry_tree = None,
                 Some(ModalLayer::MessageHistory) => self.message_history_picker = None,
+                // 关闭必须走 close_agents_panel：只清层会泄漏 runtime 侧 observer。
+                Some(ModalLayer::AgentsOverview) => self.close_agents_panel(),
             }
         }
     }

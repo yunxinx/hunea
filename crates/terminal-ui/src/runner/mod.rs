@@ -14,6 +14,11 @@ mod conversation;
 mod effects;
 #[cfg(test)]
 pub(crate) use effects::run_open_message_history_picker_effect;
+#[cfg(test)]
+pub(crate) use effects::{
+    dispatch_agents_observation_stops_if_needed, run_observe_agent_transcript_effect,
+    run_open_agents_panel_effect, run_stop_agent_effect,
+};
 mod event_pipeline;
 mod external_io;
 mod input;

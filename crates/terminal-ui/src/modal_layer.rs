@@ -11,6 +11,7 @@ pub(crate) enum ModalLayer {
     CopyPicker,
     EntryTree,
     MessageHistory,
+    AgentsOverview,
 }
 
 impl ModalLayer {
@@ -24,6 +25,7 @@ impl ModalLayer {
                 | Self::CopyPicker
                 | Self::EntryTree
                 | Self::MessageHistory
+                | Self::AgentsOverview
         )
     }
 
@@ -59,6 +61,10 @@ impl Model {
         }
         if self.message_history_picker_active() {
             return Some(ModalLayer::MessageHistory);
+        }
+        // `/agents` overview 是最低优先级全屏层：Ctrl-T transcript overlay 等仍可叠在其上。
+        if self.agents_panel_active() {
+            return Some(ModalLayer::AgentsOverview);
         }
         None
     }
@@ -99,10 +105,18 @@ impl Model {
             ModalLayer::PromptOverlay if self.prompt_overlay_preview_active() => {
                 Some(TerminalMouseModePreference::NativeWithAlternateScroll)
             }
+            // preview/transcript surface 是文本滚动视图，交还终端保留原生选区；
+            // list 模式需要行点选，捕获鼠标。
+            ModalLayer::AgentsOverview
+                if self.agents_panel_preview_active() || self.agents_panel_transcript_active() =>
+            {
+                Some(TerminalMouseModePreference::NativeWithAlternateScroll)
+            }
             ModalLayer::EntryTree
             | ModalLayer::CopyPicker
             | ModalLayer::MessageHistory
-            | ModalLayer::PromptOverlay => {
+            | ModalLayer::PromptOverlay
+            | ModalLayer::AgentsOverview => {
                 Some(TerminalMouseModePreference::CaptureWithAlternateScroll)
             }
             ModalLayer::ToolApprovalFullscreenPreview

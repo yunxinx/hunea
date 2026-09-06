@@ -95,6 +95,35 @@ where
         self.restore_selected_id_or_clamp(selected_id, row_id);
     }
 
+    /// delta upsert：同 id 原位替换保持行序稳定，新行追加到尾部；
+    /// 随后重建过滤并按 stable id 恢复 selection。
+    pub(crate) fn upsert_row(
+        &mut self,
+        row: Row,
+        matches_query: impl Fn(&Row, &CaseInsensitiveQuery<'_>) -> bool,
+        row_id: impl Fn(&Row) -> Id,
+    ) {
+        let id = row_id(&row);
+        if let Some(existing) = self.rows.iter_mut().find(|row| row_id(row) == id) {
+            *existing = row;
+        } else {
+            self.rows.push(row);
+        }
+        self.apply_filter(matches_query, row_id);
+    }
+
+    /// delta remove：按 stable id 删行；selection 恢复/迁移由
+    /// `restore_selected_id_or_clamp` 统一决定。
+    pub(crate) fn remove_row(
+        &mut self,
+        id: Id,
+        matches_query: impl Fn(&Row, &CaseInsensitiveQuery<'_>) -> bool,
+        row_id: impl Fn(&Row) -> Id,
+    ) {
+        self.rows.retain(|row| row_id(row) != id);
+        self.apply_filter(matches_query, row_id);
+    }
+
     fn rebuild_filtered_indices(
         &mut self,
         matches_query: impl Fn(&Row, &CaseInsensitiveQuery<'_>) -> bool,

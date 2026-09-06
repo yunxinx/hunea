@@ -16,6 +16,7 @@ use super::{
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton};
 use runtime_domain::{
+    agent::{AgentId, AgentObservationRequestId, AgentRuntimeGeneration},
     model_catalog::{ModelSelection, ProviderSyncRequest},
     session::{
         ConversationTurnRequest, MessageHistoryEntryId, PendingMessageHistoryEntry, RuntimeTarget,
@@ -53,6 +54,15 @@ pub enum AppEffect {
     },
     OpenEntryRewind,
     OpenBranchTree,
+    OpenAgentsPanel,
+    ObserveAgentTranscript {
+        request_id: AgentObservationRequestId,
+        agent_id: AgentId,
+    },
+    StopAgent {
+        agent_id: AgentId,
+        generation: AgentRuntimeGeneration,
+    },
     SelectEntryRewind {
         entry_id: String,
         prefill: Option<String>,
@@ -349,6 +359,16 @@ impl Model {
                 }
                 OverlayInputResult::Handled
             }
+            Some(ModalLayer::AgentsOverview) => {
+                if self.agents_panel_transcript_active() {
+                    self.move_agents_panel_transcript_page(delta_lines.signum());
+                } else if self.agents_panel_preview_active() {
+                    self.move_agents_panel_preview_page(delta_lines.signum());
+                } else {
+                    self.move_agents_panel_selection_by_delta(delta_lines.signum());
+                }
+                OverlayInputResult::Handled
+            }
             Some(ModalLayer::TranscriptOverlay) => OverlayInputResult::Handled,
             None => OverlayInputResult::Ignored,
         }
@@ -365,6 +385,9 @@ impl Model {
             Some(ModalLayer::EntryTree) => self.handle_entry_tree_mouse_down(button, column, row),
             Some(ModalLayer::MessageHistory) => {
                 self.handle_message_history_picker_mouse_down(button, column, row)
+            }
+            Some(ModalLayer::AgentsOverview) => {
+                self.handle_agents_panel_mouse_down(button, column, row)
             }
             Some(ModalLayer::PromptOverlay) => {
                 self.handle_prompt_overlay_mouse_down(button, column, row)
@@ -392,6 +415,7 @@ impl Model {
             ModalLayer::CopyPicker => self.handle_copy_picker_key(key),
             ModalLayer::EntryTree => self.handle_entry_tree_key(key),
             ModalLayer::MessageHistory => self.handle_message_history_picker_key(key),
+            ModalLayer::AgentsOverview => self.handle_agents_panel_key(key),
         }
     }
 

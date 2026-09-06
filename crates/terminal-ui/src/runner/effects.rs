@@ -45,6 +45,7 @@ where
 {
     dispatch_context_budget_cancellation_if_needed(model, runtime_coordinator);
     dispatch_prompt_assembly_commit_if_needed(model, runtime_coordinator);
+    dispatch_agents_observation_stops_if_needed(model, runtime_coordinator);
 
     let Some(effect) = effect else {
         return Ok(());
@@ -102,6 +103,24 @@ where
         }
         AppEffect::OpenMessageHistory => {
             run_open_message_history_picker_effect(model, runtime_coordinator);
+            Ok(())
+        }
+        AppEffect::OpenAgentsPanel => {
+            run_open_agents_panel_effect(model, runtime_coordinator);
+            Ok(())
+        }
+        AppEffect::ObserveAgentTranscript {
+            request_id,
+            agent_id,
+        } => {
+            run_observe_agent_transcript_effect(model, runtime_coordinator, request_id, agent_id);
+            Ok(())
+        }
+        AppEffect::StopAgent {
+            agent_id,
+            generation,
+        } => {
+            run_stop_agent_effect(model, runtime_coordinator, agent_id, generation);
             Ok(())
         }
         AppEffect::BeginPromptAssemblyEdit => {
@@ -242,6 +261,34 @@ fn dispatch_prompt_assembly_commit_if_needed(
     }
 }
 
+/// 消费 `/agents` panel 关闭路径置位的 observation 注销标志。
+///
+/// 注销命令幂等（runtime 侧 id/generation mismatch 静默），Err 只意味着 runtime
+/// 不可达——此时 observation 已随 runtime 消亡，不再打扰用户。
+pub(crate) fn dispatch_agents_observation_stops_if_needed(
+    model: &mut Model,
+    runtime_coordinator: &mut impl RuntimeCommandPort,
+) {
+    let Some(stops) = model.take_pending_agent_observation_stops() else {
+        return;
+    };
+
+    if let Some((observation_id, generation)) = stops.overview {
+        let _ = runtime_coordinator.dispatch_runtime_command(RuntimeCommand::StopObservingAgents {
+            observation_id,
+            generation,
+        });
+    }
+    for (observation_id, generation) in stops.agent_views {
+        let _ = runtime_coordinator.dispatch_runtime_command(
+            RuntimeCommand::StopObservingAgentTranscript {
+                observation_id,
+                generation,
+            },
+        );
+    }
+}
+
 pub(super) fn run_switch_branch_effect(
     model: &mut Model,
     runtime_coordinator: &mut impl RuntimeCommandPort,
@@ -305,6 +352,51 @@ pub(crate) fn run_open_message_history_picker_effect(
         .dispatch_runtime_command(RuntimeCommand::LoadMessageHistoryPickerRows { request_id })
     {
         model.show_message_history_picker_error(request_id, &message);
+    }
+}
+
+/// `/agents` 打开：Model 先进 loading 态并分配 request_id，再派发 `ObserveAgents`。
+pub(crate) fn run_open_agents_panel_effect(
+    model: &mut Model,
+    runtime_coordinator: &mut impl RuntimeCommandPort,
+) {
+    let request_id = model.open_agents_panel_loading();
+    if let Err(message) =
+        runtime_coordinator.dispatch_runtime_command(RuntimeCommand::ObserveAgents { request_id })
+    {
+        model.show_agents_panel_error(request_id, &message);
+    }
+}
+
+/// Enter/Space 进入 per-agent surface：派发共享的 `ObserveAgentTranscript`。
+pub(crate) fn run_observe_agent_transcript_effect(
+    model: &mut Model,
+    runtime_coordinator: &mut impl RuntimeCommandPort,
+    request_id: runtime_domain::agent::AgentObservationRequestId,
+    agent_id: runtime_domain::agent::AgentId,
+) {
+    if let Err(message) =
+        runtime_coordinator.dispatch_runtime_command(RuntimeCommand::ObserveAgentTranscript {
+            request_id,
+            agent_id,
+        })
+    {
+        model.show_agents_panel_agent_view_error(request_id, &message);
+    }
+}
+
+/// `x` 二次确认后的 stop：失败走 toast，panel 仍由 overview delta 反映真实状态。
+pub(crate) fn run_stop_agent_effect(
+    model: &mut Model,
+    runtime_coordinator: &mut impl RuntimeCommandPort,
+    agent_id: runtime_domain::agent::AgentId,
+    generation: runtime_domain::agent::AgentRuntimeGeneration,
+) {
+    if let Err(message) = runtime_coordinator.dispatch_runtime_command(RuntimeCommand::StopAgent {
+        agent_id,
+        generation,
+    }) {
+        model.show_toast(ToastSeverity::Error, message);
     }
 }
 

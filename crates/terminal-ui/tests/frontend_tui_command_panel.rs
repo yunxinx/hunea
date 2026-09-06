@@ -217,6 +217,17 @@ fn command_panel_resume_emits_open_resume_effect() {
 }
 
 #[test]
+fn command_panel_agents_emits_open_agents_panel_effect() {
+    let mut model = ready_model(80, 16, ModelOptions::default());
+    type_text(&mut model, "/agents");
+
+    let effect = model.update(AppEvent::Key(KeyCode::Enter.into()));
+
+    assert_eq!(effect, Some(AppEffect::OpenAgentsPanel));
+    assert_eq!(model.composer_text(), "");
+}
+
+#[test]
 fn command_panel_tree_emits_open_entry_rewind_effect_by_default() {
     let mut model = ready_model(80, 16, ModelOptions::default());
     type_text(&mut model, "/tree");

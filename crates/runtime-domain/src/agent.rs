@@ -22,8 +22,9 @@ mod child;
 
 pub use child::{
     AGENT_LAUNCH_BATCH_LIMIT, AGENT_TITLE_MAX_DISPLAY_WIDTH, AgentActivitySummary,
-    AgentInstructions, AgentLaunchBatch, AgentLaunchChildSnapshot, AgentLaunchGroupId,
-    AgentLaunchInputError, AgentLaunchRequest, AgentLaunchSnapshot, AgentObjective,
+    AgentChildCompletion, AgentGroupCompletion, AgentInstructions, AgentLaunchBatch,
+    AgentLaunchChildSnapshot, AgentLaunchGroupId, AgentLaunchInputError, AgentLaunchReceipt,
+    AgentLaunchRequest, AgentLaunchSnapshot, AgentObjective, AgentObjectiveSummary,
     AgentObservationId, AgentOutcome, AgentOutcomeSnapshot, AgentOutcomeSummary,
     AgentOverviewDelta, AgentOverviewDeltaKind, AgentOverviewRow, AgentOverviewSnapshot,
     AgentPermissionRequest, AgentPermissionState, AgentPermissionTarget, AgentPreviewSnapshot,
@@ -102,6 +103,7 @@ impl fmt::Debug for AgentUserDelivery {
 struct AgentTurnControls {
     skill_bindings: Vec<TranscriptSkillBinding>,
     custom_prompt_bindings: Vec<TranscriptCustomPromptBinding>,
+    direct_instructions: Option<child::AgentInstructions>,
 }
 
 impl fmt::Debug for AgentTurnControls {
@@ -111,6 +113,10 @@ impl fmt::Debug for AgentTurnControls {
             .field(
                 "custom_prompt_binding_count",
                 &self.custom_prompt_bindings.len(),
+            )
+            .field(
+                "has_direct_instructions",
+                &self.direct_instructions.is_some(),
             )
             .finish()
     }
@@ -147,9 +153,21 @@ impl AgentTurnRequest {
             controls: AgentTurnControls {
                 skill_bindings: source_message.skill_bindings,
                 custom_prompt_bindings: source_message.custom_prompt_bindings,
+                direct_instructions: None,
             },
             native_request: request,
         }
+    }
+
+    /// 附加只供 provider request assembly 消费的 direct instructions。
+    ///
+    /// instructions 不会写入 transcript delivery；adapter 在消费 [`Self::into_parts`] 时才把
+    /// 它们注入 provider-visible request。
+    pub fn with_direct_instructions(mut self, instructions: child::AgentInstructions) -> Self {
+        if !instructions.is_empty() {
+            self.controls.direct_instructions = Some(instructions);
+        }
+        self
     }
 
     /// 返回该 turn 对应的 runtime target。
@@ -167,15 +185,44 @@ impl AgentTurnRequest {
         &self.native_request
     }
 
-    /// 将 Agent request 还原为当前 adapter 所消费的领域 request 与 transcript message。
-    pub fn into_parts(self) -> (ConversationTurnRequest, TranscriptUserMessage) {
+    /// 将 Agent request 还原为当前 adapter 所消费的领域 request、transcript message 与
+    /// provider-only instructions。
+    ///
+    /// 第三个返回值用于 adapter 在后续 prompt assembly 重组 provider request 时保留
+    /// control plane；它绝不会进入 transcript delivery。`provider_request` 已包含该
+    /// instructions，直接转发的 adapter 可以忽略第三个值。
+    pub fn into_parts(
+        self,
+    ) -> (
+        ConversationTurnRequest,
+        TranscriptUserMessage,
+        Option<child::AgentInstructions>,
+    ) {
+        let AgentTurnRequest {
+            delivery,
+            controls,
+            native_request,
+        } = self;
         let source_message = TranscriptUserMessage {
-            content: self.delivery.content,
-            attachments: self.delivery.attachments,
-            skill_bindings: self.controls.skill_bindings,
-            custom_prompt_bindings: self.controls.custom_prompt_bindings,
+            content: delivery.content,
+            attachments: delivery.attachments,
+            skill_bindings: controls.skill_bindings,
+            custom_prompt_bindings: controls.custom_prompt_bindings,
         };
-        (self.native_request, source_message)
+        let direct_instructions = controls.direct_instructions;
+        let provider_request = match direct_instructions.as_ref() {
+            Some(instructions) => {
+                let provider_text =
+                    instructions.append_to_provider_text(source_message.content.clone());
+                ConversationTurnRequest::new_user_content(
+                    native_request.provider_id(),
+                    native_request.model_id(),
+                    source_message.provider_content_with_text(provider_text),
+                )
+            }
+            None => native_request,
+        };
+        (provider_request, source_message, direct_instructions)
     }
 }
 
@@ -411,7 +458,9 @@ pub trait AgentRuntime: Send {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentCommand, AgentEventKind, AgentId, AgentTurnId, AgentTurnRequest};
+    use super::{
+        AgentCommand, AgentEventKind, AgentId, AgentInstructions, AgentTurnId, AgentTurnRequest,
+    };
     use crate::session::{
         ConversationTurnRequest, RuntimePermissionOption, RuntimePermissionOptionKind,
         RuntimePermissionRequest, RuntimeTarget, TranscriptUserMessage,
@@ -435,6 +484,29 @@ mod tests {
 
         assert!(debug.contains("content_chars"));
         assert!(!debug.contains("visible delivery"));
+    }
+
+    #[test]
+    fn direct_instructions_reach_provider_without_entering_transcript_delivery() {
+        let request = AgentTurnRequest::from_conversation_request(
+            ConversationTurnRequest::new_user_text("local", "qwen3", "deliver this"),
+        )
+        .with_direct_instructions(AgentInstructions::new("PRIVATE_CONTROL_INSTRUCTIONS"));
+
+        assert_eq!(
+            request.conversation_request().message_text(),
+            "deliver this"
+        );
+        let debug = format!("{request:?}");
+        assert!(debug.contains("has_direct_instructions: true"));
+        assert!(!debug.contains("PRIVATE_CONTROL_INSTRUCTIONS"));
+
+        let (provider_request, transcript_message, _) = request.into_parts();
+        assert_eq!(
+            provider_request.message_text(),
+            "deliver this\n\nPRIVATE_CONTROL_INSTRUCTIONS"
+        );
+        assert_eq!(transcript_message.content, "deliver this");
     }
 
     #[test]

@@ -15,12 +15,13 @@ pub const AGENT_LAUNCH_BATCH_LIMIT: usize = 8;
 pub const AGENT_TITLE_MAX_DISPLAY_WIDTH: usize = 64;
 
 const AGENT_OUTCOME_SUMMARY_MAX_DISPLAY_WIDTH: usize = 240;
+const AGENT_OBJECTIVE_SUMMARY_MAX_DISPLAY_WIDTH: usize = 240;
 const TRUNCATION_MARKER: &str = "...";
 
 macro_rules! redacted_identity {
     ($name:ident, $doc:literal) => {
         #[doc = $doc]
-        #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
         #[serde(transparent)]
         pub struct $name(u64);
 
@@ -61,12 +62,15 @@ redacted_identity!(
     "`AgentProjectionRevision` 标识同 generation 内单调递增的 projection revision。"
 );
 
-/// `AgentObjective` 保存 child 应交付给用户的任务描述。
+/// `AgentObjective` 保存 child provider request 使用的完整任务描述。
+///
+/// 该类型故意不实现 serde：完整 objective 只允许停留在 request assembly/control plane，
+/// 持久化与 projection 必须使用 [`AgentObjectiveSummary`]。
 #[derive(Clone, PartialEq, Eq)]
 pub struct AgentObjective(String);
 
 impl AgentObjective {
-    /// 创建非空的 delivery-safe child objective。
+    /// 创建非空的 provider-facing child objective。
     pub fn new(content: impl Into<String>) -> Result<Self, AgentLaunchInputError> {
         let content = content.into();
         if content.trim().is_empty() {
@@ -103,6 +107,20 @@ impl AgentInstructions {
     /// 只在 provider request assembly boundary 暴露 instructions 正文。
     pub fn expose_for_request_assembly(&self) -> &str {
         &self.0
+    }
+
+    /// 将 control-only instructions 追加到 provider-visible 文本，不产生 transcript 文本。
+    pub fn append_to_provider_text(&self, text: impl Into<String>) -> String {
+        let text = text.into();
+        if text.trim().is_empty() {
+            return self.0.clone();
+        }
+        format!("{text}\n\n{}", self.0)
+    }
+
+    /// 判断是否没有额外 direct instructions。
+    pub fn is_empty(&self) -> bool {
+        self.0.trim().is_empty()
     }
 }
 
@@ -243,6 +261,78 @@ impl<'de> Deserialize<'de> for AgentOutcomeSummary {
     }
 }
 
+/// `AgentObjectiveSummary` 是 launch fact 与 product projection 使用的脱敏单行摘要。
+///
+/// 摘要只取 objective 的第一条 logical content，再做 whitespace 规范化和显示宽度截断；
+/// 因此多行 delivery 内容与 control-only instructions 不会进入 replay。
+#[derive(Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct AgentObjectiveSummary(String);
+
+impl AgentObjectiveSummary {
+    /// 从完整 objective 解析 delivery-safe 摘要。
+    pub fn from_objective(objective: &AgentObjective) -> Result<Self, AgentLaunchInputError> {
+        let content = first_non_empty_logical_content(objective.as_str())
+            .ok_or(AgentLaunchInputError::EmptyObjectiveSummary)?;
+        Self::new(content)
+    }
+
+    /// 创建 delivery-safe 单行摘要。
+    pub fn new(content: impl Into<String>) -> Result<Self, AgentLaunchInputError> {
+        let content = content.into();
+        if content.chars().any(is_terminal_control) {
+            return Err(AgentLaunchInputError::ObjectiveSummaryContainsTerminalControl);
+        }
+        let normalized = collapse_whitespace(&content);
+        if normalized.is_empty() {
+            return Err(AgentLaunchInputError::EmptyObjectiveSummary);
+        }
+        Ok(Self(truncate_display_width(
+            &normalized,
+            AGENT_OBJECTIVE_SUMMARY_MAX_DISPLAY_WIDTH,
+        )))
+    }
+
+    /// 返回 TUI/replay 可展示的摘要正文。
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn deserialize_frozen(source: String) -> Result<Self, AgentLaunchInputError> {
+        let summary = Self::new(source.clone())?;
+        if summary.0 != source {
+            return Err(AgentLaunchInputError::NonCanonicalObjectiveSummary);
+        }
+        Ok(summary)
+    }
+}
+
+impl Default for AgentObjectiveSummary {
+    fn default() -> Self {
+        Self("Child Agent objective unavailable".to_string())
+    }
+}
+
+impl fmt::Debug for AgentObjectiveSummary {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentObjectiveSummary")
+            .field("content_chars", &self.0.chars().count())
+            .field("display_width", &UnicodeWidthStr::width(self.0.as_str()))
+            .finish()
+    }
+}
+
+impl<'de> Deserialize<'de> for AgentObjectiveSummary {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let source = String::deserialize(deserializer)?;
+        Self::deserialize_frozen(source).map_err(serde::de::Error::custom)
+    }
+}
+
 /// 一次 child Agent launch request；control 与 delivery 保持独立 ownership。
 #[derive(Clone, PartialEq, Eq)]
 pub struct AgentLaunchRequest {
@@ -266,7 +356,7 @@ impl AgentLaunchRequest {
         })
     }
 
-    /// 返回 delivery-safe objective。
+    /// 返回只供 child provider request assembly 消费的完整 objective。
     pub fn objective(&self) -> &AgentObjective {
         &self.objective
     }
@@ -350,6 +440,12 @@ pub enum AgentLaunchInputError {
     OutcomeSummaryContainsTerminalControl,
     #[error("Persisted Agent outcome summary is not canonical")]
     NonCanonicalOutcomeSummary,
+    #[error("Agent objective summary must not be empty")]
+    EmptyObjectiveSummary,
+    #[error("Agent objective summary contains a terminal control character")]
+    ObjectiveSummaryContainsTerminalControl,
+    #[error("Persisted Agent objective summary is not canonical")]
+    NonCanonicalObjectiveSummary,
     #[error("Agent launch batch must contain at least one request")]
     EmptyBatch,
     #[error("Agent launch batch exceeds the host limit")]
@@ -361,6 +457,9 @@ pub enum AgentLaunchInputError {
 pub struct AgentLaunchChildSnapshot {
     pub agent_id: AgentId,
     pub title: AgentTitle,
+    /// 对用户交付安全的 objective 摘要；不包含 control-only instructions。
+    #[serde(default)]
+    pub objective: AgentObjectiveSummary,
 }
 
 /// 一次 committed launch operation 的 immutable durable fact。
@@ -368,6 +467,8 @@ pub struct AgentLaunchChildSnapshot {
 pub struct AgentLaunchSnapshot {
     pub group_id: AgentLaunchGroupId,
     pub parent_agent_id: AgentId,
+    #[serde(default = "default_turn_id")]
+    pub parent_turn_id: AgentTurnId,
     pub children: Vec<AgentLaunchChildSnapshot>,
     pub occurred_at_ms: i64,
 }
@@ -386,10 +487,47 @@ pub enum AgentOutcome {
 pub struct AgentOutcomeSnapshot {
     pub agent_id: AgentId,
     pub title: AgentTitle,
+    #[serde(default)]
+    pub group_id: Option<AgentLaunchGroupId>,
+    #[serde(default)]
+    pub parent_agent_id: Option<AgentId>,
+    #[serde(default)]
+    pub parent_turn_id: Option<AgentTurnId>,
     pub outcome: AgentOutcome,
     pub occurred_at_ms: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<AgentOutcomeSummary>,
+}
+
+fn default_turn_id() -> AgentTurnId {
+    AgentTurnId::new(0)
+}
+
+/// 一个 child terminal outcome 的 delivery-safe completion projection。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentChildCompletion {
+    pub agent_id: AgentId,
+    pub title: AgentTitle,
+    pub outcome: AgentOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<AgentOutcomeSummary>,
+}
+
+/// 一次 launch group 的稳定 completion aggregate。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentGroupCompletion {
+    pub group_id: AgentLaunchGroupId,
+    pub parent_agent_id: AgentId,
+    pub children: Vec<AgentChildCompletion>,
+    pub occurred_at_ms: i64,
+}
+
+/// launch transaction 提交后立即返回给 host tool 的 typed receipt。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentLaunchReceipt {
+    pub group_id: AgentLaunchGroupId,
+    pub parent_agent_id: AgentId,
+    pub children: Vec<AgentLaunchChildSnapshot>,
 }
 
 /// TUI 可观察的 child Agent product lifecycle state。
@@ -695,6 +833,57 @@ mod tests {
             format!("{batch:?}"),
             "AgentLaunchBatch { request_count: 1 }"
         );
+    }
+
+    #[test]
+    fn objective_summary_only_keeps_first_logical_line_and_is_canonical() {
+        let objective = objective("  first line with delivery text  \nsecond line secret");
+        let summary = AgentObjectiveSummary::from_objective(&objective)
+            .expect("objective should produce a summary");
+        assert_eq!(summary.as_str(), "first line with delivery text");
+        let encoded = serde_json::to_string(&summary).expect("summary should serialize");
+        assert_eq!(
+            serde_json::from_str::<AgentObjectiveSummary>(&encoded).unwrap(),
+            summary
+        );
+        assert!(serde_json::from_str::<AgentObjectiveSummary>("\" first line \"").is_err());
+    }
+
+    #[test]
+    fn objective_debug_and_summary_debug_do_not_echo_delivery_body() {
+        let objective = objective("private delivery body");
+        let summary = AgentObjectiveSummary::from_objective(&objective).unwrap();
+        assert!(!format!("{objective:?}").contains("private delivery body"));
+        assert!(!format!("{summary:?}").contains("private delivery body"));
+    }
+
+    #[test]
+    fn replay_facts_without_new_child_metadata_still_restore() {
+        let old_launch = serde_json::json!({
+            "group_id": 7,
+            "parent_agent_id": 1,
+            "children": [{"agent_id": 8, "title": "write a haiku"}],
+            "occurred_at_ms": 10
+        });
+        let launch: AgentLaunchSnapshot =
+            serde_json::from_value(old_launch).expect("old launch fact should restore");
+        assert_eq!(launch.parent_turn_id, AgentTurnId::new(0));
+        assert_eq!(
+            launch.children[0].objective.as_str(),
+            "Child Agent objective unavailable"
+        );
+
+        let old_outcome = serde_json::json!({
+            "agent_id": 8,
+            "title": "write a haiku",
+            "outcome": "completed",
+            "occurred_at_ms": 20
+        });
+        let outcome: AgentOutcomeSnapshot =
+            serde_json::from_value(old_outcome).expect("old outcome fact should restore");
+        assert_eq!(outcome.group_id, None);
+        assert_eq!(outcome.parent_agent_id, None);
+        assert_eq!(outcome.parent_turn_id, None);
     }
 
     #[test]

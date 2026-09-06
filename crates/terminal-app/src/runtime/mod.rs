@@ -76,7 +76,7 @@ pub(crate) fn tool_definitions_for_managed_ripgrep(
     managed_root: &Path,
 ) -> Vec<ToolDefinition> {
     let (catalog, _registration) =
-        conversation_workspace_tool_catalog(managed_ripgrep, managed_root)
+        conversation_workspace_tool_catalog(managed_ripgrep, managed_root, None)
             .expect("builtin workspace tools must have unique names");
     catalog.definitions()
 }
@@ -449,6 +449,11 @@ impl RuntimeEventPort for AppRuntimeCoordinator {
     }
 
     fn drain_runtime_events(&mut self) -> Vec<RuntimeEvent> {
+        self.components.drain_spawn_agents_requests();
+        // Child facts share the runtime wake with the main adapter.  Drain them at the same
+        // consumer boundary so launch-group waiters can settle even before the observer surface
+        // is introduced; child projection remains owned by the orchestrator.
+        let _ = self.components.drain_child_agent_events();
         // 消费一次 wake 后必须观测所有 producer。deferred event 只建立跨 render 的
         // 交付边界，不能让已经就绪且其 wake 可能被合并的 worker payload 留在 receiver。
         let mut events = std::mem::take(&mut self.pending_runtime_events);

@@ -7,6 +7,7 @@ use runtime_domain::session::{
 };
 use tool_runtime::{
     DefaultToolErrorFormatter, SharedToolErrorFormatter, SharedToolPermissionHandler,
+    ToolInvocationIdentity,
 };
 
 /// `ToolLoopProgress` describes runtime progress and provider-context session deltas.
@@ -85,6 +86,8 @@ pub struct ToolLoopOptions {
     pub error_formatter: SharedToolErrorFormatter,
     pub clock: ToolLoopClock,
     pub extension_hooks: ExtensionHookRegistry,
+    /// 当前 Agent turn 的 host-owned correlation metadata。
+    pub invocation_identity: Option<ToolInvocationIdentity>,
 }
 
 impl Default for ToolLoopOptions {
@@ -95,6 +98,7 @@ impl Default for ToolLoopOptions {
             error_formatter: std::sync::Arc::new(DefaultToolErrorFormatter),
             clock: ToolLoopClock::default(),
             extension_hooks: ExtensionHookRegistry::new(),
+            invocation_identity: None,
         }
     }
 }

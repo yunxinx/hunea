@@ -9,9 +9,9 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    SharedToolPermissionHandler, ToolCall, ToolDefinition, ToolPermissionDecision,
-    ToolPermissionFileSnapshot, ToolPermissionPreview, ToolPermissionRequest, ToolRegistry,
-    ToolResult, schema::validate_tool_arguments,
+    SharedToolPermissionHandler, ToolCall, ToolDefinition, ToolInvocationIdentity,
+    ToolPermissionDecision, ToolPermissionFileSnapshot, ToolPermissionPreview,
+    ToolPermissionRequest, ToolRegistry, ToolResult, schema::validate_tool_arguments,
 };
 
 /// `ToolExecutionFuture` 是工具执行返回结果的异步任务。
@@ -77,6 +77,7 @@ pub struct ToolExecutionContext<'a> {
     progress_sink: ToolProgressSink,
     permission_snapshot: Option<ToolPermissionFileSnapshot>,
     permission_handler: Option<SharedToolPermissionHandler>,
+    invocation_identity: Option<ToolInvocationIdentity>,
 }
 
 impl<'a> ToolExecutionContext<'a> {
@@ -87,6 +88,7 @@ impl<'a> ToolExecutionContext<'a> {
             progress_sink: ToolProgressSink::none(),
             permission_snapshot: None,
             permission_handler: None,
+            invocation_identity: None,
         }
     }
 
@@ -124,6 +126,7 @@ impl<'a> ToolExecutionContext<'a> {
             progress_sink: self.progress_sink,
             permission_snapshot: self.permission_snapshot,
             permission_handler: self.permission_handler,
+            invocation_identity: self.invocation_identity,
         }
     }
 
@@ -135,6 +138,26 @@ impl<'a> ToolExecutionContext<'a> {
     /// `permission_snapshot` 返回用户审批时看到的文件指纹。
     pub const fn permission_snapshot(&self) -> Option<&ToolPermissionFileSnapshot> {
         self.permission_snapshot.as_ref()
+    }
+
+    /// 返回 host 绑定的 Agent/turn correlation metadata。
+    pub const fn invocation_identity(&self) -> Option<ToolInvocationIdentity> {
+        self.invocation_identity
+    }
+
+    /// 绑定 host 生成的 Agent/turn correlation metadata。
+    pub fn with_invocation_identity(mut self, identity: ToolInvocationIdentity) -> Self {
+        self.invocation_identity = Some(identity);
+        self
+    }
+
+    /// 可选绑定 host correlation metadata；普通工具调用保持无 identity。
+    pub fn with_invocation_identity_option(
+        mut self,
+        identity: Option<ToolInvocationIdentity>,
+    ) -> Self {
+        self.invocation_identity = identity;
+        self
     }
 
     /// `emit` 向 runtime 发送一次工具进度事件。

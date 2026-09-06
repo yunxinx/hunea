@@ -4,6 +4,7 @@ mod external;
 mod native;
 #[cfg(test)]
 mod replay;
+mod spawn_agents;
 #[cfg(test)]
 mod tests;
 
@@ -49,6 +50,7 @@ pub(super) use native::construct_native_agent_runtime;
 pub(super) use native::construct_native_child_agent_runtime;
 #[cfg(test)]
 pub(super) use replay::{ReplayAgentRuntime, ReplayFixture, ReplayLifecycleProbe};
+pub(super) use spawn_agents::{SpawnAgentsFailure, SpawnAgentsRequest, SpawnAgentsTool};
 
 struct AgentPermissionConstructionGrant {
     runtime_request_policy: RuntimeRequestPolicy,
@@ -61,6 +63,7 @@ struct AgentPermissionConstructionGrant {
 pub(super) struct AgentRuntimeActivationGrants {
     event_stream: Option<CapabilityLease<RuntimeEventStreamCapability>>,
     extension_hooks: Option<CapabilityLease<ExtensionHookRegistryCapability>>,
+    tools: Option<crate::runtime::agent_capability_context::AgentScopedToolView>,
 }
 
 impl AgentRuntimeActivationGrants {
@@ -84,6 +87,14 @@ impl AgentRuntimeActivationGrants {
         self
     }
 
+    pub(super) fn with_tools(
+        mut self,
+        tools: crate::runtime::agent_capability_context::AgentScopedToolView,
+    ) -> Self {
+        self.tools = Some(tools);
+        self
+    }
+
     fn take_event_stream(
         &mut self,
     ) -> Result<CapabilityLease<RuntimeEventStreamCapability>, String> {
@@ -98,6 +109,12 @@ impl AgentRuntimeActivationGrants {
         self.extension_hooks
             .take()
             .ok_or_else(|| "Agent activation grant is unavailable: extension_hooks".to_string())
+    }
+
+    pub(super) fn take_tools(
+        &mut self,
+    ) -> Option<crate::runtime::agent_capability_context::AgentScopedToolView> {
+        self.tools.take()
     }
 }
 
@@ -541,6 +558,17 @@ pub(super) trait AgentRuntimePort: AgentRuntime + Send {
     /// 撤销当前 activation generation 的副作用，同时保留可供重新激活的持久状态。
     fn suspend(&mut self) -> Result<(), AgentRuntimeError>;
 
+    /// 绑定 host 当前 committed generation，供 scoped tools 进行 identity 校验。
+    fn bind_runtime_generation(&mut self, _generation: u64) {}
+
+    /// 绑定当前 Agent context 的 reactive tool snapshot。
+    fn bind_tools(
+        &mut self,
+        _tools: crate::runtime::agent_capability_context::AgentScopedToolView,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
     /// 返回 framework-neutral 的 Agent activity；不能由 session capability 缺省值推导。
     fn activity(&self) -> AgentRuntimeActivity;
 
@@ -549,6 +577,11 @@ pub(super) trait AgentRuntimePort: AgentRuntime + Send {
 
     /// 返回当前 adapter 实际提供的 mutable session capability。
     fn session_mut(&mut self) -> Option<&mut dyn AgentSessionCapability>;
+
+    /// 返回当前 active/pending turn 的 provider target。
+    fn current_target(&self) -> Option<runtime_domain::session::RuntimeTarget> {
+        None
+    }
 
     #[cfg(test)]
     fn has_pending_work(&self) -> bool;

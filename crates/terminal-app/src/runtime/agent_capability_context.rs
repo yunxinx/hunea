@@ -490,6 +490,11 @@ impl AgentCapabilityContext {
         }
     }
 
+    /// 返回当前 scope 的 private epoch，供 host 在跨边界校验 invocation identity。
+    pub(super) fn epoch(&self) -> u64 {
+        self.state.epoch
+    }
+
     pub(super) fn tools(&self) -> Result<AgentScopedToolView, AgentCapabilityContextError> {
         self.validate()?;
         let Some(ScopedCapability::Tools(capability)) =
@@ -505,6 +510,24 @@ impl AgentCapabilityContext {
             context_epoch: self.state.epoch,
             capability_generation: capability.generation,
             cancellation: self.state.scope.cancellation_token(),
+        })
+    }
+
+    /// 用当前 root token 将最新的 host tool snapshot 重新绑定到 main adapter。
+    ///
+    /// 工具启停属于 reactive coeffect；新的 snapshot 只能沿现有 capability generation
+    /// 重绑，不能创建第二个 authority 或绕过 context revocation。
+    pub(super) fn tools_with_registry(
+        &self,
+        registry: ToolExecutorRegistry,
+    ) -> Result<AgentScopedToolView, AgentCapabilityContextError> {
+        let current = self.tools()?;
+        Ok(AgentScopedToolView {
+            registry,
+            token: current.token,
+            context_epoch: current.context_epoch,
+            capability_generation: current.capability_generation,
+            cancellation: current.cancellation,
         })
     }
 
@@ -786,10 +809,16 @@ impl Tool for AgentScopedTool {
         let call_id = call.call_id.clone();
         let tool = Arc::clone(&self.tool);
         let token = self.token.clone();
+        let context_epoch = token.epoch;
         let scope_cancellation = self.cancellation.clone();
         let execution_cancellation = context.cancellation().child_token();
         Box::pin(async move {
-            let context = context.with_cancellation(&execution_cancellation);
+            let invocation_identity = context
+                .invocation_identity()
+                .map(|identity| identity.with_context_epoch(context_epoch));
+            let context = context
+                .with_cancellation(&execution_cancellation)
+                .with_invocation_identity_option(invocation_identity);
             let result = tokio::select! {
                 biased;
                 () = scope_cancellation.cancelled() => {
@@ -833,10 +862,16 @@ impl ToolExecutor for AgentScopedToolView {
         let call_id = call.call_id.clone();
         let registry = self.registry.clone();
         let token = self.token.clone();
+        let context_epoch = token.epoch;
         let scope_cancellation = self.cancellation.clone();
         let execution_cancellation = context.cancellation().child_token();
         Box::pin(async move {
-            let context = context.with_cancellation(&execution_cancellation);
+            let invocation_identity = context
+                .invocation_identity()
+                .map(|identity| identity.with_context_epoch(context_epoch));
+            let context = context
+                .with_cancellation(&execution_cancellation)
+                .with_invocation_identity_option(invocation_identity);
             let result = tokio::select! {
                 biased;
                 () = scope_cancellation.cancelled() => {

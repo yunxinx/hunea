@@ -32,6 +32,8 @@ impl AppRuntimeCoordinator {
         let session_workspace_tools =
             super::session_tools_for_manager(&tool_catalog, Some(manager));
         let prompt_assembly = prompt_capability.session_snapshot();
+        self.components
+            .rebind_main_tools(session_workspace_tools.clone())?;
         match self
             .components
             .agent_session_mut()?

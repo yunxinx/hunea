@@ -60,16 +60,27 @@ impl fmt::Debug for ToolCatalogError {
 /// handle Drop 与显式 `dispose` 等价；只有 identity 仍匹配当前 slot 时才会移除 tool，
 /// 因此旧 handle 不会误删后续 registration。
 pub struct ToolRegistration {
+    batches: Vec<ToolRegistrationBatch>,
+    is_disposed: bool,
+}
+
+struct ToolRegistrationBatch {
     catalog: Weak<Mutex<ToolCatalogState>>,
     entries: Vec<ToolRegistrationEntry>,
-    is_disposed: bool,
 }
 
 impl fmt::Debug for ToolRegistration {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ToolRegistration")
-            .field("entry_count", &self.entries.len())
+            .field(
+                "entry_count",
+                &self
+                    .batches
+                    .iter()
+                    .map(|batch| batch.entries.len())
+                    .sum::<usize>(),
+            )
             .field("is_disposed", &self.is_disposed)
             .finish_non_exhaustive()
     }
@@ -186,8 +197,10 @@ impl ToolCatalog {
 impl ToolRegistration {
     fn new(catalog: &Arc<Mutex<ToolCatalogState>>, entries: Vec<ToolRegistrationEntry>) -> Self {
         Self {
-            catalog: Arc::downgrade(catalog),
-            entries,
+            batches: vec![ToolRegistrationBatch {
+                catalog: Arc::downgrade(catalog),
+                entries,
+            }],
             is_disposed: false,
         }
     }
@@ -198,22 +211,31 @@ impl ToolRegistration {
             return;
         }
         self.is_disposed = true;
-        let Some(catalog) = self.catalog.upgrade() else {
-            return;
-        };
-        let mut state = catalog
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for entry in self.entries.drain(..) {
-            let owns_current_registration = state
-                .registrations
-                .get(&entry.tool_name)
-                .is_some_and(|current| current.id == entry.registration_id);
-            if owns_current_registration {
-                state.registrations.remove(&entry.tool_name);
-                state.registry.remove(&entry.tool_name);
+        for mut batch in self.batches.drain(..).rev() {
+            let Some(catalog) = batch.catalog.upgrade() else {
+                continue;
+            };
+            let mut state = catalog
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for entry in batch.entries.drain(..).rev() {
+                let owns_current_registration = state
+                    .registrations
+                    .get(&entry.tool_name)
+                    .is_some_and(|current| current.id == entry.registration_id);
+                if owns_current_registration {
+                    state.registrations.remove(&entry.tool_name);
+                    state.registry.remove(&entry.tool_name);
+                }
             }
         }
+    }
+
+    /// 合并 registration，使多个已提交 batch 由一个可逆 handle 按逆序统一撤销。
+    pub fn combine(mut self, mut other: Self) -> Self {
+        self.batches.append(&mut other.batches);
+        other.is_disposed = true;
+        self
     }
 }
 
@@ -440,6 +462,24 @@ mod tests {
         old_registration.dispose();
 
         assert_eq!(names(&catalog), vec!["read"]);
+    }
+
+    #[test]
+    fn combined_registration_reverses_all_owned_batches() {
+        let first_catalog = ToolCatalog::default();
+        let second_catalog = ToolCatalog::default();
+        let first = first_catalog
+            .register("first", StubTool { name: "read" })
+            .expect("first tool should register");
+        let second = second_catalog
+            .register("second", StubTool { name: "bash" })
+            .expect("second tool should register");
+        let mut combined = first.combine(second);
+
+        combined.dispose();
+
+        assert!(names(&first_catalog).is_empty());
+        assert!(names(&second_catalog).is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -1,7 +1,7 @@
 use extension_hook_runtime::ExtensionHookRegistry;
 use tokio_util::sync::CancellationToken;
 use tool_loop_runtime::{ToolLoopOptions, run_tool_loop};
-use tool_runtime::{SharedToolPermissionHandler, ToolExecutorRegistry};
+use tool_runtime::{SharedToolPermissionHandler, ToolExecutorRegistry, ToolInvocationIdentity};
 
 use crate::{
     ConversationRequest, PreparedConversationRequest, ProviderClientLease, TurnExecutionError,
@@ -16,6 +16,7 @@ pub(crate) struct PreparedRequestExecutionOptions {
     pub(crate) tool_max_turns: Option<usize>,
     pub(crate) permission_handler: Option<SharedToolPermissionHandler>,
     pub(crate) extension_hooks: ExtensionHookRegistry,
+    pub(crate) invocation_identity: Option<ToolInvocationIdentity>,
 }
 
 /// `execute_conversation_request` runs one conversation turn through the provider/tool runtime.
@@ -47,6 +48,7 @@ where
             error_formatter: std::sync::Arc::new(ConversationToolErrorFormatter),
             clock: Default::default(),
             extension_hooks: ExtensionHookRegistry::new(),
+            invocation_identity: None,
         },
         |progress| on_progress(conversation_progress_from_runtime_progress(progress)),
     )
@@ -85,6 +87,7 @@ where
             error_formatter: std::sync::Arc::new(ConversationToolErrorFormatter),
             clock: Default::default(),
             extension_hooks: options.extension_hooks,
+            invocation_identity: options.invocation_identity,
         },
         |progress| on_progress(conversation_progress_from_runtime_progress(progress)),
     )

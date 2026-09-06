@@ -16,8 +16,8 @@ pub use activity_policy::ToolActivityPayloadPolicy;
 pub use catalog::{ToolCatalog, ToolCatalogError, ToolRegistration};
 pub use definition::ToolDefinition;
 pub use execution::{
-    ToolCall, ToolImageDetail, ToolResult, ToolResultContent, ToolResultContentBlocks,
-    ToolResultOutcome,
+    ToolCall, ToolImageDetail, ToolInvocationIdentity, ToolResult, ToolResultContent,
+    ToolResultContentBlocks, ToolResultOutcome,
 };
 pub use executor::{
     Tool, ToolExecutionContext, ToolExecutionFuture, ToolExecutor, ToolExecutorRegistry,

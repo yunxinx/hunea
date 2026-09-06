@@ -69,6 +69,7 @@ enum NativeAgentAuthority {
 /// `NativeAgentRuntime` 封装当前 conversation worker 的完整 turn choreography。
 pub struct NativeAgentRuntime {
     owned_agent_id: AgentId,
+    runtime_generation: u64,
     authority: NativeAgentAuthority,
     worker: ConversationWorker,
     extension_hooks: Option<ExtensionHookRegistry>,
@@ -266,6 +267,7 @@ impl NativeAgentRuntime {
             RuntimeContext::event_stream_lease(event_notifier.clone(), "native_agent_bootstrap");
         Ok(Self {
             owned_agent_id,
+            runtime_generation: 1,
             authority,
             worker: ConversationWorker::new((*event_stream).clone()),
             extension_hooks: Some(extension_hooks),
@@ -402,7 +404,7 @@ impl NativeAgentRuntime {
     #[cfg(test)]
     pub(crate) fn set_pending_turn_for_test(&mut self, request: ConversationTurnRequest) {
         let request = AgentTurnRequest::from_conversation_request(request);
-        let (provider_request, transcript_user_message) = request.into_parts();
+        let (provider_request, transcript_user_message, _) = request.into_parts();
         self.pending_turn = Some(PendingNativeTurn {
             agent_id: self.owned_agent_id,
             turn_id: AgentTurnId::new(1),
@@ -456,7 +458,7 @@ impl NativeAgentRuntime {
 
         let target = request.target();
         let activity_label = request.activity_label().to_string();
-        let (request, transcript_user_message) = request.into_parts();
+        let (request, transcript_user_message, direct_instructions) = request.into_parts();
         let attached_prompt_assembly =
             self.attached_prompt_message_assembly(&transcript_user_message)?;
         let provider_request = if attached_prompt_assembly.manual_skill_uses.is_empty()
@@ -464,12 +466,15 @@ impl NativeAgentRuntime {
         {
             request.clone()
         } else {
+            let provider_visible_user_text = match direct_instructions.as_ref() {
+                Some(instructions) => instructions
+                    .append_to_provider_text(attached_prompt_assembly.provider_visible_user_text),
+                None => attached_prompt_assembly.provider_visible_user_text.clone(),
+            };
             ConversationTurnRequest::new_user_content(
                 request.provider_id(),
                 request.model_id(),
-                transcript_user_message.provider_content_with_text(
-                    attached_prompt_assembly.provider_visible_user_text.clone(),
-                ),
+                transcript_user_message.provider_content_with_text(provider_visible_user_text),
             )
         };
         let manual_skill_activities =
@@ -652,7 +657,7 @@ impl NativeAgentRuntime {
         });
         let permission_handler = permission_turn.handler();
         self.permission_turn = Some(permission_turn);
-        self.worker.start(
+        self.worker.start_with_invocation_identity(
             prepared_request,
             provider_lease,
             self.session_workspace_tools.clone(),
@@ -661,6 +666,12 @@ impl NativeAgentRuntime {
             self.extension_hooks
                 .clone()
                 .ok_or(AgentRuntimeError::Disposed)?,
+            Some(tool_runtime::ToolInvocationIdentity::new(
+                agent_id.get(),
+                turn_id.get(),
+                self.runtime_generation,
+                0,
+            )),
         );
         if !self.pending_events.is_empty() {
             self.notify_runtime_event();
@@ -970,6 +981,24 @@ impl NativeAgentRuntime {
 }
 
 impl AgentRuntimePort for NativeAgentRuntime {
+    fn bind_runtime_generation(&mut self, generation: u64) {
+        self.runtime_generation = generation;
+    }
+
+    fn current_target(&self) -> Option<RuntimeTarget> {
+        self.worker.current_target().cloned()
+    }
+
+    fn bind_tools(
+        &mut self,
+        tools: crate::runtime::agent_capability_context::AgentScopedToolView,
+    ) -> Result<(), String> {
+        self.session_workspace_tools = tools
+            .construction_registry()
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
     fn activate(&mut self, mut grants: AgentRuntimeActivationGrants) -> Result<(), String> {
         if self.is_busy() {
             return Err("Cannot replace runtime event stream while Agent is busy".to_string());
@@ -980,6 +1009,9 @@ impl AgentRuntimePort for NativeAgentRuntime {
         self.dynamic_environment_worker
             .rebind_event_stream(event_stream.clone());
         self.extension_hooks = Some((*extension_hooks).clone());
+        if let Some(tools) = grants.take_tools() {
+            self.bind_tools(tools)?;
+        }
         self.event_stream = Some(event_stream);
         self.is_shutdown = false;
         Ok(())

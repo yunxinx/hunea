@@ -104,6 +104,7 @@ pub(super) fn conversation_worker_options(
         request_policy,
         permission_handler: None,
         extension_hooks,
+        invocation_identity: None,
     }
 }
 

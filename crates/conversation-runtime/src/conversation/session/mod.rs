@@ -20,7 +20,7 @@ use runtime_domain::{
     session::{ConversationEvent, RuntimeTarget},
 };
 use session_store::SessionId;
-use tool_runtime::{SharedToolPermissionHandler, ToolExecutorRegistry};
+use tool_runtime::{SharedToolPermissionHandler, ToolExecutorRegistry, ToolInvocationIdentity};
 
 use super::{
     PersistedConversationItem, TurnExecutionError, turn::run_prepared_conversation_with_progress,
@@ -75,6 +75,7 @@ struct ConversationWorkerOptions {
     request_policy: RuntimeRequestPolicy,
     permission_handler: Option<SharedToolPermissionHandler>,
     extension_hooks: ExtensionHookRegistry,
+    invocation_identity: Option<ToolInvocationIdentity>,
 }
 
 /// `ConversationWorker` 管理对话请求的后台 worker 与取消状态。
@@ -114,6 +115,29 @@ impl ConversationWorker {
         permission_handler: Option<SharedToolPermissionHandler>,
         extension_hooks: ExtensionHookRegistry,
     ) {
+        self.start_with_invocation_identity(
+            request,
+            provider_lease,
+            executor,
+            request_policy,
+            permission_handler,
+            extension_hooks,
+            None,
+        );
+    }
+
+    /// 启动一个带 host Agent correlation metadata 的 conversation worker。
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_with_invocation_identity(
+        &mut self,
+        request: PreparedConversationRequest,
+        provider_lease: ProviderClientLease,
+        executor: ToolExecutorRegistry,
+        request_policy: RuntimeRequestPolicy,
+        permission_handler: Option<SharedToolPermissionHandler>,
+        extension_hooks: ExtensionHookRegistry,
+        invocation_identity: Option<ToolInvocationIdentity>,
+    ) {
         let (sender, receiver) = mpsc::channel();
         let sender = ConversationWorkerEventSender::new(sender, self.event_notifier.clone());
         let cancellation = CancellationToken::default();
@@ -135,6 +159,7 @@ impl ConversationWorker {
                             request_policy,
                             permission_handler,
                             extension_hooks,
+                            invocation_identity,
                         },
                         sender,
                     ));
@@ -239,6 +264,7 @@ async fn run_conversation_worker(
         request_policy,
         permission_handler,
         extension_hooks,
+        invocation_identity,
     } = options;
     if cancellation.is_cancelled() {
         let _ = sender.send(ConversationWorkerEvent::progress(
@@ -312,6 +338,7 @@ async fn run_conversation_worker(
                     tool_max_turns: request_policy.tool_max_turns(),
                     permission_handler: permission_handler.clone(),
                     extension_hooks: extension_hooks.clone(),
+                    invocation_identity,
                 },
                 move |progress| match progress {
                     crate::conversation::ConversationProgress::ProviderTurnStarted => {}

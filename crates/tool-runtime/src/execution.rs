@@ -2,6 +2,80 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::fmt;
 
+/// `ToolInvocationIdentity` 由 host 绑定到一次正在执行的 Agent turn。
+///
+/// tool payload 不得自行声明这些字段；它们只作为 control-plane correlation metadata
+/// 进入 host-owned tool adapter。
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ToolInvocationIdentity {
+    agent_id: u64,
+    turn_id: u64,
+    runtime_generation: u64,
+    context_epoch: u64,
+}
+
+impl ToolInvocationIdentity {
+    #[must_use]
+    pub const fn new(
+        agent_id: u64,
+        turn_id: u64,
+        runtime_generation: u64,
+        context_epoch: u64,
+    ) -> Self {
+        Self {
+            agent_id,
+            turn_id,
+            runtime_generation,
+            context_epoch,
+        }
+    }
+
+    /// 返回发起 tool invocation 的 logical Agent identity。
+    #[must_use]
+    pub const fn agent_id(self) -> u64 {
+        self.agent_id
+    }
+
+    /// 返回发起 tool invocation 的 Agent turn identity。
+    #[must_use]
+    pub const fn turn_id(self) -> u64 {
+        self.turn_id
+    }
+
+    /// 返回 host 绑定的 Agent runtime generation。
+    #[must_use]
+    pub const fn runtime_generation(self) -> u64 {
+        self.runtime_generation
+    }
+
+    /// 返回 scoped capability context epoch。
+    #[must_use]
+    pub const fn context_epoch(self) -> u64 {
+        self.context_epoch
+    }
+
+    /// 用 scoped capability token 覆盖 context epoch，避免调用方伪造作用域身份。
+    #[must_use]
+    pub const fn with_context_epoch(self, context_epoch: u64) -> Self {
+        Self {
+            context_epoch,
+            ..self
+        }
+    }
+}
+
+impl fmt::Debug for ToolInvocationIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ToolInvocationIdentity")
+            .field("has_agent_id", &(self.agent_id != 0))
+            .field("has_turn_id", &(self.turn_id != 0))
+            .field("has_runtime_generation", &(self.runtime_generation != 0))
+            .field("has_context_epoch", &(self.context_epoch != 0))
+            .finish()
+    }
+}
+
 /// `ToolCall` 描述模型发起的一次工具调用。
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use]
@@ -233,6 +307,17 @@ impl ToolResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invocation_identity_debug_redacts_numeric_correlation_values() {
+        let identity = ToolInvocationIdentity::new(41, 42, 43, 44);
+        let debug = format!("{identity:?}");
+
+        assert!(debug.contains("has_agent_id: true"));
+        for private in ["41", "42", "43", "44"] {
+            assert!(!debug.contains(private));
+        }
+    }
 
     #[test]
     fn tool_result_outcome_has_single_control_state() {

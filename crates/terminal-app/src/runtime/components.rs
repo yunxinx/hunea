@@ -14,8 +14,8 @@ use super::{
     agent::{
         AgentChildRuntimeLeases, AgentChildRuntimeStaticGrants, AgentRuntimeActivationGrants,
         AgentRuntimeConstructionGrants, AgentRuntimeFactory, AgentRuntimePort,
-        AgentSessionCapability, construct_native_agent_runtime,
-        construct_native_child_agent_runtime,
+        AgentSessionCapability, SpawnAgentsRequest, SpawnAgentsTool,
+        construct_native_agent_runtime, construct_native_child_agent_runtime,
     },
     agent_orchestrator::AgentOrchestrator,
     context::{
@@ -50,6 +50,7 @@ use super::{
     workspace_tools::conversation_workspace_tool_catalog,
 };
 use runtime_domain::runtime_wake::RuntimeWake;
+use tokio::sync::mpsc;
 
 #[cfg(test)]
 use super::agent::{ReplayFixture, ReplayLifecycleProbe};
@@ -516,13 +517,15 @@ struct PreparedPluginCommit {
 
 enum PreparedAgentRuntimeCommit {
     Keep,
-    Replace(Box<PreparedAgentRuntimeReplacement>),
+    ReplacePending,
+    ReplaceReady(Box<PreparedAgentRuntimeReplacement>),
 }
 
 struct PreparedAgentRuntimeReplacement {
-    candidate: Option<Box<dyn AgentRuntimePort>>,
-    child_factory: Option<Option<super::agent::ChildAgentFactory>>,
-    child_static_grants: Option<Option<AgentChildRuntimeStaticGrants>>,
+    candidate: Box<dyn AgentRuntimePort>,
+    child_factory: Option<super::agent::ChildAgentFactory>,
+    child_static_grants: Option<AgentChildRuntimeStaticGrants>,
+    next_generation: runtime_domain::agent::AgentRuntimeGeneration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -683,6 +686,8 @@ pub(super) struct RuntimeComponents {
     extension_mount: Option<Arc<Mutex<ExtensionMount>>>,
     extension_source: Option<Arc<dyn ExtensionBundleSource>>,
     runtime_event_notifier: RuntimeEventNotifier,
+    spawn_agents_receiver: mpsc::UnboundedReceiver<SpawnAgentsRequest>,
+    spawn_agents_tool: SpawnAgentsTool,
     activation_staging: ComponentActivationStaging,
     plugin_loader: PluginCompositionLoader<RuntimePluginImplementation>,
     plugins: PluginComposition<RuntimePluginImplementation>,
@@ -777,6 +782,20 @@ impl RuntimeComponents {
     #[allow(dead_code)]
     pub(super) fn drain_child_agent_events(&mut self) -> Vec<runtime_domain::agent::AgentEvent> {
         self.agent_orchestrator.drain_child_events()
+    }
+
+    /// 消费 host-owned `spawn_agents` bridge；tool 自身不直接修改 orchestrator。
+    pub(super) fn drain_spawn_agents_requests(&mut self) {
+        while let Ok(request) = self.spawn_agents_receiver.try_recv() {
+            self.agent_orchestrator.handle_spawn_agents_request(request);
+        }
+    }
+
+    pub(super) fn rebind_main_tools(
+        &mut self,
+        registry: ToolExecutorRegistry,
+    ) -> Result<(), String> {
+        self.agent_orchestrator.rebind_main_tools(registry)
     }
 
     #[allow(dead_code)]
@@ -951,6 +970,8 @@ impl RuntimeComponents {
             .prepare_startup()
             .map_err(|error| error.to_string())?;
         let runtime_event_notifier = RuntimeEventNotifier::default();
+        let (spawn_agents_tool, spawn_agents_receiver) =
+            SpawnAgentsTool::channel(runtime_event_notifier.clone());
         let extension_hooks = ExtensionHookRegistry::new();
         let permission_policy = PermissionPolicy::new();
         let approval_registration = permission_policy
@@ -967,6 +988,7 @@ impl RuntimeComponents {
         let (tool_catalog, tool_registration) = conversation_workspace_tool_catalog(
             &options.managed_ripgrep,
             &options.hunea_config_dir,
+            Some(spawn_agents_tool.clone()),
         )
         .map_err(|error| error.to_string())?;
         let (prompt_assembly, prompt_registration) = PromptAssembly::adopt_manager(
@@ -1006,12 +1028,15 @@ impl RuntimeComponents {
             options,
             TERMINAL_APPROVAL_PROVIDER_ID,
         );
+        let mut agent_orchestrator =
+            AgentOrchestrator::new(agent_runtime, child_factory, agent_child_static_grants);
+        agent_orchestrator.bind_session_port(
+            session_backend_views
+                .as_ref()
+                .map(|views| Arc::clone(&views.port)),
+        );
         let mut components = Self {
-            agent_orchestrator: AgentOrchestrator::new(
-                agent_runtime,
-                child_factory,
-                agent_child_static_grants,
-            ),
+            agent_orchestrator,
             model_refresh,
             extension_hooks,
             llm_port,
@@ -1027,6 +1052,8 @@ impl RuntimeComponents {
             extension_mount: None,
             extension_source: None,
             runtime_event_notifier,
+            spawn_agents_receiver,
+            spawn_agents_tool,
             activation_staging: ComponentActivationStaging {
                 approval_registration: Some(approval_registration),
                 provider_registrations: Some(provider_registrations),
@@ -1270,13 +1297,7 @@ impl RuntimeComponents {
     ) -> PreparedAgentRuntimeCommit {
         match action {
             AgentPluginReconciliation::Keep => PreparedAgentRuntimeCommit::Keep,
-            AgentPluginReconciliation::Replace => {
-                PreparedAgentRuntimeCommit::Replace(Box::new(PreparedAgentRuntimeReplacement {
-                    candidate: None,
-                    child_factory: None,
-                    child_static_grants: None,
-                }))
-            }
+            AgentPluginReconciliation::Replace => PreparedAgentRuntimeCommit::ReplacePending,
         }
     }
 
@@ -1467,6 +1488,7 @@ impl RuntimeComponents {
         let (fresh_tool_catalog, fresh_tool_registration) = conversation_workspace_tool_catalog(
             &options.managed_ripgrep,
             &options.hunea_config_dir,
+            Some(self.spawn_agents_tool.clone()),
         )
         .map_err(|error| error.to_string())?;
         let (fresh_prompt_assembly, fresh_prompt_registration) =
@@ -1607,6 +1629,11 @@ impl RuntimeComponents {
             .map_err(|error| error.to_string())?;
         self.session_port = fresh_session_port;
         self.session_backend_views = Some(fresh_views);
+        self.agent_orchestrator.bind_session_port(
+            self.session_backend_views
+                .as_ref()
+                .map(|views| Arc::clone(&views.port)),
+        );
         self.activation_staging.session_backend_registration = fresh_registration;
         self.with_lifecycle(|lifecycle, components| {
             lifecycle.activate_components(
@@ -2047,44 +2074,55 @@ impl RuntimeComponents {
             grants = grants.with_extension_hooks(lease);
         }
 
-        let (root_context, child_leases) = if self.agent_orchestrator.has_child_factory() {
-            let tool_lease = context
-                .require::<ToolCatalogCapability>()
-                .map_err(|error| error.to_string())?;
-            let prompt_lease = context
-                .require::<PromptAssemblyCapability>()
-                .map_err(|error| error.to_string())?;
-            let llm_lease = context
-                .require::<LlmPortCapability>()
-                .map_err(|error| error.to_string())?;
-            let permission_lease = context
-                .require::<PermissionPolicyCapability>()
-                .map_err(|error| error.to_string())?;
-            let root_context = self.agent_orchestrator.build_root_context(
-                scope,
-                &tool_lease,
-                &prompt_lease,
-                self.session_workspace_tools
-                    .definitions()
-                    .definitions()
-                    .map(|definition| definition.name.clone())
-                    .collect::<Vec<_>>(),
-            )?;
-            let child_leases = AgentChildRuntimeLeases::new(
-                event_stream.ok_or_else(|| {
-                    "Agent child capability requires runtime event stream".to_string()
-                })?,
-                extension_hooks
-                    .ok_or_else(|| "Agent child capability requires extension hooks".to_string())?,
-                llm_lease,
-                permission_lease,
-            );
-            (Some(root_context), Some(child_leases))
-        } else {
-            (None, None)
-        };
+        let (root_context, child_leases, main_tools) =
+            if self.agent_orchestrator.has_child_factory() {
+                let tool_lease = context
+                    .require::<ToolCatalogCapability>()
+                    .map_err(|error| error.to_string())?;
+                let prompt_lease = context
+                    .require::<PromptAssemblyCapability>()
+                    .map_err(|error| error.to_string())?;
+                let llm_lease = context
+                    .require::<LlmPortCapability>()
+                    .map_err(|error| error.to_string())?;
+                let permission_lease = context
+                    .require::<PermissionPolicyCapability>()
+                    .map_err(|error| error.to_string())?;
+                let root_context = self.agent_orchestrator.build_root_context(
+                    scope,
+                    &tool_lease,
+                    &prompt_lease,
+                    self.session_workspace_tools
+                        .definitions()
+                        .definitions()
+                        .map(|definition| definition.name.clone())
+                        .collect::<Vec<_>>(),
+                )?;
+                let child_leases = AgentChildRuntimeLeases::new(
+                    event_stream.ok_or_else(|| {
+                        "Agent child capability requires runtime event stream".to_string()
+                    })?,
+                    extension_hooks.ok_or_else(|| {
+                        "Agent child capability requires extension hooks".to_string()
+                    })?,
+                    llm_lease,
+                    permission_lease,
+                );
+                let main_tools = root_context.tools().map_err(|error| error.to_string())?;
+                (Some(root_context), Some(child_leases), Some(main_tools))
+            } else {
+                (None, None, None)
+            };
+        if let Some(main_tools) = main_tools {
+            grants = grants.with_tools(main_tools);
+        }
         self.agent_orchestrator
             .activate_main(grants, root_context, child_leases)?;
+        self.agent_orchestrator.bind_session_port(
+            self.session_backend_views
+                .as_ref()
+                .map(|views| Arc::clone(&views.port)),
+        );
         self.is_agent_replacement_activating = false;
         Ok(ComponentActivationOutcome::Ready)
     }
@@ -2118,7 +2156,7 @@ impl RuntimeComponents {
     }
 
     fn quiesce_agent_runtime(&mut self, mode: ComponentLifecycleMode) -> Result<(), String> {
-        match mode {
+        let result = match mode {
             ComponentLifecycleMode::Shutdown => self
                 .agent_orchestrator
                 .shutdown()
@@ -2127,13 +2165,18 @@ impl RuntimeComponents {
                 .agent_orchestrator
                 .suspend()
                 .map_err(|_| "Agent adapter failed to suspend".to_string()),
-        }
+        };
+        self.agent_orchestrator.bind_session_port(None);
+        result
     }
 
     fn finalize_agent_runtime_replacement(&mut self) -> Result<(), String> {
-        self.agent_orchestrator
+        let result = self
+            .agent_orchestrator
             .shutdown()
-            .map_err(|_| "Agent adapter failed to finalize for replacement".to_string())
+            .map_err(|_| "Agent adapter failed to finalize for replacement".to_string());
+        self.agent_orchestrator.bind_session_port(None);
+        result
     }
 
     fn quiesce_model_refresh(&mut self, mode: ComponentLifecycleMode) -> Result<(), String> {
@@ -2261,17 +2304,21 @@ impl RuntimeComponents {
             .ok_or_else(|| "plugin authority preparation is missing".to_string())?;
         let is_agent_replacement = matches!(
             &prepared.agent_runtime,
-            PreparedAgentRuntimeCommit::Replace(_)
+            PreparedAgentRuntimeCommit::ReplacePending
+                | PreparedAgentRuntimeCommit::ReplaceReady(_)
         );
         if is_agent_replacement {
             if matches!(
                 &prepared.agent_runtime,
-                PreparedAgentRuntimeCommit::Replace(replacement)
-                    if replacement.candidate.is_some()
+                PreparedAgentRuntimeCommit::ReplaceReady(_)
             ) {
                 return Err("Agent adapter candidate is already prepared".to_string());
             }
             self.finalize_agent_runtime_replacement()?;
+            let next_generation = self
+                .agent_orchestrator
+                .prepare_main_replacement_generation()
+                .map_err(|error| error.to_string())?;
 
             let (candidate, child_factory, child_static_grants) = {
                 let options = agent_options.ok_or_else(|| {
@@ -2311,13 +2358,20 @@ impl RuntimeComponents {
                 .prepared_plugin_commit
                 .as_mut()
                 .expect("prepared plugin commit must survive Agent construction");
-            let PreparedAgentRuntimeCommit::Replace(replacement) = &mut prepared.agent_runtime
-            else {
+            if !matches!(
+                prepared.agent_runtime,
+                PreparedAgentRuntimeCommit::ReplacePending
+            ) {
                 unreachable!("Agent replacement kind must remain stable during construction")
-            };
-            replacement.candidate = Some(candidate);
-            replacement.child_factory = Some(child_factory);
-            replacement.child_static_grants = Some(child_static_grants);
+            }
+            prepared.agent_runtime = PreparedAgentRuntimeCommit::ReplaceReady(Box::new(
+                PreparedAgentRuntimeReplacement {
+                    candidate,
+                    child_factory,
+                    child_static_grants,
+                    next_generation,
+                },
+            ));
         }
         #[cfg(test)]
         self.record_plugin_transaction_event("prepare:authority");
@@ -2325,34 +2379,28 @@ impl RuntimeComponents {
     }
 
     fn commit_plugin_authority(&mut self) {
-        let mut prepared = self
+        let prepared = self
             .prepared_plugin_commit
             .take()
             .expect("plugin authority commit must have a prepared composition");
-        let replacement = match &mut prepared.agent_runtime {
+        let replacement = match prepared.agent_runtime {
             PreparedAgentRuntimeCommit::Keep => None,
-            PreparedAgentRuntimeCommit::Replace(replacement) => Some((
-                replacement
-                    .candidate
-                    .take()
-                    .expect("Agent replacement must prepare its adapter before authority commit"),
-                replacement
-                    .child_factory
-                    .take()
-                    .expect("Agent replacement must prepare child factory before authority commit"),
-                replacement.child_static_grants.take().expect(
-                    "Agent replacement must prepare child static grants before authority commit",
-                ),
-            )),
+            PreparedAgentRuntimeCommit::ReplaceReady(replacement) => Some(*replacement),
+            PreparedAgentRuntimeCommit::ReplacePending => {
+                unreachable!("Agent replacement must be prepared before authority commit")
+            }
         };
-        self.plugins.commit_reconciliation(prepared.reconciliation);
-        self.plugin_loader.commit_desired(prepared.desired);
-        if let Some((candidate, child_factory, child_static_grants)) = replacement {
-            self.agent_orchestrator
-                .replace_main(candidate, child_factory, child_static_grants)
-                .expect("prepared Agent replacement must retain the cleanup barrier");
+        if let Some(replacement) = replacement {
+            self.agent_orchestrator.commit_prepared_main_replacement(
+                replacement.candidate,
+                replacement.child_factory,
+                replacement.child_static_grants,
+                replacement.next_generation,
+            );
             self.is_agent_replacement_activating = true;
         }
+        self.plugins.commit_reconciliation(prepared.reconciliation);
+        self.plugin_loader.commit_desired(prepared.desired);
         #[cfg(test)]
         self.record_plugin_transaction_event("authority:commit");
     }
@@ -2617,13 +2665,18 @@ mod tests {
         ExtensionRequestFuture, ExtensionRequestTransport, ExtensionTransportError,
     };
     use runtime_domain::agent::{
-        AgentCommand, AgentCommandReceipt, AgentEvent, AgentEventKind, AgentId, AgentRuntime,
-        AgentRuntimeError, AgentTurnId, AgentTurnRequest,
+        AgentCommand, AgentCommandReceipt, AgentEvent, AgentEventKind, AgentGroupCompletion,
+        AgentId, AgentOutcome, AgentRuntime, AgentRuntimeError, AgentTurnId, AgentTurnRequest,
     };
     use runtime_domain::prompt_assembly::{
         PromptPreludeSection, PromptSourceKind, PromptSourceOrigin,
     };
     use runtime_domain::session::ConversationTurnRequest;
+    use session_store::SessionLifecycleStore;
+    use tokio_util::sync::CancellationToken;
+    use tool_runtime::{
+        ToolCall, ToolExecutionContext, ToolExecutor, ToolInvocationIdentity, ToolResultOutcome,
+    };
 
     #[derive(Default)]
     struct ComponentKernelSource {
@@ -3366,6 +3419,298 @@ mod tests {
         }
     }
 
+    struct SpawnParentState {
+        tools: Mutex<Option<ToolExecutorRegistry>>,
+        target: Mutex<Option<runtime_domain::session::RuntimeTarget>>,
+    }
+
+    struct SpawnParentRuntime {
+        state: Arc<SpawnParentState>,
+        session_id: session_store::SessionId,
+        is_shutdown: bool,
+    }
+
+    struct FlakyReplaySessionPort {
+        inner: session_store::InMemorySessionStore,
+        fail_on_append_attempt: usize,
+        append_attempts: AtomicUsize,
+    }
+
+    impl FlakyReplaySessionPort {
+        fn new(fail_on_append_attempt: usize) -> Self {
+            Self {
+                inner: session_store::InMemorySessionStore::new(),
+                fail_on_append_attempt,
+                append_attempts: AtomicUsize::new(0),
+            }
+        }
+
+        fn append_attempts(&self) -> usize {
+            self.append_attempts.load(Ordering::SeqCst)
+        }
+    }
+
+    impl session_store::SessionLifecycleStore for FlakyReplaySessionPort {
+        fn create_session<'a>(
+            &'a self,
+            header: session_store::SessionHeader,
+        ) -> Pin<
+            Box<
+                dyn Future<
+                        Output = Result<session_store::SessionId, session_store::SessionStoreError>,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            self.inner.create_session(header)
+        }
+
+        fn append<'a>(
+            &'a self,
+            session_id: &'a session_store::SessionId,
+            item: provider_protocol::ConversationItem,
+        ) -> Pin<
+            Box<dyn Future<Output = Result<String, session_store::SessionStoreError>> + Send + 'a>,
+        > {
+            self.inner.append(session_id, item)
+        }
+
+        fn append_many<'a>(
+            &'a self,
+            session_id: &'a session_store::SessionId,
+            items: Vec<provider_protocol::ConversationItem>,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<Vec<String>, session_store::SessionStoreError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            self.inner.append_many(session_id, items)
+        }
+
+        fn append_config_change<'a>(
+            &'a self,
+            session_id: &'a session_store::SessionId,
+            snapshot: session_store::ConfigSnapshot,
+        ) -> Pin<Box<dyn Future<Output = Result<(), session_store::SessionStoreError>> + Send + 'a>>
+        {
+            self.inner.append_config_change(session_id, snapshot)
+        }
+
+        fn append_transcript_replay<'a>(
+            &'a self,
+            session_id: &'a session_store::SessionId,
+            item: runtime_domain::session::TranscriptReplayItem,
+        ) -> Pin<
+            Box<dyn Future<Output = Result<String, session_store::SessionStoreError>> + Send + 'a>,
+        > {
+            let attempt = self.append_attempts.fetch_add(1, Ordering::SeqCst);
+            if attempt == self.fail_on_append_attempt {
+                return Box::pin(async {
+                    Err(session_store::SessionStoreError::ConfigurationError {
+                        message: "PRIVATE_REPLAY_APPEND_FAILURE".to_string(),
+                    })
+                });
+            }
+            self.inner.append_transcript_replay(session_id, item)
+        }
+
+        fn set_leaf<'a>(
+            &'a self,
+            session_id: &'a session_store::SessionId,
+            leaf_id: Option<&'a str>,
+        ) -> Pin<Box<dyn Future<Output = Result<(), session_store::SessionStoreError>> + Send + 'a>>
+        {
+            self.inner.set_leaf(session_id, leaf_id)
+        }
+
+        fn resolve<'a>(
+            &'a self,
+            session_id: &'a session_store::SessionId,
+            leaf_id: Option<&'a str>,
+        ) -> Pin<
+            Box<
+                dyn Future<
+                        Output = Result<
+                            Vec<provider_protocol::ConversationItem>,
+                            session_store::SessionStoreError,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            self.inner.resolve(session_id, leaf_id)
+        }
+
+        fn load_session<'a>(
+            &'a self,
+            session_id: &'a session_store::SessionId,
+            leaf_id: Option<&'a str>,
+        ) -> Pin<
+            Box<
+                dyn Future<
+                        Output = Result<
+                            session_store::ResolvedSessionState,
+                            session_store::SessionStoreError,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            self.inner.load_session(session_id, leaf_id)
+        }
+    }
+
+    impl session_store::SessionFlushStore for FlakyReplaySessionPort {
+        fn flush<'a>(
+            &'a self,
+            session_id: &'a session_store::SessionId,
+        ) -> Pin<Box<dyn Future<Output = Result<(), session_store::SessionStoreError>> + Send + 'a>>
+        {
+            self.inner.flush(session_id)
+        }
+
+        fn flush_all<'a>(
+            &'a self,
+        ) -> Pin<Box<dyn Future<Output = Result<(), session_store::SessionStoreError>> + Send + 'a>>
+        {
+            self.inner.flush_all()
+        }
+    }
+
+    impl AgentRuntime for SpawnParentRuntime {
+        fn dispatch(
+            &mut self,
+            command: AgentCommand,
+        ) -> Result<AgentCommandReceipt, AgentRuntimeError> {
+            if self.is_shutdown {
+                return Err(AgentRuntimeError::Disposed);
+            }
+            match command {
+                AgentCommand::SubmitTurn {
+                    agent_id,
+                    turn_id,
+                    request,
+                } if agent_id == AgentId::MAIN => {
+                    let target = request.target();
+                    *self
+                        .state
+                        .target
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(target.clone());
+                    Ok(AgentCommandReceipt::TurnStarted {
+                        turn_id,
+                        target,
+                        activity_label: request.activity_label().to_string(),
+                    })
+                }
+                _ => Err(AgentRuntimeError::UnknownAgent),
+            }
+        }
+
+        fn drain_events(&mut self) -> Vec<AgentEvent> {
+            Vec::new()
+        }
+
+        fn shutdown(&mut self) -> Result<(), AgentRuntimeError> {
+            self.is_shutdown = true;
+            Ok(())
+        }
+    }
+
+    impl AgentRuntimePort for SpawnParentRuntime {
+        fn activate(&mut self, mut grants: AgentRuntimeActivationGrants) -> Result<(), String> {
+            if let Some(tools) = grants.take_tools() {
+                self.bind_tools(tools)?;
+            }
+            self.is_shutdown = false;
+            Ok(())
+        }
+
+        fn suspend(&mut self) -> Result<(), AgentRuntimeError> {
+            self.is_shutdown = true;
+            Ok(())
+        }
+
+        fn bind_tools(
+            &mut self,
+            tools: crate::runtime::agent_capability_context::AgentScopedToolView,
+        ) -> Result<(), String> {
+            *self
+                .state
+                .tools
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(
+                tools
+                    .construction_registry()
+                    .map_err(|error| error.to_string())?,
+            );
+            Ok(())
+        }
+
+        fn activity(&self) -> AgentRuntimeActivity {
+            AgentRuntimeActivity::Idle
+        }
+
+        fn session(&self) -> Option<&dyn AgentSessionCapability> {
+            Some(self)
+        }
+
+        fn session_mut(&mut self) -> Option<&mut dyn AgentSessionCapability> {
+            Some(self)
+        }
+
+        fn current_target(&self) -> Option<runtime_domain::session::RuntimeTarget> {
+            self.state
+                .target
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+
+        fn has_pending_work(&self) -> bool {
+            false
+        }
+    }
+
+    impl AgentSessionCapability for SpawnParentRuntime {
+        fn snapshot(&self) -> crate::runtime::agent::AgentSessionSnapshot {
+            crate::runtime::agent::AgentSessionSnapshot {
+                session_id: Some(self.session_id.clone()),
+                is_history_empty: false,
+            }
+        }
+
+        fn truncate_after_user_turns(
+            &mut self,
+            _retained_user_turns: usize,
+        ) -> Result<Option<(session_store::SessionId, String)>, String> {
+            Ok(None)
+        }
+
+        fn context_budget_snapshot(&self) -> crate::runtime::agent::AgentContextBudgetSnapshot {
+            crate::runtime::agent::AgentContextBudgetSnapshot {
+                items: Arc::from([]),
+                prompt_prelude: None,
+                upstream_context_tokens: None,
+                tool_definitions: Vec::new(),
+            }
+        }
+
+        fn update_empty_session_configuration(
+            &mut self,
+            _prompt_assembly: crate::runtime::prompt_assembly::PromptAssemblySessionSnapshot,
+            _session_workspace_tools: ToolExecutorRegistry,
+        ) -> crate::runtime::agent::AgentEmptySessionConfigurationOutcome {
+            crate::runtime::agent::AgentEmptySessionConfigurationOutcome::DeferredToNextSession
+        }
+
+        fn restore_session(&mut self, _restore: AgentSessionRestore) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
     impl Drop for DropCounter {
         fn drop(&mut self) {
             self.count.fetch_add(1, Ordering::SeqCst);
@@ -3423,6 +3768,610 @@ mod tests {
             }),
             Err(AgentRuntimeError::UnknownAgent)
         ));
+
+        components.shutdown().expect("runtime should shut down");
+    }
+
+    #[tokio::test]
+    async fn scoped_spawn_agents_commits_redacted_launch_and_outcome_in_order() {
+        const PRIVATE_SECOND_LINE: &str = "PRIVATE_SECOND_LINE";
+        const PRIVATE_INSTRUCTIONS: &str = "PRIVATE_INSTRUCTIONS";
+
+        let store = Arc::new(session_store::InMemorySessionStore::new());
+        let mut header = session_store::SessionHeader {
+            session_id: session_store::SessionId::new(),
+            work_dir: std::path::PathBuf::from("/typed-spawn-session"),
+            session_name: None,
+            initial_model: "qwen3".to_string(),
+            git_head: None,
+            cli_version: None,
+        };
+        let session_id = store
+            .create_session(header.clone())
+            .await
+            .expect("spawn fixture session should be created");
+        header.session_id = session_id.clone();
+
+        let parent_state = Arc::new(SpawnParentState {
+            tools: Mutex::new(None),
+            target: Mutex::new(None),
+        });
+        let parent_session_id = session_id.clone();
+        let factory = AgentRuntimeFactory::with_child_constructor(
+            {
+                let parent_state = Arc::clone(&parent_state);
+                move |_grants| {
+                    Ok(Box::new(SpawnParentRuntime {
+                        state: Arc::clone(&parent_state),
+                        session_id: parent_session_id.clone(),
+                        is_shutdown: true,
+                    }))
+                }
+            },
+            |_grants| Ok(Box::new(ChildAcceptingRuntime::default())),
+        );
+        let mut options = AppRuntimeOptions {
+            session_store: Some(store.clone()),
+            session_header_template: Some(header),
+            ..options_with_provider()
+        };
+        let mut components =
+            RuntimeComponents::new_with_agent_runtime_factory(&mut options, factory)
+                .expect("runtime components should initialize with typed spawn fixtures");
+
+        let parent_turn_id = AgentTurnId::new(77);
+        components
+            .dispatch_main_agent(AgentCommand::SubmitTurn {
+                agent_id: AgentId::MAIN,
+                turn_id: parent_turn_id,
+                request: Box::new(AgentTurnRequest::from_conversation_request(
+                    ConversationTurnRequest::new_user_text("local", "qwen3", "parent turn"),
+                )),
+            })
+            .expect("parent turn should establish current spawn identity");
+        let scoped_tools = parent_state
+            .tools
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("main activation should bind scoped tools");
+        let runtime_generation = components.agent_orchestrator.generation().get();
+
+        let execution = tokio::spawn(async move {
+            let cancellation = CancellationToken::new();
+            scoped_tools
+                .execute_tool_with_context(
+                    ToolCall::new(
+                        "spawn-call",
+                        "spawn_agents",
+                        serde_json::json!({
+                            "agents": [{
+                                "objective": format!("first delivery line\n{PRIVATE_SECOND_LINE}"),
+                                "display_title": "child title",
+                                "instructions": PRIVATE_INSTRUCTIONS
+                            }]
+                        }),
+                    ),
+                    ToolExecutionContext::new(&cancellation).with_invocation_identity(
+                        ToolInvocationIdentity::new(
+                            AgentId::MAIN.get(),
+                            parent_turn_id.get(),
+                            runtime_generation,
+                            u64::MAX,
+                        ),
+                    ),
+                )
+                .await
+        });
+
+        for _ in 0..16 {
+            components.drain_spawn_agents_requests();
+            if components.child_agent_count_for_test() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(components.child_agent_count_for_test(), 1);
+        let child_events = components.drain_child_agent_events();
+        assert_eq!(child_events.len(), 1);
+        assert!(matches!(
+            child_events[0].kind,
+            AgentEventKind::TurnFinished { .. }
+        ));
+
+        let tool_result = execution
+            .await
+            .expect("spawn tool task should finish after group completion");
+        assert_eq!(tool_result.outcome(), ToolResultOutcome::Success);
+        let completion_text = tool_result.text_content();
+        let completion: AgentGroupCompletion = serde_json::from_str(&completion_text)
+            .expect("spawn tool should return typed group completion JSON");
+        assert_eq!(completion.parent_agent_id, AgentId::MAIN);
+        assert_eq!(completion.children.len(), 1);
+        assert_eq!(completion.children[0].outcome, AgentOutcome::Completed);
+        assert!(!completion_text.contains(PRIVATE_SECOND_LINE));
+        assert!(!completion_text.contains(PRIVATE_INSTRUCTIONS));
+
+        let restored = store
+            .load_session(&session_id, None)
+            .await
+            .expect("spawn replay facts should load from the session store");
+        assert_eq!(restored.transcript.len(), 2);
+        let launch = match &restored.transcript[0] {
+            runtime_domain::session::TranscriptReplayItem::AgentLaunch(snapshot) => snapshot,
+            other => panic!("expected launch fact first, got {other:?}"),
+        };
+        assert_eq!(launch.parent_agent_id, AgentId::MAIN);
+        assert_eq!(launch.parent_turn_id, parent_turn_id);
+        assert_eq!(launch.children.len(), 1);
+        assert_eq!(launch.children[0].title.as_str(), "child title");
+        assert_eq!(launch.children[0].objective.as_str(), "first delivery line");
+        let outcome = match &restored.transcript[1] {
+            runtime_domain::session::TranscriptReplayItem::AgentOutcome(snapshot) => snapshot,
+            other => panic!("expected outcome fact second, got {other:?}"),
+        };
+        assert_eq!(outcome.agent_id, launch.children[0].agent_id);
+        assert_eq!(outcome.group_id, Some(launch.group_id));
+        assert_eq!(outcome.parent_agent_id, Some(AgentId::MAIN));
+        assert_eq!(outcome.parent_turn_id, Some(parent_turn_id));
+        assert_eq!(outcome.outcome, AgentOutcome::Completed);
+        let replay_json = serde_json::to_string(&restored.transcript)
+            .expect("replay projection should remain serializable");
+        assert!(!replay_json.contains(PRIVATE_SECOND_LINE));
+        assert!(!replay_json.contains(PRIVATE_INSTRUCTIONS));
+
+        components.shutdown().expect("runtime should shut down");
+    }
+
+    #[tokio::test]
+    async fn launch_fact_failure_rolls_back_staged_child_and_allows_clean_retry() {
+        let replay_port = Arc::new(FlakyReplaySessionPort::new(0));
+        let header = session_store::SessionHeader {
+            session_id: session_store::SessionId::new(),
+            work_dir: std::path::PathBuf::from("/typed-spawn-launch-retry"),
+            session_name: None,
+            initial_model: "qwen3".to_string(),
+            git_head: None,
+            cli_version: None,
+        };
+        let session_id = replay_port
+            .create_session(header)
+            .await
+            .expect("launch retry fixture session should be created");
+        let parent_state = Arc::new(SpawnParentState {
+            tools: Mutex::new(None),
+            target: Mutex::new(None),
+        });
+        let shutdown_calls = Arc::new(AtomicUsize::new(0));
+        let factory = AgentRuntimeFactory::with_child_constructor(
+            {
+                let parent_state = Arc::clone(&parent_state);
+                let session_id = session_id.clone();
+                move |_grants| {
+                    Ok(Box::new(SpawnParentRuntime {
+                        state: Arc::clone(&parent_state),
+                        session_id: session_id.clone(),
+                        is_shutdown: true,
+                    }))
+                }
+            },
+            {
+                let shutdown_calls = Arc::clone(&shutdown_calls);
+                move |_grants| {
+                    Ok(Box::new(ChildAcceptingRuntime {
+                        shutdown_calls: Some(Arc::clone(&shutdown_calls)),
+                        ..ChildAcceptingRuntime::default()
+                    }))
+                }
+            },
+        );
+        let mut options = options_with_provider();
+        let mut components =
+            RuntimeComponents::new_with_agent_runtime_factory(&mut options, factory)
+                .expect("runtime components should initialize for launch rollback");
+        components
+            .agent_orchestrator
+            .bind_session_port(Some(replay_port.clone()));
+        let parent_turn_id = AgentTurnId::new(78);
+        components
+            .dispatch_main_agent(AgentCommand::SubmitTurn {
+                agent_id: AgentId::MAIN,
+                turn_id: parent_turn_id,
+                request: Box::new(AgentTurnRequest::from_conversation_request(
+                    ConversationTurnRequest::new_user_text("local", "qwen3", "parent turn"),
+                )),
+            })
+            .expect("parent turn should start");
+        let scoped_tools = parent_state
+            .tools
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("main activation should bind scoped tools");
+        let runtime_generation = components.agent_orchestrator.generation().get();
+
+        let first_execution = {
+            let scoped_tools = scoped_tools.clone();
+            tokio::spawn(async move {
+                let cancellation = CancellationToken::new();
+                scoped_tools
+                    .execute_tool_with_context(
+                        ToolCall::new(
+                            "failed-launch",
+                            "spawn_agents",
+                            serde_json::json!({
+                                "agents": [{
+                                    "objective": "PRIVATE_FAILED_LAUNCH_OBJECTIVE",
+                                    "instructions": "PRIVATE_FAILED_LAUNCH_INSTRUCTIONS"
+                                }]
+                            }),
+                        ),
+                        ToolExecutionContext::new(&cancellation).with_invocation_identity(
+                            ToolInvocationIdentity::new(
+                                AgentId::MAIN.get(),
+                                parent_turn_id.get(),
+                                runtime_generation,
+                                u64::MAX,
+                            ),
+                        ),
+                    )
+                    .await
+            })
+        };
+        for _ in 0..16 {
+            components.drain_spawn_agents_requests();
+            if first_execution.is_finished() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let first_result = first_execution
+            .await
+            .expect("failed launch tool task should finish");
+        assert_eq!(first_result.outcome(), ToolResultOutcome::Error);
+        assert_eq!(
+            first_result.text_content(),
+            "spawn_agents request was rejected"
+        );
+        assert!(!first_result.text_content().contains("PRIVATE_"));
+        assert_eq!(components.child_agent_count_for_test(), 0);
+        assert_eq!(shutdown_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(replay_port.append_attempts(), 1);
+        assert!(
+            replay_port
+                .load_session(&session_id, None)
+                .await
+                .expect("failed launch session should remain readable")
+                .transcript
+                .is_empty()
+        );
+
+        let retry_execution = tokio::spawn(async move {
+            let cancellation = CancellationToken::new();
+            scoped_tools
+                .execute_tool_with_context(
+                    ToolCall::new(
+                        "retry-launch",
+                        "spawn_agents",
+                        serde_json::json!({
+                            "agents": [{"objective": "retry delivery"}]
+                        }),
+                    ),
+                    ToolExecutionContext::new(&cancellation).with_invocation_identity(
+                        ToolInvocationIdentity::new(
+                            AgentId::MAIN.get(),
+                            parent_turn_id.get(),
+                            runtime_generation,
+                            u64::MAX,
+                        ),
+                    ),
+                )
+                .await
+        });
+        for _ in 0..16 {
+            components.drain_spawn_agents_requests();
+            if components.child_agent_count_for_test() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(components.drain_child_agent_events().len(), 1);
+        let retry_result = retry_execution
+            .await
+            .expect("retry launch tool task should finish");
+        assert_eq!(retry_result.outcome(), ToolResultOutcome::Success);
+        assert_eq!(shutdown_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(replay_port.append_attempts(), 3);
+        assert_eq!(
+            replay_port
+                .load_session(&session_id, None)
+                .await
+                .expect("retry launch session should be readable")
+                .transcript
+                .len(),
+            2
+        );
+
+        components.shutdown().expect("runtime should shut down");
+    }
+
+    #[tokio::test]
+    async fn outcome_fact_failure_retains_terminal_delivery_until_exact_retry() {
+        let replay_port = Arc::new(FlakyReplaySessionPort::new(1));
+        let header = session_store::SessionHeader {
+            session_id: session_store::SessionId::new(),
+            work_dir: std::path::PathBuf::from("/typed-spawn-outcome-retry"),
+            session_name: None,
+            initial_model: "qwen3".to_string(),
+            git_head: None,
+            cli_version: None,
+        };
+        let session_id = replay_port
+            .create_session(header)
+            .await
+            .expect("outcome retry fixture session should be created");
+        let parent_state = Arc::new(SpawnParentState {
+            tools: Mutex::new(None),
+            target: Mutex::new(None),
+        });
+        let factory = AgentRuntimeFactory::with_child_constructor(
+            {
+                let parent_state = Arc::clone(&parent_state);
+                let session_id = session_id.clone();
+                move |_grants| {
+                    Ok(Box::new(SpawnParentRuntime {
+                        state: Arc::clone(&parent_state),
+                        session_id: session_id.clone(),
+                        is_shutdown: true,
+                    }))
+                }
+            },
+            |_grants| Ok(Box::new(ChildAcceptingRuntime::default())),
+        );
+        let mut options = options_with_provider();
+        let mut components =
+            RuntimeComponents::new_with_agent_runtime_factory(&mut options, factory)
+                .expect("runtime components should initialize for outcome retry");
+        components
+            .agent_orchestrator
+            .bind_session_port(Some(replay_port.clone()));
+        let parent_turn_id = AgentTurnId::new(79);
+        components
+            .dispatch_main_agent(AgentCommand::SubmitTurn {
+                agent_id: AgentId::MAIN,
+                turn_id: parent_turn_id,
+                request: Box::new(AgentTurnRequest::from_conversation_request(
+                    ConversationTurnRequest::new_user_text("local", "qwen3", "parent turn"),
+                )),
+            })
+            .expect("parent turn should start");
+        let scoped_tools = parent_state
+            .tools
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("main activation should bind scoped tools");
+        let runtime_generation = components.agent_orchestrator.generation().get();
+        let execution = tokio::spawn(async move {
+            let cancellation = CancellationToken::new();
+            scoped_tools
+                .execute_tool_with_context(
+                    ToolCall::new(
+                        "outcome-retry",
+                        "spawn_agents",
+                        serde_json::json!({
+                            "agents": [{"objective": "delivery"}]
+                        }),
+                    ),
+                    ToolExecutionContext::new(&cancellation).with_invocation_identity(
+                        ToolInvocationIdentity::new(
+                            AgentId::MAIN.get(),
+                            parent_turn_id.get(),
+                            runtime_generation,
+                            u64::MAX,
+                        ),
+                    ),
+                )
+                .await
+        });
+        for _ in 0..16 {
+            components.drain_spawn_agents_requests();
+            if components.child_agent_count_for_test() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        assert!(components.drain_child_agent_events().is_empty());
+        assert_eq!(replay_port.append_attempts(), 2);
+        assert!(!execution.is_finished());
+        let child_id = components
+            .agent_orchestrator
+            .children_of(AgentId::MAIN)
+            .into_iter()
+            .next()
+            .expect("outcome retry child should remain projected");
+        let frozen_outcome = components
+            .agent_orchestrator
+            .pending_outcome_for_test(child_id)
+            .expect("failed outcome should retain the original fact for retry");
+        let terminal_events = components.drain_child_agent_events();
+        assert_eq!(terminal_events.len(), 1);
+        assert_eq!(replay_port.append_attempts(), 3);
+        let result = execution
+            .await
+            .expect("group completion should release after outcome retry");
+        assert_eq!(result.outcome(), ToolResultOutcome::Success);
+
+        assert!(components.drain_child_agent_events().is_empty());
+        assert_eq!(replay_port.append_attempts(), 3);
+        let restored = replay_port
+            .load_session(&session_id, None)
+            .await
+            .expect("outcome retry session should be readable");
+        assert_eq!(restored.transcript.len(), 2);
+        assert!(matches!(
+            restored.transcript.as_slice(),
+            [
+                runtime_domain::session::TranscriptReplayItem::AgentLaunch(_),
+                runtime_domain::session::TranscriptReplayItem::AgentOutcome(_)
+            ]
+        ));
+        let persisted_outcome = match &restored.transcript[1] {
+            runtime_domain::session::TranscriptReplayItem::AgentOutcome(snapshot) => snapshot,
+            _ => unreachable!("outcome fact should follow launch fact"),
+        };
+        assert_eq!(persisted_outcome, &frozen_outcome);
+
+        components.shutdown().expect("runtime should shut down");
+    }
+
+    #[tokio::test]
+    async fn batch_construction_failure_publishes_no_partial_group_and_retries_cleanly() {
+        let parent_state = Arc::new(SpawnParentState {
+            tools: Mutex::new(None),
+            target: Mutex::new(None),
+        });
+        let construction_attempts = Arc::new(AtomicUsize::new(0));
+        let shutdown_calls = Arc::new(AtomicUsize::new(0));
+        let factory = AgentRuntimeFactory::with_child_constructor(
+            {
+                let parent_state = Arc::clone(&parent_state);
+                move |_grants| {
+                    Ok(Box::new(SpawnParentRuntime {
+                        state: Arc::clone(&parent_state),
+                        session_id: session_store::SessionId::new(),
+                        is_shutdown: true,
+                    }))
+                }
+            },
+            {
+                let construction_attempts = Arc::clone(&construction_attempts);
+                let shutdown_calls = Arc::clone(&shutdown_calls);
+                move |_grants| {
+                    if construction_attempts.fetch_add(1, Ordering::SeqCst) == 1 {
+                        return Err("PRIVATE_CHILD_CONSTRUCTION_FAILURE".to_string());
+                    }
+                    Ok(Box::new(ChildAcceptingRuntime {
+                        shutdown_calls: Some(Arc::clone(&shutdown_calls)),
+                        ..ChildAcceptingRuntime::default()
+                    }))
+                }
+            },
+        );
+        let mut options = options_with_provider();
+        let mut components =
+            RuntimeComponents::new_with_agent_runtime_factory(&mut options, factory)
+                .expect("runtime components should initialize for batch rollback");
+        let parent_turn_id = AgentTurnId::new(80);
+        components
+            .dispatch_main_agent(AgentCommand::SubmitTurn {
+                agent_id: AgentId::MAIN,
+                turn_id: parent_turn_id,
+                request: Box::new(AgentTurnRequest::from_conversation_request(
+                    ConversationTurnRequest::new_user_text("local", "qwen3", "parent turn"),
+                )),
+            })
+            .expect("parent turn should start");
+        let scoped_tools = parent_state
+            .tools
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("main activation should bind scoped tools");
+        let runtime_generation = components.agent_orchestrator.generation().get();
+
+        let failed_execution = {
+            let scoped_tools = scoped_tools.clone();
+            tokio::spawn(async move {
+                let cancellation = CancellationToken::new();
+                scoped_tools
+                    .execute_tool_with_context(
+                        ToolCall::new(
+                            "failed-batch",
+                            "spawn_agents",
+                            serde_json::json!({
+                                "agents": [
+                                    {"objective": "first"},
+                                    {"objective": "PRIVATE_SECOND_CHILD"}
+                                ]
+                            }),
+                        ),
+                        ToolExecutionContext::new(&cancellation).with_invocation_identity(
+                            ToolInvocationIdentity::new(
+                                AgentId::MAIN.get(),
+                                parent_turn_id.get(),
+                                runtime_generation,
+                                u64::MAX,
+                            ),
+                        ),
+                    )
+                    .await
+            })
+        };
+        for _ in 0..16 {
+            components.drain_spawn_agents_requests();
+            if failed_execution.is_finished() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let failed_result = failed_execution
+            .await
+            .expect("failed batch tool task should finish");
+        assert_eq!(failed_result.outcome(), ToolResultOutcome::Error);
+        assert_eq!(
+            failed_result.text_content(),
+            "spawn_agents request was rejected"
+        );
+        assert!(!failed_result.text_content().contains("PRIVATE_"));
+        assert_eq!(components.child_agent_count_for_test(), 0);
+        assert_eq!(construction_attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(shutdown_calls.load(Ordering::SeqCst), 1);
+
+        let retry_execution = tokio::spawn(async move {
+            let cancellation = CancellationToken::new();
+            scoped_tools
+                .execute_tool_with_context(
+                    ToolCall::new(
+                        "retry-batch",
+                        "spawn_agents",
+                        serde_json::json!({
+                            "agents": [
+                                {"objective": "first retry"},
+                                {"objective": "second retry"}
+                            ]
+                        }),
+                    ),
+                    ToolExecutionContext::new(&cancellation).with_invocation_identity(
+                        ToolInvocationIdentity::new(
+                            AgentId::MAIN.get(),
+                            parent_turn_id.get(),
+                            runtime_generation,
+                            u64::MAX,
+                        ),
+                    ),
+                )
+                .await
+        });
+        for _ in 0..16 {
+            components.drain_spawn_agents_requests();
+            if components.child_agent_count_for_test() == 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(components.child_agent_count_for_test(), 2);
+        assert_eq!(components.drain_child_agent_events().len(), 2);
+        let retry_result = retry_execution
+            .await
+            .expect("retry batch tool task should finish");
+        assert_eq!(retry_result.outcome(), ToolResultOutcome::Success);
+        let completion: AgentGroupCompletion = serde_json::from_str(&retry_result.text_content())
+            .expect("retry batch should return typed completion");
+        assert_eq!(completion.children.len(), 2);
+        assert_eq!(construction_attempts.load(Ordering::SeqCst), 4);
+        assert_eq!(shutdown_calls.load(Ordering::SeqCst), 3);
 
         components.shutdown().expect("runtime should shut down");
     }
@@ -3850,7 +4799,7 @@ mod tests {
         for publication in [
             "self.plugins.commit_reconciliation(prepared.reconciliation)",
             "self.plugin_loader.commit_desired(prepared.desired)",
-            "self.agent_orchestrator\n                .replace_main(candidate, child_factory, child_static_grants)",
+            "self.agent_orchestrator.commit_prepared_main_replacement(",
         ] {
             assert!(
                 commit_authority_source.contains(publication),

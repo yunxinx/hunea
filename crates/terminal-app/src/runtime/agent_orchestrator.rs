@@ -1,21 +1,28 @@
 //! Runtime-owned Agent tree、identity routing 与 lifecycle ownership。
 
+use session_store::SessionPort;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
 };
+use tokio::sync::oneshot;
 
+use crate::session_store_bridge::run_session_store_future;
 use runtime_domain::agent::{
-    AgentActivitySummary, AgentCommand, AgentCommandReceipt, AgentEvent, AgentEventKind, AgentId,
-    AgentObservationId, AgentOverviewRow, AgentOverviewSnapshot, AgentProjectionRevision,
-    AgentProjectionStatus, AgentRuntimeError, AgentRuntimeGeneration, AgentTitle, AgentTurnId,
-    AgentTurnRequest,
+    AgentActivitySummary, AgentChildCompletion, AgentCommand, AgentCommandReceipt, AgentEvent,
+    AgentEventKind, AgentGroupCompletion, AgentId, AgentLaunchBatch, AgentLaunchChildSnapshot,
+    AgentLaunchGroupId, AgentLaunchReceipt, AgentObjectiveSummary, AgentObservationId,
+    AgentOutcome, AgentOutcomeSummary, AgentOverviewRow, AgentOverviewSnapshot,
+    AgentProjectionRevision, AgentProjectionStatus, AgentRuntimeError, AgentRuntimeGeneration,
+    AgentTitle, AgentTurnId, AgentTurnRequest,
 };
 use runtime_domain::session::RuntimeTarget;
+use runtime_domain::session::{ConversationTurnRequest, TranscriptReplayItem};
 
 use super::agent::{
     AgentChildRuntimeLeases, AgentChildRuntimeStaticGrants, AgentRuntimeActivationGrants,
     AgentRuntimeActivity, AgentRuntimePort, AgentSessionCapability, ChildAgentFactory,
+    SpawnAgentsFailure, SpawnAgentsRequest,
 };
 use super::agent_capability_context::{
     AgentCapabilityContext, AgentChildCapabilityGrants, AgentContextOwner,
@@ -32,6 +39,11 @@ const MAX_ACTIVE_CHILD_AGENTS: usize = 32;
 #[derive(Clone)]
 struct ChildRuntimeHandle {
     runtime: Arc<Mutex<Option<Box<dyn AgentRuntimePort>>>>,
+}
+
+struct PendingChildCleanup {
+    context: AgentCapabilityContext,
+    runtime: ChildRuntimeHandle,
 }
 
 impl ChildRuntimeHandle {
@@ -103,9 +115,12 @@ impl ChildRuntimeHandle {
 #[allow(dead_code)]
 struct ChildAgentRecord {
     parent_agent_id: AgentId,
+    parent_turn_id: Option<AgentTurnId>,
     turn_id: AgentTurnId,
     generation: AgentRuntimeGeneration,
     title: AgentTitle,
+    launch_group_id: Option<AgentLaunchGroupId>,
+    launch_objective: Option<AgentObjectiveSummary>,
     target: Option<RuntimeTarget>,
     context: Option<AgentCapabilityContext>,
     runtime: ChildRuntimeHandle,
@@ -113,6 +128,8 @@ struct ChildAgentRecord {
     latest_activity: AgentActivitySummary,
     latest_committed_answer: Option<String>,
     terminal_outcome_seen: bool,
+    outcome_persisted: bool,
+    pending_outcome: Option<runtime_domain::agent::AgentOutcomeSnapshot>,
     terminal_status: Option<AgentProjectionStatus>,
     pending_terminal_event: Option<AgentEvent>,
     started_at_ms: i64,
@@ -133,9 +150,12 @@ impl ChildAgentRecord {
     ) -> Self {
         Self {
             parent_agent_id,
+            parent_turn_id: None,
             turn_id,
             generation,
             title,
+            launch_group_id: None,
+            launch_objective: None,
             target,
             context: Some(context),
             runtime,
@@ -143,6 +163,8 @@ impl ChildAgentRecord {
             latest_activity: AgentActivitySummary::Preparing,
             latest_committed_answer: None,
             terminal_outcome_seen: false,
+            outcome_persisted: false,
+            pending_outcome: None,
             terminal_status: None,
             pending_terminal_event: None,
             started_at_ms: 0,
@@ -180,10 +202,23 @@ pub(super) struct AgentOrchestrator {
     children: BTreeMap<AgentId, ChildAgentRecord>,
     children_by_parent: BTreeMap<AgentId, BTreeSet<AgentId>>,
     pending_context_cleanups: Vec<AgentCapabilityContext>,
+    pending_child_cleanups: Vec<PendingChildCleanup>,
+    session_port: Option<Arc<dyn SessionPort>>,
     next_agent_id: u64,
     next_observation_id: u64,
     projection_revision: u64,
+    next_launch_group_id: u64,
+    group_waiters: BTreeMap<AgentLaunchGroupId, GroupWaiter>,
+    main_turn_id: Option<AgentTurnId>,
 }
+
+struct GroupWaiter {
+    parent_agent_id: AgentId,
+    child_ids: Vec<AgentId>,
+    response: oneshot::Sender<Result<AgentGroupCompletion, SpawnAgentsFailure>>,
+}
+
+type StagedChild = (AgentId, ChildAgentRecord, AgentTurnRequest);
 
 impl AgentOrchestrator {
     pub(super) fn new(
@@ -202,10 +237,32 @@ impl AgentOrchestrator {
             children: BTreeMap::new(),
             children_by_parent: BTreeMap::new(),
             pending_context_cleanups: Vec::new(),
+            pending_child_cleanups: Vec::new(),
+            session_port: None,
             next_agent_id: AgentId::MAIN.get().saturating_add(1),
             next_observation_id: 1,
             projection_revision: 0,
+            next_launch_group_id: 1,
+            group_waiters: BTreeMap::new(),
+            main_turn_id: None,
         }
+    }
+
+    pub(super) fn bind_session_port(&mut self, session_port: Option<Arc<dyn SessionPort>>) {
+        self.session_port = session_port;
+    }
+
+    pub(super) fn rebind_main_tools(
+        &mut self,
+        registry: tool_runtime::ToolExecutorRegistry,
+    ) -> Result<(), String> {
+        let Some(root_context) = self.root_context.as_ref() else {
+            return Ok(());
+        };
+        let tools = root_context
+            .tools_with_registry(registry)
+            .map_err(|error| error.to_string())?;
+        self.main_runtime.bind_tools(tools)
     }
 
     #[cfg(test)]
@@ -220,6 +277,57 @@ impl AgentOrchestrator {
         child_factory: Option<ChildAgentFactory>,
         child_static_grants: Option<AgentChildRuntimeStaticGrants>,
     ) -> Result<(), AgentRuntimeError> {
+        let next_generation = self.prepare_main_replacement_generation()?;
+        self.commit_prepared_main_replacement(
+            main_runtime,
+            child_factory,
+            child_static_grants,
+            next_generation,
+        );
+        Ok(())
+    }
+
+    pub(super) fn prepare_main_replacement_generation(
+        &self,
+    ) -> Result<AgentRuntimeGeneration, AgentRuntimeError> {
+        self.validate_replace_main()?;
+        self.generation
+            .get()
+            .checked_add(1)
+            .map(AgentRuntimeGeneration::new)
+            .ok_or_else(|| {
+                AgentRuntimeError::CommandRejected(
+                    "Agent runtime generation identity exhausted".to_string(),
+                )
+            })
+    }
+
+    pub(super) fn commit_prepared_main_replacement(
+        &mut self,
+        main_runtime: Box<dyn AgentRuntimePort>,
+        child_factory: Option<ChildAgentFactory>,
+        child_static_grants: Option<AgentChildRuntimeStaticGrants>,
+        next_generation: AgentRuntimeGeneration,
+    ) {
+        debug_assert!(self.validate_replace_main().is_ok());
+        debug_assert_eq!(next_generation.get(), self.generation.get() + 1);
+        let mut main_runtime = main_runtime;
+        main_runtime.bind_runtime_generation(next_generation.get());
+        self.main_runtime = main_runtime;
+        self.child_factory = child_factory;
+        self.child_static_grants = child_static_grants;
+        self.is_main_quiescent = true;
+        self.root_context = None;
+        self.child_leases = None;
+        self.fail_group_waiters(SpawnAgentsFailure::Unavailable);
+        self.children.clear();
+        self.children_by_parent.clear();
+        self.projection_revision = 0;
+        self.generation = next_generation;
+        self.main_turn_id = None;
+    }
+
+    fn validate_replace_main(&self) -> Result<(), AgentRuntimeError> {
         if self
             .children
             .values()
@@ -234,9 +342,14 @@ impl AgentOrchestrator {
                 "Agent child authority cleanup is pending".to_string(),
             ));
         }
-        if !self.pending_context_cleanups.is_empty() {
+        if !self.pending_context_cleanups.is_empty() || !self.pending_child_cleanups.is_empty() {
             return Err(AgentRuntimeError::Shutdown(
                 "Agent child capability cleanup is pending".to_string(),
+            ));
+        }
+        if !self.group_waiters.is_empty() {
+            return Err(AgentRuntimeError::Shutdown(
+                "Agent launch completion is pending".to_string(),
             ));
         }
         if !self.is_main_quiescent {
@@ -244,20 +357,6 @@ impl AgentOrchestrator {
                 "Agent main runtime cleanup is pending".to_string(),
             ));
         }
-        let next_generation = self.generation.get().checked_add(1).ok_or_else(|| {
-            AgentRuntimeError::CommandRejected(
-                "Agent runtime generation identity exhausted".to_string(),
-            )
-        })?;
-        self.main_runtime = main_runtime;
-        self.child_factory = child_factory;
-        self.child_static_grants = child_static_grants;
-        self.is_main_quiescent = true;
-        self.root_context = None;
-        self.child_leases = None;
-        self.children_by_parent.clear();
-        self.projection_revision = 0;
-        self.generation = AgentRuntimeGeneration::new(next_generation);
         Ok(())
     }
 
@@ -269,7 +368,18 @@ impl AgentOrchestrator {
         if command.agent_id() != AgentId::MAIN {
             return Err(AgentRuntimeError::UnknownAgent);
         }
-        self.main_runtime.dispatch(command)
+        let submitted_turn_id = match &command {
+            AgentCommand::SubmitTurn { turn_id, .. } => Some(*turn_id),
+            _ => None,
+        };
+        let receipt = self.main_runtime.dispatch(command)?;
+        if let (Some(submitted_turn_id), AgentCommandReceipt::TurnStarted { turn_id, .. }) =
+            (submitted_turn_id, &receipt)
+            && *turn_id == submitted_turn_id
+        {
+            self.main_turn_id = Some(submitted_turn_id);
+        }
+        Ok(receipt)
     }
 
     /// Main adapter facts 在丢失 identity 前先经过 fail-closed ownership validation。
@@ -332,6 +442,10 @@ impl AgentOrchestrator {
                     || record.terminal_outcome_seen
                     || !record.admission_open()
                     || record
+                        .target
+                        .as_ref()
+                        .is_some_and(|target| target != &event.target)
+                    || record
                         .context
                         .as_ref()
                         .is_none_or(|context| !context.is_current())
@@ -342,7 +456,8 @@ impl AgentOrchestrator {
                 apply_child_projection(record, &event.kind);
                 if is_terminal {
                     record.terminal_outcome_seen = true;
-                    record.pending_terminal_event = Some(event);
+                    record.pending_terminal_event = Some(safe_child_terminal_event(event));
+                    freeze_pending_outcome(agent_id, record);
                 } else {
                     accepted.push(event);
                 }
@@ -350,13 +465,16 @@ impl AgentOrchestrator {
             }
         }
         self.release_terminal_authority();
+        self.persist_terminal_outcomes();
         for record in self.children.values_mut() {
             if record.context.is_none()
+                && record.outcome_persisted
                 && let Some(event) = record.pending_terminal_event.take()
             {
                 accepted.push(event);
             }
         }
+        self.try_complete_group_waiters();
         accepted
     }
 
@@ -391,6 +509,8 @@ impl AgentOrchestrator {
                 }
             }
         }
+        self.main_runtime
+            .bind_runtime_generation(self.generation.get());
         if let Err(error) = self.main_runtime.activate(grants) {
             if let Some(context) = root_context.take() {
                 self.rollback_staged_context(context);
@@ -466,21 +586,45 @@ impl AgentOrchestrator {
         Ok(())
     }
 
+    fn retry_pending_child_cleanups(&mut self) -> Result<(), AgentRuntimeError> {
+        if self.pending_child_cleanups.is_empty() {
+            return Ok(());
+        }
+        let pending = std::mem::take(&mut self.pending_child_cleanups);
+        let mut retained = Vec::new();
+        for cleanup in pending {
+            cleanup.context.begin_disposal();
+            let runtime_ok = cleanup.runtime.shutdown().is_ok();
+            let context_ok = cleanup.context.dispose().is_success();
+            if !(runtime_ok && context_ok) {
+                retained.push(cleanup);
+            }
+        }
+        self.pending_child_cleanups = retained;
+        if self.pending_child_cleanups.is_empty() {
+            Ok(())
+        } else {
+            Err(AgentRuntimeError::Shutdown(
+                "Agent child cleanup is pending".to_string(),
+            ))
+        }
+    }
+
     /// 为 immediate parent 创建并注册一个 child record。
     ///
     /// 这是后续 typed spawn provider 的唯一 runtime seam。方法先完成身份分配、scoped
     /// context 与 adapter construction，再提交 record；任何失败都不会留下 registry row。
-    #[allow(dead_code)]
-    pub(super) fn spawn_child(
+    fn stage_child_record(
         &mut self,
         parent_agent_id: AgentId,
         turn_id: AgentTurnId,
         title: AgentTitle,
         grants: AgentChildCapabilityGrants,
-        request: AgentTurnRequest,
-    ) -> Result<(AgentId, AgentCommandReceipt), AgentRuntimeError> {
+        request: &AgentTurnRequest,
+    ) -> Result<(AgentId, ChildAgentRecord), AgentRuntimeError> {
         self.retry_pending_context_cleanups()?;
-        if self.children.len() >= MAX_ACTIVE_CHILD_AGENTS {
+        self.retry_pending_child_cleanups()?;
+        if self.active_child_count() >= MAX_ACTIVE_CHILD_AGENTS {
             return Err(AgentRuntimeError::CommandRejected(
                 "Active child Agent limit reached".to_string(),
             ));
@@ -496,7 +640,6 @@ impl AgentOrchestrator {
             )
         })?;
         let target = request.target();
-
         let runtime = match self.construct_child(agent_id, child_context.clone()) {
             Ok(runtime) => runtime,
             Err(_) => {
@@ -522,34 +665,43 @@ impl AgentOrchestrator {
         };
         let mut runtime = runtime;
         if runtime.activate(leases.activation_grants()).is_err() {
-            return Err(self.rollback_staged_child(
-                agent_id,
-                parent_agent_id,
-                turn_id,
-                title,
-                Some(target.clone()),
-                child_context,
-                ChildRuntimeHandle::new(runtime),
-                AgentRuntimeError::CommandRejected("Child Agent activation failed".to_string()),
+            let staged = PendingChildCleanup {
+                context: child_context,
+                runtime: ChildRuntimeHandle::new(runtime),
+            };
+            staged.context.begin_disposal();
+            let runtime_ok = staged.runtime.shutdown().is_ok();
+            let context_ok = staged.context.dispose().is_success();
+            if !(runtime_ok && context_ok) {
+                self.pending_child_cleanups.push(staged);
+                return Err(AgentRuntimeError::Shutdown(
+                    "Agent child cleanup is pending".to_string(),
+                ));
+            }
+            return Err(AgentRuntimeError::CommandRejected(
+                "Child Agent activation failed".to_string(),
             ));
         }
-
         let runtime = match ChildRuntimeHandle::register(&child_context, runtime) {
             Ok(runtime) => runtime,
             Err((error, handle)) => {
-                return Err(self.rollback_staged_child(
-                    agent_id,
-                    parent_agent_id,
-                    turn_id,
-                    title,
-                    Some(target.clone()),
-                    child_context,
-                    handle,
-                    error,
-                ));
+                let staged = PendingChildCleanup {
+                    context: child_context,
+                    runtime: handle,
+                };
+                staged.context.begin_disposal();
+                let runtime_ok = staged.runtime.shutdown().is_ok();
+                let context_ok = staged.context.dispose().is_success();
+                if !(runtime_ok && context_ok) {
+                    self.pending_child_cleanups.push(staged);
+                    return Err(AgentRuntimeError::Shutdown(
+                        "Agent child cleanup is pending".to_string(),
+                    ));
+                }
+                return Err(error);
             }
         };
-        let mut record = ChildAgentRecord::new(
+        let record = ChildAgentRecord::new(
             parent_agent_id,
             turn_id,
             self.generation,
@@ -558,6 +710,20 @@ impl AgentOrchestrator {
             child_context,
             runtime,
         );
+        Ok((agent_id, record))
+    }
+
+    #[allow(dead_code)]
+    pub(super) fn spawn_child(
+        &mut self,
+        parent_agent_id: AgentId,
+        turn_id: AgentTurnId,
+        title: AgentTitle,
+        grants: AgentChildCapabilityGrants,
+        request: AgentTurnRequest,
+    ) -> Result<(AgentId, AgentCommandReceipt), AgentRuntimeError> {
+        let (agent_id, mut record) =
+            self.stage_child_record(parent_agent_id, turn_id, title, grants, &request)?;
         let receipt = match record.runtime.dispatch(AgentCommand::SubmitTurn {
             agent_id,
             turn_id,
@@ -586,6 +752,321 @@ impl AgentOrchestrator {
         Ok((agent_id, receipt))
     }
 
+    /// 处理 host-owned `spawn_agents` request；tool bridge 不直接持有 lifecycle authority。
+    pub(super) fn handle_spawn_agents_request(&mut self, request: SpawnAgentsRequest) {
+        let SpawnAgentsRequest {
+            identity,
+            batch,
+            response,
+        } = request;
+        match self.launch_batch(identity, batch) {
+            Ok((receipt, child_ids)) => {
+                self.group_waiters.insert(
+                    receipt.group_id,
+                    GroupWaiter {
+                        parent_agent_id: receipt.parent_agent_id,
+                        child_ids,
+                        response,
+                    },
+                );
+                self.try_complete_group_waiters();
+            }
+            Err(error) => {
+                let _ = response.send(Err(safe_launch_error(&error)));
+            }
+        }
+    }
+
+    fn launch_batch(
+        &mut self,
+        identity: tool_runtime::ToolInvocationIdentity,
+        batch: AgentLaunchBatch,
+    ) -> Result<(AgentLaunchReceipt, Vec<AgentId>), AgentRuntimeError> {
+        let parent_agent_id = AgentId::new(identity.agent_id());
+        if identity.runtime_generation() != self.generation.get()
+            || parent_agent_id.get() == 0
+            || identity.context_epoch() == 0
+        {
+            return Err(AgentRuntimeError::UnknownAgent);
+        }
+        let parent_turn_id = AgentTurnId::new(identity.turn_id());
+        if !self.parent_turn_matches(parent_agent_id, parent_turn_id) {
+            return Err(AgentRuntimeError::UnknownAgent);
+        }
+        let parent_context = self.parent_context(parent_agent_id)?;
+        if parent_context.epoch() != identity.context_epoch() {
+            return Err(AgentRuntimeError::UnknownAgent);
+        }
+        if self.child_factory.is_none() || self.child_static_grants.is_none() {
+            return Err(AgentRuntimeError::CommandRejected(
+                "Agent plugin does not provide child Agent capability".to_string(),
+            ));
+        }
+        if self
+            .active_child_count()
+            .saturating_add(batch.requests().len())
+            > MAX_ACTIVE_CHILD_AGENTS
+        {
+            return Err(AgentRuntimeError::CommandRejected(
+                "Active child Agent limit reached".to_string(),
+            ));
+        }
+        let target = self
+            .parent_target(parent_agent_id)
+            .ok_or(AgentRuntimeError::UnknownAgent)?;
+        let group_id = self.allocate_launch_group_id()?;
+        let mut staged: Vec<StagedChild> = Vec::with_capacity(batch.requests().len());
+        for request in batch.into_requests() {
+            let child_id = AgentId::new(self.next_agent_id);
+            let child_turn_id = AgentTurnId::new(child_id.get());
+            let turn_request = child_turn_request(&target, &request);
+            let objective_summary = AgentObjectiveSummary::from_objective(request.objective())
+                .map_err(|_| {
+                    AgentRuntimeError::CommandRejected(
+                        "Agent objective summary is unavailable".to_string(),
+                    )
+                })?;
+            let (child_id, mut record) = match self.stage_child_record(
+                parent_agent_id,
+                child_turn_id,
+                request.title().clone(),
+                AgentChildCapabilityGrants::empty()
+                    .inherit_tools()
+                    .inherit_prompt(),
+                &turn_request,
+            ) {
+                Ok(staged) => staged,
+                Err(error) => {
+                    self.cleanup_unpublished_children(staged);
+                    return Err(error);
+                }
+            };
+            record.launch_group_id = Some(group_id);
+            record.parent_turn_id = Some(parent_turn_id);
+            record.launch_objective = Some(objective_summary);
+            staged.push((child_id, record, turn_request));
+        }
+
+        let children = staged
+            .iter()
+            .map(|(child_id, record, _)| AgentLaunchChildSnapshot {
+                agent_id: *child_id,
+                title: record.title.clone(),
+                objective: record
+                    .launch_objective
+                    .clone()
+                    .expect("staged objective must be available"),
+            })
+            .collect::<Vec<_>>();
+        let snapshot = runtime_domain::agent::AgentLaunchSnapshot {
+            group_id,
+            parent_agent_id,
+            parent_turn_id,
+            children: children.clone(),
+            occurred_at_ms: runtime_domain::time::unix_timestamp_ms().unwrap_or(0),
+        };
+        if let Err(error) = self.append_replay_fact(TranscriptReplayItem::AgentLaunch(snapshot)) {
+            self.cleanup_unpublished_children(staged);
+            return Err(error);
+        }
+
+        let mut dispatches = Vec::with_capacity(staged.len());
+        for (child_id, record, request) in staged {
+            let turn_id = record.turn_id;
+            dispatches.push((child_id, turn_id, request));
+            let mut record = record;
+            record.started_at_ms = runtime_domain::time::unix_timestamp_ms().unwrap_or(0);
+            self.insert_child_record(child_id, record);
+        }
+        for (child_id, turn_id, request) in dispatches {
+            let Some(record) = self.children.get_mut(&child_id) else {
+                continue;
+            };
+            if let Err(_error) = record.runtime.dispatch(AgentCommand::SubmitTurn {
+                agent_id: child_id,
+                turn_id,
+                request: Box::new(request),
+            }) {
+                apply_child_projection(
+                    record,
+                    &AgentEventKind::TurnFailed {
+                        message: "Child Agent failed to start".to_string(),
+                    },
+                );
+                record.terminal_outcome_seen = true;
+                record.pending_terminal_event = Some(AgentEvent {
+                    agent_id: child_id,
+                    turn_id,
+                    target: record.target.clone().expect("child target must exist"),
+                    kind: AgentEventKind::TurnFailed {
+                        message: "Child Agent failed to start".to_string(),
+                    },
+                });
+                freeze_pending_outcome(child_id, record);
+            }
+        }
+
+        let child_ids = children.iter().map(|child| child.agent_id).collect();
+        Ok((
+            AgentLaunchReceipt {
+                group_id,
+                parent_agent_id,
+                children,
+            },
+            child_ids,
+        ))
+    }
+
+    fn parent_turn_matches(&self, parent_agent_id: AgentId, turn_id: AgentTurnId) -> bool {
+        if parent_agent_id == AgentId::MAIN {
+            return self.main_turn_id == Some(turn_id)
+                && self.main_runtime.current_target().is_some();
+        }
+        self.children
+            .get(&parent_agent_id)
+            .is_some_and(|record| record.turn_id == turn_id && record.admission_open())
+    }
+
+    fn cleanup_unpublished_children(
+        &mut self,
+        staged: Vec<(AgentId, ChildAgentRecord, AgentTurnRequest)>,
+    ) {
+        for (_, mut record, _) in staged.into_iter().rev() {
+            let Some(context) = record.context.take() else {
+                continue;
+            };
+            context.begin_disposal();
+            let runtime = record.runtime;
+            let runtime_ok = runtime.shutdown().is_ok();
+            let context_ok = context.dispose().is_success();
+            if !(runtime_ok && context_ok) {
+                self.pending_child_cleanups
+                    .push(PendingChildCleanup { context, runtime });
+            }
+        }
+    }
+
+    fn persist_terminal_outcomes(&mut self) {
+        let outcome_ids = self
+            .children
+            .iter()
+            .filter_map(|(agent_id, record)| {
+                (record.context.is_none()
+                    && record.terminal_status.is_some()
+                    && !record.outcome_persisted)
+                    .then_some(*agent_id)
+            })
+            .collect::<Vec<_>>();
+        for agent_id in outcome_ids {
+            let Some(record) = self.children.get(&agent_id) else {
+                continue;
+            };
+            let Some(snapshot) = record.pending_outcome.clone() else {
+                continue;
+            };
+            if self
+                .append_replay_fact(TranscriptReplayItem::AgentOutcome(snapshot))
+                .is_ok()
+                && let Some(record) = self.children.get_mut(&agent_id)
+            {
+                record.outcome_persisted = true;
+                record.pending_outcome = None;
+            }
+        }
+    }
+
+    fn append_replay_fact(&self, item: TranscriptReplayItem) -> Result<(), AgentRuntimeError> {
+        let Some(session_port) = self.session_port.as_ref() else {
+            return Ok(());
+        };
+        let Some(session_id) = self
+            .main_runtime
+            .session()
+            .and_then(|session| session.snapshot().session_id)
+        else {
+            return Ok(());
+        };
+        let session_port = Arc::clone(session_port);
+        run_session_store_future(
+            move || async move {
+                session_port
+                    .append_transcript_replay(&session_id, item)
+                    .await
+            },
+            "Agent replay fact",
+        )
+        .map_err(|_| {
+            AgentRuntimeError::CommandRejected("Agent replay fact unavailable".to_string())
+        })?
+        .map(|_| ())
+        .map_err(|_| {
+            AgentRuntimeError::CommandRejected("Agent replay fact unavailable".to_string())
+        })
+    }
+
+    fn parent_target(&self, parent_agent_id: AgentId) -> Option<RuntimeTarget> {
+        if parent_agent_id == AgentId::MAIN {
+            self.main_runtime.current_target()
+        } else {
+            self.children
+                .get(&parent_agent_id)
+                .and_then(|record| record.target.clone())
+        }
+    }
+
+    fn allocate_launch_group_id(&mut self) -> Result<AgentLaunchGroupId, AgentRuntimeError> {
+        let value = self.next_launch_group_id;
+        self.next_launch_group_id = self.next_launch_group_id.checked_add(1).ok_or_else(|| {
+            AgentRuntimeError::CommandRejected("Agent launch group identity exhausted".to_string())
+        })?;
+        Ok(AgentLaunchGroupId::new(value))
+    }
+
+    fn try_complete_group_waiters(&mut self) {
+        let completed = self
+            .group_waiters
+            .iter()
+            .filter_map(|(group_id, waiter)| {
+                let children = waiter
+                    .child_ids
+                    .iter()
+                    .map(|agent_id| self.children.get(agent_id))
+                    .collect::<Option<Vec<_>>>()?;
+                children
+                    .iter()
+                    .all(|record| {
+                        record.is_terminal() && record.context.is_none() && record.outcome_persisted
+                    })
+                    .then_some((*group_id, waiter.parent_agent_id, waiter.child_ids.clone()))
+            })
+            .collect::<Vec<_>>();
+        for (group_id, parent_agent_id, child_ids) in completed {
+            let Some(waiter) = self.group_waiters.remove(&group_id) else {
+                continue;
+            };
+            let children = child_ids
+                .into_iter()
+                .filter_map(|agent_id| {
+                    self.children
+                        .get(&agent_id)
+                        .map(|record| AgentChildCompletion {
+                            agent_id,
+                            title: record.title.clone(),
+                            outcome: outcome_for_status(record.terminal_status),
+                            summary: safe_outcome_summary(record.terminal_status),
+                        })
+                })
+                .collect::<Vec<_>>();
+            let completion = AgentGroupCompletion {
+                group_id,
+                parent_agent_id,
+                children,
+                occurred_at_ms: runtime_domain::time::unix_timestamp_ms().unwrap_or(0),
+            };
+            let _ = waiter.response.send(Ok(completion));
+        }
+    }
+
     fn insert_child_record(&mut self, agent_id: AgentId, record: ChildAgentRecord) {
         self.next_agent_id = self.next_agent_id.max(agent_id.get().saturating_add(1));
         self.children_by_parent
@@ -594,6 +1075,13 @@ impl AgentOrchestrator {
             .insert(agent_id);
         self.children.insert(agent_id, record);
         self.projection_revision = self.projection_revision.saturating_add(1);
+    }
+
+    fn active_child_count(&self) -> usize {
+        self.children
+            .values()
+            .filter(|record| record.context.is_some())
+            .count()
     }
 
     /// 创建一个与当前 generation 绑定的 overview snapshot。
@@ -645,7 +1133,13 @@ impl AgentOrchestrator {
         if !self.children.contains_key(&agent_id) {
             return Err(AgentRuntimeError::UnknownAgent);
         }
-        self.dispose_child_ids(self.subtree_ids(agent_id), true)
+        let retain_terminal_projection = self
+            .children
+            .get(&agent_id)
+            .is_some_and(|record| record.launch_group_id.is_some());
+        let result = self.dispose_child_ids(self.subtree_ids(agent_id), retain_terminal_projection);
+        self.persist_terminal_outcomes();
+        result
     }
 
     /// Session identity 切换时只撤销 runtime-owned child tree，main adapter 由 restore
@@ -653,7 +1147,9 @@ impl AgentOrchestrator {
     pub(super) fn dispose_children_for_session_transition(
         &mut self,
     ) -> Result<(), AgentRuntimeError> {
-        self.dispose_children()
+        let result = self.dispose_children();
+        self.persist_terminal_outcomes();
+        result
     }
 
     fn subtree_ids(&self, root: AgentId) -> Vec<AgentId> {
@@ -759,6 +1255,7 @@ impl AgentOrchestrator {
                         record.terminal_status,
                         Some(AgentProjectionStatus::Completed)
                             | Some(AgentProjectionStatus::Failed)
+                            | Some(AgentProjectionStatus::Cancelled)
                     )
             })
             .count()
@@ -777,6 +1274,16 @@ impl AgentOrchestrator {
     #[allow(dead_code)]
     pub(super) fn child_status(&self, agent_id: AgentId) -> Option<AgentProjectionStatus> {
         self.children.get(&agent_id).map(|record| record.status)
+    }
+
+    #[cfg(test)]
+    pub(super) fn pending_outcome_for_test(
+        &self,
+        agent_id: AgentId,
+    ) -> Option<runtime_domain::agent::AgentOutcomeSnapshot> {
+        self.children
+            .get(&agent_id)
+            .and_then(|record| record.pending_outcome.clone())
     }
 
     #[cfg(test)]
@@ -818,6 +1325,7 @@ impl AgentOrchestrator {
         if let Some(context) = &self.root_context {
             context.begin_disposal();
         }
+        self.fail_group_waiters(SpawnAgentsFailure::Unavailable);
         let child_result = self.dispose_children();
         let runtime_result = self.main_runtime.suspend();
         if runtime_result.is_ok() {
@@ -832,6 +1340,7 @@ impl AgentOrchestrator {
         if cleanup_succeeded {
             self.root_context = None;
             self.child_leases = None;
+            self.main_turn_id = None;
         }
         match (runtime_result, child_result, cleanup_succeeded) {
             (Err(error), _, _) => Err(error),
@@ -847,6 +1356,7 @@ impl AgentOrchestrator {
         if let Some(context) = &self.root_context {
             context.begin_disposal();
         }
+        self.fail_group_waiters(SpawnAgentsFailure::Unavailable);
         let child_result = self.dispose_children();
         let runtime_result = self.main_runtime.shutdown();
         if runtime_result.is_ok() {
@@ -861,6 +1371,7 @@ impl AgentOrchestrator {
         if cleanup_succeeded {
             self.root_context = None;
             self.child_leases = None;
+            self.main_turn_id = None;
         }
         match (runtime_result, child_result, cleanup_succeeded) {
             (Err(error), _, _) => Err(error),
@@ -882,6 +1393,12 @@ impl AgentOrchestrator {
         self.dispose_child_ids(child_ids, false)
     }
 
+    fn fail_group_waiters(&mut self, failure: SpawnAgentsFailure) {
+        for (_, waiter) in std::mem::take(&mut self.group_waiters) {
+            let _ = waiter.response.send(Err(failure));
+        }
+    }
+
     fn dispose_child_ids(
         &mut self,
         child_ids: Vec<AgentId>,
@@ -890,16 +1407,20 @@ impl AgentOrchestrator {
         for agent_id in &child_ids {
             if let Some(record) = self.children.get_mut(agent_id) {
                 record.status = AgentProjectionStatus::Stopping;
-                if retain_terminal_projection {
+                if record.terminal_status.is_none() {
                     record.terminal_outcome_seen = true;
                     record.terminal_status = Some(AgentProjectionStatus::Cancelled);
-                    record.pending_terminal_event =
-                        record.target.clone().map(|target| AgentEvent {
-                            agent_id: *agent_id,
-                            turn_id: record.turn_id,
-                            target,
-                            kind: AgentEventKind::TurnInterrupted,
-                        });
+                    record.latest_activity = AgentActivitySummary::Idle;
+                    freeze_pending_outcome(*agent_id, record);
+                    if retain_terminal_projection {
+                        record.pending_terminal_event =
+                            record.target.clone().map(|target| AgentEvent {
+                                agent_id: *agent_id,
+                                turn_id: record.turn_id,
+                                target,
+                                kind: AgentEventKind::TurnInterrupted,
+                            });
+                    }
                 }
                 if let Some(context) = &record.context {
                     context.begin_disposal();
@@ -907,6 +1428,7 @@ impl AgentOrchestrator {
             }
         }
         let mut first_error = None;
+        let mut ready_to_remove = Vec::new();
         for agent_id in child_ids {
             let has_owned_descendant =
                 self.children_by_parent
@@ -946,13 +1468,13 @@ impl AgentOrchestrator {
                 continue;
             }
             let parent_agent_id = record.parent_agent_id;
-            if retain_terminal_projection {
-                record.context = None;
-                record.status = AgentProjectionStatus::Cancelled;
-            }
+            record.context = None;
+            record.status = record
+                .terminal_status
+                .unwrap_or(AgentProjectionStatus::Cancelled);
             let _ = record;
             if !retain_terminal_projection {
-                self.children.remove(&agent_id);
+                ready_to_remove.push(agent_id);
             }
             self.children_by_parent.remove(&agent_id);
             self.projection_revision = self.projection_revision.saturating_add(1);
@@ -961,6 +1483,16 @@ impl AgentOrchestrator {
                 if children.is_empty() {
                     self.children_by_parent.remove(&parent_agent_id);
                 }
+            }
+        }
+        self.persist_terminal_outcomes();
+        for agent_id in ready_to_remove {
+            if self
+                .children
+                .get(&agent_id)
+                .is_some_and(|record| record.launch_group_id.is_none() || record.outcome_persisted)
+            {
+                self.children.remove(&agent_id);
             }
         }
         first_error.map_or(Ok(()), Err)
@@ -1045,11 +1577,14 @@ impl AgentOrchestrator {
             .child_static_grants
             .as_ref()
             .ok_or_else(|| "Agent child static grants are unavailable".to_string())?;
-        factory.construct(leases.construction_grants(
+        let runtime = factory.construct(leases.construction_grants(
             owned_agent_id,
             capability_context,
             static_grants,
-        ))
+        ))?;
+        let mut runtime = runtime;
+        runtime.bind_runtime_generation(self.generation.get());
+        Ok(runtime)
     }
 
     pub(super) fn activity(&self) -> AgentRuntimeActivity {
@@ -1082,6 +1617,86 @@ impl AgentOrchestrator {
     #[cfg(test)]
     pub(super) fn has_pending_work(&self) -> bool {
         self.main_runtime.has_pending_work()
+    }
+}
+
+fn child_turn_request(
+    target: &RuntimeTarget,
+    request: &runtime_domain::agent::AgentLaunchRequest,
+) -> AgentTurnRequest {
+    let RuntimeTarget::Provider(target) = target;
+    AgentTurnRequest::from_conversation_request(ConversationTurnRequest::new_user_text(
+        target.provider_id.clone(),
+        target.model_id.clone(),
+        request.objective().as_str(),
+    ))
+    .with_direct_instructions(request.instructions().clone())
+}
+
+fn outcome_for_status(status: Option<AgentProjectionStatus>) -> AgentOutcome {
+    match status {
+        Some(AgentProjectionStatus::Completed) => AgentOutcome::Completed,
+        Some(AgentProjectionStatus::Cancelled) => AgentOutcome::Cancelled,
+        _ => AgentOutcome::Failed,
+    }
+}
+
+fn safe_launch_error(error: &AgentRuntimeError) -> SpawnAgentsFailure {
+    match error {
+        AgentRuntimeError::Busy => SpawnAgentsFailure::ParentBusy,
+        AgentRuntimeError::Disposed => SpawnAgentsFailure::Unavailable,
+        AgentRuntimeError::UnknownAgent => SpawnAgentsFailure::ParentUnavailable,
+        AgentRuntimeError::CommandRejected(_) => SpawnAgentsFailure::RequestRejected,
+        AgentRuntimeError::Shutdown(_) => SpawnAgentsFailure::CleanupPending,
+    }
+}
+
+fn safe_outcome_summary(status: Option<AgentProjectionStatus>) -> Option<AgentOutcomeSummary> {
+    let text = match status {
+        Some(AgentProjectionStatus::Completed) => "Child Agent completed",
+        Some(AgentProjectionStatus::Cancelled) => "Child Agent cancelled",
+        _ => "Child Agent failed",
+    };
+    AgentOutcomeSummary::new(text).ok()
+}
+
+fn freeze_pending_outcome(agent_id: AgentId, record: &mut ChildAgentRecord) {
+    if record.pending_outcome.is_some() {
+        return;
+    }
+    let Some(terminal_status) = record.terminal_status else {
+        return;
+    };
+    record.pending_outcome = Some(runtime_domain::agent::AgentOutcomeSnapshot {
+        agent_id,
+        title: record.title.clone(),
+        group_id: record.launch_group_id,
+        parent_agent_id: Some(record.parent_agent_id),
+        parent_turn_id: record.parent_turn_id,
+        outcome: outcome_for_status(Some(terminal_status)),
+        occurred_at_ms: runtime_domain::time::unix_timestamp_ms().unwrap_or(0),
+        summary: safe_outcome_summary(Some(terminal_status)),
+    });
+}
+
+fn safe_child_terminal_event(event: AgentEvent) -> AgentEvent {
+    let AgentEvent {
+        agent_id,
+        turn_id,
+        target,
+        kind,
+    } = event;
+    let kind = match kind {
+        AgentEventKind::TurnFailed { .. } => AgentEventKind::TurnFailed {
+            message: "Child Agent failed".to_string(),
+        },
+        kind => kind,
+    };
+    AgentEvent {
+        agent_id,
+        turn_id,
+        target,
+        kind,
     }
 }
 
@@ -1160,9 +1775,9 @@ mod tests {
     use runtime_domain::{
         agent::{
             AgentCommand, AgentCommandReceipt, AgentEvent, AgentEventKind, AgentId, AgentObjective,
-            AgentRuntime, AgentRuntimeError, AgentTitle, AgentTurnId,
+            AgentRuntime, AgentRuntimeError, AgentTitle, AgentTurnId, AgentTurnRequest,
         },
-        session::RuntimeTarget,
+        session::{ConversationTurnRequest, RuntimeTarget},
     };
 
     use super::*;
@@ -1212,6 +1827,74 @@ mod tests {
 
         fn has_pending_work(&self) -> bool {
             false
+        }
+    }
+
+    #[derive(Default)]
+    struct AdmittingThenBusyMainRuntime {
+        accepted_target: Option<RuntimeTarget>,
+    }
+
+    impl AgentRuntime for AdmittingThenBusyMainRuntime {
+        fn dispatch(
+            &mut self,
+            command: AgentCommand,
+        ) -> Result<AgentCommandReceipt, AgentRuntimeError> {
+            match command {
+                AgentCommand::SubmitTurn {
+                    agent_id,
+                    turn_id,
+                    request,
+                } if agent_id == AgentId::MAIN && self.accepted_target.is_none() => {
+                    let target = request.target();
+                    self.accepted_target = Some(target.clone());
+                    Ok(AgentCommandReceipt::TurnStarted {
+                        turn_id,
+                        target,
+                        activity_label: request.activity_label().to_string(),
+                    })
+                }
+                AgentCommand::SubmitTurn { .. } => Err(AgentRuntimeError::Busy),
+                _ => Ok(AgentCommandReceipt::Accepted),
+            }
+        }
+
+        fn drain_events(&mut self) -> Vec<AgentEvent> {
+            Vec::new()
+        }
+
+        fn shutdown(&mut self) -> Result<(), AgentRuntimeError> {
+            Ok(())
+        }
+    }
+
+    impl AgentRuntimePort for AdmittingThenBusyMainRuntime {
+        fn activate(&mut self, _grants: AgentRuntimeActivationGrants) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn suspend(&mut self) -> Result<(), AgentRuntimeError> {
+            Ok(())
+        }
+
+        fn activity(&self) -> AgentRuntimeActivity {
+            AgentRuntimeActivity::Idle
+        }
+
+        fn session(&self) -> Option<&dyn AgentSessionCapability> {
+            None
+        }
+
+        fn session_mut(&mut self) -> Option<&mut dyn AgentSessionCapability> {
+            None
+        }
+
+        fn current_target(&self) -> Option<RuntimeTarget> {
+            self.accepted_target.clone()
+        }
+
+        fn has_pending_work(&self) -> bool {
+            self.accepted_target.is_some()
         }
     }
 
@@ -1388,6 +2071,40 @@ mod tests {
     }
 
     #[test]
+    fn rejected_main_submit_does_not_replace_the_admitted_parent_turn() {
+        let mut orchestrator = AgentOrchestrator::new(
+            Box::new(AdmittingThenBusyMainRuntime::default()),
+            None,
+            None,
+        );
+        let admitted_turn = AgentTurnId::new(7);
+        orchestrator
+            .dispatch_main(AgentCommand::SubmitTurn {
+                agent_id: AgentId::MAIN,
+                turn_id: admitted_turn,
+                request: Box::new(AgentTurnRequest::from_conversation_request(
+                    ConversationTurnRequest::new_user_text("local", "qwen3", "admitted"),
+                )),
+            })
+            .expect("first turn should be admitted");
+
+        let rejected_turn = AgentTurnId::new(8);
+        assert!(matches!(
+            orchestrator.dispatch_main(AgentCommand::SubmitTurn {
+                agent_id: AgentId::MAIN,
+                turn_id: rejected_turn,
+                request: Box::new(AgentTurnRequest::from_conversation_request(
+                    ConversationTurnRequest::new_user_text("local", "qwen3", "rejected"),
+                )),
+            }),
+            Err(AgentRuntimeError::Busy)
+        ));
+
+        assert!(orchestrator.parent_turn_matches(AgentId::MAIN, admitted_turn));
+        assert!(!orchestrator.parent_turn_matches(AgentId::MAIN, rejected_turn));
+    }
+
+    #[test]
     fn main_facts_keep_identity_until_orchestrator_gate() {
         let event = AgentEvent {
             agent_id: AgentId::MAIN,
@@ -1417,6 +2134,74 @@ mod tests {
             .expect("clean orchestrator should accept replacement");
 
         assert_eq!(orchestrator.generation().get(), first.get() + 1);
+    }
+
+    #[test]
+    fn main_replacement_drops_settled_child_projection() {
+        let agent_id = AgentId::new(2);
+        let turn_id = AgentTurnId::new(1);
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        orchestrator.register_child_for_test(
+            agent_id,
+            AgentId::MAIN,
+            turn_id,
+            test_title("settled child"),
+            test_context("settled-child"),
+            Box::new(StubMainRuntime {
+                events: vec![AgentEvent {
+                    agent_id,
+                    turn_id,
+                    target,
+                    kind: AgentEventKind::TurnFinished {
+                        response: runtime_domain::session::ConversationResponse::assistant_text(
+                            "answer",
+                        ),
+                        metrics: None,
+                        context_usage: None,
+                    },
+                }],
+            }),
+        );
+
+        assert_eq!(orchestrator.drain_child_events().len(), 1);
+        assert_eq!(orchestrator.child_count(), 1);
+
+        orchestrator
+            .replace_main(Box::new(StubMainRuntime::default()), None, None)
+            .expect("settled child projection must not block replacement");
+
+        assert_eq!(orchestrator.child_count(), 0);
+        assert!(orchestrator.children_of(AgentId::MAIN).is_empty());
+    }
+
+    #[test]
+    fn suspending_runtime_releases_pending_group_waiters() {
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        let (response_sender, response_receiver) = oneshot::channel();
+        let group_id = AgentLaunchGroupId::new(1);
+        orchestrator.group_waiters.insert(
+            group_id,
+            GroupWaiter {
+                parent_agent_id: AgentId::MAIN,
+                child_ids: vec![AgentId::new(2)],
+                response: response_sender,
+            },
+        );
+
+        orchestrator
+            .suspend()
+            .expect("clean suspend should release pending waiters");
+
+        assert!(orchestrator.group_waiters.is_empty());
+        assert_eq!(
+            response_receiver
+                .blocking_recv()
+                .expect("waiter should receive a terminal response"),
+            Err(SpawnAgentsFailure::Unavailable)
+        );
     }
 
     fn test_context(owner: &str) -> AgentCapabilityContext {
@@ -1500,6 +2285,11 @@ mod tests {
             Some(AgentProjectionStatus::Completed)
         );
         assert_eq!(orchestrator.child_count(), 1);
+        assert_eq!(
+            orchestrator.active_child_count(),
+            0,
+            "settled projections must not consume the live child resource limit"
+        );
         assert!(matches!(
             orchestrator.dispatch_child(AgentCommand::Interrupt {
                 agent_id: AgentId::MAIN,
@@ -1512,6 +2302,39 @@ mod tests {
         assert_eq!(overview.rows.len(), 1);
         assert_eq!(overview.rows[0].agent_id, agent_id);
         assert_eq!(overview.rows[0].status, AgentProjectionStatus::Completed);
+    }
+
+    #[test]
+    fn child_failure_event_is_redacted_before_delivery() {
+        let agent_id = AgentId::new(2);
+        let turn_id = AgentTurnId::new(8);
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        orchestrator.register_child_for_test(
+            agent_id,
+            AgentId::MAIN,
+            turn_id,
+            test_title("failed child"),
+            test_context("failed-child"),
+            Box::new(StubMainRuntime {
+                events: vec![AgentEvent {
+                    agent_id,
+                    turn_id,
+                    target: RuntimeTarget::provider("local", "qwen3"),
+                    kind: AgentEventKind::TurnFailed {
+                        message: "PRIVATE_PROVIDER_ERROR".to_string(),
+                    },
+                }],
+            }),
+        );
+
+        let events = orchestrator.drain_child_events();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0].kind,
+            AgentEventKind::TurnFailed { message } if message == "Child Agent failed"
+        ));
+        assert!(!format!("{events:?}").contains("PRIVATE_PROVIDER_ERROR"));
     }
 
     #[test]

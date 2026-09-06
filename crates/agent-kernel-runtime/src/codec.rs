@@ -38,7 +38,7 @@ pub(super) fn encode_command(
             turn_id,
             request,
         } => {
-            let (conversation_request, transcript) = request.into_parts();
+            let (conversation_request, transcript, _) = request.into_parts();
             if agent_id.get() == 0 || turn_id.get() == 0 || !conversation_request.is_user_message()
             {
                 return Err(AgentRuntimeError::CommandRejected(

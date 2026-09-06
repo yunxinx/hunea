@@ -10,10 +10,10 @@ use runtime_domain::session::{RuntimeTerminalExitStatus, RuntimeTerminalSnapshot
 use tokio_util::sync::CancellationToken;
 use tool_runtime::{
     ProcessedToolError, SharedToolErrorFormatter, SharedToolPermissionHandler,
-    ToolExecutionContext, ToolExecutor, ToolExecutorRegistry, ToolKind, ToolPermissionDecision,
-    ToolPermissionFileSnapshot, ToolPermissionPolicy, ToolPermissionPreview, ToolPermissionRequest,
-    ToolProgress, ToolProgressSink, ToolRegistry, ToolResult, ToolTerminalExitStatus,
-    ToolTerminalSnapshot,
+    ToolExecutionContext, ToolExecutor, ToolExecutorRegistry, ToolInvocationIdentity, ToolKind,
+    ToolPermissionDecision, ToolPermissionFileSnapshot, ToolPermissionPolicy,
+    ToolPermissionPreview, ToolPermissionRequest, ToolProgress, ToolProgressSink, ToolRegistry,
+    ToolResult, ToolTerminalExitStatus, ToolTerminalSnapshot,
 };
 
 use super::{ToolLoopClock, ToolLoopProgress, state::RuntimeTurnState};
@@ -227,6 +227,7 @@ async fn execute_tool_with_progress(
     let tool_context = ToolExecutionContext::new(context.cancellation)
         .with_permission_snapshot(permission_snapshot)
         .with_permission_handler(context.permission_handler.cloned())
+        .with_invocation_identity_option(context.invocation_identity)
         .with_progress_sink(ToolProgressSink::from_sender(progress_sender));
     let execution = context
         .executor
@@ -396,6 +397,7 @@ pub(super) struct ToolCallExecutionContext<'a> {
     pub(super) error_formatter: &'a SharedToolErrorFormatter,
     pub(super) extension_hooks: &'a ExtensionHookRegistry,
     pub(super) state: &'a mut RuntimeTurnState,
+    pub(super) invocation_identity: Option<ToolInvocationIdentity>,
 }
 
 pub fn provider_tool_definitions_from_registry(registry: &ToolRegistry) -> Vec<AiToolDefinition> {
@@ -474,6 +476,7 @@ mod tests {
             error_formatter: &error_formatter,
             extension_hooks: &extension_hooks,
             state: &mut state,
+            invocation_identity: None,
         };
         let call = ToolCall::new("call-1", "panic_preview", serde_json::json!({}));
 

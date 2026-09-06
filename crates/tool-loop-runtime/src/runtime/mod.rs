@@ -103,6 +103,7 @@ where
                 error_formatter: &options.error_formatter,
                 extension_hooks: &options.extension_hooks,
                 state: &mut state,
+                invocation_identity: options.invocation_identity,
             };
             let execution = if cancellation.is_cancelled() {
                 interrupted_tool_execution(call)

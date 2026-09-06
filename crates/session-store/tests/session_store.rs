@@ -6,8 +6,8 @@ mod support;
 use provider_protocol::{ContentBlock, ConversationItem, Role, ToolCall};
 use runtime_domain::{
     agent::{
-        AgentId, AgentLaunchChildSnapshot, AgentLaunchGroupId, AgentLaunchSnapshot, AgentOutcome,
-        AgentOutcomeSnapshot, AgentOutcomeSummary,
+        AgentId, AgentLaunchChildSnapshot, AgentLaunchGroupId, AgentLaunchSnapshot,
+        AgentObjectiveSummary, AgentOutcome, AgentOutcomeSnapshot, AgentOutcomeSummary,
     },
     session::{TranscriptReplayItem, TranscriptReplayRole},
 };
@@ -135,7 +135,12 @@ async fn agent_replay_facts_keep_order_and_do_not_change_session_meta() {
                 None,
             )
             .unwrap(),
+            objective: AgentObjectiveSummary::from_objective(
+                &runtime_domain::agent::AgentObjective::new("write a haiku").unwrap(),
+            )
+            .unwrap(),
         }],
+        parent_turn_id: runtime_domain::agent::AgentTurnId::new(1),
         occurred_at_ms: 10,
     });
     let outcome = TranscriptReplayItem::AgentOutcome(AgentOutcomeSnapshot {
@@ -144,6 +149,9 @@ async fn agent_replay_facts_keep_order_and_do_not_change_session_meta() {
             TranscriptReplayItem::AgentLaunch(snapshot) => snapshot.children[0].title.clone(),
             _ => unreachable!(),
         },
+        group_id: Some(AgentLaunchGroupId::new(7)),
+        parent_agent_id: Some(AgentId::MAIN),
+        parent_turn_id: Some(runtime_domain::agent::AgentTurnId::new(1)),
         outcome: AgentOutcome::Completed,
         occurred_at_ms: 20,
         summary: Some(AgentOutcomeSummary::new("done").unwrap()),

@@ -14,10 +14,13 @@ mod conversation;
 mod effects;
 #[cfg(test)]
 pub(crate) use effects::run_open_message_history_picker_effect;
+pub(crate) use effects::{
+    dispatch_agents_observation_stops_if_needed, dispatch_pending_agent_view_observes_if_needed,
+};
 #[cfg(test)]
 pub(crate) use effects::{
-    dispatch_agents_observation_stops_if_needed, run_observe_agent_transcript_effect,
-    run_open_agents_panel_effect, run_stop_agent_effect,
+    run_observe_agent_transcript_effect, run_open_agents_panel_effect,
+    run_respond_agent_permission_effect, run_stop_agent_effect,
 };
 mod event_pipeline;
 mod external_io;
@@ -303,7 +306,10 @@ fn apply_external_io_shutdown_events(
 
 fn drain_runtime_coordinator_events<R>(model: &mut Model, runtime_coordinator: &mut R) -> bool
 where
-    R: runtime_port::RuntimeEventPort + runtime_port::ModelRuntimePort + ?Sized,
+    R: runtime_port::RuntimeEventPort
+        + runtime_port::RuntimeCommandPort
+        + runtime_port::ModelRuntimePort
+        + ?Sized,
 {
     let mut changed = false;
 
@@ -315,6 +321,14 @@ where
     for event in runtime_coordinator.drain_model_provider_refresh_events() {
         apply_model_provider_refresh_event(model, event);
         changed = true;
+    }
+
+    // 事件应用点暂存的派发（pill 导航的 per-agent observe、panel 关闭的 stop）
+    // 没有 Effect 通道；drain 路径不经过 apply_effect_if_needed，必须在此补消费——
+    // 事件泵在无 deadline 时无限阻塞，不补派发 preview 会卡在 loading 直到下一次按键。
+    if changed {
+        dispatch_agents_observation_stops_if_needed(model, runtime_coordinator);
+        dispatch_pending_agent_view_observes_if_needed(model, runtime_coordinator);
     }
 
     changed

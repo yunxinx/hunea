@@ -1,6 +1,8 @@
 mod common;
 mod lifecycle;
 mod list;
+mod pending_permission;
+mod permission;
 mod preview;
 mod render;
 mod stop_confirm;

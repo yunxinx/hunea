@@ -273,6 +273,24 @@ where
         }
     }
 
+    /// 按 stable id 选中一行：id 存在于当前 filtered 视图才生效；
+    /// 未命中保持原 selection 并返回 false（fail closed，不猜临近行）。
+    ///
+    /// 与 `restore_selected_id_or_clamp` 的查找逻辑一致，但不做 clamp 迁移——
+    /// 显式选中失败时调用方需要知道目标不存在（如 pill 导航意图失效）。
+    pub(crate) fn select_id(&mut self, id: Id, row_id: impl Fn(&Row) -> Id) -> bool {
+        let Some(position) = self.filtered_indices.iter().position(|row_index| {
+            self.rows
+                .get(*row_index)
+                .is_some_and(|row| row_id(row) == id)
+        }) else {
+            return false;
+        };
+        self.selected = position;
+        self.sync_selected_id(row_id);
+        true
+    }
+
     pub(crate) fn selected_position_label(&self) -> usize {
         self.selection().selected_position_label()
     }

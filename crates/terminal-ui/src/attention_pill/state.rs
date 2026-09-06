@@ -16,6 +16,9 @@ pub(crate) struct AttentionPillState {
 pub(crate) enum AttentionPillKind {
     /// 有工具等待审批（审批面板打开但不可见）。
     ToolApproval,
+    /// 有 child Agent 的 permission head 处于 Pending（全局 pending 投影派生，
+    /// 与面板/surface 可见性无关——pending 事实到达即置位）。
+    AgentApproval,
     /// 离底期间到达的最终消息计数。
     NewMessages,
 }

@@ -9,6 +9,15 @@ use crate::{Model, display_width::display_width, render_frame::RenderFrame};
 
 pub(super) const TOOL_APPROVAL_PILL_TEXT: &str = "Tool waiting for approval";
 
+/// Agent approval pill 文案：单/复数可区分（与 main tool approval pill 靠文案区分）。
+fn agent_approval_pill_text(agent_count: usize) -> String {
+    if agent_count == 1 {
+        "Agent waiting for approval".to_string()
+    } else {
+        format!("{agent_count} agents waiting for approval")
+    }
+}
+
 fn new_message_pill_text(count: usize) -> String {
     if count == 1 {
         "1 new message ↓".to_string()
@@ -33,12 +42,22 @@ impl Model {
             return Vec::new();
         }
 
-        // 审批在上（优先级高），新消息在下，左锚定垂直堆叠。
+        // 堆叠优先级：ToolApproval → AgentApproval → NewMessages（待办高于新消息），
+        // 左锚定垂直堆叠。
         let mut pills = Vec::new();
         if self.attention_pill.approval_pending {
             pills.push((
                 AttentionPillKind::ToolApproval,
                 TOOL_APPROVAL_PILL_TEXT.to_string(),
+            ));
+        }
+        // Agent approval pill 从全局 pending 投影派生（单一事实源，不加布尔字段）；
+        // 只统计 Pending head——Submitted 已处理待收敛，不再引导点击。
+        let agent_pending_count = self.pending_agent_permission_count();
+        if agent_pending_count > 0 {
+            pills.push((
+                AttentionPillKind::AgentApproval,
+                agent_approval_pill_text(agent_pending_count),
             ));
         }
         if let Some(count) = self.attention_pill.new_message_count {

@@ -129,3 +129,43 @@ fn remove_row_clamps_selection_to_remaining_rows() {
     // selected position clamp：被移除行之后回落到剩余列表的同一位置。
     assert_eq!(state.selected_row().map(|row| row.id), Some("three"));
 }
+
+#[test]
+fn select_id_targets_row_in_filtered_view() {
+    let mut state = FullscreenSearchListState::default();
+    state.replace_rows(sample_rows(), row_text_matches, |row| row.id);
+    state.selected = 0;
+    state.sync_selected_id(|row| row.id);
+
+    assert!(state.select_id("two", |row| row.id));
+    assert_eq!(state.selected_row().map(|row| row.id), Some("two"));
+}
+
+#[test]
+fn select_id_respects_search_filter() {
+    let mut state = FullscreenSearchListState::default();
+    state.replace_rows(sample_rows(), row_text_matches, |row| row.id);
+    state.start_search();
+    // 过滤后只剩 beta 两行："one" 不在 filtered 视图中。
+    state.push_search_character('b', row_text_matches, |row| row.id);
+    state.selected = 0;
+    state.sync_selected_id(|row| row.id);
+
+    assert!(!state.select_id("one", |row| row.id));
+    // fail closed：选中目标不存在时保持原 selection。
+    assert_eq!(state.selected_row().map(|row| row.id), Some("two"));
+
+    assert!(state.select_id("three", |row| row.id));
+    assert_eq!(state.selected_row().map(|row| row.id), Some("three"));
+}
+
+#[test]
+fn select_id_missing_keeps_selection() {
+    let mut state = FullscreenSearchListState::default();
+    state.replace_rows(sample_rows(), row_text_matches, |row| row.id);
+    state.selected = 1;
+    state.sync_selected_id(|row| row.id);
+
+    assert!(!state.select_id("missing", |row| row.id));
+    assert_eq!(state.selected_row().map(|row| row.id), Some("two"));
+}

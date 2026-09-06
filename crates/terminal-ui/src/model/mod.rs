@@ -97,6 +97,12 @@ pub struct Model {
     pub(super) message_history_picker:
         Option<crate::message_history_picker::MessageHistoryPickerState>,
     pub(super) agents_panel: Option<crate::agents_panel::AgentsPanelState>,
+    /// Agent permission 的全局 pending 权威投影（pill 数据源）；
+    /// 与 `agents_panel` 生命周期无关——panel 关闭时仍然存活。
+    pub(super) agent_pending_permissions: crate::agents_panel::AgentPendingPermissionProjection,
+    /// Agent approval pill 点击产生的 panel 导航意图；
+    /// 由 overview snapshot 建立投影后消费，目标失效时作废停在 list。
+    pub(super) agents_panel_pill_navigation: Option<crate::agents_panel::AgentsPanelPillNavigation>,
     pub(super) next_agent_observation_request_id: u64,
     /// `/agents` panel 关闭路径置位的 observation 注销集合，runner 消费派发。
     pub(super) pending_stop_observing_agents:
@@ -104,6 +110,12 @@ pub struct Model {
     /// panel 关闭时仍在 loading 的 per-agent view 请求；回包送达后按 observation id 补 stop。
     pub(super) pending_agent_view_stop_requests:
         Vec<runtime_domain::agent::AgentObservationRequestId>,
+    /// 事件应用点（pill 导航打开 preview）暂存的 per-agent view observe 请求；
+    /// 由 runner effect 循环消费派发（事件应用没有 Effect 通道）。
+    pub(super) pending_agent_view_observe_requests: Vec<(
+        runtime_domain::agent::AgentObservationRequestId,
+        runtime_domain::agent::AgentId,
+    )>,
     pub(super) prompt_assembly: PromptAssemblyManagerSnapshot,
     pub(super) prompt_overlay: Option<crate::prompt_overlay::PromptOverlayState>,
     pub(super) next_session_load_request_id: u64,
@@ -277,9 +289,13 @@ impl Model {
             copy_picker: None,
             message_history_picker: None,
             agents_panel: None,
+            agent_pending_permissions:
+                crate::agents_panel::AgentPendingPermissionProjection::default(),
+            agents_panel_pill_navigation: None,
             next_agent_observation_request_id: 1,
             pending_stop_observing_agents: None,
             pending_agent_view_stop_requests: Vec::new(),
+            pending_agent_view_observe_requests: Vec::new(),
             prompt_assembly,
             prompt_overlay: None,
             next_session_load_request_id: 1,
@@ -567,8 +583,12 @@ impl Model {
         self.copy_picker = None;
         // panel 关闭统一走 close：注销 observation 并清空 generation-bound state。
         self.close_agents_panel();
+        // 会话清空后旧 pending permission 投影与导航意图均不再成立。
+        self.clear_agent_pending_permissions();
+        self.agents_panel_pill_navigation = None;
         // runtime Reset 后旧请求的回包不再送达，关闭时留下的补 stop 跟踪一并清理。
         self.pending_agent_view_stop_requests.clear();
+        self.pending_agent_view_observe_requests.clear();
         self.tool_approval_panel = ToolApprovalPanelState::default();
         self.tool_approval_panel_revision = self.tool_approval_panel_revision.saturating_add(1);
         self.message_revisit = MessageRevisitState::default();

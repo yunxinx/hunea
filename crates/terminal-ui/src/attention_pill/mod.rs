@@ -15,7 +15,7 @@ use ratatui::layout::{Position, Rect};
 use state::AttentionPillKind;
 pub(crate) use state::AttentionPillState;
 
-use super::{Model, modal_layer::ModalLayer, overlay_input_result::OverlayInputResult};
+use super::{AppEffect, Model, modal_layer::ModalLayer, overlay_input_result::OverlayInputResult};
 
 impl Model {
     /// `MessageFinished` 到达但用户看不到消息（非贴底或被全屏层遮挡）时累计计数。
@@ -99,6 +99,11 @@ impl Model {
                 self.sync_tool_approval_preview_mode();
                 self.attention_pill.approval_pending = false;
             }
+            AttentionPillKind::AgentApproval => {
+                // 点击是"引导去看"：pending 事实未消失，pill 不清除
+                //（收敛/清空后自然消失）。
+                return self.route_agent_approval_pill_click();
+            }
             AttentionPillKind::NewMessages => {
                 self.close_all_non_approval_fullscreen_modal_layers();
                 self.sync_tool_approval_preview_mode();
@@ -110,6 +115,30 @@ impl Model {
             }
         }
         OverlayInputResult::Handled
+    }
+
+    /// Agent approval pill 的点击路由：归属只来自全局 pending 投影
+    /// （单 Pending 直达 preview，多 Pending 预选最早 owner），不以当前 selection 推断。
+    ///
+    /// AgentsOverview 已开时不关不重开（避免 observer 注销/重建抖动），直接导航；
+    /// 未开时先关其他全屏层，再设导航意图并经 `OpenAgentsPanel` 打开——意图在
+    /// overview snapshot 投影建立后消费。
+    fn route_agent_approval_pill_click(&mut self) -> OverlayInputResult {
+        let Some(navigation) = self.agents_panel_pill_navigation_target() else {
+            // 无 Pending head（如全部收敛后被点击）：无可路由目标。
+            return OverlayInputResult::Handled;
+        };
+        if self.agents_panel_active() {
+            return match self.apply_agents_panel_pill_navigation(navigation) {
+                Some(effect) => OverlayInputResult::Effect(effect),
+                None => OverlayInputResult::Handled,
+            };
+        }
+        // 未开：关其他全屏层（此时 AgentsOverview 不可能在栈中，无需跳过）；
+        // panel 打开是异步的，导航意图由 snapshot 应用点消费。
+        self.close_all_non_approval_fullscreen_modal_layers();
+        self.agents_panel_pill_navigation = Some(navigation);
+        OverlayInputResult::Effect(AppEffect::OpenAgentsPanel)
     }
 
     /// 逐层关闭全部非审批全屏层；审批全屏预览属于审批流程本身，保留为焦点。
@@ -125,7 +154,11 @@ impl Model {
                 Some(ModalLayer::EntryTree) => self.entry_tree = None,
                 Some(ModalLayer::MessageHistory) => self.message_history_picker = None,
                 // 关闭必须走 close_agents_panel：只清层会泄漏 runtime 侧 observer。
-                Some(ModalLayer::AgentsOverview) => self.close_agents_panel(),
+                Some(ModalLayer::AgentsOverview) => {
+                    self.close_agents_panel();
+                    // panel 关闭后未消费的 pill 导航意图一并作废（fail closed）。
+                    self.agents_panel_pill_navigation = None;
+                }
             }
         }
     }

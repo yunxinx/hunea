@@ -18,6 +18,7 @@ use super::runtime_port::{
 };
 use crate::{
     AppEffect, AppEvent, ReasoningDisplayMode, Sender, StatusLineItem,
+    agents_panel::AgentsPanelPillNavigation,
     runtime::RuntimeEventApply,
     test_helpers::{branch_choice, render_model_buffer, rendered_rows},
     theme::{TerminalBackgroundColor, TerminalColorCapability, default_palette},
@@ -27,6 +28,11 @@ use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::style::Color;
+use runtime_domain::agent::{
+    AgentActivitySummary, AgentId, AgentObjective, AgentObservationId, AgentOverviewRow,
+    AgentOverviewSnapshot, AgentProjectionEvent, AgentProjectionRevision, AgentProjectionStatus,
+    AgentRuntimeGeneration, AgentTitle,
+};
 use runtime_domain::context_budget::ContextTokenLimit;
 use runtime_domain::model_catalog::{
     ModelProviderRefreshEvent, ModelSelection, ProviderSyncRequest,
@@ -2557,5 +2563,73 @@ fn apply_effect_if_needed_for_test(
             run_interrupt_current_turn_effect(model, runtime_coordinator);
         }
         _ => {}
+    }
+}
+
+#[test]
+fn runtime_event_drain_consumes_staged_agent_view_observe_without_input() {
+    // Agent approval pill 的异步链路：点击设导航意图并派发 OpenAgentsPanel 后，
+    // overview snapshot 作为 runtime 事件到达。事件 drain 路径不经过
+    // apply_effect_if_needed——其中暂存的 ObserveAgentTranscript 必须在同一次
+    // drain 内补派发，否则事件泵在无动画/超时 deadline 时无限阻塞，
+    // preview 会卡在 loading 直到下一次按键。
+    let mut model = ready_model();
+    let mut runtime_coordinator = TestUiRuntimePort::default();
+
+    // pill 点击路径的前半段（input 路径已消费 effect）：意图已置位，panel 已打开。
+    run_open_agents_panel_effect(&mut model, &mut runtime_coordinator);
+    let request_id = model
+        .agents_panel_pending_overview_request_id_for_test()
+        .expect("panel should be loading after the open effect");
+    model.agents_panel_pill_navigation = Some(AgentsPanelPillNavigation::OpenPreview {
+        agent_id: AgentId::new(2),
+    });
+
+    runtime_coordinator
+        .runtime_events
+        .push(RuntimeEvent::AgentProjection(Box::new(
+            AgentProjectionEvent::AgentsOverviewSnapshotLoaded {
+                request_id,
+                snapshot: AgentOverviewSnapshot {
+                    observation_id: AgentObservationId::new(11),
+                    generation: AgentRuntimeGeneration::new(1),
+                    revision: AgentProjectionRevision::new(1),
+                    rows: vec![agent_overview_row(2, "research task")],
+                },
+            },
+        )));
+
+    assert!(drain_runtime_coordinator_events(
+        &mut model,
+        &mut runtime_coordinator
+    ));
+
+    assert!(
+        runtime_coordinator.commands.iter().any(|command| matches!(
+            command,
+            RuntimeCommand::ObserveAgentTranscript { agent_id, .. } if *agent_id == AgentId::new(2)
+        )),
+        "staged observe must be dispatched by the event drain itself: {:?}",
+        runtime_coordinator.commands
+    );
+    assert!(
+        model.agents_panel_preview_active(),
+        "pill navigation must have opened the preview surface"
+    );
+}
+
+fn agent_overview_row(agent_id: u64, title: &str) -> AgentOverviewRow {
+    AgentOverviewRow {
+        agent_id: AgentId::new(agent_id),
+        title: AgentTitle::resolve(
+            &AgentObjective::new("fallback objective").expect("objective should be valid"),
+            Some(title),
+        )
+        .expect("title should resolve"),
+        status: AgentProjectionStatus::WaitingPermission,
+        latest_activity: AgentActivitySummary::Idle,
+        elapsed_ms: Some(1000),
+        tool_uses: None,
+        token_usage: None,
     }
 }

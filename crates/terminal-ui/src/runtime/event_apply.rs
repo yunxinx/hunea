@@ -310,13 +310,15 @@ impl RuntimeEventApply for Model {
                 self.reset_runtime_final_body_divider_state();
                 // runtime 替换后旧 generation observation 全部失效，注销并关闭 panel。
                 self.close_agents_panel();
+                // 旧 generation 的 pending permission 投影与导航意图一并失效。
+                self.clear_agent_pending_permissions();
+                self.agents_panel_pill_navigation = None;
                 if let Some(message) = message {
                     self.show_toast(ToastSeverity::Error, format!("Runtime stopped: {message}"));
                 }
             }
             // Agent projection port：document facts 追加语义 transcript item；
-            // observation/permission 投影由 `/agents` panel 消费（AgentPermissionUpdated
-            // 属 Slice 8，本阶段保持无害吸收）。
+            // observation 投影由 `/agents` panel 消费，permission 投影进入全局 pending map。
             RuntimeEvent::AgentProjection(projection) => match *projection {
                 AgentProjectionEvent::AgentLaunchFact { snapshot } => {
                     // 事实行必须落在 buffered 流式正文之后，避免流式文本覆盖事实。
@@ -347,7 +349,11 @@ impl RuntimeEventApply for Model {
                 AgentProjectionEvent::AgentViewUpdated { snapshot } => {
                     self.apply_agent_view_updated(snapshot);
                 }
-                AgentProjectionEvent::AgentPermissionUpdated { .. } => {}
+                AgentProjectionEvent::AgentPermissionUpdated { update } => {
+                    // observation-independent 投影：全局 pending map（pill 数据源），
+                    // 不追加 document timeline item。
+                    self.apply_agent_permission_update(update);
+                }
                 AgentProjectionEvent::AgentObservationRejected { request_id, reason } => {
                     self.apply_agent_observation_rejected(request_id, reason);
                 }
@@ -395,6 +401,9 @@ impl Model {
         self.reset_attention_pills();
         // resume 建立新的会话上下文，旧 observation 一律注销（R12）。
         self.close_agents_panel();
+        // 上一会话的 Agent pending 投影与导航意图不跨会话存活。
+        self.clear_agent_pending_permissions();
+        self.agents_panel_pill_navigation = None;
         // 上下文占用描述的是切换前会话的历史;v1 不在 resume 路径恢复
         // 新会话的占用数据,因此切换后先隐藏,等待下一次请求完成再显示。
         self.set_last_context_usage(None);

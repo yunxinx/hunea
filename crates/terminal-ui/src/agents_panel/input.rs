@@ -7,8 +7,10 @@ use runtime_domain::agent::{
 use crate::{
     AppEffect, Model,
     agents_panel::{
-        AgentsPanelAgentView, AgentsPanelState, AgentsPanelSurface, PendingAgentObservationStops,
+        AgentsPanelAgentView, AgentsPanelPillNavigation, AgentsPanelPreviewPermissionChoice,
+        AgentsPanelState, AgentsPanelSurface, PendingAgentObservationStops,
         agent_status_is_stoppable, agents_panel_rejection_text,
+        preview::initial_preview_permission_choice,
     },
     fullscreen_list_chrome::{
         fullscreen_list_body_visible_offset_for_row, fullscreen_list_page_size_for_height,
@@ -67,6 +69,18 @@ impl Model {
         panel.error = None;
         panel.replace_rows(snapshot.rows);
         self.agents_panel = Some(panel);
+        // pill 导航意图消费：panel 打开是异步的，snapshot 投影建立后才能定位目标。
+        if let Some(navigation) = self.agents_panel_pill_navigation.take()
+            && let Some(AppEffect::ObserveAgentTranscript {
+                request_id,
+                agent_id,
+            }) = self.apply_agents_panel_pill_navigation(navigation)
+        {
+            // 事件应用点没有 Effect 通道：暂存给 runner effect 循环消费
+            //（对齐 pending_stop_observing_agents 的 pending-flag 模式）。
+            self.pending_agent_view_observe_requests
+                .push((request_id, agent_id));
+        }
     }
 
     /// 同步错误路径（runtime port Err）：按 pending request_id 匹配后呈现于 panel。
@@ -170,6 +184,7 @@ impl Model {
         }
         if matched_live_record {
             self.sync_agents_panel_transcript_surface(agent_id);
+            self.sync_agents_panel_preview_permission(agent_id);
             return;
         }
         // panel 已关闭（或记录被覆盖）后到达的回包：若请求在待注销列表中，
@@ -201,6 +216,7 @@ impl Model {
         }
         if matched {
             self.sync_agents_panel_transcript_surface(agent_id);
+            self.sync_agents_panel_preview_permission(agent_id);
         }
     }
 
@@ -234,6 +250,39 @@ impl Model {
     ) -> Option<PendingAgentObservationStops> {
         let pending = self.pending_stop_observing_agents.take()?;
         (!pending.is_empty()).then_some(pending)
+    }
+
+    /// runner 消费：取出事件应用点暂存的 per-agent view observe 请求。
+    pub(crate) fn take_pending_agent_view_observe_requests(
+        &mut self,
+    ) -> Vec<(AgentObservationRequestId, AgentId)> {
+        std::mem::take(&mut self.pending_agent_view_observe_requests)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn agents_panel_pending_overview_request_id_for_test(
+        &self,
+    ) -> Option<AgentObservationRequestId> {
+        self.agents_panel
+            .as_ref()
+            .and_then(|panel| panel.pending_request_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn agents_panel_observation_id_for_test(
+        &self,
+    ) -> Option<runtime_domain::agent::AgentObservationId> {
+        self.agents_panel
+            .as_ref()
+            .and_then(|panel| panel.observation_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn agents_panel_selected_agent_id_for_test(&self) -> Option<AgentId> {
+        self.agents_panel
+            .as_ref()
+            .and_then(|panel| panel.selected_row())
+            .map(|row| row.agent_id)
     }
 
     fn stage_pending_agent_observation_stops(&mut self, stops: PendingAgentObservationStops) {
@@ -288,6 +337,8 @@ impl Model {
                     return OverlayInputResult::Handled;
                 }
                 self.close_agents_panel();
+                // panel 被用户关闭：未消费的 pill 导航意图作废（fail closed）。
+                self.agents_panel_pill_navigation = None;
                 OverlayInputResult::Handled
             }
             KeyCode::Char(character) if is_searching && is_picker_search_text_key(&key) => {
@@ -406,19 +457,90 @@ impl Model {
         let Some(agent_id) = self.agents_panel_selected_agent_id() else {
             return OverlayInputResult::Handled;
         };
-        let dispatch_request_id = self.stage_agents_panel_agent_view(agent_id);
-        if let Some(panel) = self.agents_panel.as_mut() {
-            panel.surface = Some(AgentsPanelSurface::Preview {
-                agent_id,
-                scroll_offset: 0,
-            });
-        }
-        match dispatch_request_id {
+        match self.open_agents_panel_preview_for_agent(agent_id) {
             Some(request_id) => OverlayInputResult::Effect(AppEffect::ObserveAgentTranscript {
                 request_id,
                 agent_id,
             }),
             None => OverlayInputResult::Handled,
+        }
+    }
+
+    /// 为指定 agent 打开 quick preview surface（`Space` 与 Agent approval pill 导航共用）。
+    ///
+    /// permission 区块交互态按 record 当前 snapshot 初始化；snapshot 未就绪时由
+    /// snapshot 应用路径的 reconcile 接管。返回需要派发的 observation 请求。
+    pub(crate) fn open_agents_panel_preview_for_agent(
+        &mut self,
+        agent_id: AgentId,
+    ) -> Option<AgentObservationRequestId> {
+        let dispatch_request_id = self.stage_agents_panel_agent_view(agent_id);
+        let permission_choice = self
+            .agents_panel
+            .as_ref()
+            .and_then(|panel| panel.agent_view_for_agent(agent_id))
+            .and_then(|record| record.snapshot.as_ref())
+            .map(|snapshot| {
+                initial_preview_permission_choice(snapshot.preview.permission.as_ref())
+            });
+        if let Some(panel) = self.agents_panel.as_mut() {
+            panel.surface = Some(AgentsPanelSurface::Preview {
+                agent_id,
+                scroll_offset: 0,
+                permission_choice: permission_choice
+                    .unwrap_or(AgentsPanelPreviewPermissionChoice::None),
+            });
+        }
+        dispatch_request_id
+    }
+
+    /// 执行 pill 导航意图：预选目标 agent；`OpenPreview` 追加打开 preview surface。
+    ///
+    /// 目标 agent 不在当前投影时意图失效停在 list（fail closed，不猜临近行）；
+    /// rows 尚未建立（loading）时意图保留，等 snapshot 应用点再消费。
+    /// 返回值是"需要派发的 ObserveAgentTranscript"——点击路径直接作为 Effect
+    /// 返回，snapshot 应用路径暂存给 runner 消费。
+    pub(crate) fn apply_agents_panel_pill_navigation(
+        &mut self,
+        navigation: AgentsPanelPillNavigation,
+    ) -> Option<AppEffect> {
+        let agent_id = match navigation {
+            AgentsPanelPillNavigation::OpenPreview { agent_id }
+            | AgentsPanelPillNavigation::Preselect { agent_id } => agent_id,
+        };
+        let panel_ready = self
+            .agents_panel
+            .as_ref()
+            .is_some_and(|panel| !panel.is_loading && panel.error.is_none());
+        if !panel_ready {
+            // rows 未建立（loading）保留意图延后消费；error/已关则新旧意图一并作废
+            //（fail closed：残留的旧意图不得在下一次手动重开时突然导航）。
+            if self
+                .agents_panel
+                .as_ref()
+                .is_some_and(|panel| panel.is_loading)
+            {
+                self.agents_panel_pill_navigation = Some(navigation);
+            } else {
+                self.agents_panel_pill_navigation = None;
+            }
+            return None;
+        }
+        let selected = self
+            .agents_panel
+            .as_mut()
+            .is_some_and(|panel| panel.select_agent(agent_id));
+        if !selected {
+            return None;
+        }
+        match navigation {
+            AgentsPanelPillNavigation::Preselect { .. } => None,
+            AgentsPanelPillNavigation::OpenPreview { agent_id } => self
+                .open_agents_panel_preview_for_agent(agent_id)
+                .map(|request_id| AppEffect::ObserveAgentTranscript {
+                    request_id,
+                    agent_id,
+                }),
         }
     }
 

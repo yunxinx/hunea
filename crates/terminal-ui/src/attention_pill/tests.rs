@@ -515,3 +515,509 @@ fn user_preview_panel_open_while_scrolled_up_repins_and_stays_interactive() {
     assert_eq!(press_key(&mut model, KeyCode::Esc), None);
     assert!(!model.tool_approval_panel_active());
 }
+
+// ---- Agent approval pill（R14/R17）----
+
+use runtime_domain::agent::{
+    AgentActivitySummary, AgentId, AgentObjective, AgentObservationId, AgentOverviewRow,
+    AgentPermissionRequest, AgentPermissionState, AgentPermissionTarget, AgentPermissionUpdate,
+    AgentProjectionEvent, AgentProjectionRevision, AgentProjectionStatus, AgentRuntimeGeneration,
+    AgentTitle, AgentTurnId,
+};
+
+use crate::attention_pill::AttentionPillKind;
+
+/// 记录派发命令的 test port（与 agents_panel tests 的 RecordingRuntimePort 同构）。
+#[derive(Default)]
+struct RecordingRuntimePort {
+    commands: Vec<runtime_domain::session::RuntimeCommand>,
+}
+
+impl crate::runner::runtime_port::RuntimeCommandPort for RecordingRuntimePort {
+    fn dispatch_runtime_command(
+        &mut self,
+        command: runtime_domain::session::RuntimeCommand,
+    ) -> Result<runtime_domain::session::RuntimeCommandReceipt, String> {
+        self.commands.push(command);
+        Ok(runtime_domain::session::RuntimeCommandReceipt::Accepted)
+    }
+}
+
+impl crate::runner::runtime_port::ModelRuntimePort for RecordingRuntimePort {
+    fn drain_model_provider_refresh_events(
+        &mut self,
+    ) -> Vec<runtime_domain::model_catalog::ModelProviderRefreshEvent> {
+        Vec::new()
+    }
+
+    fn persist_selected_model(
+        &mut self,
+        _selection: &runtime_domain::model_catalog::ModelSelection,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn refresh_model_provider(
+        &mut self,
+        _request: runtime_domain::model_catalog::ProviderSyncRequest,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+impl crate::runner::runtime_port::PromptRuntimePort for RecordingRuntimePort {
+    fn begin_prompt_assembly_edit(
+        &mut self,
+    ) -> Result<runtime_domain::prompt_assembly::PromptAssemblyManagerSnapshot, String> {
+        Err("Prompt assembly editing is not available".to_string())
+    }
+
+    fn apply_prompt_assembly_edit_mutation(
+        &mut self,
+        _mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation,
+    ) -> Result<runtime_domain::prompt_assembly::PromptAssemblyManagerSnapshot, String> {
+        Err("Prompt assembly editing is not available".to_string())
+    }
+
+    fn commit_prompt_assembly_edit(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+fn agent_permission_request(
+    agent_id: u64,
+    request_id: &str,
+    state: AgentPermissionState,
+    occurred_at_ms: i64,
+) -> AgentPermissionRequest {
+    AgentPermissionRequest {
+        target: AgentPermissionTarget {
+            agent_id: AgentId::new(agent_id),
+            turn_id: AgentTurnId::new(7),
+            generation: AgentRuntimeGeneration::new(1),
+            runtime_target: runtime_domain::session::RuntimeTarget::provider("local", "qwen3"),
+            request_id: request_id.to_string(),
+        },
+        request: runtime_domain::session::RuntimePermissionRequest::new(
+            request_id,
+            Some("Run database query".to_string()),
+            vec![
+                runtime_domain::session::RuntimePermissionOption::new(
+                    format!("{request_id}-allow"),
+                    "Allow",
+                    runtime_domain::session::RuntimePermissionOptionKind::AllowOnce,
+                ),
+                runtime_domain::session::RuntimePermissionOption::new(
+                    format!("{request_id}-deny"),
+                    "Deny",
+                    runtime_domain::session::RuntimePermissionOptionKind::RejectOnce,
+                ),
+            ],
+        ),
+        state,
+        occurred_at_ms,
+    }
+}
+
+fn apply_agent_permission_update(
+    model: &mut Model,
+    agent_id: u64,
+    request: Option<AgentPermissionRequest>,
+) {
+    model.apply_runtime_event(RuntimeEvent::AgentProjection(Box::new(
+        AgentProjectionEvent::AgentPermissionUpdated {
+            update: AgentPermissionUpdate {
+                agent_id: AgentId::new(agent_id),
+                generation: AgentRuntimeGeneration::new(1),
+                request,
+            },
+        },
+    )));
+}
+
+fn agent_pill_target(model: &Model) -> Option<(u16, u16)> {
+    let area = ratatui::layout::Rect::new(0, 0, model.width, model.height);
+    model
+        .attention_pill_hit_targets(area)
+        .into_iter()
+        .find(|(kind, _, _)| matches!(kind, AttentionPillKind::AgentApproval))
+        .map(|(_, rect, _)| (rect.x + 1, rect.y))
+}
+
+fn click_agent_pill(model: &mut Model) -> Option<AppEffect> {
+    let (column, row) = agent_pill_target(model).expect("agent approval pill should be visible");
+    click(model, column, row)
+}
+
+fn waiting_permission_row(agent_id: u64, title: &str) -> AgentOverviewRow {
+    AgentOverviewRow {
+        agent_id: AgentId::new(agent_id),
+        title: AgentTitle::resolve(
+            &AgentObjective::new("fallback").expect("objective should be valid"),
+            Some(title),
+        )
+        .expect("title should resolve"),
+        status: AgentProjectionStatus::WaitingPermission,
+        latest_activity: AgentActivitySummary::Idle,
+        elapsed_ms: Some(1000),
+        tool_uses: None,
+        token_usage: None,
+    }
+}
+
+/// 打开 panel 并完成 snapshot 投影（复刻 runner open effect + 回包链路）。
+fn open_panel_with_rows(
+    model: &mut Model,
+    port: &mut RecordingRuntimePort,
+    rows: Vec<AgentOverviewRow>,
+) {
+    crate::runner::run_open_agents_panel_effect(model, port);
+    let request_id = model
+        .agents_panel_pending_overview_request_id_for_test()
+        .expect("panel should be loading");
+    model.apply_runtime_event(RuntimeEvent::AgentProjection(Box::new(
+        AgentProjectionEvent::AgentsOverviewSnapshotLoaded {
+            request_id,
+            snapshot: runtime_domain::agent::AgentOverviewSnapshot {
+                observation_id: AgentObservationId::new(11),
+                generation: AgentRuntimeGeneration::new(1),
+                revision: AgentProjectionRevision::new(1),
+                rows,
+            },
+        },
+    )));
+}
+
+#[test]
+fn agent_approval_pill_visibility_follows_pending_projection() {
+    let mut model = scrollable_model();
+
+    // Pending head 到达即置位（无需打开任何 surface）。
+    apply_agent_permission_update(
+        &mut model,
+        2,
+        Some(agent_permission_request(
+            2,
+            "req-1",
+            AgentPermissionState::Pending,
+            100,
+        )),
+    );
+    assert!(agent_pill_target(&model).is_some());
+
+    // 收敛（None）后消失。
+    apply_agent_permission_update(&mut model, 2, None);
+    assert!(agent_pill_target(&model).is_none());
+}
+
+#[test]
+fn agent_approval_pill_ignores_submitted_heads_and_uses_count_text() {
+    let mut model = scrollable_model();
+    apply_agent_permission_update(
+        &mut model,
+        2,
+        Some(agent_permission_request(
+            2,
+            "req-1",
+            AgentPermissionState::Submitted,
+            100,
+        )),
+    );
+    assert!(
+        agent_pill_target(&model).is_none(),
+        "Submitted head must not drive the pill"
+    );
+
+    // 单 pending：单数文案。
+    apply_agent_permission_update(
+        &mut model,
+        3,
+        Some(agent_permission_request(
+            3,
+            "req-2",
+            AgentPermissionState::Pending,
+            100,
+        )),
+    );
+    let area = ratatui::layout::Rect::new(0, 0, model.width, model.height);
+    let texts: Vec<String> = model
+        .attention_pill_hit_targets(area)
+        .into_iter()
+        .map(|(_, _, text)| text)
+        .collect();
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.contains("Agent waiting for approval")),
+        "single pending text: {texts:?}"
+    );
+
+    // 多 pending：复数文案。
+    apply_agent_permission_update(
+        &mut model,
+        4,
+        Some(agent_permission_request(
+            4,
+            "req-3",
+            AgentPermissionState::Pending,
+            100,
+        )),
+    );
+    let texts: Vec<String> = model
+        .attention_pill_hit_targets(area)
+        .into_iter()
+        .map(|(_, _, text)| text)
+        .collect();
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.contains("2 agents waiting for approval")),
+        "plural pending text: {texts:?}"
+    );
+}
+
+#[test]
+fn agent_pill_stacks_between_tool_approval_and_new_messages() {
+    let mut model = scrollable_model();
+    model.scroll_document_by(-4);
+    model.open_session_picker_loading();
+    model.apply_runtime_event(message_finished_event());
+    open_inline_tool_approval(&mut model);
+    apply_agent_permission_update(
+        &mut model,
+        2,
+        Some(agent_permission_request(
+            2,
+            "req-1",
+            AgentPermissionState::Pending,
+            100,
+        )),
+    );
+
+    let area = ratatui::layout::Rect::new(0, 0, 40, 6);
+    let kinds: Vec<AttentionPillKind> = model
+        .attention_pill_hit_targets(area)
+        .into_iter()
+        .map(|(kind, _, _)| kind)
+        .collect();
+    assert_eq!(kinds.len(), 3);
+    assert!(matches!(kinds[0], AttentionPillKind::ToolApproval));
+    assert!(matches!(kinds[1], AttentionPillKind::AgentApproval));
+    assert!(matches!(kinds[2], AttentionPillKind::NewMessages));
+}
+
+#[test]
+fn single_pending_click_opens_panel_then_navigates_to_preview() {
+    let mut model = scrollable_model();
+    apply_agent_permission_update(
+        &mut model,
+        2,
+        Some(agent_permission_request(
+            2,
+            "req-1",
+            AgentPermissionState::Pending,
+            100,
+        )),
+    );
+
+    // 点击：设导航意图并返回 OpenAgentsPanel；pill 保持（pending 事实未消失）。
+    assert_eq!(
+        click_agent_pill(&mut model),
+        Some(AppEffect::OpenAgentsPanel)
+    );
+    assert_eq!(
+        model.agents_panel_pill_navigation,
+        Some(
+            crate::agents_panel::AgentsPanelPillNavigation::OpenPreview {
+                agent_id: AgentId::new(2)
+            }
+        )
+    );
+    assert!(
+        agent_pill_target(&model).is_some(),
+        "pill must stay after click"
+    );
+
+    // runner 打开 panel；snapshot 回包后意图消费：直达 preview。
+    let mut port = RecordingRuntimePort::default();
+    open_panel_with_rows(
+        &mut model,
+        &mut port,
+        vec![waiting_permission_row(2, "research task")],
+    );
+
+    assert!(
+        model.agents_panel_preview_active(),
+        "single pending must open preview"
+    );
+    assert_eq!(model.agents_panel_pill_navigation, None);
+    // ObserveAgentTranscript 经 pending-flag 暂存，runner effect 循环消费派发。
+    crate::runner::dispatch_pending_agent_view_observes_if_needed(&mut model, &mut port);
+    assert!(
+        port.commands.iter().any(|command| matches!(
+            command,
+            runtime_domain::session::RuntimeCommand::ObserveAgentTranscript { agent_id, .. }
+                if *agent_id == AgentId::new(2)
+        )),
+        "staged observe must be dispatched: {:?}",
+        port.commands
+    );
+}
+
+#[test]
+fn multiple_pending_click_preselects_earliest_owner_on_overview() {
+    let mut model = scrollable_model();
+    apply_agent_permission_update(
+        &mut model,
+        2,
+        Some(agent_permission_request(
+            2,
+            "req-late",
+            AgentPermissionState::Pending,
+            300,
+        )),
+    );
+    apply_agent_permission_update(
+        &mut model,
+        3,
+        Some(agent_permission_request(
+            3,
+            "req-early",
+            AgentPermissionState::Pending,
+            100,
+        )),
+    );
+
+    assert_eq!(
+        click_agent_pill(&mut model),
+        Some(AppEffect::OpenAgentsPanel)
+    );
+    assert_eq!(
+        model.agents_panel_pill_navigation,
+        Some(crate::agents_panel::AgentsPanelPillNavigation::Preselect {
+            agent_id: AgentId::new(3)
+        })
+    );
+
+    // 打开 + snapshot：预选最早 owner，停在 overview list（不开 preview）。
+    let mut port = RecordingRuntimePort::default();
+    open_panel_with_rows(
+        &mut model,
+        &mut port,
+        vec![
+            waiting_permission_row(2, "late task"),
+            waiting_permission_row(3, "early task"),
+        ],
+    );
+
+    assert!(
+        !model.agents_panel_preview_active(),
+        "multi pending stays on list"
+    );
+    assert_eq!(
+        model.agents_panel_selected_agent_id_for_test(),
+        Some(AgentId::new(3)),
+        "earliest occurred_at owner must be preselected"
+    );
+    assert_eq!(model.agents_panel_pill_navigation, None);
+}
+
+#[test]
+fn open_panel_click_navigates_in_place_without_rebuild() {
+    // AgentsOverview 已开：不关不重开（observer 不注销），直接导航。
+    let mut model = scrollable_model();
+    let mut port = RecordingRuntimePort::default();
+    open_panel_with_rows(
+        &mut model,
+        &mut port,
+        vec![
+            waiting_permission_row(2, "research task"),
+            waiting_permission_row(3, "other task"),
+        ],
+    );
+    let observation_before = model.agents_panel_observation_id_for_test();
+    apply_agent_permission_update(
+        &mut model,
+        2,
+        Some(agent_permission_request(
+            2,
+            "req-1",
+            AgentPermissionState::Pending,
+            100,
+        )),
+    );
+
+    // 单 pending + panel 已开：直接打开 preview surface，返回 observe effect。
+    let effect = click_agent_pill(&mut model);
+    assert!(
+        matches!(effect, Some(AppEffect::ObserveAgentTranscript { agent_id, .. }) if agent_id == AgentId::new(2)),
+        "already-open panel must navigate directly: {effect:?}"
+    );
+    assert!(model.agents_panel_preview_active());
+    assert_eq!(
+        model.agents_panel_observation_id_for_test(),
+        observation_before,
+        "navigation must not close/reopen the panel (observer stays bound)"
+    );
+}
+
+#[test]
+fn navigation_intent_fails_closed_when_target_missing_from_snapshot() {
+    let mut model = scrollable_model();
+    apply_agent_permission_update(
+        &mut model,
+        9,
+        Some(agent_permission_request(
+            9,
+            "req-1",
+            AgentPermissionState::Pending,
+            100,
+        )),
+    );
+    assert_eq!(
+        click_agent_pill(&mut model),
+        Some(AppEffect::OpenAgentsPanel)
+    );
+
+    // snapshot 里没有目标 agent：意图失效停在 list（fail closed）。
+    let mut port = RecordingRuntimePort::default();
+    open_panel_with_rows(
+        &mut model,
+        &mut port,
+        vec![waiting_permission_row(2, "other task")],
+    );
+
+    assert!(!model.agents_panel_preview_active());
+    assert_eq!(
+        model.agents_panel_selected_agent_id_for_test(),
+        Some(AgentId::new(2)),
+        "failed navigation must leave the default selection"
+    );
+    assert_eq!(model.agents_panel_pill_navigation, None);
+}
+
+#[test]
+fn navigation_intent_is_cancelled_when_panel_closes_while_loading() {
+    let mut model = scrollable_model();
+    apply_agent_permission_update(
+        &mut model,
+        2,
+        Some(agent_permission_request(
+            2,
+            "req-1",
+            AgentPermissionState::Pending,
+            100,
+        )),
+    );
+    assert_eq!(
+        click_agent_pill(&mut model),
+        Some(AppEffect::OpenAgentsPanel)
+    );
+
+    // panel 打开后（loading 中）用户 Esc 关闭：意图作废，后续 snapshot 不得触发导航。
+    let mut port = RecordingRuntimePort::default();
+    crate::runner::run_open_agents_panel_effect(&mut model, &mut port);
+    assert_eq!(press_key(&mut model, KeyCode::Esc), None);
+    assert!(!model.agents_panel_active());
+    assert_eq!(model.agents_panel_pill_navigation, None);
+}

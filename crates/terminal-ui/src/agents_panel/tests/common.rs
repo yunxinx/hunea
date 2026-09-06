@@ -2,10 +2,14 @@ use crossterm::event::{KeyCode, KeyEvent};
 use runtime_domain::agent::{
     AgentActivitySummary, AgentId, AgentObjective, AgentObservationId, AgentObservationRejection,
     AgentObservationRequestId, AgentOverviewDelta, AgentOverviewDeltaKind, AgentOverviewRow,
-    AgentOverviewSnapshot, AgentProjectionEvent, AgentProjectionRevision, AgentProjectionStatus,
-    AgentRuntimeGeneration, AgentTitle, AgentViewSnapshot,
+    AgentOverviewSnapshot, AgentPermissionRequest, AgentPermissionState, AgentPermissionTarget,
+    AgentPermissionUpdate, AgentProjectionEvent, AgentProjectionRevision, AgentProjectionStatus,
+    AgentRuntimeGeneration, AgentTitle, AgentTurnId, AgentViewSnapshot,
 };
-use runtime_domain::session::{RuntimeCommand, RuntimeCommandReceipt, RuntimeEvent};
+use runtime_domain::session::{
+    RuntimeCommand, RuntimeCommandReceipt, RuntimeEvent, RuntimePermissionOption,
+    RuntimePermissionOptionKind, RuntimePermissionRequest, RuntimeTarget,
+};
 
 use crate::{
     AppEffect, AppEvent, Model, StartupBannerOptions,
@@ -111,6 +115,15 @@ pub(super) fn view_snapshot(
     observation_id: u64,
     answer: Option<&str>,
 ) -> AgentViewSnapshot {
+    view_snapshot_with_permission(agent_id, observation_id, answer, None)
+}
+
+pub(super) fn view_snapshot_with_permission(
+    agent_id: u64,
+    observation_id: u64,
+    answer: Option<&str>,
+    permission: Option<AgentPermissionRequest>,
+) -> AgentViewSnapshot {
     let revision = AgentProjectionRevision::new(3);
     AgentViewSnapshot {
         observation_id: AgentObservationId::new(observation_id),
@@ -145,9 +158,65 @@ pub(super) fn view_snapshot(
             latest_activity: AgentActivitySummary::Thinking,
             elapsed_ms: Some(83_000),
             latest_committed_answer: answer.map(str::to_string),
-            permission: None,
+            permission,
         },
     }
+}
+
+/// 全局 pending 投影测试的 permission request fixture。
+///
+/// options 是 runtime-issued 全集（option_id 稳定，label 短），
+/// `target.generation` 与 FIXTURE_GENERATION 对齐以便断言 typed identity。
+pub(super) fn permission_request(
+    agent_id: u64,
+    request_id: &str,
+    state: AgentPermissionState,
+    occurred_at_ms: i64,
+) -> AgentPermissionRequest {
+    AgentPermissionRequest {
+        target: AgentPermissionTarget {
+            agent_id: AgentId::new(agent_id),
+            turn_id: AgentTurnId::new(7),
+            generation: AgentRuntimeGeneration::new(FIXTURE_GENERATION),
+            runtime_target: RuntimeTarget::provider("local", "qwen3"),
+            request_id: request_id.to_string(),
+        },
+        request: RuntimePermissionRequest::new(
+            request_id,
+            Some("Run database query".to_string()),
+            vec![
+                RuntimePermissionOption::new(
+                    format!("{request_id}-allow"),
+                    "Allow",
+                    RuntimePermissionOptionKind::AllowOnce,
+                ),
+                RuntimePermissionOption::new(
+                    format!("{request_id}-deny"),
+                    "Deny",
+                    RuntimePermissionOptionKind::RejectOnce,
+                ),
+            ],
+        ),
+        state,
+        occurred_at_ms,
+    }
+}
+
+pub(super) fn apply_permission_update(
+    model: &mut Model,
+    agent_id: u64,
+    generation: u64,
+    request: Option<AgentPermissionRequest>,
+) {
+    model.apply_runtime_event(RuntimeEvent::AgentProjection(Box::new(
+        AgentProjectionEvent::AgentPermissionUpdated {
+            update: AgentPermissionUpdate {
+                agent_id: AgentId::new(agent_id),
+                generation: AgentRuntimeGeneration::new(generation),
+                request,
+            },
+        },
+    )));
 }
 
 pub(super) fn apply_view_snapshot_loaded(

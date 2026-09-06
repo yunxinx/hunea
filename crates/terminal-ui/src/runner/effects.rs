@@ -46,6 +46,7 @@ where
     dispatch_context_budget_cancellation_if_needed(model, runtime_coordinator);
     dispatch_prompt_assembly_commit_if_needed(model, runtime_coordinator);
     dispatch_agents_observation_stops_if_needed(model, runtime_coordinator);
+    dispatch_pending_agent_view_observes_if_needed(model, runtime_coordinator);
 
     let Some(effect) = effect else {
         return Ok(());
@@ -82,6 +83,10 @@ where
                 &request_id,
                 option_id,
             );
+            Ok(())
+        }
+        AppEffect::RespondAgentPermission { target, option_id } => {
+            run_respond_agent_permission_effect(model, runtime_coordinator, target, option_id);
             Ok(())
         }
         AppEffect::OpenResumePicker => {
@@ -267,7 +272,7 @@ fn dispatch_prompt_assembly_commit_if_needed(
 /// 不可达——此时 observation 已随 runtime 消亡，不再打扰用户。
 pub(crate) fn dispatch_agents_observation_stops_if_needed(
     model: &mut Model,
-    runtime_coordinator: &mut impl RuntimeCommandPort,
+    runtime_coordinator: &mut (impl RuntimeCommandPort + ?Sized),
 ) {
     let Some(stops) = model.take_pending_agent_observation_stops() else {
         return;
@@ -355,6 +360,20 @@ pub(crate) fn run_open_message_history_picker_effect(
     }
 }
 
+/// 消费事件应用点暂存的 per-agent view observe 请求（pill 导航打开 preview）。
+///
+/// 事件应用发生在 `Model::apply_runtime_event` 内，没有 Effect 通道；
+/// 这里按 pending-flag 模式统一补派发，Err 收敛与直接点击路径一致。
+pub(crate) fn dispatch_pending_agent_view_observes_if_needed(
+    model: &mut Model,
+    runtime_coordinator: &mut (impl RuntimeCommandPort + ?Sized),
+) {
+    let requests = model.take_pending_agent_view_observe_requests();
+    for (request_id, agent_id) in requests {
+        run_observe_agent_transcript_effect(model, runtime_coordinator, request_id, agent_id);
+    }
+}
+
 /// `/agents` 打开：Model 先进 loading 态并分配 request_id，再派发 `ObserveAgents`。
 pub(crate) fn run_open_agents_panel_effect(
     model: &mut Model,
@@ -371,7 +390,7 @@ pub(crate) fn run_open_agents_panel_effect(
 /// Enter/Space 进入 per-agent surface：派发共享的 `ObserveAgentTranscript`。
 pub(crate) fn run_observe_agent_transcript_effect(
     model: &mut Model,
-    runtime_coordinator: &mut impl RuntimeCommandPort,
+    runtime_coordinator: &mut (impl RuntimeCommandPort + ?Sized),
     request_id: runtime_domain::agent::AgentObservationRequestId,
     agent_id: runtime_domain::agent::AgentId,
 ) {
@@ -465,6 +484,28 @@ fn run_respond_runtime_permission_effect(
         })
     {
         model.show_toast(ToastSeverity::Error, message);
+    }
+}
+
+/// child Agent permission 提交：target 从 FIFO head 原样携带，由 runtime 校验
+/// （generation / request / option 全链 closed 拒绝）。
+///
+/// Err → Error toast + 主动 reconcile：runtime 拒绝后投影不会变化，preview 的
+/// 本地 Submitted 锁定需要在 snapshot 仍 Pending 时解除，允许重试。
+pub(crate) fn run_respond_agent_permission_effect(
+    model: &mut Model,
+    runtime_coordinator: &mut impl RuntimeCommandPort,
+    target: runtime_domain::agent::AgentPermissionTarget,
+    option_id: String,
+) {
+    if let Err(message) =
+        runtime_coordinator.dispatch_runtime_command(RuntimeCommand::RespondAgentPermission {
+            target: target.clone(),
+            option_id: Some(option_id),
+        })
+    {
+        model.show_toast(ToastSeverity::Error, message);
+        model.sync_agents_panel_preview_permission(target.agent_id);
     }
 }
 

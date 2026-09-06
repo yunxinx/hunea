@@ -2,6 +2,7 @@
 
 mod input;
 mod list_render;
+mod pending_permission;
 mod preview;
 mod preview_render;
 mod render;
@@ -12,8 +13,10 @@ mod transcript_render;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use pending_permission::{AgentPendingPermissionProjection, AgentsPanelPillNavigation};
 pub(crate) use state::{
-    AgentsPanelAgentView, AgentsPanelState, AgentsPanelSurface, PendingAgentObservationStops,
+    AgentsPanelAgentView, AgentsPanelPreviewPermissionChoice, AgentsPanelState, AgentsPanelSurface,
+    PendingAgentObservationStops,
 };
 
 use runtime_domain::agent::{AgentActivitySummary, AgentProjectionStatus};

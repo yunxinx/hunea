@@ -47,6 +47,27 @@ pub(crate) struct AgentsPanelAgentView {
     pub(super) error: Option<String>,
 }
 
+/// quick preview 的 permission 区块交互态。
+///
+/// 交互态与 head 的 request identity 绑定：`AgentViewUpdated` 到达时按 request_id
+/// 对比决定保持还是重置（无关快照更新不得重置用户的选择）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AgentsPanelPreviewPermissionChoice {
+    /// 无 pending head（或记录尚在 loading）：不渲染 permission 区块。
+    None,
+    /// FIFO head 处于 Pending：可见 selection，可移动、可提交。
+    Selecting { request_id: String, selected: usize },
+    /// 已提交的不可重复提交态。
+    ///
+    /// `option_id` 已知（本地刚提交）时锁定显示该 option；`None` 表示只知道
+    /// runtime 投影 Submitted（重开 preview 等场景，投影不携带已选 option），
+    /// options 照常渲染但无 marker。
+    Submitted {
+        request_id: String,
+        option_id: Option<String>,
+    },
+}
+
 /// preview 与 transcript 共用同一 per-agent view observation（`AgentViewSnapshot`
 /// 聚合两份数据），因此两者都是层内子模式而非独立 ModalLayer。
 ///
@@ -56,6 +77,8 @@ pub(crate) enum AgentsPanelSurface {
     Preview {
         agent_id: AgentId,
         scroll_offset: usize,
+        /// permission 区块交互态；渲染与提交共用（单一事实源在 surface 内）。
+        permission_choice: AgentsPanelPreviewPermissionChoice,
     },
     Transcript {
         agent_id: AgentId,
@@ -173,6 +196,11 @@ impl AgentsPanelState {
     pub(super) fn select_visible_row(&mut self, page_size: usize, visible_offset: usize) -> bool {
         self.list
             .select_visible_row(page_size, visible_offset, agents_row_id)
+    }
+
+    /// 按 AgentId 预选（pill 导航等显式定位）；目标不在 filtered 视图时保持原 selection。
+    pub(super) fn select_agent(&mut self, agent_id: AgentId) -> bool {
+        self.list.select_id(agent_id, agents_row_id)
     }
 
     pub(super) fn selected_position_label(&self) -> usize {

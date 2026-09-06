@@ -45,6 +45,12 @@ pub enum AppEffect {
         request_id: String,
         option_id: Option<String>,
     },
+    /// child Agent permission 提交：`String`（而非 Option）表达"必须显式 option"——
+    /// Agent 流没有 cancel 语义，Space/Esc 不派发任何 response。
+    RespondAgentPermission {
+        target: runtime_domain::agent::AgentPermissionTarget,
+        option_id: String,
+    },
     OpenResumePicker,
     OpenSessionPreview {
         session_id: String,

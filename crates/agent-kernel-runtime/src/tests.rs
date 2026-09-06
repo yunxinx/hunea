@@ -748,6 +748,46 @@ fn unknown_command_and_identity_mismatch_fail_closed() {
 }
 
 #[test]
+fn non_main_commands_fail_closed_without_reaching_the_kernel() {
+    let source = ScriptSource::new(ScriptMode::Normal);
+    let mut runtime = runtime(Arc::clone(&source));
+    runtime
+        .activate(RuntimeEventNotifier::default())
+        .expect("activation");
+
+    // External kernel adapter 是 main-only adapter：child identity 的 submit 与 interrupt
+    // 都必须 closed 拒绝，且不向 kernel 发送任何 command。
+    let child_submit = AgentCommand::SubmitTurn {
+        agent_id: AgentId::new(2),
+        turn_id: AgentTurnId::new(9),
+        request: Box::new(AgentTurnRequest::from_conversation_request(
+            ConversationTurnRequest::new_user_text("local", "model", "child spawn attempt"),
+        )),
+    };
+    assert!(matches!(
+        runtime.dispatch(child_submit),
+        Err(AgentRuntimeError::UnknownAgent)
+    ));
+    assert!(matches!(
+        runtime.dispatch(AgentCommand::Interrupt {
+            agent_id: AgentId::new(2),
+            target: None,
+        }),
+        Err(AgentRuntimeError::UnknownAgent)
+    ));
+
+    let generation = source.generation(0);
+    assert!(
+        generation.commands.lock().expect("commands").is_empty(),
+        "a rejected child command must not reach the kernel"
+    );
+
+    // main session 语义不受影响：MAIN submit 仍被正常接纳。
+    runtime.dispatch(submit()).expect("MAIN submit");
+    assert_eq!(generation.commands.lock().expect("commands").len(), 1);
+}
+
+#[test]
 fn duplicate_permission_and_event_after_terminal_replace_success_with_safe_failure() {
     {
         let source = ScriptSource::new(ScriptMode::Normal);

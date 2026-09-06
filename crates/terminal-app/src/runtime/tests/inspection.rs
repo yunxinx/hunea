@@ -14,9 +14,18 @@ use terminal_ui::RuntimeEventPort;
 
 use super::support::*;
 use crate::runtime::{
+    agent::{
+        AgentRuntimeActivationGrants, AgentRuntimeActivity, AgentRuntimePort,
+        AgentSessionCapability,
+    },
+    agent_capability_context::{AgentChildCapabilityGrants, AgentContextOwner},
     context::{PromptAssemblyCapability, ToolCatalogCapability},
     lifecycle::ComponentFailureReason,
     prompt_assembly::PromptSectionContribution,
+};
+use runtime_domain::agent::{
+    AgentCommand, AgentCommandReceipt, AgentEvent, AgentId, AgentObjective, AgentRuntime,
+    AgentRuntimeError, AgentTitle, AgentTurnId,
 };
 
 const SECRET_SENTINEL: &str = "inspection-secret-sentinel";
@@ -468,6 +477,17 @@ fn composition_snapshot_is_deterministic_and_redacted() {
     let mut sorted_workspace_names = workspace_names.clone();
     sorted_workspace_names.sort();
     assert_eq!(workspace_names, sorted_workspace_names);
+    // spawn_agents 在所有 composition 都注册为 metadata-only workspace tool：锁定其
+    // 存在与 closed metadata 字段，防止 catalog 变更引入 UI/runtime implementation 依赖。
+    let spawn_agents_snapshot = snapshot["workspace_tools"]
+        .as_array()
+        .expect("workspace tools should be an array")
+        .iter()
+        .find(|tool| tool["name"] == "spawn_agents")
+        .expect("spawn_agents should stay registered in the default composition");
+    assert_eq!(spawn_agents_snapshot["kind"], "other");
+    assert_eq!(spawn_agents_snapshot["permission_policy"], "never");
+    assert_eq!(spawn_agents_snapshot["has_prompt_guidelines"], false);
     assert!(
         !snapshot["session_tools"]
             .as_array()
@@ -507,6 +527,143 @@ fn composition_snapshot_is_deterministic_and_redacted() {
                 "estimated_tokens": null,
             }
         ])
+    );
+}
+
+#[test]
+fn composition_snapshot_projects_child_agent_scopes_without_instruction_bodies() {
+    /// inspection scope 斋试的最小 child runtime：无事件、无 session capability。
+    struct InspectionScopeChildRuntime;
+
+    impl AgentRuntime for InspectionScopeChildRuntime {
+        fn dispatch(
+            &mut self,
+            _command: AgentCommand,
+        ) -> Result<AgentCommandReceipt, AgentRuntimeError> {
+            Ok(AgentCommandReceipt::Accepted)
+        }
+
+        fn drain_events(&mut self) -> Vec<AgentEvent> {
+            Vec::new()
+        }
+
+        fn shutdown(&mut self) -> Result<(), AgentRuntimeError> {
+            Ok(())
+        }
+    }
+
+    impl AgentRuntimePort for InspectionScopeChildRuntime {
+        fn activate(&mut self, _grants: AgentRuntimeActivationGrants) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn suspend(&mut self) -> Result<(), AgentRuntimeError> {
+            Ok(())
+        }
+
+        fn activity(&self) -> AgentRuntimeActivity {
+            AgentRuntimeActivity::Idle
+        }
+
+        fn session(&self) -> Option<&dyn AgentSessionCapability> {
+            None
+        }
+
+        fn session_mut(&mut self) -> Option<&mut dyn AgentSessionCapability> {
+            None
+        }
+
+        fn has_pending_work(&self) -> bool {
+            false
+        }
+    }
+
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions::default());
+    let root_context = coordinator
+        .components
+        .agent_root_context_for_test()
+        .expect("Native Agent should own a root context");
+    // owner 命名与 stage_child_record 的 production 约定一致（child-agent-{id}）。
+    let child_context = root_context
+        .child(
+            AgentContextOwner::try_new("child-agent-2").expect("child owner should validate"),
+            AgentChildCapabilityGrants::empty()
+                .inherit_tools()
+                .inherit_prompt(),
+        )
+        .expect("child context should attach to the root scope");
+    // title 携带 SECRET sentinel：scope 投影只允许 closed owner/label，不允许任何内容体。
+    let title = AgentTitle::resolve(
+        &AgentObjective::new(format!("child task {SECRET_SENTINEL}"))
+            .expect("objective should be valid"),
+        None,
+    )
+    .expect("title should resolve");
+    coordinator.components.register_child_agent_for_test(
+        AgentId::new(2),
+        AgentId::MAIN,
+        AgentTurnId::new(1),
+        title,
+        child_context,
+        Box::new(InspectionScopeChildRuntime),
+    );
+
+    let snapshot = composition_snapshot(&coordinator);
+    let child_scope = snapshot["effect_scopes"]
+        .as_array()
+        .expect("effect scopes should be an array")
+        .iter()
+        .find(|scope| scope["owner"] == "agent_runtime")
+        .expect("the agent component scope should be present")["children"]
+        .as_array()
+        .expect("main-agent scope children should be an array")
+        .iter()
+        .find(|scope| scope["owner"] == "main-agent")
+        .expect("the main-agent scope should be present")["children"]
+        .as_array()
+        .expect("child scopes should be an array")
+        .iter()
+        .find(|scope| scope["owner"] == "child-agent-2")
+        .expect("the child scope should appear under the main-agent scope");
+    // 只有 closed owner/lifecycle/effects/children。effect label 是固定控制格式
+    // `agent_effect:{kind}:{per-context id}`：child context 的首个 effect 就是其 worker。
+    assert_eq!(child_scope["lifecycle"], "active");
+    assert_eq!(
+        child_scope["effects"],
+        serde_json::json!(["agent_effect:worker:0"])
+    );
+    assert_eq!(child_scope["children"], serde_json::json!([]));
+
+    let json = serde_json::to_string(&snapshot).expect("snapshot should serialize");
+    assert!(
+        !json.contains(SECRET_SENTINEL),
+        "child scope projection must not leak instruction or objective bodies: {json}"
+    );
+
+    // child scope 随 child tree 回收从 snapshot 消失（closed counts 归零语义）。
+    coordinator
+        .components
+        .dispose_child_agents_for_session_transition()
+        .expect("session transition should retire the child tree");
+    let snapshot = composition_snapshot(&coordinator);
+    let main_agent_scope_children = snapshot["effect_scopes"]
+        .as_array()
+        .expect("effect scopes should be an array")
+        .iter()
+        .find(|scope| scope["owner"] == "agent_runtime")
+        .expect("the agent component scope should be present")["children"]
+        .as_array()
+        .expect("main-agent scope children should be an array")
+        .iter()
+        .find(|scope| scope["owner"] == "main-agent")
+        .expect("the main-agent scope should be present")["children"]
+        .as_array()
+        .expect("child scopes should be an array");
+    assert!(
+        main_agent_scope_children
+            .iter()
+            .all(|scope| scope["owner"] != "child-agent-2"),
+        "a disposed child scope must disappear from the inspection snapshot"
     );
 }
 

@@ -258,7 +258,6 @@ impl AgentChildRuntimeLeases {
     /// lease 本身是 generation-bound 的 clone；child 不会获得 host registry 或第二份
     /// capability authority。orchestrator 在 child record 提交前调用该方法，确保 activation
     /// 失败时仍可回收已构造的 context。
-    #[allow(dead_code)]
     pub(super) fn activation_grants(&self) -> AgentRuntimeActivationGrants {
         AgentRuntimeActivationGrants::empty()
             .with_event_stream(self.event_stream.clone())

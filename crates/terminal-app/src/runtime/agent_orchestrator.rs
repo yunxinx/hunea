@@ -36,7 +36,6 @@ use super::agent_capability_context::{
 use super::context::{CapabilityLease, PromptAssemblyCapability, ToolCatalogCapability};
 use super::effect_scope::EffectScope;
 
-#[allow(dead_code)]
 const MAX_ACTIVE_CHILD_AGENTS: usize = 32;
 
 /// Child adapter 由 context effect 和 registry record 共同引用，但 runtime owner 始终唯一。
@@ -126,7 +125,6 @@ impl ChildRuntimeHandle {
 /// 一个 child 的 runtime、context 与 projection 必须由同一个 record 持有。
 ///
 /// 该结构不实现 `Clone`，避免把 adapter 或 cleanup owner 隐式复制到 registry 之外。
-#[allow(dead_code)]
 struct ChildAgentRecord {
     parent_agent_id: AgentId,
     parent_turn_id: Option<AgentTurnId>,
@@ -157,7 +155,6 @@ struct ChildAgentRecord {
     token_usage: usize,
 }
 
-#[allow(dead_code)]
 impl ChildAgentRecord {
     fn new(
         parent_agent_id: AgentId,
@@ -627,39 +624,6 @@ impl AgentOrchestrator {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn rollback_staged_child(
-        &mut self,
-        agent_id: AgentId,
-        parent_agent_id: AgentId,
-        turn_id: AgentTurnId,
-        title: AgentTitle,
-        target: Option<RuntimeTarget>,
-        context: AgentCapabilityContext,
-        runtime: ChildRuntimeHandle,
-        failure: AgentRuntimeError,
-    ) -> AgentRuntimeError {
-        context.begin_disposal();
-        let runtime_result = runtime.shutdown();
-        let context_result = context.dispose();
-        if runtime_result.is_ok() && context_result.is_success() {
-            return failure;
-        }
-
-        let mut record = ChildAgentRecord::new(
-            parent_agent_id,
-            turn_id,
-            self.generation,
-            title,
-            target,
-            context,
-            runtime,
-        );
-        record.status = AgentProjectionStatus::CleanupBlocked;
-        self.insert_child_record(agent_id, record);
-        AgentRuntimeError::Shutdown("Agent child cleanup is pending".to_string())
-    }
-
     fn retry_pending_context_cleanups(&mut self) -> Result<(), AgentRuntimeError> {
         if self.pending_context_cleanups.is_empty() {
             return Ok(());
@@ -701,8 +665,8 @@ impl AgentOrchestrator {
 
     /// 为 immediate parent 创建并注册一个 child record。
     ///
-    /// 这是后续 typed spawn provider 的唯一 runtime seam。方法先完成身份分配、scoped
-    /// context 与 adapter construction，再提交 record；任何失败都不会留下 registry row。
+    /// 这是 `launch_batch` 的唯一 staging seam：先完成身份分配、scoped context 与
+    /// adapter construction，再提交 record；任何失败都不会留下 registry row。
     fn stage_child_record(
         &mut self,
         parent_agent_id: AgentId,
@@ -800,45 +764,6 @@ impl AgentOrchestrator {
             runtime,
         );
         Ok((agent_id, record))
-    }
-
-    #[allow(dead_code)]
-    pub(super) fn spawn_child(
-        &mut self,
-        parent_agent_id: AgentId,
-        turn_id: AgentTurnId,
-        title: AgentTitle,
-        grants: AgentChildCapabilityGrants,
-        request: AgentTurnRequest,
-    ) -> Result<(AgentId, AgentCommandReceipt), AgentRuntimeError> {
-        let (agent_id, mut record) =
-            self.stage_child_record(parent_agent_id, turn_id, title, grants, &request)?;
-        let receipt = match record.runtime.dispatch(AgentCommand::SubmitTurn {
-            agent_id,
-            turn_id,
-            request: Box::new(request),
-        }) {
-            Ok(receipt) => receipt,
-            Err(error) => {
-                let context = record
-                    .context
-                    .take()
-                    .expect("staged child record must retain its context");
-                return Err(self.rollback_staged_child(
-                    agent_id,
-                    parent_agent_id,
-                    turn_id,
-                    record.title,
-                    record.target,
-                    context,
-                    record.runtime,
-                    error,
-                ));
-            }
-        };
-        record.started_at_ms = runtime_domain::time::unix_timestamp_ms().unwrap_or(0);
-        self.insert_child_record(agent_id, record);
-        Ok((agent_id, receipt))
     }
 
     /// 处理 host-owned `spawn_agents` request；tool bridge 不直接持有 lifecycle authority。
@@ -1612,7 +1537,6 @@ impl AgentOrchestrator {
         self.release_terminal_authority();
     }
 
-    #[allow(dead_code)]
     fn allocate_agent_id(&mut self) -> Result<AgentId, AgentRuntimeError> {
         let value = self.next_agent_id;
         self.next_agent_id = self.next_agent_id.checked_add(1).ok_or_else(|| {
@@ -1622,7 +1546,6 @@ impl AgentOrchestrator {
     }
 
     #[cfg(test)]
-    #[allow(dead_code)]
     pub(super) fn child_count(&self) -> usize {
         self.children
             .values()
@@ -1639,7 +1562,6 @@ impl AgentOrchestrator {
     }
 
     #[cfg(test)]
-    #[allow(dead_code)]
     pub(super) fn children_of(&self, parent_agent_id: AgentId) -> Vec<AgentId> {
         self.children_by_parent
             .get(&parent_agent_id)
@@ -1648,7 +1570,6 @@ impl AgentOrchestrator {
     }
 
     #[cfg(test)]
-    #[allow(dead_code)]
     pub(super) fn child_status(&self, agent_id: AgentId) -> Option<AgentProjectionStatus> {
         self.children.get(&agent_id).map(|record| record.status)
     }
@@ -1988,7 +1909,6 @@ impl AgentOrchestrator {
         .map_err(|error| error.to_string())
     }
 
-    #[allow(dead_code)]
     pub(super) fn construct_child(
         &self,
         owned_agent_id: AgentId,

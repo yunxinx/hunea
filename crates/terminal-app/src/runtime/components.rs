@@ -798,42 +798,6 @@ impl RuntimeComponents {
         self.agent_orchestrator.rebind_main_tools(registry)
     }
 
-    #[allow(dead_code)]
-    pub(super) fn dispatch_child_agent(
-        &mut self,
-        command: runtime_domain::agent::AgentCommand,
-    ) -> Result<runtime_domain::agent::AgentCommandReceipt, runtime_domain::agent::AgentRuntimeError>
-    {
-        self.agent_orchestrator.dispatch_child(command)
-    }
-
-    #[allow(dead_code)]
-    pub(super) fn spawn_child_agent(
-        &mut self,
-        parent_agent_id: runtime_domain::agent::AgentId,
-        turn_id: runtime_domain::agent::AgentTurnId,
-        title: runtime_domain::agent::AgentTitle,
-        grants: crate::runtime::agent_capability_context::AgentChildCapabilityGrants,
-        request: runtime_domain::agent::AgentTurnRequest,
-    ) -> Result<
-        (
-            runtime_domain::agent::AgentId,
-            runtime_domain::agent::AgentCommandReceipt,
-        ),
-        runtime_domain::agent::AgentRuntimeError,
-    > {
-        self.agent_orchestrator
-            .spawn_child(parent_agent_id, turn_id, title, grants, request)
-    }
-
-    #[allow(dead_code)]
-    pub(super) fn stop_child_agent(
-        &mut self,
-        agent_id: runtime_domain::agent::AgentId,
-    ) -> Result<(), runtime_domain::agent::AgentRuntimeError> {
-        self.agent_orchestrator.stop_child(agent_id)
-    }
-
     /// 建立一个 overview observation 并通过 runtime event notifier 唤醒 event pump。
     pub(super) fn observe_agents(
         &mut self,
@@ -2745,7 +2709,8 @@ mod tests {
     use session_store::SessionLifecycleStore;
     use tokio_util::sync::CancellationToken;
     use tool_runtime::{
-        ToolCall, ToolExecutionContext, ToolExecutor, ToolInvocationIdentity, ToolResultOutcome,
+        ToolCall, ToolExecutionContext, ToolExecutor, ToolInvocationIdentity, ToolResult,
+        ToolResultOutcome,
     };
 
     #[derive(Default)]
@@ -3675,6 +3640,11 @@ mod tests {
                         activity_label: request.activity_label().to_string(),
                     })
                 }
+                // main turn interrupt 语义只到达 main adapter；child tree 由 orchestrator
+                // 的独立 stop 路径管理，main interrupt 不得级联。
+                AgentCommand::Interrupt { agent_id, target } if agent_id == AgentId::MAIN => {
+                    Ok(AgentCommandReceipt::Interrupted { target })
+                }
                 _ => Err(AgentRuntimeError::UnknownAgent),
             }
         }
@@ -3787,39 +3757,38 @@ mod tests {
         }
     }
 
-    #[test]
-    fn child_spawn_commits_identity_index_and_terminal_projection() {
-        let factory = AgentRuntimeFactory::with_child_constructor(
-            construct_native_agent_runtime,
-            |_grants| Ok(Box::new(ChildAcceptingRuntime::default())),
-        );
-        let mut options = options_with_provider();
-        let mut components =
-            RuntimeComponents::new_with_agent_runtime_factory(&mut options, factory)
-                .expect("runtime components should initialize with child factory");
-        let request = AgentTurnRequest::from_conversation_request(
-            ConversationTurnRequest::new_user_text("local", "qwen3", "delivery objective"),
-        );
-        let title = runtime_domain::agent::AgentTitle::resolve(
-            &runtime_domain::agent::AgentObjective::new("delivery objective")
-                .expect("objective should be valid"),
-            None,
-        )
-        .expect("title should resolve");
-        let (child_id, receipt) = components
-            .spawn_child_agent(
-                AgentId::MAIN,
-                AgentTurnId::new(41),
-                title,
-                AgentChildCapabilityGrants::empty()
-                    .inherit_tools()
-                    .inherit_prompt(),
-                request,
-            )
-            .expect("child spawn should commit and dispatch");
+    #[tokio::test]
+    async fn child_spawn_commits_identity_index_and_terminal_projection() {
+        // 旁路 spawn wrapper 已删除：identity/index/terminal projection 经由 product 的
+        // host-owned spawn_agents tool 路径提交。
+        let SpawnChainFixture {
+            mut components,
+            scoped_tools,
+            parent_turn_id,
+            runtime_generation,
+            ..
+        } = spawn_chain_fixture("/child-spawn-commit-session", || {
+            Box::new(ChildAcceptingRuntime::default())
+        })
+        .await;
 
+        let execution = scoped_spawn_execution(
+            &scoped_tools,
+            parent_turn_id,
+            runtime_generation,
+            serde_json::json!({"agents": [{"objective": "delivery objective"}]}),
+        );
+        for _ in 0..16 {
+            components.drain_spawn_agents_requests();
+            if components.child_agent_count_for_test() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(components.child_agent_count_for_test(), 1);
+
+        let child_id = first_child_of_main(&components);
         assert_eq!(child_id, AgentId::new(2));
-        assert!(matches!(receipt, AgentCommandReceipt::TurnStarted { .. }));
         assert_eq!(
             components.agent_orchestrator.children_of(AgentId::MAIN),
             vec![child_id]
@@ -3831,13 +3800,21 @@ mod tests {
             components.agent_orchestrator.child_status(child_id),
             Some(runtime_domain::agent::AgentProjectionStatus::Completed)
         );
+        // main command 不能经 child registry 寻址：dispatch_child 对 MAIN fail closed。
         assert!(matches!(
-            components.dispatch_child_agent(AgentCommand::Interrupt {
-                agent_id: AgentId::MAIN,
-                target: None,
-            }),
+            components
+                .agent_orchestrator
+                .dispatch_child(AgentCommand::Interrupt {
+                    agent_id: AgentId::MAIN,
+                    target: None,
+                }),
             Err(AgentRuntimeError::UnknownAgent)
         ));
+
+        let tool_result = execution
+            .await
+            .expect("spawn tool should finish after group completion");
+        assert_eq!(tool_result.outcome(), ToolResultOutcome::Success);
 
         components.shutdown().expect("runtime should shut down");
     }
@@ -4434,6 +4411,944 @@ mod tests {
         components.shutdown().expect("runtime should shut down");
     }
 
+    /// T 系列集成测试共享的 spawn 链 fixture：InMemory store + SpawnParent main +
+    /// 可定制 child runtime 构造器，并预先建立一次有效 main turn identity。
+    struct SpawnChainFixture {
+        components: RuntimeComponents,
+        store: Arc<session_store::InMemorySessionStore>,
+        session_id: session_store::SessionId,
+        scoped_tools: ToolExecutorRegistry,
+        parent_turn_id: AgentTurnId,
+        runtime_generation: u64,
+    }
+
+    async fn spawn_chain_fixture(
+        work_dir_label: &str,
+        child_runtime: impl Fn() -> Box<dyn AgentRuntimePort> + Send + Sync + 'static,
+    ) -> SpawnChainFixture {
+        let store = Arc::new(session_store::InMemorySessionStore::new());
+        let mut header = session_store::SessionHeader {
+            session_id: session_store::SessionId::new(),
+            work_dir: std::path::PathBuf::from(work_dir_label),
+            session_name: None,
+            initial_model: "qwen3".to_string(),
+            git_head: None,
+            cli_version: None,
+        };
+        let session_id = store
+            .create_session(header.clone())
+            .await
+            .expect("spawn chain fixture session should be created");
+        header.session_id = session_id.clone();
+
+        let parent_state = Arc::new(SpawnParentState {
+            tools: Mutex::new(None),
+            target: Mutex::new(None),
+        });
+        let parent_session_id = session_id.clone();
+        let factory = AgentRuntimeFactory::with_child_constructor(
+            {
+                let parent_state = Arc::clone(&parent_state);
+                move |_grants| {
+                    Ok(Box::new(SpawnParentRuntime {
+                        state: Arc::clone(&parent_state),
+                        session_id: parent_session_id.clone(),
+                        is_shutdown: true,
+                    }))
+                }
+            },
+            move |_grants| Ok(child_runtime()),
+        );
+        let mut options = AppRuntimeOptions {
+            session_store: Some(store.clone()),
+            session_header_template: Some(header),
+            ..options_with_provider()
+        };
+        let mut components =
+            RuntimeComponents::new_with_agent_runtime_factory(&mut options, factory)
+                .expect("spawn chain fixtures should initialize");
+
+        let parent_turn_id = AgentTurnId::new(91);
+        components
+            .dispatch_main_agent(AgentCommand::SubmitTurn {
+                agent_id: AgentId::MAIN,
+                turn_id: parent_turn_id,
+                request: Box::new(AgentTurnRequest::from_conversation_request(
+                    ConversationTurnRequest::new_user_text("local", "qwen3", "parent turn"),
+                )),
+            })
+            .expect("parent turn should establish the spawn identity");
+        let scoped_tools = parent_state
+            .tools
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("main activation should bind scoped tools");
+        let runtime_generation = components.agent_orchestrator.generation().get();
+        SpawnChainFixture {
+            components,
+            store,
+            session_id,
+            scoped_tools,
+            parent_turn_id,
+            runtime_generation,
+        }
+    }
+
+    /// 经 scoped tool view 发起一次 `spawn_agents` 调用；identity 的 context epoch 由
+    /// scoped wrapper 在执行时改写为真实 root context epoch（与 production 路径一致）。
+    fn scoped_spawn_execution(
+        scoped_tools: &ToolExecutorRegistry,
+        parent_turn_id: AgentTurnId,
+        runtime_generation: u64,
+        agents: serde_json::Value,
+    ) -> tokio::task::JoinHandle<ToolResult> {
+        let scoped_tools = scoped_tools.clone();
+        tokio::spawn(async move {
+            let cancellation = CancellationToken::new();
+            scoped_tools
+                .execute_tool_with_context(
+                    ToolCall::new("spawn-call", "spawn_agents", agents),
+                    ToolExecutionContext::new(&cancellation).with_invocation_identity(
+                        ToolInvocationIdentity::new(
+                            AgentId::MAIN.get(),
+                            parent_turn_id.get(),
+                            runtime_generation,
+                            u64::MAX,
+                        ),
+                    ),
+                )
+                .await
+        })
+    }
+
+    /// 拒绝路径没有可观测的 child 状态变化：循环推进 host bridge 直到 tool task 完成。
+    async fn settle_spawn_rejection(
+        components: &mut RuntimeComponents,
+        execution: tokio::task::JoinHandle<ToolResult>,
+    ) -> ToolResult {
+        for _ in 0..64 {
+            components.drain_spawn_agents_requests();
+            tokio::task::yield_now().await;
+            if execution.is_finished() {
+                break;
+            }
+        }
+        execution
+            .await
+            .expect("spawn_agents tool task should settle after the host rejection")
+    }
+
+    fn first_child_of_main(components: &RuntimeComponents) -> AgentId {
+        components
+            .agent_orchestrator
+            .children_of(AgentId::MAIN)
+            .first()
+            .copied()
+            .expect("spawned child id should be indexed")
+    }
+
+    fn pending_permission_targets(
+        projection_events: &[AgentProjectionEvent],
+    ) -> Vec<runtime_domain::agent::AgentPermissionTarget> {
+        projection_events
+            .iter()
+            .filter_map(|event| match event {
+                AgentProjectionEvent::AgentPermissionUpdated { update } => update
+                    .request
+                    .as_ref()
+                    .map(|request| request.target.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn projected_outcome_facts(
+        projection_events: &[AgentProjectionEvent],
+    ) -> Vec<runtime_domain::agent::AgentOutcomeSnapshot> {
+        projection_events
+            .iter()
+            .filter_map(|event| match event {
+                AgentProjectionEvent::AgentOutcomeFact { snapshot } => Some(snapshot.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn spawn_agents_full_chain_persists_and_resumes_semantically_equivalent_facts() {
+        const PRIVATE_SECOND_LINE: &str = "PRIVATE_SECOND_LINE";
+        const PRIVATE_INSTRUCTIONS: &str = "PRIVATE_INSTRUCTIONS";
+
+        let SpawnChainFixture {
+            mut components,
+            store,
+            session_id,
+            scoped_tools,
+            parent_turn_id,
+            runtime_generation,
+        } = spawn_chain_fixture("/spawn-full-chain-session", || {
+            Box::new(PermissionChildRuntime {
+                events: Vec::new(),
+                is_shutdown: true,
+            })
+        })
+        .await;
+
+        // batch >= 2：launch fact 必须是 grouped form（单个 snapshot 携带全部 children）。
+        let execution = scoped_spawn_execution(
+            &scoped_tools,
+            parent_turn_id,
+            runtime_generation,
+            serde_json::json!({
+                "agents": [
+                    {
+                        "objective": "research the integration gap",
+                        "display_title": "first child title"
+                    },
+                    {
+                        "objective": format!("summarize findings\n{PRIVATE_SECOND_LINE}"),
+                        "instructions": PRIVATE_INSTRUCTIONS
+                    }
+                ]
+            }),
+        );
+        for _ in 0..16 {
+            components.drain_spawn_agents_requests();
+            if components.child_agent_count_for_test() == 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(components.child_agent_count_for_test(), 2);
+
+        // launch fact：grouped form、title 冻结、objective 只保留 delivery-safe 首行。
+        let projection_events = components.drain_agent_projection_events();
+        let projected_launch = match projection_events.first() {
+            Some(AgentProjectionEvent::AgentLaunchFact { snapshot }) => snapshot.clone(),
+            other => panic!("expected one grouped launch fact, got {other:?}"),
+        };
+        assert_eq!(
+            projection_events.len(),
+            1,
+            "no observation surface is registered, only the launch fact should project"
+        );
+        assert_eq!(projected_launch.parent_agent_id, AgentId::MAIN);
+        assert_eq!(projected_launch.parent_turn_id, parent_turn_id);
+        assert_eq!(projected_launch.children.len(), 2);
+        assert_eq!(
+            projected_launch.children[0].title.as_str(),
+            "first child title"
+        );
+        assert_eq!(
+            projected_launch.children[0].objective.as_str(),
+            "research the integration gap"
+        );
+        assert_eq!(
+            projected_launch.children[1].objective.as_str(),
+            "summarize findings"
+        );
+
+        // child events：两个 child 各自进入 permission FIFO（typed identity 隔离）。
+        let child_events = components.drain_child_agent_events();
+        assert_eq!(child_events.len(), 2);
+        assert!(child_events.iter().all(|event| {
+            event.agent_id != AgentId::MAIN
+                && matches!(event.kind, AgentEventKind::PermissionRequested { .. })
+        }));
+        let permission_targets =
+            pending_permission_targets(&components.drain_agent_projection_events());
+        assert_eq!(permission_targets.len(), 2);
+        let mut permission_agent_ids = permission_targets
+            .iter()
+            .map(|target| target.agent_id)
+            .collect::<Vec<_>>();
+        permission_agent_ids.sort();
+        assert_eq!(permission_agent_ids, vec![AgentId::new(2), AgentId::new(3)]);
+        assert!(
+            permission_targets
+                .iter()
+                .all(|target| target.generation == components.agent_orchestrator.generation())
+        );
+
+        // typed respond：两个 child 的 permission 各自路由成功。
+        for target in &permission_targets {
+            components
+                .respond_child_agent_permission(target.clone(), Some("allow-1".to_string()))
+                .expect("each child permission response should route to its own child");
+        }
+
+        // completion：terminal events 收敛、outcome facts 持久化、group waiter 完成。
+        let terminal_events = components.drain_child_agent_events();
+        assert_eq!(terminal_events.len(), 4);
+        assert_eq!(
+            terminal_events
+                .iter()
+                .filter(|event| event.kind.is_terminal())
+                .count(),
+            2
+        );
+        let projected_outcomes =
+            projected_outcome_facts(&components.drain_agent_projection_events());
+        assert_eq!(projected_outcomes.len(), 2);
+        for outcome in &projected_outcomes {
+            assert_eq!(outcome.outcome, AgentOutcome::Completed);
+            assert_eq!(outcome.parent_agent_id, Some(AgentId::MAIN));
+            assert_eq!(outcome.parent_turn_id, Some(parent_turn_id));
+            assert_eq!(outcome.group_id, Some(projected_launch.group_id));
+        }
+
+        let tool_result = execution
+            .await
+            .expect("spawn tool task should finish after group completion");
+        assert_eq!(tool_result.outcome(), ToolResultOutcome::Success);
+        let completion_text = tool_result.text_content();
+        let completion: AgentGroupCompletion = serde_json::from_str(&completion_text)
+            .expect("spawn tool should return typed group completion JSON");
+        assert_eq!(completion.parent_agent_id, AgentId::MAIN);
+        assert_eq!(completion.group_id, projected_launch.group_id);
+        assert_eq!(completion.children.len(), 2);
+        assert!(
+            completion
+                .children
+                .iter()
+                .all(|child| child.outcome == AgentOutcome::Completed)
+        );
+        assert!(!completion_text.contains(PRIVATE_SECOND_LINE));
+        assert!(!completion_text.contains(PRIVATE_INSTRUCTIONS));
+
+        // session resume 语义等价：replay items 与 live document facts 是同一 typed snapshots。
+        let restored = store
+            .load_session(&session_id, None)
+            .await
+            .expect("full chain replay facts should load from the session store");
+        assert_eq!(restored.transcript.len(), 3);
+        let restored_launch = match &restored.transcript[0] {
+            runtime_domain::session::TranscriptReplayItem::AgentLaunch(snapshot) => {
+                snapshot.clone()
+            }
+            other => panic!("expected a launch replay fact first, got {other:?}"),
+        };
+        assert_eq!(restored_launch, projected_launch);
+        for (index, projected) in projected_outcomes.iter().enumerate() {
+            let restored_outcome = match &restored.transcript[index + 1] {
+                runtime_domain::session::TranscriptReplayItem::AgentOutcome(snapshot) => {
+                    snapshot.clone()
+                }
+                other => panic!("expected outcome replay facts, got {other:?}"),
+            };
+            assert_eq!(
+                restored_outcome, *projected,
+                "outcome fact {index} must resume semantically equal to the live document fact"
+            );
+        }
+        let replay_json = serde_json::to_string(&restored.transcript)
+            .expect("replay projection should remain serializable");
+        assert!(!replay_json.contains(PRIVATE_SECOND_LINE));
+        assert!(!replay_json.contains(PRIVATE_INSTRUCTIONS));
+
+        components.shutdown().expect("runtime should shut down");
+    }
+
+    #[tokio::test]
+    async fn main_turn_interrupt_does_not_cascade_into_running_children() {
+        let SpawnChainFixture {
+            mut components,
+            scoped_tools,
+            parent_turn_id,
+            runtime_generation,
+            ..
+        } = spawn_chain_fixture("/main-interrupt-session", || {
+            Box::new(PermissionChildRuntime {
+                events: Vec::new(),
+                is_shutdown: true,
+            })
+        })
+        .await;
+
+        let execution = scoped_spawn_execution(
+            &scoped_tools,
+            parent_turn_id,
+            runtime_generation,
+            serde_json::json!({
+                "agents": [{"objective": "background research while the main turn runs"}]
+            }),
+        );
+        for _ in 0..16 {
+            components.drain_spawn_agents_requests();
+            if components.child_agent_count_for_test() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(components.child_agent_count_for_test(), 1);
+        let child_id = first_child_of_main(&components);
+        let child_events = components.drain_child_agent_events();
+        assert!(matches!(
+            child_events.as_slice(),
+            [AgentEvent {
+                kind: AgentEventKind::PermissionRequested { .. },
+                ..
+            }]
+        ));
+        let permission_targets =
+            pending_permission_targets(&components.drain_agent_projection_events());
+        let permission_target = permission_targets
+            .first()
+            .cloned()
+            .expect("pending permission head should be projected");
+
+        // main turn interrupt 只作用于 main adapter：child authority、permission FIFO 与
+        // projection 全部保持原状（非级联）。
+        let receipt = components
+            .dispatch_main_agent(AgentCommand::Interrupt {
+                agent_id: AgentId::MAIN,
+                target: None,
+            })
+            .expect("main interrupt should be admitted by the main adapter");
+        assert!(matches!(receipt, AgentCommandReceipt::Interrupted { .. }));
+        assert!(components.agent_orchestrator.child_has_authority(child_id));
+        assert_eq!(
+            components.agent_orchestrator.child_status(child_id),
+            Some(runtime_domain::agent::AgentProjectionStatus::WaitingPermission)
+        );
+        assert!(components.drain_child_agent_events().is_empty());
+        assert!(
+            components.drain_agent_projection_events().is_empty(),
+            "main interrupt must not project any child change"
+        );
+
+        // child 继续按原 turn 完成：respond -> terminal -> group waiter 正常成功。
+        components
+            .respond_child_agent_permission(permission_target, Some("allow-1".to_string()))
+            .expect("child permission must remain routable after a main interrupt");
+        let terminal_events = components.drain_child_agent_events();
+        assert_eq!(
+            terminal_events
+                .iter()
+                .filter(|event| event.kind.is_terminal())
+                .count(),
+            1
+        );
+        let tool_result = execution
+            .await
+            .expect("spawn tool should finish with a successful group completion");
+        assert_eq!(tool_result.outcome(), ToolResultOutcome::Success);
+        let completion: AgentGroupCompletion = serde_json::from_str(&tool_result.text_content())
+            .expect("group completion JSON should decode");
+        assert_eq!(completion.children.len(), 1);
+        assert_eq!(completion.children[0].agent_id, child_id);
+        assert_eq!(completion.children[0].outcome, AgentOutcome::Completed);
+        assert!(!components.agent_orchestrator.child_has_authority(child_id));
+
+        components.shutdown().expect("runtime should shut down");
+    }
+
+    #[tokio::test]
+    async fn explicit_child_stop_persists_cancelled_outcome_and_clears_pending_permission() {
+        let SpawnChainFixture {
+            mut components,
+            store,
+            session_id,
+            scoped_tools,
+            parent_turn_id,
+            runtime_generation,
+            ..
+        } = spawn_chain_fixture("/explicit-stop-session", || {
+            Box::new(PermissionChildRuntime {
+                events: Vec::new(),
+                is_shutdown: true,
+            })
+        })
+        .await;
+
+        let execution = scoped_spawn_execution(
+            &scoped_tools,
+            parent_turn_id,
+            runtime_generation,
+            serde_json::json!({
+                "agents": [{"objective": "stop before the permission resolves"}]
+            }),
+        );
+        for _ in 0..16 {
+            components.drain_spawn_agents_requests();
+            if components.child_agent_count_for_test() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(components.child_agent_count_for_test(), 1);
+        let child_id = first_child_of_main(&components);
+        let child_events = components.drain_child_agent_events();
+        assert!(matches!(
+            child_events.as_slice(),
+            [AgentEvent {
+                kind: AgentEventKind::PermissionRequested { .. },
+                ..
+            }]
+        ));
+        // launch/permission 投影已交付；下面只断言 stop 自身的投影。
+        let launch_projection = components.drain_agent_projection_events();
+        let launch_group_id = match launch_projection.first() {
+            Some(AgentProjectionEvent::AgentLaunchFact { snapshot }) => Some(snapshot.group_id),
+            other => panic!("expected a launch document fact first, got {other:?}"),
+        };
+
+        // explicit stop：typed product route（StopAgent -> stop_child -> descendants-first）。
+        components
+            .stop_child_agent_with_generation(
+                child_id,
+                runtime_domain::agent::AgentRuntimeGeneration::new(runtime_generation),
+            )
+            .expect("explicit child stop should converge");
+
+        // stop 投影：pending permission 清空 + Cancelled outcome fact。
+        let projection_events = components.drain_agent_projection_events();
+        assert!(
+            projection_events.iter().any(|event| matches!(
+                event,
+                AgentProjectionEvent::AgentPermissionUpdated { update }
+                    if update.agent_id == child_id && update.request.is_none()
+            )),
+            "explicit stop must clear the pending permission projection"
+        );
+        let projected_outcomes = projected_outcome_facts(&projection_events);
+        assert_eq!(projected_outcomes.len(), 1);
+        let projected_outcome = projected_outcomes[0].clone();
+        assert_eq!(projected_outcome.agent_id, child_id);
+        assert_eq!(projected_outcome.outcome, AgentOutcome::Cancelled);
+        assert_eq!(projected_outcome.group_id, launch_group_id);
+        assert_eq!(projected_outcome.parent_agent_id, Some(AgentId::MAIN));
+
+        // terminal fact 在 authority 清理与 outcome 持久化之后交付（exactly-once）。
+        let child_events = components.drain_child_agent_events();
+        assert!(matches!(
+            child_events.as_slice(),
+            [AgentEvent {
+                agent_id,
+                kind: AgentEventKind::TurnInterrupted,
+                ..
+            }] if *agent_id == child_id
+        ));
+
+        // group waiter 收到 group completion；被显式停止的 child outcome 为 Cancelled。
+        let tool_result = execution
+            .await
+            .expect("spawn tool task should finish after the explicit stop");
+        assert_eq!(tool_result.outcome(), ToolResultOutcome::Success);
+        let completion: AgentGroupCompletion = serde_json::from_str(&tool_result.text_content())
+            .expect("group completion JSON should decode");
+        assert_eq!(completion.children.len(), 1);
+        assert_eq!(completion.children[0].agent_id, child_id);
+        assert_eq!(completion.children[0].outcome, AgentOutcome::Cancelled);
+
+        // launch-group child 的 settled row 保留（terminal projection 由 session 统一回收）。
+        assert_eq!(components.child_agent_count_for_test(), 1);
+
+        // Cancelled outcome fact 落 store，与 document fact 是同一 typed snapshot。
+        let restored = store
+            .load_session(&session_id, None)
+            .await
+            .expect("explicit stop replay facts should load from the session store");
+        let restored_outcome = match &restored.transcript[1] {
+            runtime_domain::session::TranscriptReplayItem::AgentOutcome(snapshot) => {
+                snapshot.clone()
+            }
+            other => panic!("expected an outcome replay fact second, got {other:?}"),
+        };
+        assert_eq!(restored_outcome, projected_outcome);
+        assert_eq!(restored_outcome.outcome, AgentOutcome::Cancelled);
+
+        components.shutdown().expect("runtime should shut down");
+    }
+
+    #[tokio::test]
+    async fn session_disposal_persists_cancelled_outcomes_and_invalidates_observations() {
+        let SpawnChainFixture {
+            mut components,
+            store,
+            session_id,
+            scoped_tools,
+            parent_turn_id,
+            runtime_generation,
+            ..
+        } = spawn_chain_fixture("/session-disposal-session", || {
+            Box::new(PermissionChildRuntime {
+                events: Vec::new(),
+                is_shutdown: true,
+            })
+        })
+        .await;
+
+        let execution = scoped_spawn_execution(
+            &scoped_tools,
+            parent_turn_id,
+            runtime_generation,
+            serde_json::json!({
+                "agents": [{"objective": "dispose on session transition"}]
+            }),
+        );
+        for _ in 0..16 {
+            components.drain_spawn_agents_requests();
+            if components.child_agent_count_for_test() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(components.child_agent_count_for_test(), 1);
+        let child_id = first_child_of_main(&components);
+        let _ = components.drain_child_agent_events();
+        let _ = components.drain_agent_projection_events();
+
+        // observation 建立：session 切换后必须整体失效。
+        components.observe_agents(runtime_domain::agent::AgentObservationRequestId::new(51));
+        components.observe_agent_transcript(
+            runtime_domain::agent::AgentObservationRequestId::new(52),
+            child_id,
+        );
+        let projection_events = components.drain_agent_projection_events();
+        assert!(projection_events.iter().any(|event| matches!(
+            event,
+            AgentProjectionEvent::AgentsOverviewSnapshotLoaded { .. }
+        )));
+        assert!(
+            projection_events
+                .iter()
+                .any(|event| matches!(event, AgentProjectionEvent::AgentViewSnapshotLoaded { .. }))
+        );
+
+        // session disposal：Cancelled outcome 持久化、runtime child tree 整体回收。
+        components
+            .dispose_child_agents_for_session_transition()
+            .expect("session transition should retire the child tree");
+        assert_eq!(components.child_agent_count_for_test(), 0);
+        let projection_events = components.drain_agent_projection_events();
+        assert!(
+            projection_events.iter().any(|event| matches!(
+                event,
+                AgentProjectionEvent::AgentPermissionUpdated { update }
+                    if update.agent_id == child_id && update.request.is_none()
+            )),
+            "session disposal must clear the pending permission projection"
+        );
+        let projected_outcomes = projected_outcome_facts(&projection_events);
+        assert_eq!(projected_outcomes.len(), 1);
+        let projected_outcome = projected_outcomes[0].clone();
+        assert_eq!(projected_outcome.agent_id, child_id);
+        assert_eq!(projected_outcome.outcome, AgentOutcome::Cancelled);
+
+        // observation 失效：之后不再有任何 fresh delta。
+        assert!(components.drain_child_agent_events().is_empty());
+        assert!(
+            components.drain_agent_projection_events().is_empty(),
+            "invalidated observations must not receive fresh deltas"
+        );
+
+        // Cancelled outcome fact 落 store，与 document fact 是同一 typed snapshot。
+        let restored = store
+            .load_session(&session_id, None)
+            .await
+            .expect("session disposal replay facts should load from the session store");
+        let restored_outcome = match &restored.transcript[1] {
+            runtime_domain::session::TranscriptReplayItem::AgentOutcome(snapshot) => {
+                snapshot.clone()
+            }
+            other => panic!("expected an outcome replay fact second, got {other:?}"),
+        };
+        assert_eq!(restored_outcome, projected_outcome);
+        assert_eq!(restored_outcome.outcome, AgentOutcome::Cancelled);
+
+        // 被回收的 group 不产生成功 completion；等待中的 tool 调用只在 runtime 收敛时
+        // 收到 closed failure。shutdown 顺序先 dispose root context（scope cancellation），
+        // 再释放 group waiter，scoped wrapper 的 biased select 确定性地交付自身的
+        // closed 文案——两种路径都不携带任何 raw 内容。
+        let mut execution = execution;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut execution)
+                .await
+                .is_err(),
+            "session disposal must not deliver a success completion for the disposed group"
+        );
+        components.shutdown().expect("runtime should shut down");
+        let tool_result = execution
+            .await
+            .expect("runtime shutdown should release the pending spawn tool call");
+        assert_eq!(tool_result.outcome(), ToolResultOutcome::Error);
+        assert_eq!(
+            tool_result.text_content(),
+            "Agent-scoped tool capability is unavailable"
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_composition_rejects_spawn_agents_without_side_effects() {
+        let replay_fixture = ReplayFixture::new(vec![AgentEventKind::TurnFinished {
+            response: runtime_domain::session::ConversationResponse::assistant_text(
+                "replayed terminal fact",
+            ),
+            metrics: None,
+            context_usage: None,
+        }])
+        .expect("replay fixture should validate");
+        let mut options = AppRuntimeOptions::default();
+        let mut components =
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+        components
+            .replace_agent_with_replay_for_test(&options, replay_fixture)
+            .expect("Replay Agent should replace Native");
+        assert!(!components.agent_orchestrator.has_child_factory());
+
+        // Replay composition 中活跃的 main turn 也不构成 child host：spawn 必须 closed 拒绝。
+        let parent_turn_id = AgentTurnId::new(57);
+        components
+            .dispatch_main_agent(AgentCommand::SubmitTurn {
+                agent_id: AgentId::MAIN,
+                turn_id: parent_turn_id,
+                request: Box::new(AgentTurnRequest::from_conversation_request(
+                    ConversationTurnRequest::new_user_text(
+                        "replay",
+                        "fixture-model",
+                        "replay parent turn",
+                    ),
+                )),
+            })
+            .expect("replay parent turn should start");
+        let runtime_generation = components.agent_orchestrator.generation().get();
+        let spawn_tool = components
+            .session_workspace_tools
+            .tools()
+            .into_iter()
+            .find(|tool| tool.definition().name == "spawn_agents")
+            .expect("spawn_agents stays registered in every composition");
+
+        let execution = tokio::spawn(async move {
+            let cancellation = CancellationToken::new();
+            spawn_tool
+                .execute_with_context(
+                    ToolCall::new(
+                        "spawn-call",
+                        "spawn_agents",
+                        serde_json::json!({
+                            "agents": [{"objective": "PRIVATE_REPLAY_OBJECTIVE"}]
+                        }),
+                    ),
+                    ToolExecutionContext::new(&cancellation).with_invocation_identity(
+                        ToolInvocationIdentity::new(
+                            AgentId::MAIN.get(),
+                            parent_turn_id.get(),
+                            runtime_generation,
+                            1,
+                        ),
+                    ),
+                )
+                .await
+        });
+        let tool_result = settle_spawn_rejection(&mut components, execution).await;
+        assert_eq!(tool_result.outcome(), ToolResultOutcome::Error);
+        assert_eq!(
+            tool_result.text_content(),
+            "spawn_agents parent is unavailable"
+        );
+        assert!(
+            !tool_result
+                .text_content()
+                .contains("PRIVATE_REPLAY_OBJECTIVE")
+        );
+
+        // 无副作用：不分配 child identity、不创建 scope/worker、不产生 launch fact。
+        assert_eq!(components.child_agent_count_for_test(), 0);
+        assert!(components.drain_agent_projection_events().is_empty());
+        assert!(components.drain_child_agent_events().is_empty());
+
+        components.shutdown().expect("runtime should shut down");
+    }
+
+    #[tokio::test]
+    async fn external_composition_rejects_spawn_agents_without_side_effects() {
+        const EXTERNAL_AGENT: &str = "external-agent-kernel";
+        let source = Arc::new(ComponentKernelSource::default());
+        let kernel_source: Arc<dyn AgentKernelSource> = source.clone();
+        let external_catalog = PluginFactoryCatalog::try_new([external_agent_replacement_factory(
+            EXTERNAL_AGENT,
+            kernel_source,
+        )])
+        .expect("external Agent catalog should validate");
+        let mut options = AppRuntimeOptions::default();
+        let mut components =
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+        components
+            .reconcile_plugin_composition_with_catalog(
+                &options,
+                &external_catalog,
+                desired_with_agent_plugin_for_test(Some(EXTERNAL_AGENT)),
+                ComponentLifecycleMode::Reconfigure,
+            )
+            .expect("external Agent should replace Native");
+        assert!(!components.agent_orchestrator.has_child_factory());
+
+        // external kernel 真正接收了 main turn；spawn 仍然 closed 拒绝。
+        let parent_turn_id = AgentTurnId::new(58);
+        components
+            .dispatch_main_agent(AgentCommand::SubmitTurn {
+                agent_id: AgentId::MAIN,
+                turn_id: parent_turn_id,
+                request: Box::new(AgentTurnRequest::from_conversation_request(
+                    ConversationTurnRequest::new_user_text(
+                        "external",
+                        "kernel",
+                        "external parent turn",
+                    ),
+                )),
+            })
+            .expect("external parent turn should be admitted by the kernel");
+        assert_eq!(
+            source
+                .generation(0)
+                .commands
+                .lock()
+                .expect("kernel commands")
+                .len(),
+            1,
+            "the external kernel must have received the main turn"
+        );
+        let runtime_generation = components.agent_orchestrator.generation().get();
+        let spawn_tool = components
+            .session_workspace_tools
+            .tools()
+            .into_iter()
+            .find(|tool| tool.definition().name == "spawn_agents")
+            .expect("spawn_agents stays registered in every composition");
+
+        let execution = tokio::spawn(async move {
+            let cancellation = CancellationToken::new();
+            spawn_tool
+                .execute_with_context(
+                    ToolCall::new(
+                        "spawn-call",
+                        "spawn_agents",
+                        serde_json::json!({
+                            "agents": [{"objective": "PRIVATE_EXTERNAL_OBJECTIVE"}]
+                        }),
+                    ),
+                    ToolExecutionContext::new(&cancellation).with_invocation_identity(
+                        ToolInvocationIdentity::new(
+                            AgentId::MAIN.get(),
+                            parent_turn_id.get(),
+                            runtime_generation,
+                            1,
+                        ),
+                    ),
+                )
+                .await
+        });
+        let tool_result = settle_spawn_rejection(&mut components, execution).await;
+        assert_eq!(tool_result.outcome(), ToolResultOutcome::Error);
+        assert_eq!(
+            tool_result.text_content(),
+            "spawn_agents parent is unavailable"
+        );
+        assert!(
+            !tool_result
+                .text_content()
+                .contains("PRIVATE_EXTERNAL_OBJECTIVE")
+        );
+
+        // 无副作用：kernel 没有收到任何额外 command，child registry 仍为空。
+        assert_eq!(
+            source
+                .generation(0)
+                .commands
+                .lock()
+                .expect("kernel commands")
+                .len(),
+            1
+        );
+        assert_eq!(components.child_agent_count_for_test(), 0);
+        assert!(components.drain_agent_projection_events().is_empty());
+        assert!(components.drain_child_agent_events().is_empty());
+
+        components.shutdown().expect("runtime should shut down");
+    }
+
+    #[tokio::test]
+    async fn spawn_agents_over_the_active_child_limit_fails_closed_without_partial_group() {
+        let SpawnChainFixture {
+            mut components,
+            store,
+            session_id,
+            scoped_tools,
+            parent_turn_id,
+            runtime_generation,
+            ..
+        } = spawn_chain_fixture("/spawn-limit-session", || {
+            Box::new(ChildAcceptingRuntime::default())
+        })
+        .await;
+
+        // 预注册 MAX_ACTIVE_CHILD_AGENTS（32）个 active child，使下一批 spawn 超限。
+        let root_context = components
+            .agent_root_context_for_test()
+            .expect("child-capable composition should own a root context");
+        for index in 0..32u64 {
+            let child_context = root_context
+                .child(
+                    AgentContextOwner::try_new(format!("limit-child-{index}"))
+                        .expect("limit child owner should validate"),
+                    AgentChildCapabilityGrants::empty()
+                        .inherit_tools()
+                        .inherit_prompt(),
+                )
+                .expect("limit child context should attach to the root scope");
+            let agent_id = AgentId::new(index + 2);
+            components.register_child_agent_for_test(
+                agent_id,
+                AgentId::MAIN,
+                AgentTurnId::new(agent_id.get()),
+                runtime_domain::agent::AgentTitle::resolve(
+                    &runtime_domain::agent::AgentObjective::new("active limit child")
+                        .expect("objective should be valid"),
+                    None,
+                )
+                .expect("title should resolve"),
+                child_context,
+                Box::new(ChildAcceptingRuntime::default()),
+            );
+        }
+        assert_eq!(components.child_agent_count_for_test(), 32);
+
+        let execution = scoped_spawn_execution(
+            &scoped_tools,
+            parent_turn_id,
+            runtime_generation,
+            serde_json::json!({
+                "agents": [{"objective": "one child over the active limit"}]
+            }),
+        );
+        let tool_result = settle_spawn_rejection(&mut components, execution).await;
+        assert_eq!(tool_result.outcome(), ToolResultOutcome::Error);
+        assert_eq!(
+            tool_result.text_content(),
+            "spawn_agents request was rejected"
+        );
+
+        // 无 partial group：child 数量不变、无 launch fact 投影、无 durable Agent fact。
+        assert_eq!(components.child_agent_count_for_test(), 32);
+        assert!(
+            components.drain_agent_projection_events().is_empty(),
+            "a rejected batch must not project a launch fact"
+        );
+        let restored = store
+            .load_session(&session_id, None)
+            .await
+            .expect("limit fixture session should load");
+        assert!(
+            restored.transcript.is_empty(),
+            "a rejected batch must not persist Agent facts"
+        );
+
+        components.shutdown().expect("runtime should shut down");
+    }
+
     #[tokio::test]
     async fn launch_fact_failure_rolls_back_staged_child_and_allows_clean_retry() {
         let replay_port = Arc::new(FlakyReplaySessionPort::new(0));
@@ -4931,6 +5846,45 @@ mod tests {
         components.shutdown().expect("runtime should shut down");
     }
 
+    /// 为 quiesce 系列测试注册一个 active child。`register_child_for_test` 是 cfg(test)
+    /// 的等价构造入口：它同样经 root context 建立 scoped child context 与 worker effect，
+    /// 不绕过 product 的 launch 事务（这里只需要一个真实 active child tree）。
+    fn register_active_child_for_quiesce(
+        components: &mut RuntimeComponents,
+        owner: &str,
+        turn_id: u64,
+        objective: &str,
+        shutdown_calls: Arc<AtomicUsize>,
+    ) {
+        let root_context = components
+            .agent_root_context_for_test()
+            .expect("child-capable Agent should own a root context");
+        let child_context = root_context
+            .child(
+                AgentContextOwner::try_new(owner).expect("quiesce child owner should validate"),
+                AgentChildCapabilityGrants::empty()
+                    .inherit_tools()
+                    .inherit_prompt(),
+            )
+            .expect("quiesce child context should attach");
+        components.register_child_agent_for_test(
+            AgentId::new(2),
+            AgentId::MAIN,
+            AgentTurnId::new(turn_id),
+            runtime_domain::agent::AgentTitle::resolve(
+                &runtime_domain::agent::AgentObjective::new(objective)
+                    .expect("objective should be valid"),
+                None,
+            )
+            .expect("title should resolve"),
+            child_context,
+            Box::new(ChildAcceptingRuntime {
+                shutdown_calls: Some(shutdown_calls),
+                ..ChildAcceptingRuntime::default()
+            }),
+        );
+    }
+
     #[test]
     fn runtime_reset_quiesces_child_tree_before_main_replacement() {
         let shutdown_calls = Arc::new(AtomicUsize::new(0));
@@ -4947,25 +5901,13 @@ mod tests {
         let mut options = options_with_provider();
         let mut components =
             RuntimeComponents::new_with_agent_runtime_factory(&mut options, factory).unwrap();
-        let request = AgentTurnRequest::from_conversation_request(
-            ConversationTurnRequest::new_user_text("local", "qwen3", "reset child"),
+        register_active_child_for_quiesce(
+            &mut components,
+            "reset-quiesce-child",
+            42,
+            "reset child",
+            Arc::clone(&shutdown_calls),
         );
-        let title = runtime_domain::agent::AgentTitle::resolve(
-            &runtime_domain::agent::AgentObjective::new("reset child").unwrap(),
-            None,
-        )
-        .unwrap();
-        components
-            .spawn_child_agent(
-                AgentId::MAIN,
-                AgentTurnId::new(42),
-                title,
-                AgentChildCapabilityGrants::empty()
-                    .inherit_tools()
-                    .inherit_prompt(),
-                request,
-            )
-            .unwrap();
 
         components
             .reset_after_clear(&options)
@@ -4992,25 +5934,13 @@ mod tests {
         let mut options = options_with_provider();
         let mut components =
             RuntimeComponents::new_with_agent_runtime_factory(&mut options, factory).unwrap();
-        let request = AgentTurnRequest::from_conversation_request(
-            ConversationTurnRequest::new_user_text("local", "qwen3", "revoked child"),
+        register_active_child_for_quiesce(
+            &mut components,
+            "revocation-quiesce-child",
+            43,
+            "revoked child",
+            Arc::clone(&shutdown_calls),
         );
-        let title = runtime_domain::agent::AgentTitle::resolve(
-            &runtime_domain::agent::AgentObjective::new("revoked child").unwrap(),
-            None,
-        )
-        .unwrap();
-        components
-            .spawn_child_agent(
-                AgentId::MAIN,
-                AgentTurnId::new(43),
-                title,
-                AgentChildCapabilityGrants::empty()
-                    .inherit_tools()
-                    .inherit_prompt(),
-                request,
-            )
-            .unwrap();
 
         components
             .with_lifecycle(|lifecycle, components| {
@@ -5046,25 +5976,13 @@ mod tests {
         let mut options = options_with_provider();
         let mut components =
             RuntimeComponents::new_with_agent_runtime_factory(&mut options, factory).unwrap();
-        let request = AgentTurnRequest::from_conversation_request(
-            ConversationTurnRequest::new_user_text("local", "qwen3", "replace child"),
+        register_active_child_for_quiesce(
+            &mut components,
+            "replacement-quiesce-child",
+            44,
+            "replace child",
+            Arc::clone(&shutdown_calls),
         );
-        let title = runtime_domain::agent::AgentTitle::resolve(
-            &runtime_domain::agent::AgentObjective::new("replace child").unwrap(),
-            None,
-        )
-        .unwrap();
-        components
-            .spawn_child_agent(
-                AgentId::MAIN,
-                AgentTurnId::new(44),
-                title,
-                AgentChildCapabilityGrants::empty()
-                    .inherit_tools()
-                    .inherit_prompt(),
-                request,
-            )
-            .unwrap();
         let replay = ReplayFixture::new(vec![AgentEventKind::TurnInterrupted]).unwrap();
 
         components

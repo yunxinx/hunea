@@ -677,6 +677,87 @@ pub struct AgentPreviewSnapshot {
     pub permission: Option<AgentPermissionRequest>,
 }
 
+/// `AgentObservationRequestId` 标识一次由调用方发起的 Agent observation 请求。
+///
+/// 对齐 `SessionLoadRequestId` 模式：由 TUI/调用方单调分配，runtime 只原样回显，
+/// 不复用 session load 的语义。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AgentObservationRequestId(u64);
+
+impl AgentObservationRequestId {
+    /// 从调用方维护的单调序列创建请求标识。
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// 返回调用方分配的原始数值。
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// 一次 per-agent observation 的聚合 delivery 视图。
+///
+/// transcript 与 quick preview 共用同一 observation 与 revision；TUI 的 transcript surface 与
+/// quick preview 都从同一 observation 消费，不建立第二个 observer。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentViewSnapshot {
+    pub observation_id: AgentObservationId,
+    pub generation: AgentRuntimeGeneration,
+    pub revision: AgentProjectionRevision,
+    pub transcript: AgentTranscriptSnapshot,
+    pub preview: AgentPreviewSnapshot,
+}
+
+/// child permission queue 的 delivery-safe 投影。
+///
+/// `Some` 表示该 agent 的 FIFO head 变化（Pending/Submitted），`None` 表示收敛或清空。
+/// 它独立于 observation 交付，保证 attention 事实在未打开任何 surface 时也能到达 TUI。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentPermissionUpdate {
+    pub agent_id: AgentId,
+    pub generation: AgentRuntimeGeneration,
+    pub request: Option<AgentPermissionRequest>,
+}
+
+/// observation 请求的 closed 拒绝分类；不携带 raw 错误正文。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentObservationRejection {
+    UnknownAgent,
+    StaleGeneration,
+    Duplicate,
+}
+
+/// Agent projection port 的 closed 事件集合。
+///
+/// 只包含 delivery-safe 投影事实；instructions、provider prompt、raw tool payload/result、
+/// raw error 与 streaming partial 不得进入任何 snapshot/delta。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentProjectionEvent {
+    AgentsOverviewSnapshotLoaded {
+        request_id: AgentObservationRequestId,
+        snapshot: AgentOverviewSnapshot,
+    },
+    AgentsOverviewUpdated {
+        delta: AgentOverviewDelta,
+    },
+    AgentViewSnapshotLoaded {
+        request_id: AgentObservationRequestId,
+        snapshot: AgentViewSnapshot,
+    },
+    /// 存活的 per-agent observation 在 revision 严格递增时收到的整快照更新。
+    AgentViewUpdated {
+        snapshot: AgentViewSnapshot,
+    },
+    AgentPermissionUpdated {
+        update: AgentPermissionUpdate,
+    },
+    AgentObservationRejected {
+        request_id: AgentObservationRequestId,
+        reason: AgentObservationRejection,
+    },
+}
+
 fn first_non_empty_logical_content(content: &str) -> Option<&str> {
     content
         .split(['\n', '\r', '\u{2028}', '\u{2029}'])
@@ -923,5 +1004,132 @@ mod tests {
         ] {
             assert!(!debug.contains(secret), "leaked {secret}");
         }
+    }
+
+    fn permission_update_fixture() -> AgentPermissionUpdate {
+        AgentPermissionUpdate {
+            agent_id: AgentId::new(41),
+            generation: AgentRuntimeGeneration::new(43),
+            request: Some(AgentPermissionRequest {
+                target: AgentPermissionTarget {
+                    agent_id: AgentId::new(41),
+                    turn_id: AgentTurnId::new(42),
+                    generation: AgentRuntimeGeneration::new(43),
+                    runtime_target: RuntimeTarget::provider("secret-provider", "secret-model"),
+                    request_id: "secret-request".to_string(),
+                },
+                request: RuntimePermissionRequest::new(
+                    "secret-request",
+                    Some("secret permission body".to_string()),
+                    vec![crate::session::RuntimePermissionOption::new(
+                        "secret-option-id",
+                        "secret option body",
+                        crate::session::RuntimePermissionOptionKind::AllowOnce,
+                    )],
+                ),
+                state: AgentPermissionState::Pending,
+                occurred_at_ms: 1,
+            }),
+        }
+    }
+
+    #[test]
+    fn permission_update_debug_omits_permission_bodies() {
+        let debug = format!("{:?}", permission_update_fixture());
+
+        for secret in [
+            "secret-provider",
+            "secret-model",
+            "secret-request",
+            "secret-option-id",
+            "secret permission body",
+            "secret option body",
+        ] {
+            assert!(!debug.contains(secret), "leaked {secret}");
+        }
+    }
+
+    #[test]
+    fn projection_events_echo_request_id_and_classify_rejections() {
+        let request_id = AgentObservationRequestId::new(7);
+        assert_eq!(request_id.get(), 7);
+
+        let loaded = AgentProjectionEvent::AgentsOverviewSnapshotLoaded {
+            request_id,
+            snapshot: AgentOverviewSnapshot {
+                observation_id: AgentObservationId::new(1),
+                generation: AgentRuntimeGeneration::new(2),
+                revision: AgentProjectionRevision::new(3),
+                rows: Vec::new(),
+            },
+        };
+        let AgentProjectionEvent::AgentsOverviewSnapshotLoaded {
+            request_id: echoed, ..
+        } = &loaded
+        else {
+            panic!("overview snapshot event should carry the caller request id");
+        };
+        assert_eq!(*echoed, request_id);
+
+        let rejected = AgentProjectionEvent::AgentObservationRejected {
+            request_id,
+            reason: AgentObservationRejection::UnknownAgent,
+        };
+        let AgentProjectionEvent::AgentObservationRejected { reason, .. } = &rejected else {
+            panic!("observation rejection should stay typed");
+        };
+        assert_eq!(*reason, AgentObservationRejection::UnknownAgent);
+        assert!(!format!("{rejected:?}").contains("error"));
+    }
+
+    #[test]
+    fn view_snapshot_binds_transcript_and_preview_to_one_observation() {
+        let observation_id = AgentObservationId::new(9);
+        let generation = AgentRuntimeGeneration::new(2);
+        let revision = AgentProjectionRevision::new(4);
+        let agent_id = AgentId::new(41);
+        let snapshot = AgentViewSnapshot {
+            observation_id,
+            generation,
+            revision,
+            transcript: AgentTranscriptSnapshot {
+                observation_id,
+                generation,
+                revision,
+                agent_id,
+                title: AgentTitle::resolve(&objective("committed task"), None)
+                    .expect("title should resolve"),
+                status: AgentProjectionStatus::Completed,
+                items: vec![
+                    AgentTranscriptItem::User {
+                        content: "committed task".to_string(),
+                    },
+                    AgentTranscriptItem::Assistant {
+                        content: "committed answer".to_string(),
+                    },
+                ],
+            },
+            preview: AgentPreviewSnapshot {
+                generation,
+                revision,
+                agent_id,
+                title: AgentTitle::resolve(&objective("committed task"), None)
+                    .expect("title should resolve"),
+                status: AgentProjectionStatus::Completed,
+                latest_activity: AgentActivitySummary::Idle,
+                elapsed_ms: Some(10),
+                latest_committed_answer: Some("committed answer".to_string()),
+                permission: None,
+            },
+        };
+
+        assert_eq!(snapshot.transcript.observation_id, observation_id);
+        assert_eq!(snapshot.preview.revision, revision);
+        assert_eq!(
+            snapshot.transcript.items.last(),
+            Some(&AgentTranscriptItem::Assistant {
+                content: "committed answer".to_string()
+            })
+        );
     }
 }

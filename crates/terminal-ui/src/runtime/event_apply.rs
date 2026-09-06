@@ -311,6 +311,9 @@ impl RuntimeEventApply for Model {
                     self.show_toast(ToastSeverity::Error, format!("Runtime stopped: {message}"));
                 }
             }
+            // Agent projection ports 尚未接入任何 TUI surface；本阶段只保证事件被无害吸收，
+            // 不渲染、不改变会话状态。
+            RuntimeEvent::AgentProjection(_) => {}
         }
     }
 }

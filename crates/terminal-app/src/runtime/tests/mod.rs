@@ -1,5 +1,6 @@
 mod support;
 
+mod agent_projection;
 mod branch_tree;
 mod context_budget;
 mod conversation;

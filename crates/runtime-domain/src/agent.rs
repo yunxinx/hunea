@@ -25,11 +25,12 @@ pub use child::{
     AgentChildCompletion, AgentGroupCompletion, AgentInstructions, AgentLaunchBatch,
     AgentLaunchChildSnapshot, AgentLaunchGroupId, AgentLaunchInputError, AgentLaunchReceipt,
     AgentLaunchRequest, AgentLaunchSnapshot, AgentObjective, AgentObjectiveSummary,
-    AgentObservationId, AgentOutcome, AgentOutcomeSnapshot, AgentOutcomeSummary,
-    AgentOverviewDelta, AgentOverviewDeltaKind, AgentOverviewRow, AgentOverviewSnapshot,
-    AgentPermissionRequest, AgentPermissionState, AgentPermissionTarget, AgentPreviewSnapshot,
+    AgentObservationId, AgentObservationRejection, AgentObservationRequestId, AgentOutcome,
+    AgentOutcomeSnapshot, AgentOutcomeSummary, AgentOverviewDelta, AgentOverviewDeltaKind,
+    AgentOverviewRow, AgentOverviewSnapshot, AgentPermissionRequest, AgentPermissionState,
+    AgentPermissionTarget, AgentPermissionUpdate, AgentPreviewSnapshot, AgentProjectionEvent,
     AgentProjectionRevision, AgentProjectionStatus, AgentRuntimeGeneration, AgentTitle,
-    AgentTranscriptItem, AgentTranscriptSnapshot,
+    AgentTranscriptItem, AgentTranscriptSnapshot, AgentViewSnapshot,
 };
 
 /// `AgentId` 标识一个由 runtime host 管理的 Agent handle。

@@ -5,6 +5,7 @@ use super::{
     SessionBranchTreePayload, SessionLoadRequestId, SessionPickerRow, SessionPreviewPayload,
     SessionResumePayload, SessionTreePayload, context_budget::ContextBudgetLoadErrorPayload,
 };
+use crate::agent::AgentProjectionEvent;
 use crate::context_budget::{ContextBudgetSnapshot, ContextWindowUsage};
 use crate::prompt_assembly::PromptAssemblyManagerSnapshot;
 
@@ -189,6 +190,12 @@ pub enum RuntimeEvent {
         target: RuntimeTarget,
         message: Option<String>,
     },
+    /// Agent projection product port 的 closed umbrella variant。
+    ///
+    /// Agent 事实由 typed identity（observation id/agent id/generation）携带，
+    /// 不复用 main stream target 语义。snapshot payload 较大，Box 化避免
+    /// 撑大整个 `RuntimeEvent` 的传递尺寸。
+    AgentProjection(Box<AgentProjectionEvent>),
 }
 
 impl RuntimeEvent {
@@ -236,7 +243,8 @@ impl RuntimeEvent {
             | Self::PromptAssemblyUpdated { .. }
             | Self::PromptAssemblyUpdateFailed { .. }
             | Self::ContextBudgetSnapshotLoaded { .. }
-            | Self::ContextBudgetSnapshotLoadFailed { .. } => None,
+            | Self::ContextBudgetSnapshotLoadFailed { .. }
+            | Self::AgentProjection(_) => None,
         }
     }
 }

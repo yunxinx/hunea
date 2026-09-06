@@ -539,3 +539,40 @@ fn session_resume_replay_restores_bottom_follow() {
         "session replay must rebuild the transcript pinned to bottom"
     );
 }
+
+#[test]
+fn agent_projection_events_are_absorbed_without_touching_session_state() {
+    use runtime_domain::agent::{
+        AgentObservationId, AgentObservationRejection, AgentObservationRequestId,
+        AgentOverviewSnapshot, AgentProjectionEvent, AgentProjectionRevision,
+        AgentRuntimeGeneration,
+    };
+
+    let mut model = scrollable_model();
+    let transcript_before = model.transcript_plain_items().join("\n");
+    let viewport_y = model.document_runtime.viewport_y;
+
+    let projection_events = [
+        AgentProjectionEvent::AgentsOverviewSnapshotLoaded {
+            request_id: AgentObservationRequestId::new(1),
+            snapshot: AgentOverviewSnapshot {
+                observation_id: AgentObservationId::new(1),
+                generation: AgentRuntimeGeneration::new(1),
+                revision: AgentProjectionRevision::new(1),
+                rows: Vec::new(),
+            },
+        },
+        AgentProjectionEvent::AgentObservationRejected {
+            request_id: AgentObservationRequestId::new(2),
+            reason: AgentObservationRejection::UnknownAgent,
+        },
+    ];
+
+    for projection_event in projection_events {
+        model.apply_runtime_event(RuntimeEvent::AgentProjection(Box::new(projection_event)));
+    }
+
+    // TUI surface 尚未接入：事件被无害吸收，transcript/viewport 状态不变。
+    assert_eq!(model.transcript_plain_items().join("\n"), transcript_before);
+    assert_eq!(model.document_runtime.viewport_y, viewport_y);
+}

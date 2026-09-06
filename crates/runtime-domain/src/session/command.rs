@@ -1,4 +1,8 @@
 use super::{ConversationTurnRequest, MessageHistoryEntryId, RuntimeTarget, SessionLoadRequestId};
+use crate::agent::{
+    AgentId, AgentObservationId, AgentObservationRequestId, AgentPermissionTarget,
+    AgentRuntimeGeneration,
+};
 
 /// `RuntimeCommand` 描述 TUI 向交互式 runtime 发出的统一命令。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,6 +21,29 @@ pub enum RuntimeCommand {
         target: Option<RuntimeTarget>,
         request_id: String,
         option_id: Option<String>,
+    },
+    ObserveAgents {
+        request_id: AgentObservationRequestId,
+    },
+    StopObservingAgents {
+        observation_id: AgentObservationId,
+        generation: AgentRuntimeGeneration,
+    },
+    ObserveAgentTranscript {
+        request_id: AgentObservationRequestId,
+        agent_id: AgentId,
+    },
+    StopObservingAgentTranscript {
+        observation_id: AgentObservationId,
+        generation: AgentRuntimeGeneration,
+    },
+    RespondAgentPermission {
+        target: AgentPermissionTarget,
+        option_id: Option<String>,
+    },
+    StopAgent {
+        agent_id: AgentId,
+        generation: AgentRuntimeGeneration,
     },
     ListSessions,
     LoadSessionPreview {
@@ -110,6 +137,12 @@ impl RuntimeCommand {
             } => Some(target),
             Self::Interrupt { target: None }
             | Self::RespondPermission { target: None, .. }
+            | Self::ObserveAgents { .. }
+            | Self::StopObservingAgents { .. }
+            | Self::ObserveAgentTranscript { .. }
+            | Self::StopObservingAgentTranscript { .. }
+            | Self::RespondAgentPermission { .. }
+            | Self::StopAgent { .. }
             | Self::TruncateConversation { .. }
             | Self::ListSessions
             | Self::LoadSessionPreview { .. }

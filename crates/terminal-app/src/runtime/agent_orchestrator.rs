@@ -2,7 +2,7 @@
 
 use session_store::SessionPort;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{Arc, Mutex},
 };
 use tokio::sync::oneshot;
@@ -12,12 +12,17 @@ use runtime_domain::agent::{
     AgentActivitySummary, AgentChildCompletion, AgentCommand, AgentCommandReceipt, AgentEvent,
     AgentEventKind, AgentGroupCompletion, AgentId, AgentLaunchBatch, AgentLaunchChildSnapshot,
     AgentLaunchGroupId, AgentLaunchReceipt, AgentObjectiveSummary, AgentObservationId,
-    AgentOutcome, AgentOutcomeSummary, AgentOverviewRow, AgentOverviewSnapshot,
-    AgentProjectionRevision, AgentProjectionStatus, AgentRuntimeError, AgentRuntimeGeneration,
-    AgentTitle, AgentTurnId, AgentTurnRequest,
+    AgentObservationRejection, AgentObservationRequestId, AgentOutcome, AgentOutcomeSummary,
+    AgentOverviewDelta, AgentOverviewDeltaKind, AgentOverviewRow, AgentOverviewSnapshot,
+    AgentPermissionRequest, AgentPermissionState, AgentPermissionTarget, AgentPermissionUpdate,
+    AgentPreviewSnapshot, AgentProjectionEvent, AgentProjectionRevision, AgentProjectionStatus,
+    AgentRuntimeError, AgentRuntimeGeneration, AgentTitle, AgentTranscriptItem,
+    AgentTranscriptSnapshot, AgentTurnId, AgentTurnRequest, AgentViewSnapshot,
 };
 use runtime_domain::session::RuntimeTarget;
-use runtime_domain::session::{ConversationTurnRequest, TranscriptReplayItem};
+use runtime_domain::session::{
+    ConversationTurnRequest, RuntimeToolActivityContent, TranscriptReplayItem,
+};
 
 use super::agent::{
     AgentChildRuntimeLeases, AgentChildRuntimeStaticGrants, AgentRuntimeActivationGrants,
@@ -44,6 +49,15 @@ struct ChildRuntimeHandle {
 struct PendingChildCleanup {
     context: AgentCapabilityContext,
     runtime: ChildRuntimeHandle,
+}
+
+/// 单个 child 在 disposal 收敛循环中的结果；`projection_changed` 避免重试时重复发布。
+enum ChildDisposal {
+    Blocked {
+        projection_changed: bool,
+        reason: &'static str,
+    },
+    Converged(AgentId),
 }
 
 impl ChildRuntimeHandle {
@@ -127,6 +141,12 @@ struct ChildAgentRecord {
     status: AgentProjectionStatus,
     latest_activity: AgentActivitySummary,
     latest_committed_answer: Option<String>,
+    /// committed-only transcript projection；streaming partial 与 raw tool payload 永不进入。
+    transcript: Vec<AgentTranscriptItem>,
+    /// tool activity id -> transcript item index，用于把 Started/Updated 折叠到同一 item。
+    transcript_tool_items: BTreeMap<String, usize>,
+    /// authoritative permission FIFO；head 是唯一可交互的 unresolved request。
+    pending_permissions: VecDeque<AgentPermissionRequest>,
     terminal_outcome_seen: bool,
     outcome_persisted: bool,
     pending_outcome: Option<runtime_domain::agent::AgentOutcomeSnapshot>,
@@ -162,6 +182,9 @@ impl ChildAgentRecord {
             status: AgentProjectionStatus::Pending,
             latest_activity: AgentActivitySummary::Preparing,
             latest_committed_answer: None,
+            transcript: Vec::new(),
+            transcript_tool_items: BTreeMap::new(),
+            pending_permissions: VecDeque::new(),
             terminal_outcome_seen: false,
             outcome_persisted: false,
             pending_outcome: None,
@@ -187,6 +210,46 @@ impl ChildAgentRecord {
     }
 }
 
+/// observation 是纯 projection state：打开/关闭都不改变 child authority、permission FIFO
+/// 或 replay facts，失效只需移除注册，不需要 EffectScope inverse。
+struct Observation {
+    generation: AgentRuntimeGeneration,
+    kind: ObservationKind,
+    /// 该 observation 已交付的最高 revision；新 revision 必须严格大于它才发布。
+    delivered_revision: AgentProjectionRevision,
+}
+
+enum ObservationKind {
+    Overview,
+    AgentView { agent_id: AgentId },
+}
+
+/// typed Agent product command 的 closed 拒绝分类。
+///
+/// 错误正文是固定分类文案；provider error、cleanup source 等不跨越 command boundary。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AgentProductCommandRejection {
+    UnknownAgent,
+    StaleGeneration,
+    UnknownRequest,
+    InvalidOption,
+    AlreadySubmitted,
+    CleanupPending,
+}
+
+impl AgentProductCommandRejection {
+    pub(super) fn closed_message(self) -> &'static str {
+        match self {
+            Self::UnknownAgent => "Unknown child Agent",
+            Self::StaleGeneration => "Child Agent generation is stale",
+            Self::UnknownRequest => "Unknown child Agent permission request",
+            Self::InvalidOption => "Invalid child Agent permission option",
+            Self::AlreadySubmitted => "Child Agent permission response is already submitted",
+            Self::CleanupPending => "Child Agent cleanup is pending",
+        }
+    }
+}
+
 /// `AgentOrchestrator` 是 active Agent plugin generation 与全部 logical Agent 的唯一 owner。
 ///
 /// 当前 slice 先把既有 main adapter 收进该边界；child records、factory 与 scope tree 后续只会
@@ -201,6 +264,10 @@ pub(super) struct AgentOrchestrator {
     is_main_quiescent: bool,
     children: BTreeMap<AgentId, ChildAgentRecord>,
     children_by_parent: BTreeMap<AgentId, BTreeSet<AgentId>>,
+    /// 存活的 projection observer；generation mismatch 的 entry 不再发布任何 delta。
+    observations: BTreeMap<AgentObservationId, Observation>,
+    /// 待 coordinator 在 runtime event consumer 边界 flush 的 projection facts。
+    projection_events: Vec<AgentProjectionEvent>,
     pending_context_cleanups: Vec<AgentCapabilityContext>,
     pending_child_cleanups: Vec<PendingChildCleanup>,
     session_port: Option<Arc<dyn SessionPort>>,
@@ -236,6 +303,8 @@ impl AgentOrchestrator {
             is_main_quiescent: true,
             children: BTreeMap::new(),
             children_by_parent: BTreeMap::new(),
+            observations: BTreeMap::new(),
+            projection_events: Vec::new(),
             pending_context_cleanups: Vec::new(),
             pending_child_cleanups: Vec::new(),
             session_port: None,
@@ -320,6 +389,8 @@ impl AgentOrchestrator {
         self.root_context = None;
         self.child_leases = None;
         self.fail_group_waiters(SpawnAgentsFailure::Unavailable);
+        // generation 切换使全部 observation 失效；旧 observation id 不再收到任何 delta。
+        self.observations.clear();
         self.children.clear();
         self.children_by_parent.clear();
         self.projection_revision = 0;
@@ -396,7 +467,6 @@ impl AgentOrchestrator {
     }
 
     /// 分发一个已注册 child 的命令；main command 必须继续经过 `dispatch_main`。
-    #[allow(dead_code)]
     pub(super) fn dispatch_child(
         &mut self,
         command: AgentCommand,
@@ -425,43 +495,17 @@ impl AgentOrchestrator {
     ///
     /// 未知 Agent、错误 turn、旧 generation 或 terminal 后的 late event 都被丢弃；它们不能
     /// 进入 main mapper，也不能改变任何 child projection。
-    #[allow(dead_code)]
     pub(super) fn drain_child_events(&mut self) -> Vec<AgentEvent> {
         self.reconcile_revoked_children();
         let child_ids = self.children.keys().copied().collect::<Vec<_>>();
         let mut accepted = Vec::new();
         for agent_id in child_ids {
-            let Some(record) = self.children.get_mut(&agent_id) else {
-                continue;
+            let events = match self.children.get_mut(&agent_id) {
+                Some(record) => record.runtime.drain_events(),
+                None => continue,
             };
-            let events = record.runtime.drain_events();
             for event in events {
-                if event.agent_id != agent_id
-                    || event.turn_id != record.turn_id
-                    || record.generation != self.generation
-                    || record.terminal_outcome_seen
-                    || !record.admission_open()
-                    || record
-                        .target
-                        .as_ref()
-                        .is_some_and(|target| target != &event.target)
-                    || record
-                        .context
-                        .as_ref()
-                        .is_none_or(|context| !context.is_current())
-                {
-                    continue;
-                }
-                let is_terminal = event.kind.is_terminal();
-                apply_child_projection(record, &event.kind);
-                if is_terminal {
-                    record.terminal_outcome_seen = true;
-                    record.pending_terminal_event = Some(safe_child_terminal_event(event));
-                    freeze_pending_outcome(agent_id, record);
-                } else {
-                    accepted.push(event);
-                }
-                self.projection_revision = self.projection_revision.saturating_add(1);
+                self.accept_child_event(agent_id, event, &mut accepted);
             }
         }
         self.release_terminal_authority();
@@ -476,6 +520,51 @@ impl AgentOrchestrator {
         }
         self.try_complete_group_waiters();
         accepted
+    }
+
+    /// 通过 identity/turn/generation/admission/terminal gate 接受单个 child fact，并推进
+    /// authoritative record、transcript、permission FIFO 与 observation 投影。
+    fn accept_child_event(
+        &mut self,
+        agent_id: AgentId,
+        event: AgentEvent,
+        accepted: &mut Vec<AgentEvent>,
+    ) {
+        let is_terminal = event.kind.is_terminal();
+        let permission_changed;
+        {
+            let Some(record) = self.children.get_mut(&agent_id) else {
+                return;
+            };
+            if event.agent_id != agent_id
+                || event.turn_id != record.turn_id
+                || record.generation != self.generation
+                || record.terminal_outcome_seen
+                || !record.admission_open()
+                || record
+                    .target
+                    .as_ref()
+                    .is_some_and(|target| target != &event.target)
+                || record
+                    .context
+                    .as_ref()
+                    .is_none_or(|context| !context.is_current())
+            {
+                return;
+            }
+            apply_child_projection(record, &event.kind);
+            permission_changed = apply_child_permission_fact(agent_id, record, &event);
+            apply_child_transcript_fact(record, &event.kind);
+            if is_terminal {
+                record.terminal_outcome_seen = true;
+                record.pending_terminal_event = Some(safe_child_terminal_event(event));
+                freeze_pending_outcome(agent_id, record);
+            } else {
+                accepted.push(event);
+            }
+        }
+        self.projection_revision = self.projection_revision.saturating_add(1);
+        self.publish_child_facts(agent_id, permission_changed);
     }
 
     pub(super) fn activate_main(
@@ -844,6 +933,10 @@ impl AgentOrchestrator {
             record.launch_group_id = Some(group_id);
             record.parent_turn_id = Some(parent_turn_id);
             record.launch_objective = Some(objective_summary);
+            // launch 边界冻结 delivery-safe user objective；instructions 不进入 transcript。
+            record.transcript.push(AgentTranscriptItem::User {
+                content: request.objective().as_str().to_string(),
+            });
             staged.push((child_id, record, turn_request));
         }
 
@@ -1075,6 +1168,7 @@ impl AgentOrchestrator {
             .insert(agent_id);
         self.children.insert(agent_id, record);
         self.projection_revision = self.projection_revision.saturating_add(1);
+        self.publish_child_facts(agent_id, false);
     }
 
     fn active_child_count(&self) -> usize {
@@ -1084,22 +1178,304 @@ impl AgentOrchestrator {
             .count()
     }
 
-    /// 创建一个与当前 generation 绑定的 overview snapshot。
+    /// 建立一个 overview observation：立即生成 snapshot 并 queue 对应 projection event。
     ///
-    /// 该方法只投影 delivery-safe record fields；observer 增量与 disposal lease 属于后续
-    /// runtime command slice，不能让 UI 直接读取 registry。
-    #[allow(dead_code)]
-    pub(super) fn overview_snapshot(&mut self) -> AgentOverviewSnapshot {
+    /// observation 是纯 projection state；打开它不改变 child authority、permission FIFO
+    /// 或 replay facts。
+    pub(super) fn observe_agents(&mut self, request_id: AgentObservationRequestId) {
         self.reconcile_revoked_children();
         let observation_id = AgentObservationId::new(self.next_observation_id);
         self.next_observation_id = self.next_observation_id.saturating_add(1);
-        self.overview_snapshot_for(
+        let snapshot = self.overview_snapshot_for(
             observation_id,
             runtime_domain::time::unix_timestamp_ms().unwrap_or(0),
-        )
+        );
+        self.observations.insert(
+            observation_id,
+            Observation {
+                generation: self.generation,
+                kind: ObservationKind::Overview,
+                delivered_revision: snapshot.revision,
+            },
+        );
+        self.projection_events
+            .push(AgentProjectionEvent::AgentsOverviewSnapshotLoaded {
+                request_id,
+                snapshot,
+            });
     }
 
-    #[allow(dead_code)]
+    /// 建立一个 per-agent observation：transcript 与 preview 共用同一 observation 与 revision。
+    ///
+    /// 未知 Agent 或 stale generation 一律 fail closed，queue closed rejection。
+    pub(super) fn observe_agent_transcript(
+        &mut self,
+        request_id: AgentObservationRequestId,
+        agent_id: AgentId,
+    ) {
+        self.reconcile_revoked_children();
+        let record = self
+            .children
+            .get(&agent_id)
+            .filter(|record| record.generation == self.generation);
+        let Some(record) = record else {
+            self.projection_events
+                .push(AgentProjectionEvent::AgentObservationRejected {
+                    request_id,
+                    reason: AgentObservationRejection::UnknownAgent,
+                });
+            return;
+        };
+        let observation_id = AgentObservationId::new(self.next_observation_id);
+        self.next_observation_id = self.next_observation_id.saturating_add(1);
+        let snapshot = agent_view_snapshot_for_child(
+            observation_id,
+            agent_id,
+            record,
+            self.generation,
+            AgentProjectionRevision::new(self.projection_revision),
+            runtime_domain::time::unix_timestamp_ms().unwrap_or(0),
+        );
+        self.observations.insert(
+            observation_id,
+            Observation {
+                generation: self.generation,
+                kind: ObservationKind::AgentView { agent_id },
+                delivered_revision: snapshot.revision,
+            },
+        );
+        self.projection_events
+            .push(AgentProjectionEvent::AgentViewSnapshotLoaded {
+                request_id,
+                snapshot,
+            });
+    }
+
+    /// 撤销一个 observation；id/generation mismatch 静默丢弃（幂等），无副作用需要撤销。
+    pub(super) fn stop_observation(
+        &mut self,
+        observation_id: AgentObservationId,
+        generation: AgentRuntimeGeneration,
+    ) {
+        if self
+            .observations
+            .get(&observation_id)
+            .is_some_and(|observation| observation.generation == generation)
+        {
+            self.observations.remove(&observation_id);
+        }
+    }
+
+    /// 取出已 queue 的 projection facts；由 coordinator 在 runtime event consumer 边界 flush。
+    pub(super) fn drain_projection_events(&mut self) -> Vec<AgentProjectionEvent> {
+        std::mem::take(&mut self.projection_events)
+    }
+
+    /// typed child permission response 的完整 identity/option 校验与路由。
+    ///
+    /// 校验或 dispatch 失败返回 closed rejection，entry 状态保持不变；成功 receipt 才把
+    /// entry 置为 `Submitted` 并投影 FIFO head。
+    pub(super) fn respond_agent_permission(
+        &mut self,
+        target: AgentPermissionTarget,
+        option_id: Option<String>,
+    ) -> Result<(), AgentProductCommandRejection> {
+        if target.generation != self.generation {
+            return Err(AgentProductCommandRejection::StaleGeneration);
+        }
+        self.reconcile_revoked_children();
+        {
+            let Some(record) = self.children.get(&target.agent_id) else {
+                return Err(AgentProductCommandRejection::UnknownAgent);
+            };
+            if record.generation != self.generation
+                || record.turn_id != target.turn_id
+                || !record.admission_open()
+                || record
+                    .target
+                    .as_ref()
+                    .is_some_and(|record_target| *record_target != target.runtime_target)
+            {
+                return Err(AgentProductCommandRejection::UnknownAgent);
+            }
+            // child preview 侧永远显式提交 runtime-issued option；`None` 是封闭语义，不是 reject。
+            let Some(option_id) = option_id.as_deref() else {
+                return Err(AgentProductCommandRejection::InvalidOption);
+            };
+            let Some(entry) = record
+                .pending_permissions
+                .iter()
+                .find(|entry| entry.target.request_id == target.request_id)
+            else {
+                return Err(AgentProductCommandRejection::UnknownRequest);
+            };
+            if entry.state == AgentPermissionState::Submitted {
+                return Err(AgentProductCommandRejection::AlreadySubmitted);
+            }
+            if !entry
+                .request
+                .options
+                .iter()
+                .any(|option| option.option_id == option_id)
+            {
+                return Err(AgentProductCommandRejection::InvalidOption);
+            }
+        }
+        let receipt = self.dispatch_child(AgentCommand::RespondPermission {
+            agent_id: target.agent_id,
+            target: Some(target.runtime_target.clone()),
+            request_id: target.request_id.clone(),
+            option_id,
+        });
+        if let Err(error) = receipt {
+            return Err(match error {
+                AgentRuntimeError::UnknownAgent => AgentProductCommandRejection::UnknownAgent,
+                AgentRuntimeError::Busy => AgentProductCommandRejection::AlreadySubmitted,
+                _ => AgentProductCommandRejection::CleanupPending,
+            });
+        }
+        let head = {
+            let Some(record) = self.children.get_mut(&target.agent_id) else {
+                return Err(AgentProductCommandRejection::UnknownAgent);
+            };
+            if let Some(entry) = record
+                .pending_permissions
+                .iter_mut()
+                .find(|entry| entry.target.request_id == target.request_id)
+            {
+                entry.state = AgentPermissionState::Submitted;
+            }
+            record.pending_permissions.front().cloned()
+        };
+        self.projection_events
+            .push(AgentProjectionEvent::AgentPermissionUpdated {
+                update: AgentPermissionUpdate {
+                    agent_id: target.agent_id,
+                    generation: self.generation,
+                    request: head,
+                },
+            });
+        Ok(())
+    }
+
+    /// typed subtree stop：generation 校验后复用既有 descendants-first `stop_child`。
+    ///
+    /// main `Interrupt` 语义保持分离；`AgentId::MAIN` 一律 closed 拒绝。
+    pub(super) fn stop_agent(
+        &mut self,
+        agent_id: AgentId,
+        generation: AgentRuntimeGeneration,
+    ) -> Result<(), AgentProductCommandRejection> {
+        if generation != self.generation {
+            return Err(AgentProductCommandRejection::StaleGeneration);
+        }
+        if agent_id == AgentId::MAIN || !self.children.contains_key(&agent_id) {
+            return Err(AgentProductCommandRejection::UnknownAgent);
+        }
+        self.stop_child(agent_id)
+            .map_err(|_| AgentProductCommandRejection::CleanupPending)
+    }
+
+    /// 把某个 child 的最新投影发布给存活的 observation；permission 变化独立于 observation 交付。
+    fn publish_child_facts(&mut self, agent_id: AgentId, permission_changed: bool) {
+        let revision = AgentProjectionRevision::new(self.projection_revision);
+        let now_ms = runtime_domain::time::unix_timestamp_ms().unwrap_or(0);
+        let Some(record) = self.children.get(&agent_id) else {
+            return;
+        };
+        let row = overview_row_for_child(&agent_id, record, now_ms);
+        for (observation_id, observation) in self.observations.iter_mut() {
+            if observation.generation != self.generation
+                || observation.delivered_revision >= revision
+            {
+                continue;
+            }
+            match observation.kind {
+                ObservationKind::Overview => {
+                    self.projection_events
+                        .push(AgentProjectionEvent::AgentsOverviewUpdated {
+                            delta: AgentOverviewDelta {
+                                observation_id: *observation_id,
+                                generation: self.generation,
+                                revision,
+                                kind: AgentOverviewDeltaKind::Upsert(row.clone()),
+                            },
+                        });
+                    observation.delivered_revision = revision;
+                }
+                ObservationKind::AgentView {
+                    agent_id: observed_agent_id,
+                } if observed_agent_id == agent_id => {
+                    let snapshot = agent_view_snapshot_for_child(
+                        *observation_id,
+                        agent_id,
+                        record,
+                        self.generation,
+                        revision,
+                        now_ms,
+                    );
+                    self.projection_events
+                        .push(AgentProjectionEvent::AgentViewUpdated { snapshot });
+                    observation.delivered_revision = revision;
+                }
+                _ => {}
+            }
+        }
+        if permission_changed {
+            let update = AgentPermissionUpdate {
+                agent_id,
+                generation: self.generation,
+                request: record.pending_permissions.front().cloned(),
+            };
+            self.projection_events
+                .push(AgentProjectionEvent::AgentPermissionUpdated { update });
+        }
+    }
+
+    /// child record 从 registry 移除后发布 Remove delta，并让绑定该 child 的
+    /// per-agent observation 一并失效（fail closed，不再有后续 snapshot）。
+    fn publish_overview_remove(&mut self, agent_id: AgentId) {
+        let revision = AgentProjectionRevision::new(self.projection_revision);
+        for (observation_id, observation) in self.observations.iter_mut() {
+            if observation.generation != self.generation
+                || observation.delivered_revision >= revision
+                || !matches!(observation.kind, ObservationKind::Overview)
+            {
+                continue;
+            }
+            self.projection_events
+                .push(AgentProjectionEvent::AgentsOverviewUpdated {
+                    delta: AgentOverviewDelta {
+                        observation_id: *observation_id,
+                        generation: self.generation,
+                        revision,
+                        kind: AgentOverviewDeltaKind::Remove { agent_id },
+                    },
+                });
+            observation.delivered_revision = revision;
+        }
+        self.observations.retain(|_, observation| {
+            !matches!(
+                observation.kind,
+                ObservationKind::AgentView {
+                    agent_id: observed_agent_id
+                } if observed_agent_id == agent_id
+            )
+        });
+    }
+
+    /// permission queue 被清空时投影 `AgentPermissionUpdated(None)`；与 observation 无关。
+    fn queue_permission_cleared(&mut self, agent_id: AgentId) {
+        self.projection_events
+            .push(AgentProjectionEvent::AgentPermissionUpdated {
+                update: AgentPermissionUpdate {
+                    agent_id,
+                    generation: self.generation,
+                    request: None,
+                },
+            });
+    }
+
     fn overview_snapshot_for(
         &self,
         observation_id: AgentObservationId,
@@ -1108,16 +1484,7 @@ impl AgentOrchestrator {
         let rows = self
             .children
             .iter()
-            .map(|(agent_id, record)| AgentOverviewRow {
-                agent_id: *agent_id,
-                title: record.title.clone(),
-                status: record.status,
-                latest_activity: record.latest_activity.clone(),
-                elapsed_ms: (record.started_at_ms > 0 && now_ms >= record.started_at_ms)
-                    .then_some((now_ms - record.started_at_ms) as u64),
-                tool_uses: (record.tool_uses > 0).then_some(record.tool_uses),
-                token_usage: (record.token_usage > 0).then_some(record.token_usage),
-            })
+            .map(|(agent_id, record)| overview_row_for_child(agent_id, record, now_ms))
             .collect();
         AgentOverviewSnapshot {
             observation_id,
@@ -1128,7 +1495,6 @@ impl AgentOrchestrator {
     }
 
     /// Stop 一个 child subtree；该操作不会影响 parent 或 sibling。
-    #[allow(dead_code)]
     pub(super) fn stop_child(&mut self, agent_id: AgentId) -> Result<(), AgentRuntimeError> {
         if !self.children.contains_key(&agent_id) {
             return Err(AgentRuntimeError::UnknownAgent);
@@ -1147,6 +1513,8 @@ impl AgentOrchestrator {
     pub(super) fn dispose_children_for_session_transition(
         &mut self,
     ) -> Result<(), AgentRuntimeError> {
+        // observation 是 session-bound projection；session 切换后一律失效。
+        self.observations.clear();
         let result = self.dispose_children();
         self.persist_terminal_outcomes();
         result
@@ -1187,7 +1555,6 @@ impl AgentOrchestrator {
         ids
     }
 
-    #[allow(dead_code)]
     fn parent_context(
         &self,
         parent_agent_id: AgentId,
@@ -1294,6 +1661,11 @@ impl AgentOrchestrator {
     }
 
     #[cfg(test)]
+    pub(super) fn observation_count(&self) -> usize {
+        self.observations.len()
+    }
+
+    #[cfg(test)]
     pub(super) fn register_child_for_test(
         &mut self,
         agent_id: AgentId,
@@ -1326,6 +1698,7 @@ impl AgentOrchestrator {
             context.begin_disposal();
         }
         self.fail_group_waiters(SpawnAgentsFailure::Unavailable);
+        self.observations.clear();
         let child_result = self.dispose_children();
         let runtime_result = self.main_runtime.suspend();
         if runtime_result.is_ok() {
@@ -1357,6 +1730,7 @@ impl AgentOrchestrator {
             context.begin_disposal();
         }
         self.fail_group_waiters(SpawnAgentsFailure::Unavailable);
+        self.observations.clear();
         let child_result = self.dispose_children();
         let runtime_result = self.main_runtime.shutdown();
         if runtime_result.is_ok() {
@@ -1405,7 +1779,12 @@ impl AgentOrchestrator {
         retain_terminal_projection: bool,
     ) -> Result<(), AgentRuntimeError> {
         for agent_id in &child_ids {
+            let mut stopping_started = false;
+            let mut permission_cleared = false;
             if let Some(record) = self.children.get_mut(agent_id) {
+                if record.status != AgentProjectionStatus::Stopping {
+                    stopping_started = true;
+                }
                 record.status = AgentProjectionStatus::Stopping;
                 if record.terminal_status.is_none() {
                     record.terminal_outcome_seen = true;
@@ -1425,6 +1804,18 @@ impl AgentOrchestrator {
                 if let Some(context) = &record.context {
                     context.begin_disposal();
                 }
+                if !record.pending_permissions.is_empty() {
+                    // stop/dispose 直接撤销 pending permission authority 并投影清空。
+                    record.pending_permissions.clear();
+                    permission_cleared = true;
+                }
+            }
+            if stopping_started {
+                self.projection_revision = self.projection_revision.saturating_add(1);
+                self.publish_child_facts(*agent_id, false);
+            }
+            if permission_cleared {
+                self.queue_permission_cleared(*agent_id);
             }
         }
         let mut first_error = None;
@@ -1438,50 +1829,67 @@ impl AgentOrchestrator {
                             .iter()
                             .any(|child| self.children.contains_key(child))
                     });
-            let Some(record) = self.children.get_mut(&agent_id) else {
-                continue;
+            // record 借用限制在作用域块内；registry/index 更新与投影发布在借用结束后进行。
+            let disposal = {
+                let Some(record) = self.children.get_mut(&agent_id) else {
+                    continue;
+                };
+                let was_cleanup_blocked = record.status == AgentProjectionStatus::CleanupBlocked;
+                if has_owned_descendant {
+                    record.status = AgentProjectionStatus::CleanupBlocked;
+                    ChildDisposal::Blocked {
+                        projection_changed: !was_cleanup_blocked,
+                        reason: "Agent descendant cleanup is pending",
+                    }
+                } else if record.runtime.shutdown().is_err() {
+                    record.status = AgentProjectionStatus::CleanupBlocked;
+                    ChildDisposal::Blocked {
+                        projection_changed: !was_cleanup_blocked,
+                        reason: "Agent child runtime cleanup is pending",
+                    }
+                } else if !record
+                    .context
+                    .as_ref()
+                    .is_none_or(|context| context.dispose().is_success())
+                {
+                    record.status = AgentProjectionStatus::CleanupBlocked;
+                    ChildDisposal::Blocked {
+                        projection_changed: !was_cleanup_blocked,
+                        reason: "Agent child capability cleanup is pending",
+                    }
+                } else {
+                    let parent_agent_id = record.parent_agent_id;
+                    record.context = None;
+                    record.status = record
+                        .terminal_status
+                        .unwrap_or(AgentProjectionStatus::Cancelled);
+                    ChildDisposal::Converged(parent_agent_id)
+                }
             };
-            if has_owned_descendant {
-                record.status = AgentProjectionStatus::CleanupBlocked;
-                first_error.get_or_insert(AgentRuntimeError::Shutdown(
-                    "Agent descendant cleanup is pending".to_string(),
-                ));
-                continue;
-            }
-            let runtime_result = record.runtime.shutdown();
-            if runtime_result.is_err() {
-                record.status = AgentProjectionStatus::CleanupBlocked;
-                first_error.get_or_insert(AgentRuntimeError::Shutdown(
-                    "Agent child runtime cleanup is pending".to_string(),
-                ));
-                continue;
-            }
-            let context_succeeded = record
-                .context
-                .as_ref()
-                .is_none_or(|context| context.dispose().is_success());
-            if !context_succeeded {
-                record.status = AgentProjectionStatus::CleanupBlocked;
-                first_error.get_or_insert(AgentRuntimeError::Shutdown(
-                    "Agent child capability cleanup is pending".to_string(),
-                ));
-                continue;
-            }
-            let parent_agent_id = record.parent_agent_id;
-            record.context = None;
-            record.status = record
-                .terminal_status
-                .unwrap_or(AgentProjectionStatus::Cancelled);
-            let _ = record;
-            if !retain_terminal_projection {
-                ready_to_remove.push(agent_id);
-            }
-            self.children_by_parent.remove(&agent_id);
-            self.projection_revision = self.projection_revision.saturating_add(1);
-            if let Some(children) = self.children_by_parent.get_mut(&parent_agent_id) {
-                children.remove(&agent_id);
-                if children.is_empty() {
-                    self.children_by_parent.remove(&parent_agent_id);
+            match disposal {
+                ChildDisposal::Blocked {
+                    projection_changed,
+                    reason,
+                } => {
+                    first_error.get_or_insert(AgentRuntimeError::Shutdown(reason.to_string()));
+                    if projection_changed {
+                        self.projection_revision = self.projection_revision.saturating_add(1);
+                        self.publish_child_facts(agent_id, false);
+                    }
+                }
+                ChildDisposal::Converged(parent_agent_id) => {
+                    if !retain_terminal_projection {
+                        ready_to_remove.push(agent_id);
+                    }
+                    self.children_by_parent.remove(&agent_id);
+                    self.projection_revision = self.projection_revision.saturating_add(1);
+                    if let Some(children) = self.children_by_parent.get_mut(&parent_agent_id) {
+                        children.remove(&agent_id);
+                        if children.is_empty() {
+                            self.children_by_parent.remove(&parent_agent_id);
+                        }
+                    }
+                    self.publish_child_facts(agent_id, false);
                 }
             }
         }
@@ -1493,6 +1901,8 @@ impl AgentOrchestrator {
                 .is_some_and(|record| record.launch_group_id.is_none() || record.outcome_persisted)
             {
                 self.children.remove(&agent_id);
+                self.projection_revision = self.projection_revision.saturating_add(1);
+                self.publish_overview_remove(agent_id);
             }
         }
         first_error.map_or(Ok(()), Err)
@@ -1513,30 +1923,39 @@ impl AgentOrchestrator {
                                 .is_some_and(|record| record.context.is_some())
                         })
                     });
-            let Some(record) = self.children.get_mut(&agent_id) else {
-                continue;
-            };
-            if record.terminal_status.is_none() || record.context.is_none() || has_owned_descendant
+            let mut projection_changed = false;
             {
-                continue;
-            }
-            let context = record
-                .context
-                .as_ref()
-                .expect("terminal authority check must retain context");
-            context.begin_disposal();
-            if record.runtime.shutdown().is_err() || !context.dispose().is_success() {
-                if record.status != AgentProjectionStatus::CleanupBlocked {
-                    self.projection_revision = self.projection_revision.saturating_add(1);
+                let Some(record) = self.children.get_mut(&agent_id) else {
+                    continue;
+                };
+                if record.terminal_status.is_none()
+                    || record.context.is_none()
+                    || has_owned_descendant
+                {
+                    continue;
                 }
-                record.status = AgentProjectionStatus::CleanupBlocked;
-                continue;
+                let context = record
+                    .context
+                    .as_ref()
+                    .expect("terminal authority check must retain context");
+                context.begin_disposal();
+                if record.runtime.shutdown().is_err() || !context.dispose().is_success() {
+                    if record.status != AgentProjectionStatus::CleanupBlocked {
+                        projection_changed = true;
+                    }
+                    record.status = AgentProjectionStatus::CleanupBlocked;
+                } else {
+                    record.context = None;
+                    record.status = record
+                        .terminal_status
+                        .expect("terminal cleanup must retain settled projection");
+                    projection_changed = true;
+                }
             }
-            record.context = None;
-            record.status = record
-                .terminal_status
-                .expect("terminal cleanup must retain settled projection");
-            self.projection_revision = self.projection_revision.saturating_add(1);
+            if projection_changed {
+                self.projection_revision = self.projection_revision.saturating_add(1);
+                self.publish_child_facts(agent_id, false);
+            }
         }
     }
 
@@ -1763,6 +2182,215 @@ fn apply_child_projection(record: &mut ChildAgentRecord, kind: &AgentEventKind) 
             record.latest_activity = AgentActivitySummary::Idle;
         }
     }
+}
+
+/// child 的 delivery-safe overview row 投影；只读取 record 的安全字段。
+fn overview_row_for_child(
+    agent_id: &AgentId,
+    record: &ChildAgentRecord,
+    now_ms: i64,
+) -> AgentOverviewRow {
+    AgentOverviewRow {
+        agent_id: *agent_id,
+        title: record.title.clone(),
+        status: record.status,
+        latest_activity: record.latest_activity.clone(),
+        elapsed_ms: (record.started_at_ms > 0 && now_ms >= record.started_at_ms)
+            .then_some((now_ms - record.started_at_ms) as u64),
+        tool_uses: (record.tool_uses > 0).then_some(record.tool_uses),
+        token_usage: (record.token_usage > 0).then_some(record.token_usage),
+    }
+}
+
+/// 一次 per-agent observation 的聚合 delivery 视图：transcript 与 preview 共用 revision。
+fn agent_view_snapshot_for_child(
+    observation_id: AgentObservationId,
+    agent_id: AgentId,
+    record: &ChildAgentRecord,
+    generation: AgentRuntimeGeneration,
+    revision: AgentProjectionRevision,
+    now_ms: i64,
+) -> AgentViewSnapshot {
+    let transcript = AgentTranscriptSnapshot {
+        observation_id,
+        generation,
+        revision,
+        agent_id,
+        title: record.title.clone(),
+        status: record.status,
+        items: record.transcript.clone(),
+    };
+    let preview = AgentPreviewSnapshot {
+        generation,
+        revision,
+        agent_id,
+        title: record.title.clone(),
+        status: record.status,
+        latest_activity: record.latest_activity.clone(),
+        elapsed_ms: (record.started_at_ms > 0 && now_ms >= record.started_at_ms)
+            .then_some((now_ms - record.started_at_ms) as u64),
+        latest_committed_answer: record.transcript.iter().rev().find_map(|item| match item {
+            AgentTranscriptItem::Assistant { content } => Some(content.clone()),
+            _ => None,
+        }),
+        permission: record.pending_permissions.front().cloned(),
+    };
+    AgentViewSnapshot {
+        observation_id,
+        generation,
+        revision,
+        transcript,
+        preview,
+    }
+}
+
+/// 把已通过 identity gate 的 permission fact 并入 authoritative FIFO。
+///
+/// duplicate request id 同 turn 内直接忽略；新的非 permission fact（tool activity /
+/// 新 permission / terminal / interrupt）收敛已 Submitted 的 head。返回 queue 是否变化。
+fn apply_child_permission_fact(
+    agent_id: AgentId,
+    record: &mut ChildAgentRecord,
+    event: &AgentEvent,
+) -> bool {
+    match &event.kind {
+        AgentEventKind::PermissionRequested { request } => {
+            if record
+                .pending_permissions
+                .iter()
+                .any(|entry| entry.target.request_id == request.request_id)
+            {
+                return false;
+            }
+            drop_submitted_head(record);
+            let target = AgentPermissionTarget {
+                agent_id,
+                turn_id: record.turn_id,
+                generation: record.generation,
+                runtime_target: record
+                    .target
+                    .clone()
+                    .unwrap_or_else(|| event.target.clone()),
+                request_id: request.request_id.clone(),
+            };
+            record
+                .pending_permissions
+                .push_back(AgentPermissionRequest {
+                    target,
+                    request: request.clone(),
+                    state: AgentPermissionState::Pending,
+                    occurred_at_ms: runtime_domain::time::unix_timestamp_ms().unwrap_or(0),
+                });
+            true
+        }
+        AgentEventKind::ToolActivityStarted { .. } | AgentEventKind::ToolActivityUpdated { .. } => {
+            drop_submitted_head(record)
+        }
+        AgentEventKind::TurnFinished { .. }
+        | AgentEventKind::TurnFailed { .. }
+        | AgentEventKind::TurnInterrupted => {
+            let was_empty = record.pending_permissions.is_empty();
+            record.pending_permissions.clear();
+            !was_empty
+        }
+        _ => false,
+    }
+}
+
+/// 收敛 FIFO head 的 Submitted entry；只有 head 是 Submitted 时才移除。
+fn drop_submitted_head(record: &mut ChildAgentRecord) -> bool {
+    if record
+        .pending_permissions
+        .front()
+        .is_some_and(|entry| entry.state == AgentPermissionState::Submitted)
+    {
+        record.pending_permissions.pop_front();
+        true
+    } else {
+        false
+    }
+}
+
+/// 只累积 committed transcript 事实：tool activity 折叠与 terminal committed answer。
+///
+/// 未提交的 AssistantDelta/ReasoningDelta 永不进入；terminal 后的 late event 已被
+/// identity/terminal gate 拒绝，因此 transcript 是 exactly-once 的。
+fn apply_child_transcript_fact(record: &mut ChildAgentRecord, kind: &AgentEventKind) {
+    match kind {
+        AgentEventKind::ToolActivityStarted { activity } => {
+            upsert_transcript_tool_item(
+                record,
+                &activity.activity_id,
+                Some(&activity.title),
+                Some(delivery_safe_tool_content(&activity.content)),
+            );
+        }
+        AgentEventKind::ToolActivityUpdated { update } => {
+            upsert_transcript_tool_item(
+                record,
+                &update.activity_id,
+                update.title.as_deref(),
+                update.content.as_deref().map(delivery_safe_tool_content),
+            );
+        }
+        AgentEventKind::TurnFinished { response, .. } => {
+            record.transcript.push(AgentTranscriptItem::Assistant {
+                content: response.text_content(),
+            });
+        }
+        _ => {}
+    }
+}
+
+/// 把 tool activity 的 Started/Updated 折叠为同一 transcript item。
+fn upsert_transcript_tool_item(
+    record: &mut ChildAgentRecord,
+    activity_id: &str,
+    title: Option<&str>,
+    content: Option<String>,
+) {
+    if let Some(&index) = record.transcript_tool_items.get(activity_id)
+        && let Some(AgentTranscriptItem::Tool {
+            title: item_title,
+            content: item_content,
+        }) = record.transcript.get_mut(index)
+    {
+        if let Some(title) = title {
+            *item_title = title.to_string();
+        }
+        if let Some(content) = content {
+            *item_content = content;
+        }
+        return;
+    }
+    let index = record.transcript.len();
+    record.transcript.push(AgentTranscriptItem::Tool {
+        title: title.unwrap_or("Using tool").to_string(),
+        content: content.unwrap_or_default(),
+    });
+    record
+        .transcript_tool_items
+        .insert(activity_id.to_string(), index);
+}
+
+/// tool activity content 的 delivery-safe 文本投影；`raw_input/raw_output` 永不读取。
+fn delivery_safe_tool_content(content: &[RuntimeToolActivityContent]) -> String {
+    content
+        .iter()
+        .filter_map(|item| match item {
+            RuntimeToolActivityContent::Text(text) => Some(text.clone()),
+            RuntimeToolActivityContent::Diff { path, new_text, .. } => {
+                Some(format!("{path}\n{new_text}"))
+            }
+            RuntimeToolActivityContent::Resource {
+                text: Some(text), ..
+            } => Some(text.clone()),
+            RuntimeToolActivityContent::ResourceLink { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]
@@ -2297,7 +2925,17 @@ mod tests {
             }),
             Err(AgentRuntimeError::UnknownAgent)
         ));
-        let overview = orchestrator.overview_snapshot();
+        let mut overview_events = None;
+        orchestrator.observe_agents(AgentObservationRequestId::new(1));
+        for event in orchestrator.drain_projection_events() {
+            match event {
+                AgentProjectionEvent::AgentsOverviewSnapshotLoaded { snapshot, .. } => {
+                    overview_events = Some(snapshot);
+                }
+                other => panic!("unexpected projection event: {other:?}"),
+            }
+        }
+        let overview = overview_events.expect("overview observation should deliver a snapshot");
         assert_eq!(overview.generation, orchestrator.generation());
         assert_eq!(overview.rows.len(), 1);
         assert_eq!(overview.rows[0].agent_id, agent_id);
@@ -2692,5 +3330,1093 @@ mod tests {
         orchestrator
             .replace_main(Box::new(StubMainRuntime::default()), None, None)
             .expect("replacement should proceed after retained owner converges");
+    }
+
+    /// 可分阶段注入 events、并记录 dispatched command 的 child runtime fixture。
+    type ScriptedEventQueue = Arc<Mutex<Vec<AgentEvent>>>;
+    type ScriptedDispatchLog = Arc<Mutex<Vec<&'static str>>>;
+
+    struct ScriptedChildRuntime {
+        events: ScriptedEventQueue,
+        dispatched: ScriptedDispatchLog,
+        is_shutdown: bool,
+    }
+
+    impl ScriptedChildRuntime {
+        fn new(events: Vec<AgentEvent>) -> (Self, ScriptedEventQueue, ScriptedDispatchLog) {
+            let events = Arc::new(Mutex::new(events));
+            let dispatched = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self {
+                    events: Arc::clone(&events),
+                    dispatched: Arc::clone(&dispatched),
+                    is_shutdown: false,
+                },
+                events,
+                dispatched,
+            )
+        }
+    }
+
+    impl AgentRuntime for ScriptedChildRuntime {
+        fn dispatch(
+            &mut self,
+            command: AgentCommand,
+        ) -> Result<AgentCommandReceipt, AgentRuntimeError> {
+            if self.is_shutdown {
+                return Err(AgentRuntimeError::Disposed);
+            }
+            let label = match &command {
+                AgentCommand::SubmitTurn { .. } => "submit_turn",
+                AgentCommand::Interrupt { .. } => "interrupt",
+                AgentCommand::RespondPermission { .. } => "respond_permission",
+            };
+            self.dispatched
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(label);
+            Ok(match command {
+                AgentCommand::SubmitTurn {
+                    turn_id, request, ..
+                } => AgentCommandReceipt::TurnStarted {
+                    turn_id,
+                    target: request.target(),
+                    activity_label: request.activity_label().to_string(),
+                },
+                AgentCommand::Interrupt { target, .. } => {
+                    AgentCommandReceipt::Interrupted { target }
+                }
+                AgentCommand::RespondPermission { .. } => AgentCommandReceipt::Accepted,
+            })
+        }
+
+        fn drain_events(&mut self) -> Vec<AgentEvent> {
+            std::mem::take(
+                &mut *self
+                    .events
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            )
+        }
+
+        fn shutdown(&mut self) -> Result<(), AgentRuntimeError> {
+            self.is_shutdown = true;
+            Ok(())
+        }
+    }
+
+    impl AgentRuntimePort for ScriptedChildRuntime {
+        fn activate(&mut self, _grants: AgentRuntimeActivationGrants) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn suspend(&mut self) -> Result<(), AgentRuntimeError> {
+            Ok(())
+        }
+
+        fn activity(&self) -> AgentRuntimeActivity {
+            AgentRuntimeActivity::Idle
+        }
+
+        fn session(&self) -> Option<&dyn AgentSessionCapability> {
+            None
+        }
+
+        fn session_mut(&mut self) -> Option<&mut dyn AgentSessionCapability> {
+            None
+        }
+
+        fn has_pending_work(&self) -> bool {
+            false
+        }
+    }
+
+    fn child_event(
+        agent_id: AgentId,
+        turn_id: AgentTurnId,
+        target: &RuntimeTarget,
+        kind: AgentEventKind,
+    ) -> AgentEvent {
+        AgentEvent {
+            agent_id,
+            turn_id,
+            target: target.clone(),
+            kind,
+        }
+    }
+
+    fn permission_request(request_id: &str) -> runtime_domain::session::RuntimePermissionRequest {
+        runtime_domain::session::RuntimePermissionRequest::new(
+            request_id,
+            Some("Run shell command".to_string()),
+            vec![
+                runtime_domain::session::RuntimePermissionOption::new(
+                    "allow-1",
+                    "Allow once",
+                    runtime_domain::session::RuntimePermissionOptionKind::AllowOnce,
+                ),
+                runtime_domain::session::RuntimePermissionOption::new(
+                    "reject-1",
+                    "Reject once",
+                    runtime_domain::session::RuntimePermissionOptionKind::RejectOnce,
+                ),
+            ],
+        )
+    }
+
+    fn permission_target(
+        agent_id: AgentId,
+        turn_id: AgentTurnId,
+        generation: AgentRuntimeGeneration,
+        runtime_target: &RuntimeTarget,
+        request_id: &str,
+    ) -> AgentPermissionTarget {
+        AgentPermissionTarget {
+            agent_id,
+            turn_id,
+            generation,
+            runtime_target: runtime_target.clone(),
+            request_id: request_id.to_string(),
+        }
+    }
+
+    fn permission_updates(events: &[AgentProjectionEvent]) -> Vec<AgentPermissionUpdate> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                AgentProjectionEvent::AgentPermissionUpdated { update } => Some(update.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn overview_observation_delivers_snapshot_then_ordered_monotonic_deltas() {
+        let agent_id = AgentId::new(2);
+        let turn_id = AgentTurnId::new(7);
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        orchestrator.register_child_for_test(
+            agent_id,
+            AgentId::MAIN,
+            turn_id,
+            test_title("observed child"),
+            test_context("observed-child"),
+            Box::new(StubMainRuntime {
+                events: vec![
+                    child_event(
+                        agent_id,
+                        turn_id,
+                        &target,
+                        AgentEventKind::AssistantDelta {
+                            content: "streaming partial".to_string(),
+                        },
+                    ),
+                    child_event(
+                        agent_id,
+                        turn_id,
+                        &target,
+                        AgentEventKind::TurnFinished {
+                            response: runtime_domain::session::ConversationResponse::assistant_text(
+                                "committed answer",
+                            ),
+                            metrics: None,
+                            context_usage: None,
+                        },
+                    ),
+                ],
+            }),
+        );
+
+        orchestrator.observe_agents(AgentObservationRequestId::new(11));
+        let snapshot_events = orchestrator.drain_projection_events();
+        assert_eq!(snapshot_events.len(), 1);
+        let (request_id, snapshot) = match &snapshot_events[0] {
+            AgentProjectionEvent::AgentsOverviewSnapshotLoaded {
+                request_id,
+                snapshot,
+            } => (*request_id, snapshot),
+            other => panic!("expected overview snapshot, got {other:?}"),
+        };
+        assert_eq!(request_id, AgentObservationRequestId::new(11));
+        assert_eq!(snapshot.rows.len(), 1);
+        assert_eq!(snapshot.rows[0].status, AgentProjectionStatus::Pending);
+        let observation_id = snapshot.observation_id;
+        let snapshot_revision = snapshot.revision;
+
+        let _ = orchestrator.drain_child_events();
+        let deltas = orchestrator.drain_projection_events();
+        assert!(!deltas.is_empty());
+        let mut previous_revision = snapshot_revision;
+        for delta in &deltas {
+            let AgentProjectionEvent::AgentsOverviewUpdated { delta } = delta else {
+                panic!("expected overview delta, got {delta:?}");
+            };
+            assert_eq!(delta.observation_id, observation_id);
+            assert!(
+                delta.revision > previous_revision,
+                "revision must be strict"
+            );
+            previous_revision = delta.revision;
+            assert!(matches!(delta.kind, AgentOverviewDeltaKind::Upsert(_)));
+        }
+        let last_delta = match deltas.last() {
+            Some(AgentProjectionEvent::AgentsOverviewUpdated { delta }) => delta,
+            other => panic!("expected final delta, got {other:?}"),
+        };
+        match &last_delta.kind {
+            AgentOverviewDeltaKind::Upsert(row) => {
+                assert_eq!(row.status, AgentProjectionStatus::Completed);
+            }
+            other => panic!("expected upsert delta, got {other:?}"),
+        }
+
+        orchestrator.stop_observation(observation_id, orchestrator.generation());
+        orchestrator.register_child_for_test(
+            AgentId::new(3),
+            AgentId::MAIN,
+            AgentTurnId::new(8),
+            test_title("later child"),
+            test_context("later-child"),
+            Box::new(StubMainRuntime::default()),
+        );
+        assert!(
+            orchestrator.drain_projection_events().is_empty(),
+            "stopped observation must not receive fresh deltas"
+        );
+    }
+
+    #[test]
+    fn overview_remove_delta_and_view_observation_fail_closed_on_child_removal() {
+        let agent_id = AgentId::new(2);
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        orchestrator.register_child_for_test(
+            agent_id,
+            AgentId::MAIN,
+            AgentTurnId::new(1),
+            test_title("removed child"),
+            test_context("removed-child"),
+            Box::new(StubMainRuntime::default()),
+        );
+        orchestrator.observe_agents(AgentObservationRequestId::new(1));
+        orchestrator.observe_agent_transcript(AgentObservationRequestId::new(2), agent_id);
+        assert_eq!(orchestrator.drain_projection_events().len(), 2);
+
+        orchestrator
+            .stop_child(agent_id)
+            .expect("child disposal should converge");
+        let events = orchestrator.drain_projection_events();
+        let remove_deltas = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    AgentProjectionEvent::AgentsOverviewUpdated {
+                        delta: AgentOverviewDelta {
+                            kind: AgentOverviewDeltaKind::Remove { .. },
+                            ..
+                        }
+                    }
+                )
+            })
+            .count();
+        assert_eq!(remove_deltas, 1, "expected exactly one Remove delta");
+        assert_eq!(orchestrator.child_count(), 0);
+
+        // 移除后的 child 不再产生 view snapshot；overview observation 继续存活。
+        orchestrator.register_child_for_test(
+            AgentId::new(3),
+            AgentId::MAIN,
+            AgentTurnId::new(2),
+            test_title("replacement child"),
+            test_context("replacement-child"),
+            Box::new(StubMainRuntime::default()),
+        );
+        let events = orchestrator.drain_projection_events();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentProjectionEvent::AgentsOverviewUpdated { .. }))
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentProjectionEvent::AgentViewUpdated { .. })),
+            "view observation bound to a removed child must fail closed"
+        );
+    }
+
+    #[test]
+    fn observations_fail_closed_after_replacement_suspend_and_session_transition() {
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        orchestrator.observe_agents(AgentObservationRequestId::new(1));
+        assert_eq!(orchestrator.observation_count(), 1);
+        orchestrator
+            .suspend()
+            .expect("clean suspend should invalidate observations");
+        assert_eq!(orchestrator.observation_count(), 0);
+
+        orchestrator.observe_agents(AgentObservationRequestId::new(2));
+        orchestrator
+            .replace_main(Box::new(StubMainRuntime::default()), None, None)
+            .expect("clean replacement should invalidate observations");
+        assert_eq!(orchestrator.observation_count(), 0);
+
+        orchestrator.register_child_for_test(
+            AgentId::new(2),
+            AgentId::MAIN,
+            AgentTurnId::new(1),
+            test_title("session transition child"),
+            test_context("session-transition-child"),
+            Box::new(StubMainRuntime::default()),
+        );
+        orchestrator.observe_agents(AgentObservationRequestId::new(3));
+        orchestrator
+            .dispose_children_for_session_transition()
+            .expect("session transition should converge child cleanup");
+        assert_eq!(orchestrator.observation_count(), 0);
+
+        // 失效后的 observation id 收不到 fresh delta。
+        orchestrator.observe_agents(AgentObservationRequestId::new(4));
+        let _ = orchestrator.drain_projection_events();
+        orchestrator.stop_observation(AgentObservationId::new(1), AgentRuntimeGeneration::new(1));
+        assert_eq!(orchestrator.observation_count(), 1);
+        assert!(orchestrator.drain_projection_events().is_empty());
+    }
+
+    #[test]
+    fn observe_and_stop_do_not_change_child_authority_or_permission_projection() {
+        let agent_id = AgentId::new(2);
+        let turn_id = AgentTurnId::new(7);
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let (runtime, staged_events, dispatched) = ScriptedChildRuntime::new(vec![
+            child_event(
+                agent_id,
+                turn_id,
+                &target,
+                AgentEventKind::PermissionRequested {
+                    request: permission_request("perm-1"),
+                },
+            ),
+            child_event(
+                agent_id,
+                turn_id,
+                &target,
+                AgentEventKind::TurnFinished {
+                    response: runtime_domain::session::ConversationResponse::assistant_text(
+                        "committed answer",
+                    ),
+                    metrics: None,
+                    context_usage: None,
+                },
+            ),
+        ]);
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        orchestrator.register_child_for_test(
+            agent_id,
+            AgentId::MAIN,
+            turn_id,
+            test_title("observed child"),
+            test_context("observed-child"),
+            Box::new(runtime),
+        );
+
+        // 打开 observation 后立即撤销；observation 是纯 projection，不触碰 child authority。
+        orchestrator.observe_agents(AgentObservationRequestId::new(1));
+        orchestrator.observe_agent_transcript(AgentObservationRequestId::new(2), agent_id);
+        assert!(orchestrator.child_has_authority(agent_id));
+        let observation_ids = orchestrator
+            .drain_projection_events()
+            .iter()
+            .filter_map(|event| match event {
+                AgentProjectionEvent::AgentsOverviewSnapshotLoaded { snapshot, .. } => {
+                    Some(snapshot.observation_id)
+                }
+                AgentProjectionEvent::AgentViewSnapshotLoaded { snapshot, .. } => {
+                    Some(snapshot.observation_id)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(observation_ids.len(), 2);
+        for observation_id in observation_ids {
+            orchestrator.stop_observation(observation_id, orchestrator.generation());
+        }
+        assert!(orchestrator.child_has_authority(agent_id));
+        assert!(
+            dispatched
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
+        );
+
+        let accepted = orchestrator.drain_child_events();
+        assert_eq!(accepted.len(), 2);
+        assert!(matches!(
+            accepted[0].kind,
+            AgentEventKind::PermissionRequested { .. }
+        ));
+        assert!(accepted[1].kind.is_terminal());
+        assert_eq!(
+            orchestrator.child_status(agent_id),
+            Some(AgentProjectionStatus::Completed)
+        );
+        assert!(!orchestrator.child_has_authority(agent_id));
+
+        // permission 投影由 child fact 驱动，与 observation 打开/关闭无关。
+        let updates = permission_updates(&orchestrator.drain_projection_events());
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates[0].agent_id, agent_id);
+        assert!(updates[0].request.is_some());
+        assert_eq!(updates[1].request, None);
+        assert!(
+            staged_events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn transcript_projection_accumulates_committed_facts_only() {
+        let agent_id = AgentId::new(2);
+        let turn_id = AgentTurnId::new(7);
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let tool_activity = runtime_domain::session::RuntimeToolActivity {
+            activity_id: "tool-1".to_string(),
+            title: "Read file".to_string(),
+            kind: runtime_domain::session::RuntimeToolKind::Read,
+            status: runtime_domain::session::RuntimeToolActivityStatus::InProgress,
+            content: vec![runtime_domain::session::RuntimeToolActivityContent::Text(
+                "safe content".to_string(),
+            )],
+            locations: Vec::new(),
+            raw_input: Some(runtime_domain::session::RuntimeToolActivityRawValue::from(
+                serde_json::json!({"secret": "PRIVATE_RAW_INPUT"}),
+            )),
+            raw_output: None,
+        };
+        let tool_update = runtime_domain::session::RuntimeToolActivityUpdate {
+            activity_id: "tool-1".to_string(),
+            content: Some(vec![
+                runtime_domain::session::RuntimeToolActivityContent::Text(
+                    "updated safe content".to_string(),
+                ),
+            ]),
+            ..runtime_domain::session::RuntimeToolActivityUpdate::default()
+        };
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        orchestrator.register_child_for_test(
+            agent_id,
+            AgentId::MAIN,
+            turn_id,
+            test_title("transcript child"),
+            test_context("transcript-child"),
+            Box::new(StubMainRuntime {
+                events: vec![
+                    child_event(
+                        agent_id,
+                        turn_id,
+                        &target,
+                        AgentEventKind::AssistantDelta {
+                            content: "streaming partial".to_string(),
+                        },
+                    ),
+                    child_event(
+                        agent_id,
+                        turn_id,
+                        &target,
+                        AgentEventKind::ToolActivityStarted {
+                            activity: tool_activity,
+                        },
+                    ),
+                    child_event(
+                        agent_id,
+                        turn_id,
+                        &target,
+                        AgentEventKind::ToolActivityUpdated {
+                            update: tool_update,
+                        },
+                    ),
+                    child_event(
+                        agent_id,
+                        turn_id,
+                        &target,
+                        AgentEventKind::TurnFinished {
+                            response: runtime_domain::session::ConversationResponse::assistant_text(
+                                "committed answer",
+                            ),
+                            metrics: None,
+                            context_usage: None,
+                        },
+                    ),
+                    child_event(
+                        agent_id,
+                        turn_id,
+                        &target,
+                        AgentEventKind::AssistantDelta {
+                            content: "late partial".to_string(),
+                        },
+                    ),
+                ],
+            }),
+        );
+
+        orchestrator.observe_agent_transcript(AgentObservationRequestId::new(5), agent_id);
+        let loaded = orchestrator.drain_projection_events();
+        assert!(matches!(
+            loaded.as_slice(),
+            [AgentProjectionEvent::AgentViewSnapshotLoaded { .. }]
+        ));
+
+        let _ = orchestrator.drain_child_events();
+        let updates = orchestrator
+            .drain_projection_events()
+            .iter()
+            .filter_map(|event| match event {
+                AgentProjectionEvent::AgentViewUpdated { snapshot } => Some(snapshot.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let latest = updates
+            .last()
+            .expect("view observation should receive updated snapshots");
+        assert_eq!(
+            latest.transcript.items,
+            vec![
+                AgentTranscriptItem::Tool {
+                    title: "Read file".to_string(),
+                    content: "updated safe content".to_string(),
+                },
+                AgentTranscriptItem::Assistant {
+                    content: "committed answer".to_string(),
+                },
+            ]
+        );
+        assert_eq!(
+            latest.preview.latest_committed_answer,
+            Some("committed answer".to_string())
+        );
+        let transcript_debug = format!("{latest:?}");
+        assert!(!transcript_debug.contains("streaming partial"));
+        assert!(!transcript_debug.contains("late partial"));
+        assert!(!transcript_debug.contains("PRIVATE_RAW_INPUT"));
+    }
+
+    #[test]
+    fn permission_fifo_enqueues_in_order_and_projects_head() {
+        let agent_id = AgentId::new(2);
+        let turn_id = AgentTurnId::new(7);
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        orchestrator.register_child_for_test(
+            agent_id,
+            AgentId::MAIN,
+            turn_id,
+            test_title("permission child"),
+            test_context("permission-child"),
+            Box::new(
+                ScriptedChildRuntime::new(vec![
+                    child_event(
+                        agent_id,
+                        turn_id,
+                        &target,
+                        AgentEventKind::PermissionRequested {
+                            request: permission_request("perm-1"),
+                        },
+                    ),
+                    child_event(
+                        agent_id,
+                        turn_id,
+                        &target,
+                        AgentEventKind::PermissionRequested {
+                            request: permission_request("perm-2"),
+                        },
+                    ),
+                ])
+                .0,
+            ),
+        );
+
+        let _ = orchestrator.drain_child_events();
+        // 未打开任何 observation 时 permission 投影仍然交付。
+        let updates = permission_updates(&orchestrator.drain_projection_events());
+        assert_eq!(updates.len(), 2);
+        for update in &updates {
+            assert_eq!(update.agent_id, agent_id);
+            assert_eq!(update.generation, orchestrator.generation());
+            let head = update.request.as_ref().expect("head should be pending");
+            assert_eq!(head.target.request_id, "perm-1");
+            assert_eq!(head.state, AgentPermissionState::Pending);
+            assert_eq!(head.target.turn_id, turn_id);
+            assert_eq!(head.target.runtime_target, target);
+        }
+    }
+
+    #[test]
+    fn duplicate_permission_request_id_is_ignored_within_the_same_turn() {
+        let agent_id = AgentId::new(2);
+        let turn_id = AgentTurnId::new(7);
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        orchestrator.register_child_for_test(
+            agent_id,
+            AgentId::MAIN,
+            turn_id,
+            test_title("duplicate permission"),
+            test_context("duplicate-permission"),
+            Box::new(
+                ScriptedChildRuntime::new(vec![
+                    child_event(
+                        agent_id,
+                        turn_id,
+                        &target,
+                        AgentEventKind::PermissionRequested {
+                            request: permission_request("perm-1"),
+                        },
+                    ),
+                    child_event(
+                        agent_id,
+                        turn_id,
+                        &target,
+                        AgentEventKind::PermissionRequested {
+                            request: permission_request("perm-1"),
+                        },
+                    ),
+                ])
+                .0,
+            ),
+        );
+
+        let _ = orchestrator.drain_child_events();
+        let updates = permission_updates(&orchestrator.drain_projection_events());
+        assert_eq!(
+            updates.len(),
+            1,
+            "duplicate request id must not enqueue twice"
+        );
+    }
+
+    #[test]
+    fn respond_agent_permission_validates_identity_and_option_before_dispatch() {
+        let agent_id = AgentId::new(2);
+        let turn_id = AgentTurnId::new(7);
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let (runtime, _staged, dispatched) = ScriptedChildRuntime::new(vec![child_event(
+            agent_id,
+            turn_id,
+            &target,
+            AgentEventKind::PermissionRequested {
+                request: permission_request("perm-1"),
+            },
+        )]);
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        orchestrator.register_child_for_test(
+            agent_id,
+            AgentId::MAIN,
+            turn_id,
+            test_title("respond child"),
+            test_context("respond-child"),
+            Box::new(runtime),
+        );
+        let _ = orchestrator.drain_child_events();
+        let _ = orchestrator.drain_projection_events();
+        let generation = orchestrator.generation();
+
+        let valid_target = || permission_target(agent_id, turn_id, generation, &target, "perm-1");
+
+        // option_id: None 是封闭语义，runtime 校验层直接拒绝。
+        assert_eq!(
+            orchestrator.respond_agent_permission(valid_target(), None),
+            Err(AgentProductCommandRejection::InvalidOption)
+        );
+        assert_eq!(
+            orchestrator.respond_agent_permission(valid_target(), Some("unknown-option".into())),
+            Err(AgentProductCommandRejection::InvalidOption)
+        );
+        assert_eq!(
+            orchestrator.respond_agent_permission(
+                permission_target(agent_id, turn_id, generation, &target, "perm-unknown"),
+                Some("allow-1".into()),
+            ),
+            Err(AgentProductCommandRejection::UnknownRequest)
+        );
+        assert_eq!(
+            orchestrator.respond_agent_permission(
+                permission_target(AgentId::new(99), turn_id, generation, &target, "perm-1"),
+                Some("allow-1".into()),
+            ),
+            Err(AgentProductCommandRejection::UnknownAgent)
+        );
+        assert_eq!(
+            orchestrator.respond_agent_permission(
+                permission_target(
+                    agent_id,
+                    turn_id,
+                    AgentRuntimeGeneration::new(generation.get() + 1),
+                    &target,
+                    "perm-1"
+                ),
+                Some("allow-1".into()),
+            ),
+            Err(AgentProductCommandRejection::StaleGeneration)
+        );
+        assert!(
+            dispatched
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
+        );
+        let _ = orchestrator.drain_projection_events();
+
+        orchestrator
+            .respond_agent_permission(valid_target(), Some("allow-1".into()))
+            .expect("valid response should dispatch to the child runtime");
+        assert_eq!(
+            *dispatched
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec!["respond_permission"]
+        );
+        let updates = permission_updates(&orchestrator.drain_projection_events());
+        assert_eq!(updates.len(), 1);
+        let head = updates[0]
+            .request
+            .as_ref()
+            .expect("submitted head should stay projected");
+        assert_eq!(head.target.request_id, "perm-1");
+        assert_eq!(head.state, AgentPermissionState::Submitted);
+
+        // 重复提交同一 request fail closed，不再触碰 child runtime。
+        assert_eq!(
+            orchestrator.respond_agent_permission(valid_target(), Some("allow-1".into())),
+            Err(AgentProductCommandRejection::AlreadySubmitted)
+        );
+        assert_eq!(
+            *dispatched
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec!["respond_permission"]
+        );
+    }
+
+    #[test]
+    fn submitted_permission_converges_on_next_fact_and_clears_on_terminal() {
+        let agent_id = AgentId::new(2);
+        let turn_id = AgentTurnId::new(7);
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let (runtime, staged, _dispatched) = ScriptedChildRuntime::new(vec![child_event(
+            agent_id,
+            turn_id,
+            &target,
+            AgentEventKind::PermissionRequested {
+                request: permission_request("perm-1"),
+            },
+        )]);
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        orchestrator.register_child_for_test(
+            agent_id,
+            AgentId::MAIN,
+            turn_id,
+            test_title("converge child"),
+            test_context("converge-child"),
+            Box::new(runtime),
+        );
+        let _ = orchestrator.drain_child_events();
+        let _ = orchestrator.drain_projection_events();
+        let generation = orchestrator.generation();
+        orchestrator
+            .respond_agent_permission(
+                permission_target(agent_id, turn_id, generation, &target, "perm-1"),
+                Some("allow-1".into()),
+            )
+            .expect("response should submit the head entry");
+        let _ = orchestrator.drain_projection_events();
+
+        // 第二个 permission 进入 FIFO；新 permission fact 收敛已 Submitted 的 head。
+        staged
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend(vec![
+                child_event(
+                    agent_id,
+                    turn_id,
+                    &target,
+                    AgentEventKind::PermissionRequested {
+                        request: permission_request("perm-2"),
+                    },
+                ),
+                child_event(
+                    agent_id,
+                    turn_id,
+                    &target,
+                    AgentEventKind::ToolActivityStarted {
+                        activity: runtime_domain::session::RuntimeToolActivity {
+                            activity_id: "tool-1".to_string(),
+                            title: "Read file".to_string(),
+                            kind: runtime_domain::session::RuntimeToolKind::Read,
+                            status: runtime_domain::session::RuntimeToolActivityStatus::InProgress,
+                            content: Vec::new(),
+                            locations: Vec::new(),
+                            raw_input: None,
+                            raw_output: None,
+                        },
+                    },
+                ),
+            ]);
+        let _ = orchestrator.drain_child_events();
+        let updates = permission_updates(&orchestrator.drain_projection_events());
+        // perm-2 enqueue 在同一 fact 内收敛已 Submitted 的 perm-1 并推进 head；
+        // 随后的 tool activity 对 Pending head 是 no-op，不产生额外投影。
+        assert_eq!(updates.len(), 1);
+        let head = updates[0]
+            .request
+            .as_ref()
+            .expect("perm-2 should become head");
+        assert_eq!(head.target.request_id, "perm-2");
+        assert_eq!(head.state, AgentPermissionState::Pending);
+        let _ = orchestrator.drain_projection_events();
+
+        orchestrator
+            .respond_agent_permission(
+                permission_target(agent_id, turn_id, generation, &target, "perm-2"),
+                Some("reject-1".into()),
+            )
+            .expect("second response should submit");
+        let _ = orchestrator.drain_projection_events();
+
+        // terminal fact 清空整个 queue 并投影 None。
+        staged
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(child_event(
+                agent_id,
+                turn_id,
+                &target,
+                AgentEventKind::TurnFinished {
+                    response: runtime_domain::session::ConversationResponse::assistant_text(
+                        "committed answer",
+                    ),
+                    metrics: None,
+                    context_usage: None,
+                },
+            ));
+        let _ = orchestrator.drain_child_events();
+        let updates = permission_updates(&orchestrator.drain_projection_events());
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].request, None);
+
+        // terminal 后 admission 关闭，再 respond fail closed。
+        assert_eq!(
+            orchestrator.respond_agent_permission(
+                permission_target(agent_id, turn_id, generation, &target, "perm-2"),
+                Some("allow-1".into()),
+            ),
+            Err(AgentProductCommandRejection::UnknownAgent)
+        );
+    }
+
+    #[test]
+    fn stop_child_clears_pending_permission_queue() {
+        let agent_id = AgentId::new(2);
+        let turn_id = AgentTurnId::new(7);
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        orchestrator.register_child_for_test(
+            agent_id,
+            AgentId::MAIN,
+            turn_id,
+            test_title("stop with permission"),
+            test_context("stop-with-permission"),
+            Box::new(
+                ScriptedChildRuntime::new(vec![child_event(
+                    agent_id,
+                    turn_id,
+                    &target,
+                    AgentEventKind::PermissionRequested {
+                        request: permission_request("perm-1"),
+                    },
+                )])
+                .0,
+            ),
+        );
+        let _ = orchestrator.drain_child_events();
+        let _ = orchestrator.drain_projection_events();
+
+        orchestrator
+            .stop_child(agent_id)
+            .expect("stop should converge");
+        let updates = permission_updates(&orchestrator.drain_projection_events());
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].agent_id, agent_id);
+        assert_eq!(updates[0].request, None);
+    }
+
+    #[test]
+    fn permission_updates_are_scoped_per_agent() {
+        let first_id = AgentId::new(2);
+        let second_id = AgentId::new(3);
+        let first_turn = AgentTurnId::new(21);
+        let second_turn = AgentTurnId::new(22);
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        orchestrator.register_child_for_test(
+            first_id,
+            AgentId::MAIN,
+            first_turn,
+            test_title("first child"),
+            test_context("first-child"),
+            Box::new(
+                ScriptedChildRuntime::new(vec![child_event(
+                    first_id,
+                    first_turn,
+                    &target,
+                    AgentEventKind::PermissionRequested {
+                        request: permission_request("perm-first"),
+                    },
+                )])
+                .0,
+            ),
+        );
+        orchestrator.register_child_for_test(
+            second_id,
+            AgentId::MAIN,
+            second_turn,
+            test_title("second child"),
+            test_context("second-child"),
+            Box::new(
+                ScriptedChildRuntime::new(vec![child_event(
+                    second_id,
+                    second_turn,
+                    &target,
+                    AgentEventKind::PermissionRequested {
+                        request: permission_request("perm-second"),
+                    },
+                )])
+                .0,
+            ),
+        );
+
+        let _ = orchestrator.drain_child_events();
+        let updates = permission_updates(&orchestrator.drain_projection_events());
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates[0].agent_id, first_id);
+        assert_eq!(
+            updates[0]
+                .request
+                .as_ref()
+                .expect("first child head should be pending")
+                .target
+                .request_id,
+            "perm-first"
+        );
+        assert_eq!(updates[1].agent_id, second_id);
+        assert_eq!(
+            updates[1]
+                .request
+                .as_ref()
+                .expect("second child head should be pending")
+                .target
+                .request_id,
+            "perm-second"
+        );
+
+        // 跨 agent 的 request id 不共享 FIFO；用 first child 的 request 回复 second child fail closed。
+        assert_eq!(
+            orchestrator.respond_agent_permission(
+                permission_target(
+                    second_id,
+                    second_turn,
+                    orchestrator.generation(),
+                    &target,
+                    "perm-first"
+                ),
+                Some("allow-1".into()),
+            ),
+            Err(AgentProductCommandRejection::UnknownRequest)
+        );
+    }
+
+    #[test]
+    fn stop_agent_validates_generation_and_stops_subtree() {
+        let root_context = test_context("stop-agent-root");
+        let child_context = root_context
+            .child(
+                AgentContextOwner::try_new("stop-agent-child").unwrap(),
+                AgentChildCapabilityGrants::empty(),
+            )
+            .unwrap();
+        let grandchild_context = child_context
+            .child(
+                AgentContextOwner::try_new("stop-agent-grandchild").unwrap(),
+                AgentChildCapabilityGrants::empty(),
+            )
+            .unwrap();
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        orchestrator.register_child_for_test(
+            AgentId::new(2),
+            AgentId::MAIN,
+            AgentTurnId::new(1),
+            test_title("stop agent child"),
+            child_context.clone(),
+            Box::new(RecordingShutdownRuntime {
+                label: "child",
+                context: child_context,
+                order: Arc::clone(&order),
+            }),
+        );
+        orchestrator.register_child_for_test(
+            AgentId::new(3),
+            AgentId::new(2),
+            AgentTurnId::new(2),
+            test_title("stop agent grandchild"),
+            grandchild_context.clone(),
+            Box::new(RecordingShutdownRuntime {
+                label: "grandchild",
+                context: grandchild_context,
+                order: Arc::clone(&order),
+            }),
+        );
+        let generation = orchestrator.generation();
+
+        assert_eq!(
+            orchestrator.stop_agent(AgentId::MAIN, generation),
+            Err(AgentProductCommandRejection::UnknownAgent)
+        );
+        assert_eq!(
+            orchestrator.stop_agent(AgentId::new(99), generation),
+            Err(AgentProductCommandRejection::UnknownAgent)
+        );
+        assert_eq!(
+            orchestrator.stop_agent(
+                AgentId::new(2),
+                AgentRuntimeGeneration::new(generation.get() + 1)
+            ),
+            Err(AgentProductCommandRejection::StaleGeneration)
+        );
+
+        orchestrator
+            .stop_agent(AgentId::new(2), generation)
+            .expect("typed stop should reuse the descendants-first path");
+        assert_eq!(orchestrator.child_count(), 0);
+        assert_eq!(
+            *order
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec!["grandchild", "child"]
+        );
     }
 }

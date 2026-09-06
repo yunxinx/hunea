@@ -192,3 +192,64 @@ fn runtime_request_policy_defaults_to_unbounded_tool_turns() {
 
     assert_eq!(policy.tool_max_turns(), None);
 }
+
+#[test]
+fn agent_projection_commands_and_event_carry_no_stream_target() {
+    use runtime_domain::agent::{
+        AgentId, AgentObservationId, AgentObservationRequestId, AgentPermissionTarget,
+        AgentProjectionEvent, AgentProjectionRevision, AgentRuntimeGeneration, AgentTurnId,
+    };
+
+    let commands = [
+        RuntimeCommand::ObserveAgents {
+            request_id: AgentObservationRequestId::new(1),
+        },
+        RuntimeCommand::StopObservingAgents {
+            observation_id: AgentObservationId::new(1),
+            generation: AgentRuntimeGeneration::new(1),
+        },
+        RuntimeCommand::ObserveAgentTranscript {
+            request_id: AgentObservationRequestId::new(2),
+            agent_id: AgentId::new(2),
+        },
+        RuntimeCommand::StopObservingAgentTranscript {
+            observation_id: AgentObservationId::new(2),
+            generation: AgentRuntimeGeneration::new(1),
+        },
+        RuntimeCommand::RespondAgentPermission {
+            target: AgentPermissionTarget {
+                agent_id: AgentId::new(2),
+                turn_id: AgentTurnId::new(3),
+                generation: AgentRuntimeGeneration::new(1),
+                runtime_target: RuntimeTarget::provider("local", "qwen3"),
+                request_id: "permission-1".to_string(),
+            },
+            option_id: Some("allow".to_string()),
+        },
+        RuntimeCommand::StopAgent {
+            agent_id: AgentId::new(2),
+            generation: AgentRuntimeGeneration::new(1),
+        },
+    ];
+
+    for command in &commands {
+        assert_eq!(
+            command.target(),
+            None,
+            "Agent projection commands must not reuse main stream target semantics"
+        );
+    }
+
+    let event =
+        RuntimeEvent::AgentProjection(Box::new(AgentProjectionEvent::AgentsOverviewUpdated {
+            delta: runtime_domain::agent::AgentOverviewDelta {
+                observation_id: AgentObservationId::new(1),
+                generation: AgentRuntimeGeneration::new(1),
+                revision: AgentProjectionRevision::new(1),
+                kind: runtime_domain::agent::AgentOverviewDeltaKind::Remove {
+                    agent_id: AgentId::new(2),
+                },
+            },
+        }));
+    assert_eq!(event.target(), None);
+}

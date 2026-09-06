@@ -156,7 +156,13 @@ impl RuntimeCommandPort for TestUiRuntimePort {
                 })
             }
             RuntimeCommand::RespondPermission { .. } => Ok(RuntimeCommandReceipt::Accepted),
-            RuntimeCommand::ListSessions
+            RuntimeCommand::ObserveAgents { .. }
+            | RuntimeCommand::StopObservingAgents { .. }
+            | RuntimeCommand::ObserveAgentTranscript { .. }
+            | RuntimeCommand::StopObservingAgentTranscript { .. }
+            | RuntimeCommand::RespondAgentPermission { .. }
+            | RuntimeCommand::StopAgent { .. }
+            | RuntimeCommand::ListSessions
             | RuntimeCommand::LoadSessionPreview { .. }
             | RuntimeCommand::ResumeSession { .. }
             | RuntimeCommand::LoadEntryTree { .. }

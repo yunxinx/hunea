@@ -203,6 +203,47 @@ impl AppRuntimeCoordinator {
                 self.respond_permission(target.as_ref(), &request_id, option_id)?;
                 Ok(RuntimeCommandReceipt::Accepted)
             }
+            RuntimeCommand::ObserveAgents { request_id } => {
+                self.components.observe_agents(request_id);
+                Ok(RuntimeCommandReceipt::Accepted)
+            }
+            RuntimeCommand::StopObservingAgents {
+                observation_id,
+                generation,
+            } => {
+                self.components
+                    .stop_observing_agents(observation_id, generation);
+                Ok(RuntimeCommandReceipt::Accepted)
+            }
+            RuntimeCommand::ObserveAgentTranscript {
+                request_id,
+                agent_id,
+            } => {
+                self.components
+                    .observe_agent_transcript(request_id, agent_id);
+                Ok(RuntimeCommandReceipt::Accepted)
+            }
+            RuntimeCommand::StopObservingAgentTranscript {
+                observation_id,
+                generation,
+            } => {
+                self.components
+                    .stop_observing_agent_transcript(observation_id, generation);
+                Ok(RuntimeCommandReceipt::Accepted)
+            }
+            RuntimeCommand::RespondAgentPermission { target, option_id } => {
+                self.components
+                    .respond_child_agent_permission(target, option_id)?;
+                Ok(RuntimeCommandReceipt::Accepted)
+            }
+            RuntimeCommand::StopAgent {
+                agent_id,
+                generation,
+            } => {
+                self.components
+                    .stop_child_agent_with_generation(agent_id, generation)?;
+                Ok(RuntimeCommandReceipt::Accepted)
+            }
             RuntimeCommand::ListSessions => self.list_sessions(),
             RuntimeCommand::LoadSessionPreview { session_id } => {
                 self.load_session_preview(&session_id)
@@ -466,10 +507,12 @@ impl RuntimeEventPort for AppRuntimeCoordinator {
         while let Some(runtime_event) = agent_events.next() {
             if should_defer_runtime_event_for_render_barrier(&events, &runtime_event) {
                 self.defer_runtime_events_until_next_render(runtime_event, agent_events);
+                self.flush_agent_projection_events_into(&mut events);
                 return events;
             }
             events.push(runtime_event);
         }
+        self.flush_agent_projection_events_into(&mut events);
         events
     }
 }
@@ -590,6 +633,16 @@ impl AppRuntimeCoordinator {
 
     fn drain_context_budget_events_into(&mut self, events: &mut Vec<RuntimeEvent>) {
         events.extend(self.components.context_budget_worker.drain_events());
+    }
+
+    /// 在既有 drain 顺序（spawn -> child -> main）之后 flush Agent projection facts。
+    fn flush_agent_projection_events_into(&mut self, events: &mut Vec<RuntimeEvent>) {
+        events.extend(
+            self.components
+                .drain_agent_projection_events()
+                .into_iter()
+                .map(|projection| RuntimeEvent::AgentProjection(Box::new(projection))),
+        );
     }
 }
 

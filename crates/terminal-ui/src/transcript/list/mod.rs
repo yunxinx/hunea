@@ -10,8 +10,8 @@ use std::{
 use ratatui::text::Line;
 
 use super::{
-    DEFAULT_RENDER_WIDTH, FinalBodyDividerItem, ItemLineAnchor, LineAnchor, LineAnchorKind,
-    ReasoningDisplayMode, ReasoningMessageItem, ReasoningRenderMode, RenderResult,
+    AgentFactItem, DEFAULT_RENDER_WIDTH, FinalBodyDividerItem, ItemLineAnchor, LineAnchor,
+    LineAnchorKind, ReasoningDisplayMode, ReasoningMessageItem, ReasoningRenderMode, RenderResult,
     SystemMessageItem, TranscriptEstimateBreakdown, TranscriptEstimateKind,
     TranscriptEstimateSource, TranscriptFastEstimate, TranscriptItemMetrics,
     TranscriptItemMetricsCache, TranscriptItemMetricsIndex, TranscriptItemMetricsQuality,
@@ -35,6 +35,7 @@ use crate::{
     theme::TerminalPalette,
     tool_result::{ToolActivityRenderMode, ToolResultItem, ToolResultKind},
 };
+use runtime_domain::agent::{AgentLaunchSnapshot, AgentOutcomeSnapshot};
 use runtime_domain::session::{
     RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityUpdate,
 };
@@ -55,6 +56,7 @@ pub(crate) enum TranscriptItem {
     ToolResult(ToolResultItem),
     WorkDuration(WorkDurationMessageItem),
     FinalBodyDivider(FinalBodyDividerItem),
+    AgentFact(AgentFactItem),
 }
 
 /// `Transcript` 管理 document-flow 顺序、宽度与逐项渲染缓存。
@@ -279,7 +281,8 @@ impl Transcript {
                 | TranscriptItem::ToolResult(_)
                 | TranscriptItem::System(_)
                 | TranscriptItem::WorkDuration(_)
-                | TranscriptItem::FinalBodyDivider(_) => false,
+                | TranscriptItem::FinalBodyDivider(_)
+                | TranscriptItem::AgentFact(_) => false,
             })
     }
 
@@ -318,6 +321,19 @@ impl Transcript {
     /// `append_final_body_divider` 追加一条只用于分隔工具活动与最终正文的纯分割线。
     pub(crate) fn append_final_body_divider(&mut self) {
         self.push_item(TranscriptItem::FinalBodyDivider(FinalBodyDividerItem::new()));
+    }
+
+    /// `append_agent_launch_fact` 追加一次 typed batch launch 的 immutable document 事实。
+    ///
+    /// 一个 snapshot 就是一个 launch group（children 携带全部 frozen title）；
+    /// item append-only，后续 delta 不回写。
+    pub(crate) fn append_agent_launch_fact(&mut self, snapshot: AgentLaunchSnapshot) {
+        self.push_item(TranscriptItem::AgentFact(AgentFactItem::launch(snapshot)));
+    }
+
+    /// `append_agent_outcome_fact` 追加一个 child Agent terminal outcome 的 immutable 事实。
+    pub(crate) fn append_agent_outcome_fact(&mut self, snapshot: AgentOutcomeSnapshot) {
+        self.push_item(TranscriptItem::AgentFact(AgentFactItem::outcome(snapshot)));
     }
 
     /// `append_tool_result` 追加一条只用于 TUI 展示的工具审批结果。
@@ -679,7 +695,8 @@ impl Transcript {
                 | TranscriptItem::System(_)
                 | TranscriptItem::ToolResult(_)
                 | TranscriptItem::WorkDuration(_)
-                | TranscriptItem::FinalBodyDivider(_) => None,
+                | TranscriptItem::FinalBodyDivider(_)
+                | TranscriptItem::AgentFact(_) => None,
             })
             .collect()
     }

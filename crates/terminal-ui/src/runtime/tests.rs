@@ -541,7 +541,7 @@ fn session_resume_replay_restores_bottom_follow() {
 }
 
 #[test]
-fn agent_projection_events_are_absorbed_without_touching_session_state() {
+fn agent_observation_projection_events_are_absorbed_without_touching_session_state() {
     use runtime_domain::agent::{
         AgentObservationId, AgentObservationRejection, AgentObservationRequestId,
         AgentOverviewSnapshot, AgentProjectionEvent, AgentProjectionRevision,
@@ -572,7 +572,335 @@ fn agent_projection_events_are_absorbed_without_touching_session_state() {
         model.apply_runtime_event(RuntimeEvent::AgentProjection(Box::new(projection_event)));
     }
 
-    // TUI surface 尚未接入：事件被无害吸收，transcript/viewport 状态不变。
+    // observation 类 TUI surface 尚未接入：事件被无害吸收，transcript/viewport 状态不变。
     assert_eq!(model.transcript_plain_items().join("\n"), transcript_before);
     assert_eq!(model.document_runtime.viewport_y, viewport_y);
+}
+
+fn agent_launch_child_fixture(
+    agent_id: u64,
+    title: &str,
+) -> runtime_domain::agent::AgentLaunchChildSnapshot {
+    use runtime_domain::agent::{AgentObjective, AgentObjectiveSummary, AgentTitle};
+    runtime_domain::agent::AgentLaunchChildSnapshot {
+        agent_id: runtime_domain::agent::AgentId::new(agent_id),
+        title: AgentTitle::resolve(
+            &AgentObjective::new("fallback objective").expect("objective should be valid"),
+            Some(title),
+        )
+        .expect("title should resolve"),
+        objective: AgentObjectiveSummary::from_objective(
+            &AgentObjective::new("objective body").expect("objective should be valid"),
+        )
+        .expect("objective summary should resolve"),
+    }
+}
+
+fn agent_launch_snapshot_fixture(
+    children: Vec<runtime_domain::agent::AgentLaunchChildSnapshot>,
+) -> runtime_domain::agent::AgentLaunchSnapshot {
+    runtime_domain::agent::AgentLaunchSnapshot {
+        group_id: runtime_domain::agent::AgentLaunchGroupId::new(7),
+        parent_agent_id: runtime_domain::agent::AgentId::MAIN,
+        parent_turn_id: runtime_domain::agent::AgentTurnId::new(9),
+        children,
+        occurred_at_ms: 42,
+    }
+}
+
+fn agent_outcome_snapshot_fixture(
+    outcome: runtime_domain::agent::AgentOutcome,
+) -> runtime_domain::agent::AgentOutcomeSnapshot {
+    use runtime_domain::agent::{AgentObjective, AgentOutcomeSummary, AgentTitle};
+    runtime_domain::agent::AgentOutcomeSnapshot {
+        agent_id: runtime_domain::agent::AgentId::new(2),
+        title: AgentTitle::resolve(
+            &AgentObjective::new("fallback objective").expect("objective should be valid"),
+            Some("research task"),
+        )
+        .expect("title should resolve"),
+        group_id: Some(runtime_domain::agent::AgentLaunchGroupId::new(7)),
+        parent_agent_id: Some(runtime_domain::agent::AgentId::MAIN),
+        parent_turn_id: Some(runtime_domain::agent::AgentTurnId::new(9)),
+        outcome,
+        occurred_at_ms: 43,
+        summary: Some(
+            AgentOutcomeSummary::new("Child Agent completed").expect("summary should resolve"),
+        ),
+    }
+}
+
+#[test]
+fn agent_document_facts_append_semantic_transcript_items() {
+    use runtime_domain::agent::AgentProjectionEvent;
+
+    let mut model = scrollable_model();
+
+    model.apply_runtime_event(RuntimeEvent::AgentProjection(Box::new(
+        AgentProjectionEvent::AgentLaunchFact {
+            snapshot: agent_launch_snapshot_fixture(vec![agent_launch_child_fixture(
+                2,
+                "research task",
+            )]),
+        },
+    )));
+    model.apply_runtime_event(RuntimeEvent::AgentProjection(Box::new(
+        AgentProjectionEvent::AgentLaunchFact {
+            snapshot: agent_launch_snapshot_fixture(vec![
+                agent_launch_child_fixture(3, "first task"),
+                agent_launch_child_fixture(4, "second task"),
+            ]),
+        },
+    )));
+    model.apply_runtime_event(RuntimeEvent::AgentProjection(Box::new(
+        AgentProjectionEvent::AgentOutcomeFact {
+            snapshot: agent_outcome_snapshot_fixture(
+                runtime_domain::agent::AgentOutcome::Completed,
+            ),
+        },
+    )));
+
+    let transcript = model.transcript_plain_items().join("\n");
+    assert!(transcript.contains("● Launched research task"));
+    assert!(transcript.contains("● Launched 2 agents"));
+    assert!(transcript.contains("  ├ first task"));
+    assert!(transcript.contains("  └ second task"));
+    assert!(transcript.contains("● Completed research task"));
+    assert!(transcript.contains("  └ Child Agent completed"));
+    // Agent 事实不降级成 error-styled system message。
+    assert!(!transcript.contains('■'));
+    // 追加事实后仍保持贴底跟随（非手动滚动）。
+    assert!(model.document_pinned_to_bottom());
+}
+
+#[test]
+fn agent_document_fact_appends_keep_manual_scroll_viewport() {
+    use runtime_domain::agent::AgentProjectionEvent;
+
+    let mut model = scrollable_model();
+    model.scroll_document_by(-4);
+    let viewport_y = model.document_runtime.viewport_y;
+
+    model.apply_runtime_event(RuntimeEvent::AgentProjection(Box::new(
+        AgentProjectionEvent::AgentLaunchFact {
+            snapshot: agent_launch_snapshot_fixture(vec![agent_launch_child_fixture(
+                2,
+                "research task",
+            )]),
+        },
+    )));
+
+    assert_eq!(
+        model.document_runtime.viewport_y, viewport_y,
+        "appended agent facts must not move a manually scrolled viewport"
+    );
+}
+
+#[test]
+fn agent_projection_deltas_do_not_rewrite_appended_document_facts() {
+    use runtime_domain::agent::{
+        AgentId, AgentObservationId, AgentOverviewDelta, AgentOverviewDeltaKind, AgentOverviewRow,
+        AgentProjectionEvent, AgentProjectionRevision, AgentRuntimeGeneration, AgentViewSnapshot,
+    };
+
+    let mut model = scrollable_model();
+    model.apply_runtime_event(RuntimeEvent::AgentProjection(Box::new(
+        AgentProjectionEvent::AgentLaunchFact {
+            snapshot: agent_launch_snapshot_fixture(vec![agent_launch_child_fixture(
+                2,
+                "research task",
+            )]),
+        },
+    )));
+    let fact_item = model
+        .transcript
+        .item(model.transcript.len() - 1)
+        .expect("launch fact item should exist")
+        .clone();
+
+    // status/permission/metrics delta 类投影事件不得触碰 transcript。
+    let revision = AgentProjectionRevision::new(2);
+    let delta = AgentProjectionEvent::AgentsOverviewUpdated {
+        delta: AgentOverviewDelta {
+            observation_id: AgentObservationId::new(1),
+            generation: AgentRuntimeGeneration::new(1),
+            revision,
+            kind: AgentOverviewDeltaKind::Upsert(AgentOverviewRow {
+                agent_id: AgentId::new(2),
+                title: runtime_domain::agent::AgentTitle::resolve(
+                    &runtime_domain::agent::AgentObjective::new("fallback")
+                        .expect("objective should be valid"),
+                    Some("renamed title"),
+                )
+                .expect("title should resolve"),
+                status: runtime_domain::agent::AgentProjectionStatus::Working,
+                latest_activity: runtime_domain::agent::AgentActivitySummary::Thinking,
+                elapsed_ms: Some(1200),
+                tool_uses: Some(3),
+                token_usage: Some(2048),
+            }),
+        },
+    };
+    model.apply_runtime_event(RuntimeEvent::AgentProjection(Box::new(delta)));
+    model.apply_runtime_event(RuntimeEvent::AgentProjection(Box::new(
+        AgentProjectionEvent::AgentViewUpdated {
+            snapshot: AgentViewSnapshot {
+                observation_id: AgentObservationId::new(2),
+                generation: AgentRuntimeGeneration::new(1),
+                revision,
+                transcript: runtime_domain::agent::AgentTranscriptSnapshot {
+                    observation_id: AgentObservationId::new(2),
+                    generation: AgentRuntimeGeneration::new(1),
+                    revision,
+                    agent_id: AgentId::new(2),
+                    title: runtime_domain::agent::AgentTitle::resolve(
+                        &runtime_domain::agent::AgentObjective::new("fallback")
+                            .expect("objective should be valid"),
+                        Some("renamed title"),
+                    )
+                    .expect("title should resolve"),
+                    status: runtime_domain::agent::AgentProjectionStatus::Working,
+                    items: Vec::new(),
+                },
+                preview: runtime_domain::agent::AgentPreviewSnapshot {
+                    generation: AgentRuntimeGeneration::new(1),
+                    revision,
+                    agent_id: AgentId::new(2),
+                    title: runtime_domain::agent::AgentTitle::resolve(
+                        &runtime_domain::agent::AgentObjective::new("fallback")
+                            .expect("objective should be valid"),
+                        Some("renamed title"),
+                    )
+                    .expect("title should resolve"),
+                    status: runtime_domain::agent::AgentProjectionStatus::Working,
+                    latest_activity: runtime_domain::agent::AgentActivitySummary::Thinking,
+                    elapsed_ms: Some(1200),
+                    latest_committed_answer: None,
+                    permission: None,
+                },
+            },
+        },
+    )));
+
+    let transcript = model.transcript_plain_items().join("\n");
+    assert!(
+        transcript.contains("● Launched research task"),
+        "launch fact must keep the frozen title"
+    );
+    assert!(!transcript.contains("renamed title"));
+    // permission request/decision 只属于后续 panel/pill surface，不进 document timeline。
+    let item_count_after_deltas = model.transcript.len();
+    model.apply_runtime_event(RuntimeEvent::AgentProjection(Box::new(
+        AgentProjectionEvent::AgentPermissionUpdated {
+            update: runtime_domain::agent::AgentPermissionUpdate {
+                agent_id: AgentId::new(2),
+                generation: AgentRuntimeGeneration::new(1),
+                request: None,
+            },
+        },
+    )));
+    assert_eq!(
+        model.transcript.len(),
+        item_count_after_deltas,
+        "permission projections must not append document items"
+    );
+    assert_eq!(
+        model
+            .transcript
+            .item(model.transcript.len() - 1)
+            .expect("launch fact item should still exist"),
+        &fact_item,
+        "delta projections must not rewrite the appended fact item"
+    );
+}
+
+#[test]
+fn agent_document_facts_resume_replay_matches_live_items() {
+    use runtime_domain::agent::AgentProjectionEvent;
+
+    let launch_snapshot =
+        agent_launch_snapshot_fixture(vec![agent_launch_child_fixture(2, "research task")]);
+    let outcome_snapshot =
+        agent_outcome_snapshot_fixture(runtime_domain::agent::AgentOutcome::Failed);
+
+    // live 路径：document fact 事件直接追加。
+    let mut live_model = Model::new(StartupBannerOptions::default());
+    live_model.apply_runtime_event(RuntimeEvent::AgentProjection(Box::new(
+        AgentProjectionEvent::AgentLaunchFact {
+            snapshot: launch_snapshot.clone(),
+        },
+    )));
+    live_model.apply_runtime_event(RuntimeEvent::AgentProjection(Box::new(
+        AgentProjectionEvent::AgentOutcomeFact {
+            snapshot: outcome_snapshot.clone(),
+        },
+    )));
+
+    // resume 路径：同一 typed snapshots 从 replay facts 重建。
+    let mut resumed_model = Model::new(StartupBannerOptions::default());
+    resumed_model.apply_runtime_event(RuntimeEvent::SessionResumed {
+        payload: SessionResumePayload {
+            session_id: "agent-facts-session".to_string(),
+            transcript: vec![
+                TranscriptReplayItem::AgentLaunch(launch_snapshot),
+                TranscriptReplayItem::AgentOutcome(outcome_snapshot),
+            ],
+            restored_model: None,
+        },
+    });
+
+    // 相同 facts 产生相同的 item 序列与渲染语义。live 路径的 model 带启动欢迎块，
+    // resume 重建的 transcript 只含 replay facts，比较时跳过 banner 项。
+    assert!(live_model.transcript.starts_with_startup_banner());
+    let mut live_plain_items = live_model.transcript_plain_items();
+    live_plain_items.remove(0);
+    assert_eq!(live_plain_items, resumed_model.transcript_plain_items());
+    for index in 0..resumed_model.transcript.len() {
+        assert_eq!(
+            live_model.transcript.item(index + 1),
+            resumed_model.transcript.item(index),
+            "agent fact items must be identical between live and resume paths"
+        );
+    }
+    let transcript = resumed_model.transcript_plain_items().join("\n");
+    assert!(transcript.contains("● Launched research task"));
+    assert!(transcript.contains("● Failed research task"));
+    assert!(transcript.contains("  └ Child Agent completed"));
+}
+
+#[test]
+fn agent_outcome_replay_with_legacy_defaults_renders_without_group_identity() {
+    // 旧 JSONL 没有新 metadata 字段：serde 安全默认值（group/parent 为 None）必须直接成立。
+    let replay_json = r#"[
+        {"type": "agent_launch", "payload": {
+            "group_id": 7,
+            "parent_agent_id": 1,
+            "parent_turn_id": 9,
+            "children": [
+                {"agent_id": 2, "title": "legacy task", "objective": "legacy objective"}
+            ],
+            "occurred_at_ms": 42
+        }},
+        {"type": "agent_outcome", "payload": {
+            "agent_id": 2,
+            "title": "legacy task",
+            "outcome": "cancelled",
+            "occurred_at_ms": 43
+        }}
+    ]"#;
+    let transcript: Vec<TranscriptReplayItem> = serde_json::from_str(replay_json)
+        .expect("legacy agent replay facts should deserialize with safe defaults");
+
+    let mut model = scrollable_model();
+    model.apply_runtime_event(RuntimeEvent::SessionResumed {
+        payload: SessionResumePayload {
+            session_id: "legacy-agent-facts".to_string(),
+            transcript,
+            restored_model: None,
+        },
+    });
+
+    let text = model.transcript_plain_items().join("\n");
+    assert!(text.contains("● Launched legacy task"));
+    assert!(text.contains("● Cancelled legacy task"));
 }

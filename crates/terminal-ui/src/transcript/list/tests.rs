@@ -997,6 +997,86 @@ fn render_cache_hit_reuses_underlying_result_storage() {
 }
 
 #[test]
+fn agent_fact_items_flow_through_render_pipeline_with_cached_blocks() {
+    use runtime_domain::agent::{
+        AgentId, AgentLaunchChildSnapshot, AgentLaunchGroupId, AgentLaunchSnapshot, AgentObjective,
+        AgentObjectiveSummary, AgentOutcome, AgentOutcomeSnapshot, AgentOutcomeSummary, AgentTitle,
+        AgentTurnId,
+    };
+
+    let launch_child = |agent_id: u64, title: &str| AgentLaunchChildSnapshot {
+        agent_id: AgentId::new(agent_id),
+        title: AgentTitle::resolve(
+            &AgentObjective::new("fallback objective").expect("objective should be valid"),
+            Some(title),
+        )
+        .expect("title should resolve"),
+        objective: AgentObjectiveSummary::from_objective(
+            &AgentObjective::new("objective body").expect("objective should be valid"),
+        )
+        .expect("objective summary should resolve"),
+    };
+
+    let mut transcript = Transcript::new(default_palette(), None);
+    transcript.set_width(40);
+    transcript.append_agent_launch_fact(AgentLaunchSnapshot {
+        group_id: AgentLaunchGroupId::new(7),
+        parent_agent_id: AgentId::MAIN,
+        parent_turn_id: AgentTurnId::new(9),
+        children: vec![
+            launch_child(2, "first task"),
+            launch_child(3, "second task"),
+        ],
+        occurred_at_ms: 42,
+    });
+    transcript.append_agent_outcome_fact(AgentOutcomeSnapshot {
+        agent_id: AgentId::new(2),
+        title: AgentTitle::resolve(
+            &AgentObjective::new("fallback objective").expect("objective should be valid"),
+            Some("research task"),
+        )
+        .expect("title should resolve"),
+        group_id: Some(AgentLaunchGroupId::new(7)),
+        parent_agent_id: Some(AgentId::MAIN),
+        parent_turn_id: Some(AgentTurnId::new(9)),
+        outcome: AgentOutcome::Completed,
+        occurred_at_ms: 43,
+        summary: Some(
+            AgentOutcomeSummary::new("Child Agent completed").expect("summary should resolve"),
+        ),
+    });
+
+    let result = transcript.render(crate::frame_time::FrameRenderContext::capture());
+    let rendered = result
+        .lines_for_range(0, result.line_count)
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        rendered,
+        vec![
+            "● Launched 2 agents",
+            "  ├ first task",
+            "  └ second task",
+            "",
+            "● Completed research task",
+            "  └ Child Agent completed",
+        ]
+    );
+    assert_eq!(result.line_count, 6);
+
+    // Agent fact 是 immutable item：无动态 marker，重复 render 必须整体命中缓存。
+    let second = transcript.render(crate::frame_time::FrameRenderContext::capture());
+    assert_eq!(result.items.as_ptr(), second.items.as_ptr());
+}
+
+#[test]
 fn render_cache_hit_does_not_rehash_message_content() {
     let mut transcript = Transcript::new(default_palette(), None);
     transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(static_message(

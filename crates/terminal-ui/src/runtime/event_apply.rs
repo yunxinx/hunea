@@ -1,3 +1,4 @@
+use runtime_domain::agent::AgentProjectionEvent;
 use runtime_domain::prompt_assembly::{
     PromptAssemblyDiscoveredSkill, PromptAssemblyExtraPromptCandidate,
 };
@@ -311,9 +312,26 @@ impl RuntimeEventApply for Model {
                     self.show_toast(ToastSeverity::Error, format!("Runtime stopped: {message}"));
                 }
             }
-            // Agent projection ports 尚未接入任何 TUI surface；本阶段只保证事件被无害吸收，
-            // 不渲染、不改变会话状态。
-            RuntimeEvent::AgentProjection(_) => {}
+            // Agent projection port：document facts 追加语义 transcript item；
+            // observation/permission 投影属于后续 surface（/agents、attention pill），
+            // 本阶段只保证被无害吸收，不渲染、不改变会话状态。
+            RuntimeEvent::AgentProjection(projection) => match *projection {
+                AgentProjectionEvent::AgentLaunchFact { snapshot } => {
+                    // 事实行必须落在 buffered 流式正文之后，避免流式文本覆盖事实。
+                    self.flush_runtime_response_buffer();
+                    self.append_agent_launch_fact_from_runtime(snapshot);
+                }
+                AgentProjectionEvent::AgentOutcomeFact { snapshot } => {
+                    self.flush_runtime_response_buffer();
+                    self.append_agent_outcome_fact_from_runtime(snapshot);
+                }
+                AgentProjectionEvent::AgentsOverviewSnapshotLoaded { .. }
+                | AgentProjectionEvent::AgentsOverviewUpdated { .. }
+                | AgentProjectionEvent::AgentViewSnapshotLoaded { .. }
+                | AgentProjectionEvent::AgentViewUpdated { .. }
+                | AgentProjectionEvent::AgentPermissionUpdated { .. }
+                | AgentProjectionEvent::AgentObservationRejected { .. } => {}
+            },
         }
     }
 }
@@ -628,8 +646,14 @@ fn append_transcript_replay_item(
         TranscriptReplayItem::System { content } => {
             transcript.append_system_message(content);
         }
-        // Agent facts在专用 transcript item 接入前保持 typed，不降级成 error-styled system text。
-        TranscriptReplayItem::AgentLaunch(_) | TranscriptReplayItem::AgentOutcome(_) => {}
+        // Agent document facts 用与 live 路径相同的 typed snapshot 构造同一 item，
+        // 保证 resume 与 live 语义等价。
+        TranscriptReplayItem::AgentLaunch(snapshot) => {
+            transcript.append_agent_launch_fact(snapshot);
+        }
+        TranscriptReplayItem::AgentOutcome(snapshot) => {
+            transcript.append_agent_outcome_fact(snapshot);
+        }
     }
 }
 

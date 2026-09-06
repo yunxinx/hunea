@@ -958,10 +958,16 @@ impl AgentOrchestrator {
             children: children.clone(),
             occurred_at_ms: runtime_domain::time::unix_timestamp_ms().unwrap_or(0),
         };
-        if let Err(error) = self.append_replay_fact(TranscriptReplayItem::AgentLaunch(snapshot)) {
+        if let Err(error) =
+            self.append_replay_fact(TranscriptReplayItem::AgentLaunch(snapshot.clone()))
+        {
             self.cleanup_unpublished_children(staged);
             return Err(error);
         }
+        // durable launch fact 已提交（或确认无需持久化）才进入 document 投影；
+        // 事件与 replay fact 携带同一 typed snapshot，live/resume 渲染同源。
+        self.projection_events
+            .push(AgentProjectionEvent::AgentLaunchFact { snapshot });
 
         let mut dispatches = Vec::with_capacity(staged.len());
         for (child_id, record, request) in staged {
@@ -1058,12 +1064,16 @@ impl AgentOrchestrator {
                 continue;
             };
             if self
-                .append_replay_fact(TranscriptReplayItem::AgentOutcome(snapshot))
+                .append_replay_fact(TranscriptReplayItem::AgentOutcome(snapshot.clone()))
                 .is_ok()
                 && let Some(record) = self.children.get_mut(&agent_id)
             {
                 record.outcome_persisted = true;
                 record.pending_outcome = None;
+                // 与 launch fact 同理：先持久化（或确认无需持久化）再交付 document 投影，
+                // 重试成功时交付的是同一 frozen snapshot。
+                self.projection_events
+                    .push(AgentProjectionEvent::AgentOutcomeFact { snapshot });
             }
         }
     }
@@ -2932,6 +2942,8 @@ mod tests {
                 AgentProjectionEvent::AgentsOverviewSnapshotLoaded { snapshot, .. } => {
                     overview_events = Some(snapshot);
                 }
+                // sessionless orchestrator 的 outcome append 是 no-op Ok，document fact 照常交付。
+                AgentProjectionEvent::AgentOutcomeFact { .. } => {}
                 other => panic!("unexpected projection event: {other:?}"),
             }
         }
@@ -3546,13 +3558,24 @@ mod tests {
         let snapshot_revision = snapshot.revision;
 
         let _ = orchestrator.drain_child_events();
-        let deltas = orchestrator.drain_projection_events();
+        let events = orchestrator.drain_projection_events();
+        // 同一 drain 边界先交付 observation deltas，再交付 sessionless outcome document fact
+        //（no-op append 照常 push）；deltas 过滤后仍须严格单调。
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentProjectionEvent::AgentOutcomeFact { .. }))
+        );
+        let deltas = events
+            .into_iter()
+            .filter_map(|event| match event {
+                AgentProjectionEvent::AgentsOverviewUpdated { delta } => Some(delta),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
         assert!(!deltas.is_empty());
         let mut previous_revision = snapshot_revision;
         for delta in &deltas {
-            let AgentProjectionEvent::AgentsOverviewUpdated { delta } = delta else {
-                panic!("expected overview delta, got {delta:?}");
-            };
             assert_eq!(delta.observation_id, observation_id);
             assert!(
                 delta.revision > previous_revision,
@@ -3561,10 +3584,7 @@ mod tests {
             previous_revision = delta.revision;
             assert!(matches!(delta.kind, AgentOverviewDeltaKind::Upsert(_)));
         }
-        let last_delta = match deltas.last() {
-            Some(AgentProjectionEvent::AgentsOverviewUpdated { delta }) => delta,
-            other => panic!("expected final delta, got {other:?}"),
-        };
+        let last_delta = deltas.last().expect("overview deltas should not be empty");
         match &last_delta.kind {
             AgentOverviewDeltaKind::Upsert(row) => {
                 assert_eq!(row.status, AgentProjectionStatus::Completed);

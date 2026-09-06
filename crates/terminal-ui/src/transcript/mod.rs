@@ -33,7 +33,8 @@ pub(crate) use item_index::{
 pub use items::ReasoningDisplayMode;
 pub(crate) use items::ReasoningRenderMode;
 pub(crate) use items::{
-    FinalBodyDividerItem, ReasoningMessageItem, SystemMessageItem, WorkDurationMessageItem,
+    AgentFactItem, FinalBodyDividerItem, ReasoningMessageItem, SystemMessageItem,
+    WorkDurationMessageItem,
 };
 pub(crate) use linebreak::{
     ProseWrapOptions, WrappedWhitespace, prose_wrap_is_monotone_when_widening, split_text_lines,

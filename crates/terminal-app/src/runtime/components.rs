@@ -2735,7 +2735,8 @@ mod tests {
     };
     use runtime_domain::agent::{
         AgentCommand, AgentCommandReceipt, AgentEvent, AgentEventKind, AgentGroupCompletion,
-        AgentId, AgentOutcome, AgentRuntime, AgentRuntimeError, AgentTurnId, AgentTurnRequest,
+        AgentId, AgentOutcome, AgentProjectionEvent, AgentRuntime, AgentRuntimeError, AgentTurnId,
+        AgentTurnRequest,
     };
     use runtime_domain::prompt_assembly::{
         PromptPreludeSection, PromptSourceKind, PromptSourceOrigin,
@@ -3948,6 +3949,22 @@ mod tests {
             AgentEventKind::TurnFinished { .. }
         ));
 
+        // document facts 与 durable replay facts 同源同序：launch 先于 outcome。
+        let projection_events = components.drain_agent_projection_events();
+        let projected_launch = match projection_events.first() {
+            Some(AgentProjectionEvent::AgentLaunchFact { snapshot }) => snapshot.clone(),
+            other => panic!("expected a launch document fact first, got {other:?}"),
+        };
+        let projected_outcome = match projection_events.get(1) {
+            Some(AgentProjectionEvent::AgentOutcomeFact { snapshot }) => snapshot.clone(),
+            other => panic!("expected an outcome document fact second, got {other:?}"),
+        };
+        assert_eq!(
+            projection_events.len(),
+            2,
+            "no observation surface is registered, only document facts should project"
+        );
+
         let tool_result = execution
             .await
             .expect("spawn tool task should finish after group completion");
@@ -3984,6 +4001,9 @@ mod tests {
         assert_eq!(outcome.parent_agent_id, Some(AgentId::MAIN));
         assert_eq!(outcome.parent_turn_id, Some(parent_turn_id));
         assert_eq!(outcome.outcome, AgentOutcome::Completed);
+        // document 投影与 durable replay fact 是同一份 typed snapshot。
+        assert_eq!(projected_launch, *launch);
+        assert_eq!(projected_outcome, *outcome);
         let replay_json = serde_json::to_string(&restored.transcript)
             .expect("replay projection should remain serializable");
         assert!(!replay_json.contains(PRIVATE_SECOND_LINE));
@@ -4536,6 +4556,10 @@ mod tests {
                 .transcript
                 .is_empty()
         );
+        assert!(
+            components.drain_agent_projection_events().is_empty(),
+            "failed launch append must not deliver a document fact"
+        );
 
         let retry_execution = tokio::spawn(async move {
             let cancellation = CancellationToken::new();
@@ -4567,6 +4591,17 @@ mod tests {
             tokio::task::yield_now().await;
         }
         assert_eq!(components.drain_child_agent_events().len(), 1);
+        // retry 成功后，launch 与 outcome 两个 document facts 按 durable 顺序交付。
+        let projection_events = components.drain_agent_projection_events();
+        assert!(matches!(
+            projection_events.first(),
+            Some(AgentProjectionEvent::AgentLaunchFact { .. })
+        ));
+        assert!(matches!(
+            projection_events.get(1),
+            Some(AgentProjectionEvent::AgentOutcomeFact { .. })
+        ));
+        assert_eq!(projection_events.len(), 2);
         let retry_result = retry_execution
             .await
             .expect("retry launch tool task should finish");
@@ -4676,6 +4711,12 @@ mod tests {
         assert!(components.drain_child_agent_events().is_empty());
         assert_eq!(replay_port.append_attempts(), 2);
         assert!(!execution.is_finished());
+        // outcome append 失败时不交付 outcome document fact；已成功的 launch fact 仍保留。
+        let projection_events = components.drain_agent_projection_events();
+        assert!(matches!(
+            projection_events.as_slice(),
+            [AgentProjectionEvent::AgentLaunchFact { .. }]
+        ));
         let child_id = components
             .agent_orchestrator
             .children_of(AgentId::MAIN)
@@ -4689,6 +4730,14 @@ mod tests {
         let terminal_events = components.drain_child_agent_events();
         assert_eq!(terminal_events.len(), 1);
         assert_eq!(replay_port.append_attempts(), 3);
+        // retry 成功后交付的是同一 frozen snapshot。
+        let projection_events = components.drain_agent_projection_events();
+        match projection_events.as_slice() {
+            [AgentProjectionEvent::AgentOutcomeFact { snapshot }] => {
+                assert_eq!(*snapshot, frozen_outcome);
+            }
+            other => panic!("expected the retried outcome document fact, got {other:?}"),
+        }
         let result = execution
             .await
             .expect("group completion should release after outcome retry");
@@ -4854,6 +4903,21 @@ mod tests {
         }
         assert_eq!(components.child_agent_count_for_test(), 2);
         assert_eq!(components.drain_child_agent_events().len(), 2);
+        // sessionless（未绑定 session port）时 replay append 是 no-op Ok，
+        // document facts 仍按事实顺序交付：一个 launch fact + 每个 child 一个 outcome fact。
+        let projection_events = components.drain_agent_projection_events();
+        assert!(matches!(
+            projection_events.first(),
+            Some(AgentProjectionEvent::AgentLaunchFact { .. })
+        ));
+        assert_eq!(
+            projection_events
+                .iter()
+                .filter(|event| matches!(event, AgentProjectionEvent::AgentOutcomeFact { .. }))
+                .count(),
+            2
+        );
+        assert_eq!(projection_events.len(), 3);
         let retry_result = retry_execution
             .await
             .expect("retry batch tool task should finish");

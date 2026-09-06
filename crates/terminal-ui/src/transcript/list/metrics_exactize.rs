@@ -77,6 +77,9 @@ impl Transcript {
                             TranscriptItem::FinalBodyDivider(_) => {
                                 estimate_breakdown.non_assistant_item_count += 1;
                             }
+                            TranscriptItem::AgentFact(_) => {
+                                estimate_breakdown.non_assistant_item_count += 1;
+                            }
                             TranscriptItem::Reasoning(_) | TranscriptItem::Message(_) => {
                                 match estimated.kind {
                                     TranscriptEstimateKind::Assistant => {

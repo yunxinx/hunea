@@ -731,7 +731,9 @@ pub enum AgentObservationRejection {
 /// Agent projection port 的 closed 事件集合。
 ///
 /// 只包含 delivery-safe 投影事实；instructions、provider prompt、raw tool payload/result、
-/// raw error 与 streaming partial 不得进入任何 snapshot/delta。
+/// raw error 与 streaming partial 不得进入任何 snapshot/delta。其中 document fact
+/// （`AgentLaunchFact`/`AgentOutcomeFact`）只携带 typed frozen snapshot，与 observation 无关：
+/// 即使没有任何 surface 存活，已 commit 的 launch/outcome 事实也要到达 runtime event 边界。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentProjectionEvent {
     AgentsOverviewSnapshotLoaded {
@@ -755,6 +757,15 @@ pub enum AgentProjectionEvent {
     AgentObservationRejected {
         request_id: AgentObservationRequestId,
         reason: AgentObservationRejection,
+    },
+    /// 一次 committed typed batch launch 的 document fact；与 durable launch fact 同源同序。
+    AgentLaunchFact {
+        snapshot: AgentLaunchSnapshot,
+    },
+    /// 一个 child terminal outcome 的 document fact；durable append 成功（或确认无需
+    /// 持久化）后才交付，重试成功时交付的是同一 frozen snapshot。
+    AgentOutcomeFact {
+        snapshot: AgentOutcomeSnapshot,
     },
 }
 

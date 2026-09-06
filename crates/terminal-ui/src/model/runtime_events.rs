@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use runtime_domain::agent::{AgentLaunchSnapshot, AgentOutcomeSnapshot};
 use runtime_domain::session::{
     RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityUpdate,
 };
@@ -344,6 +345,27 @@ impl Model {
     pub(crate) fn append_work_duration_from_runtime(&mut self, duration: Duration) {
         let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
         self.transcript_mut().append_work_duration_message(duration);
+        self.refresh_status_line_after_transcript_change();
+        self.sync_transcript_render();
+        self.sync_viewport_after_runtime_transcript_refresh(preserved_viewport_state);
+    }
+
+    /// `append_agent_launch_fact_from_runtime` 追加一次 typed batch launch 的 document 事实。
+    pub(crate) fn append_agent_launch_fact_from_runtime(&mut self, snapshot: AgentLaunchSnapshot) {
+        let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
+        self.transcript_mut().append_agent_launch_fact(snapshot);
+        self.refresh_status_line_after_transcript_change();
+        self.sync_transcript_render();
+        self.sync_viewport_after_runtime_transcript_refresh(preserved_viewport_state);
+    }
+
+    /// `append_agent_outcome_fact_from_runtime` 追加一个 child terminal outcome 的 document 事实。
+    pub(crate) fn append_agent_outcome_fact_from_runtime(
+        &mut self,
+        snapshot: AgentOutcomeSnapshot,
+    ) {
+        let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
+        self.transcript_mut().append_agent_outcome_fact(snapshot);
         self.refresh_status_line_after_transcript_change();
         self.sync_transcript_render();
         self.sync_viewport_after_runtime_transcript_refresh(preserved_viewport_state);

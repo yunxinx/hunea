@@ -176,6 +176,57 @@ fn begin_prompt_assembly_edit_reads_latest_filesystem_state() {
 }
 
 #[test]
+fn spawn_agents_guidelines_enter_prompt_assembly_tool_guidelines_body() {
+    let root = temp_test_dir("spawn-agents-guidelines");
+    let work_dir = root.join("repo");
+    fs::create_dir_all(&work_dir).expect("work dir should exist");
+
+    let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        session_store: Some(store),
+        session_header_template: Some(SessionHeader {
+            session_id: SessionId::new(),
+            work_dir: work_dir.clone(),
+            session_name: None,
+            initial_model: "qwen3".to_string(),
+            git_head: None,
+            cli_version: None,
+        }),
+        ..AppRuntimeOptions::default()
+    });
+
+    // begin edit 走真实 tool catalog definitions 解析 working copy，
+    // 断言 spawn_agents 守则进入 prelude 的 tool guidelines 装配输出。
+    let manager = coordinator
+        .begin_prompt_assembly_edit()
+        .expect("begin prompt assembly edit should resolve default assembly");
+    let guidelines_section = manager
+        .resolution
+        .prelude
+        .sections
+        .iter()
+        .find(|section| section.kind == PromptSourceKind::ToolGuidelines)
+        .expect("tool guidelines section should exist in the default prelude");
+    assert!(
+        guidelines_section
+            .body
+            .contains("<tool name=\"spawn_agents\">"),
+        "spawn_agents guidelines should be assembled into the prelude"
+    );
+    assert!(
+        guidelines_section.body.contains("self-contained"),
+        "spawn_agents guidelines body should carry the objective rule"
+    );
+    assert!(
+        guidelines_section
+            .body
+            .contains("may require user approval"),
+        "spawn_agents guidelines body should carry the permission rule"
+    );
+    cleanup(&root);
+}
+
+#[test]
 fn begin_prompt_assembly_edit_reports_load_failure() {
     let root = temp_test_dir("reload-prompt-assembly-load-failure");
     let work_dir = root.join("repo");

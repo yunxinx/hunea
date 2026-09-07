@@ -37,6 +37,7 @@ use super::context::{CapabilityLease, PromptAssemblyCapability, ToolCatalogCapab
 use super::effect_scope::EffectScope;
 
 const MAX_ACTIVE_CHILD_AGENTS: usize = 32;
+const CHILD_COMPLETED_WITHOUT_REPORT_TEXT: &str = "Child Agent completed without a report";
 
 /// Child adapter 由 context effect 和 registry record 共同引用，但 runtime owner 始终唯一。
 /// effect inverse 成功后取走 boxed adapter；失败则原位保留，供同一 owner 重试。
@@ -1081,7 +1082,7 @@ impl AgentOrchestrator {
                             agent_id,
                             title: record.title.clone(),
                             outcome: outcome_for_status(record.terminal_status),
-                            summary: safe_outcome_summary(record.terminal_status),
+                            summary: safe_outcome_summary(record),
                         })
                 })
                 .collect::<Vec<_>>();
@@ -2000,13 +2001,27 @@ fn safe_launch_error(error: &AgentRuntimeError) -> SpawnAgentsFailure {
     }
 }
 
-fn safe_outcome_summary(status: Option<AgentProjectionStatus>) -> Option<AgentOutcomeSummary> {
-    let text = match status {
-        Some(AgentProjectionStatus::Completed) => "Child Agent completed",
-        Some(AgentProjectionStatus::Cancelled) => "Child Agent cancelled",
-        _ => "Child Agent failed",
-    };
-    AgentOutcomeSummary::new(text).ok()
+/// transcript 中最后一条 committed assistant 内容；streaming partial 永不进入，因此它是
+/// child 产出的唯一 committed 来源。
+fn latest_committed_assistant_content(record: &ChildAgentRecord) -> Option<&str> {
+    record.transcript.iter().rev().find_map(|item| match item {
+        AgentTranscriptItem::Assistant { content } => Some(content.as_str()),
+        _ => None,
+    })
+}
+
+/// child terminal outcome 的 delivery-safe 摘要：Completed 取最后一条 committed assistant
+/// 内容，其余 status 只有固定占位文本。
+fn safe_outcome_summary(record: &ChildAgentRecord) -> Option<AgentOutcomeSummary> {
+    match record.terminal_status {
+        Some(AgentProjectionStatus::Completed) => latest_committed_assistant_content(record)
+            .and_then(|content| AgentOutcomeSummary::new(content).ok())
+            .or_else(|| AgentOutcomeSummary::new(CHILD_COMPLETED_WITHOUT_REPORT_TEXT).ok()),
+        Some(AgentProjectionStatus::Cancelled) => {
+            AgentOutcomeSummary::new("Child Agent cancelled").ok()
+        }
+        _ => AgentOutcomeSummary::new("Child Agent failed").ok(),
+    }
 }
 
 fn freeze_pending_outcome(agent_id: AgentId, record: &mut ChildAgentRecord) {
@@ -2024,7 +2039,7 @@ fn freeze_pending_outcome(agent_id: AgentId, record: &mut ChildAgentRecord) {
         parent_turn_id: record.parent_turn_id,
         outcome: outcome_for_status(Some(terminal_status)),
         occurred_at_ms: runtime_domain::time::unix_timestamp_ms().unwrap_or(0),
-        summary: safe_outcome_summary(Some(terminal_status)),
+        summary: safe_outcome_summary(record),
     });
 }
 
@@ -2159,10 +2174,7 @@ fn agent_view_snapshot_for_child(
         latest_activity: record.latest_activity.clone(),
         elapsed_ms: (record.started_at_ms > 0 && now_ms >= record.started_at_ms)
             .then_some((now_ms - record.started_at_ms) as u64),
-        latest_committed_answer: record.transcript.iter().rev().find_map(|item| match item {
-            AgentTranscriptItem::Assistant { content } => Some(content.clone()),
-            _ => None,
-        }),
+        latest_committed_answer: latest_committed_assistant_content(record).map(str::to_string),
         permission: record.pending_permissions.front().cloned(),
     };
     AgentViewSnapshot {
@@ -2760,6 +2772,79 @@ mod tests {
                 .expect("waiter should receive a terminal response"),
             Err(SpawnAgentsFailure::Unavailable)
         );
+    }
+
+    fn registered_child_with_terminal_event(kind: AgentEventKind) -> (AgentOrchestrator, AgentId) {
+        let agent_id = AgentId::new(2);
+        let turn_id = AgentTurnId::new(7);
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        orchestrator.register_child_for_test(
+            agent_id,
+            AgentId::MAIN,
+            turn_id,
+            test_title("group child"),
+            test_context("group-child"),
+            Box::new(StubMainRuntime {
+                events: vec![child_event(agent_id, turn_id, &target, kind)],
+            }),
+        );
+        (orchestrator, agent_id)
+    }
+
+    fn completed_group_summary(kind: AgentEventKind) -> Option<AgentOutcomeSummary> {
+        let (mut orchestrator, agent_id) = registered_child_with_terminal_event(kind);
+        let (response_sender, response_receiver) = oneshot::channel();
+        orchestrator.group_waiters.insert(
+            AgentLaunchGroupId::new(1),
+            GroupWaiter {
+                parent_agent_id: AgentId::MAIN,
+                child_ids: vec![agent_id],
+                response: response_sender,
+            },
+        );
+
+        let _ = orchestrator.drain_child_events();
+
+        let completion = response_receiver
+            .blocking_recv()
+            .expect("group waiter should receive a completion")
+            .expect("group completion should succeed");
+        assert_eq!(completion.children.len(), 1);
+        assert_eq!(completion.children[0].agent_id, agent_id);
+        completion.children[0].summary.clone()
+    }
+
+    fn finished_turn_event(answer_text: &str) -> AgentEventKind {
+        AgentEventKind::TurnFinished {
+            response: runtime_domain::session::ConversationResponse::assistant_text(answer_text),
+            metrics: None,
+            context_usage: None,
+        }
+    }
+
+    #[test]
+    fn group_completion_carries_child_committed_answer() {
+        let summary = completed_group_summary(finished_turn_event("  final researched   answer  "));
+        let summary = summary.expect("completed child with output should carry a summary");
+        assert_eq!(summary.as_str(), "final researched answer");
+    }
+
+    #[test]
+    fn group_completion_without_committed_answer_uses_placeholder() {
+        let summary = completed_group_summary(finished_turn_event(""));
+        let summary = summary.expect("completed child should still carry a summary");
+        assert_eq!(summary.as_str(), CHILD_COMPLETED_WITHOUT_REPORT_TEXT);
+    }
+
+    #[test]
+    fn group_completion_failed_child_keeps_placeholder_summary() {
+        let summary = completed_group_summary(AgentEventKind::TurnFailed {
+            message: "provider connection closed".to_string(),
+        });
+        let summary = summary.expect("failed child should still carry a summary");
+        assert_eq!(summary.as_str(), "Child Agent failed");
     }
 
     fn test_context(owner: &str) -> AgentCapabilityContext {

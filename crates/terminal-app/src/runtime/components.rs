@@ -2670,7 +2670,9 @@ mod tests {
     };
 
     use super::*;
-    use crate::runtime::agent::{AgentRuntimeActivity, AgentSessionRestore};
+    use crate::runtime::agent::{
+        AgentRuntimeActivity, AgentSessionRestore, child_construction_tool_grants,
+    };
     use crate::runtime::agent_capability_context::{AgentChildCapabilityGrants, AgentContextOwner};
     use crate::runtime::lifecycle::{ComponentDefinition, ComponentState};
     use agent_kernel_protocol::{
@@ -2712,6 +2714,16 @@ mod tests {
         ToolCall, ToolExecutionContext, ToolExecutor, ToolInvocationIdentity, ToolResult,
         ToolResultOutcome,
     };
+
+    use provider_protocol::{
+        ConversationItem, FinishReason, ModelDescriptor, PromptCompletion, PromptRequest,
+        ProviderCapabilities, ProviderClient, ProviderError, ProviderFuture, Role, StreamEvent,
+        StreamEventSink, ToolCall as ProviderToolCall,
+    };
+    use tool_loop_runtime::{ToolLoopOptions, run_tool_loop};
+
+    use crate::runtime::agent::AgentChildRuntimeConstructionGrants;
+    use crate::runtime::llm_port::{LlmPortError, ProviderClientFactory};
 
     #[derive(Default)]
     struct ComponentKernelSource {
@@ -3819,6 +3831,54 @@ mod tests {
         components.shutdown().expect("runtime should shut down");
     }
 
+    #[test]
+    fn native_child_construction_tool_grants_exclude_spawn_agents() {
+        let mut options = AppRuntimeOptions::default();
+        let mut components =
+            RuntimeComponents::new(&mut options).expect("runtime components should initialize");
+        let root_context = components
+            .agent_root_context_for_test()
+            .expect("child-capable Agent should own a root context");
+
+        // main 视图保留 spawn_agents：派遣入口只对 main turn 开放。
+        let main_names = root_context
+            .tools()
+            .expect("main tool view should be current")
+            .definitions()
+            .expect("main tool definitions should be current")
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect::<Vec<_>>();
+        assert!(main_names.contains(&"spawn_agents".to_string()));
+
+        let child_context = root_context
+            .child(
+                AgentContextOwner::try_new("child-tool-view").expect("child owner should validate"),
+                AgentChildCapabilityGrants::empty()
+                    .inherit_tools()
+                    .inherit_prompt(),
+            )
+            .expect("child context should attach to the root scope");
+        let (registry, definitions) = child_construction_tool_grants(&child_context)
+            .expect("child tool grants should project");
+        let registry_names = registry
+            .definitions()
+            .definitions()
+            .map(|definition| definition.name.clone())
+            .collect::<Vec<_>>();
+        assert!(!registry_names.contains(&"spawn_agents".to_string()));
+        assert!(registry_names.contains(&"read".to_string()));
+        let definition_names = definitions
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect::<Vec<_>>();
+        // provider-visible schema 与执行 registry 同源，避免模型视图与可执行面漂移。
+        assert_eq!(definition_names, registry_names);
+
+        assert!(child_context.dispose().is_success());
+        components.shutdown().expect("runtime should shut down");
+    }
+
     #[tokio::test]
     async fn scoped_spawn_agents_commits_redacted_launch_and_outcome_in_order() {
         const PRIVATE_SECOND_LINE: &str = "PRIVATE_SECOND_LINE";
@@ -3985,6 +4045,333 @@ mod tests {
             .expect("replay projection should remain serializable");
         assert!(!replay_json.contains(PRIVATE_SECOND_LINE));
         assert!(!replay_json.contains(PRIVATE_INSTRUCTIONS));
+
+        components.shutdown().expect("runtime should shut down");
+    }
+
+    const PARENT_FINAL_TEXT: &str = "parent restates the child report";
+    const CHILD_REPORT_TEXT: &str = "child committed final report";
+
+    /// main 侧 provider stub：第一轮发出 `spawn_agents` tool call，记录模型可见的 tool
+    /// schema；第二轮记录 tool result 并返回最终 assistant 文本。
+    #[derive(Default)]
+    struct ParentToolLoopProvider {
+        first_turn_tools: Mutex<Vec<String>>,
+        spawn_tool_result: Mutex<Option<(String, bool)>>,
+    }
+
+    fn has_tool_result_item(items: &[ConversationItem]) -> bool {
+        items
+            .iter()
+            .any(|item| matches!(item, ConversationItem::ToolResult { .. }))
+    }
+
+    impl ProviderClient for ParentToolLoopProvider {
+        fn stream_prompt<'a>(
+            &'a self,
+            request: &'a PromptRequest,
+            sink: &'a mut (dyn StreamEventSink + Send),
+        ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
+            Box::pin(async move {
+                if !has_tool_result_item(&request.items) {
+                    *self
+                        .first_turn_tools
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = request
+                        .tools
+                        .iter()
+                        .map(|tool| tool.name.clone())
+                        .collect::<Vec<_>>();
+                    let arguments = serde_json::json!({
+                        "agents": [{
+                            "objective": "scout the workspace layout",
+                            "display_title": "workspace scout"
+                        }]
+                    })
+                    .to_string();
+                    let call = ProviderToolCall::new("spawn-call", "spawn_agents", arguments);
+                    let response = PromptCompletion::new(
+                        vec![ConversationItem::assistant_with_tool_calls(
+                            String::new(),
+                            vec![call],
+                        )],
+                        FinishReason::ToolCalls,
+                        None,
+                    );
+                    sink.emit(StreamEvent::TurnCompleted(response.clone()));
+                    Ok(response)
+                } else {
+                    let tool_result = request.items.iter().find_map(|item| match item {
+                        ConversationItem::ToolResult { is_error, .. } => {
+                            Some((item.text_content(), *is_error))
+                        }
+                        _ => None,
+                    });
+                    *self
+                        .spawn_tool_result
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = tool_result;
+                    let response = PromptCompletion::new(
+                        vec![ConversationItem::text(Role::Assistant, PARENT_FINAL_TEXT)],
+                        FinishReason::Stop,
+                        None,
+                    );
+                    sink.emit(StreamEvent::TurnCompleted(response.clone()));
+                    Ok(response)
+                }
+            })
+        }
+
+        fn list_models<'a>(
+            &'a self,
+        ) -> ProviderFuture<'a, Result<Vec<ModelDescriptor>, ProviderError>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities::chat_completions()
+        }
+    }
+
+    /// child 侧 provider 观察：记录 native child 每轮收到的 provider-visible tool schema。
+    #[derive(Clone, Default)]
+    struct ChildTurnObservations {
+        tool_names_per_turn: Arc<Mutex<Vec<Vec<String>>>>,
+    }
+
+    impl ChildTurnObservations {
+        fn record(&self, request: &PromptRequest) {
+            let names = request
+                .tools
+                .iter()
+                .map(|tool| tool.name.clone())
+                .collect::<Vec<_>>();
+            self.tool_names_per_turn
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(names);
+        }
+
+        fn turns(&self) -> Vec<Vec<String>> {
+            self.tool_names_per_turn
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    struct ChildReportProvider {
+        observations: ChildTurnObservations,
+    }
+
+    impl ProviderClient for ChildReportProvider {
+        fn stream_prompt<'a>(
+            &'a self,
+            request: &'a PromptRequest,
+            sink: &'a mut (dyn StreamEventSink + Send),
+        ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
+            Box::pin(async move {
+                self.observations.record(request);
+                let response = PromptCompletion::new(
+                    vec![ConversationItem::text(Role::Assistant, CHILD_REPORT_TEXT)],
+                    FinishReason::Stop,
+                    None,
+                );
+                sink.emit(StreamEvent::TurnCompleted(response.clone()));
+                Ok(response)
+            })
+        }
+
+        fn list_models<'a>(
+            &'a self,
+        ) -> ProviderFuture<'a, Result<Vec<ModelDescriptor>, ProviderError>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities::chat_completions()
+        }
+    }
+
+    struct ChildReportFactory {
+        observations: ChildTurnObservations,
+    }
+
+    impl ProviderClientFactory for ChildReportFactory {
+        fn create_client(
+            &self,
+            _idle_timeout: Duration,
+        ) -> Result<Arc<dyn ProviderClient>, LlmPortError> {
+            Ok(Arc::new(ChildReportProvider {
+                observations: self.observations.clone(),
+            }))
+        }
+
+        fn provider_kind(&self) -> runtime_domain::provider::ProviderKind {
+            runtime_domain::provider::ProviderKind::OpenAiCompatible
+        }
+
+        fn prompt_cache_policy(&self) -> conversation_runtime::ProviderPromptCachePolicy {
+            conversation_runtime::ProviderPromptCachePolicy::Disabled
+        }
+
+        fn adapter_kind(&self) -> &'static str {
+            "child-report-fixture"
+        }
+    }
+
+    /// 全链集成：模型 tool call 经真实 tool loop 授权层（`run_tool_loop` 内的
+    /// `authorize_tool_call`）→ spawn_agents 执行 → mpsc bridge → orchestrator →
+    /// 真实 native child runtime（stub provider）→ group completion 回到 ToolResult，
+    /// 再以 provider tool result 形式进入下一轮模型上下文。
+    #[tokio::test]
+    async fn model_tool_call_spawns_child_and_returns_final_report_through_tool_loop() {
+        let child_observations = ChildTurnObservations::default();
+        let child_factory_observations = child_observations.clone();
+        let SpawnChainFixture {
+            mut components,
+            scoped_tools,
+            parent_turn_id,
+            runtime_generation,
+            ..
+        } = spawn_chain_fixture_with_child_constructor(
+            "/tool-loop-dispatch-session",
+            move |mut grants| {
+                // grants 携带的 llm_port 指向 components 的真实 provider 配置；child turn
+                // 需要注入 stub provider 才能在测试内完成流式回复。
+                let llm_port = crate::runtime::llm_port::LlmPort::new();
+                let registration = llm_port
+                    .register(
+                        "tool-loop-dispatch-test",
+                        "local",
+                        Arc::new(ChildReportFactory {
+                            observations: child_factory_observations.clone(),
+                        }),
+                    )
+                    .map_err(|error| error.to_string())?;
+                // registration 必须与 child runtime 同生命周期；测试进程内允许泄漏。
+                std::mem::forget(registration);
+                grants.llm_port = llm_port;
+                construct_native_child_agent_runtime(grants)
+            },
+        )
+        .await;
+
+        let loop_task = tokio::spawn(async move {
+            let provider = ParentToolLoopProvider::default();
+            let request = PromptRequest::new(
+                "qwen3",
+                vec![ConversationItem::text(
+                    Role::User,
+                    "dispatch the scout agent",
+                )],
+            );
+            let cancellation = CancellationToken::new();
+            let options = ToolLoopOptions {
+                invocation_identity: Some(ToolInvocationIdentity::new(
+                    AgentId::MAIN.get(),
+                    parent_turn_id.get(),
+                    runtime_generation,
+                    u64::MAX,
+                )),
+                ..ToolLoopOptions::default()
+            };
+            let completion = run_tool_loop(
+                &provider,
+                request,
+                scoped_tools,
+                &cancellation,
+                options,
+                |_progress| {},
+            )
+            .await
+            .expect("tool loop should complete the spawn turn");
+            (provider, completion)
+        });
+
+        // spawn tool 在 loop task 内等待 group completion；host bridge 与 child 事件由
+        // 本循环驱动（与 production wake loop 的职责一致）。
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !loop_task.is_finished() && tokio::time::Instant::now() < deadline {
+            components.drain_spawn_agents_requests();
+            components.drain_child_agent_events();
+            let _ = components.drain_agent_projection_events();
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let (parent_provider, completion) =
+            match tokio::time::timeout(Duration::from_secs(10), loop_task).await {
+                Ok(joined) => joined.expect("tool loop task should not panic"),
+                Err(_) => panic!("tool loop did not finish within the pump deadline"),
+            };
+
+        // 授权层放行：spawn tool result 不是 error，也不携带 permission denied 文案。
+        let (tool_result_text, is_error) = parent_provider
+            .spawn_tool_result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("provider should receive the spawn tool result");
+        assert!(
+            !is_error,
+            "spawn_agents must not be denied by the tool loop authorization layer"
+        );
+        assert!(!tool_result_text.contains("Tool permission denied"));
+
+        // completion payload 携带 child 的 committed final answer。
+        let group_completion: AgentGroupCompletion = serde_json::from_str(&tool_result_text)
+            .expect("spawn tool result should carry typed group completion JSON");
+        assert_eq!(group_completion.parent_agent_id, AgentId::MAIN);
+        assert_eq!(group_completion.children.len(), 1);
+        assert_eq!(
+            group_completion.children[0].outcome,
+            AgentOutcome::Completed
+        );
+        assert_eq!(
+            group_completion.children[0]
+                .summary
+                .as_ref()
+                .expect("completed child with output should carry a summary")
+                .as_str(),
+            CHILD_REPORT_TEXT
+        );
+
+        // main 模型视图包含 spawn_agents；child 的 provider-visible schema 不包含——
+        // 执行面与模型视图在同一 filtered registry 上收敛。
+        let main_tools = parent_provider
+            .first_turn_tools
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert!(main_tools.contains(&"spawn_agents".to_string()));
+        let child_turns = child_observations.turns();
+        assert!(
+            !child_turns.is_empty(),
+            "native child should run at least one provider turn"
+        );
+        for names in &child_turns {
+            assert!(
+                !names.contains(&"spawn_agents".to_string()),
+                "child model-visible schema must not offer spawn_agents"
+            );
+        }
+        assert!(
+            child_turns
+                .iter()
+                .any(|names| names.contains(&"read".to_string())),
+            "child should still see ordinary workspace tools"
+        );
+
+        // spawn 经由 host bridge 与 orchestrator 完成，而不是直注入。
+        assert_eq!(components.child_agent_count_for_test(), 1);
+
+        // tool loop 的最终 assistant 回复保留，供 parent 转述 child 报告。
+        let final_item = completion
+            .response
+            .items
+            .last()
+            .expect("final assistant item should be preserved");
+        assert_eq!(final_item.role(), Some(Role::Assistant));
+        assert_eq!(final_item.text_content(), PARENT_FINAL_TEXT);
 
         components.shutdown().expect("runtime should shut down");
     }
@@ -4426,6 +4813,23 @@ mod tests {
         work_dir_label: &str,
         child_runtime: impl Fn() -> Box<dyn AgentRuntimePort> + Send + Sync + 'static,
     ) -> SpawnChainFixture {
+        spawn_chain_fixture_with_child_constructor(work_dir_label, move |_grants| {
+            Ok(child_runtime())
+        })
+        .await
+    }
+
+    /// 与 `spawn_chain_fixture` 相同的 main/identity 前置，但 child constructor 可消费完整
+    /// construction grants——用于把真实 `construct_native_child_agent_runtime` 接入链路。
+    async fn spawn_chain_fixture_with_child_constructor(
+        work_dir_label: &str,
+        child_construct: impl Fn(
+            AgentChildRuntimeConstructionGrants,
+        ) -> Result<Box<dyn AgentRuntimePort>, String>
+        + Send
+        + Sync
+        + 'static,
+    ) -> SpawnChainFixture {
         let store = Arc::new(session_store::InMemorySessionStore::new());
         let mut header = session_store::SessionHeader {
             session_id: session_store::SessionId::new(),
@@ -4457,7 +4861,7 @@ mod tests {
                     }))
                 }
             },
-            move |_grants| Ok(child_runtime()),
+            child_construct,
         );
         let mut options = AppRuntimeOptions {
             session_store: Some(store.clone()),

@@ -486,8 +486,8 @@ fn composition_snapshot_is_deterministic_and_redacted() {
         .find(|tool| tool["name"] == "spawn_agents")
         .expect("spawn_agents should stay registered in the default composition");
     assert_eq!(spawn_agents_snapshot["kind"], "other");
-    assert_eq!(spawn_agents_snapshot["permission_policy"], "never");
-    assert_eq!(spawn_agents_snapshot["has_prompt_guidelines"], false);
+    assert_eq!(spawn_agents_snapshot["permission_policy"], "always");
+    assert_eq!(spawn_agents_snapshot["has_prompt_guidelines"], true);
     assert!(
         !snapshot["session_tools"]
             .as_array()

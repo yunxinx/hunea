@@ -46,6 +46,8 @@ use crate::{
 
 #[cfg(test)]
 pub(super) use native::NativeAgentRuntime;
+#[cfg(test)]
+pub(super) use native::child_construction_tool_grants;
 pub(super) use native::construct_native_agent_runtime;
 pub(super) use native::construct_native_child_agent_runtime;
 #[cfg(test)]

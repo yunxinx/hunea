@@ -22,6 +22,7 @@ use tool_runtime::{ToolDefinition, ToolExecutorRegistry};
 
 #[cfg(test)]
 use super::AgentRuntimeTestHarness;
+use super::spawn_agents::SPAWN_AGENTS_TOOL_NAME;
 use super::{
     AgentChildRuntimeConstructionGrants, AgentCommand, AgentCommandReceipt,
     AgentContextBudgetSnapshot, AgentEmptySessionConfigurationOutcome, AgentEvent, AgentEventKind,
@@ -127,21 +128,13 @@ pub(in crate::runtime) fn construct_native_child_agent_runtime(
         dynamic_environment_observer,
         hunea_config_dir,
     } = grants;
-    let tools = capability_context
-        .tools()
-        .map_err(|error| error.to_string())?
-        .construction_registry()
-        .map_err(|error| error.to_string())?;
+    let (tools, prompt_assembly_tool_definitions) =
+        child_construction_tool_grants(&capability_context)?;
     let prompt_assembly = capability_context
         .prompt()
         .map_err(|error| error.to_string())?
         .session_snapshot()
         .map_err(|error| error.to_string())?;
-    let prompt_assembly_tool_definitions = tools
-        .definitions()
-        .definitions()
-        .cloned()
-        .collect::<Vec<_>>();
     let native_grants = AgentRuntimeConstructionGrants::empty()
         .with_extension_hooks(extension_hooks)
         .with_llm_port(llm_port)
@@ -163,6 +156,25 @@ pub(in crate::runtime) fn construct_native_child_agent_runtime(
         event_notifier,
     )
     .map(|runtime| Box::new(runtime) as Box<dyn AgentRuntimePort>)
+}
+
+/// Child 的 construction tool 投影：执行 registry 与 provider-visible definitions 同源生成，
+/// 且固定剔除 `spawn_agents`——child 不提供嵌套派遣，执行面与模型视图保持一致。
+pub(in crate::runtime) fn child_construction_tool_grants(
+    context: &crate::runtime::agent_capability_context::AgentCapabilityContext,
+) -> Result<(ToolExecutorRegistry, Vec<ToolDefinition>), String> {
+    let tools = context
+        .tools()
+        .map_err(|error| error.to_string())?
+        .construction_registry()
+        .map_err(|error| error.to_string())?
+        .filtered(|tool_name| tool_name != SPAWN_AGENTS_TOOL_NAME);
+    let definitions = tools
+        .definitions()
+        .definitions()
+        .cloned()
+        .collect::<Vec<_>>();
+    Ok((tools, definitions))
 }
 
 impl NativeAgentRuntime {

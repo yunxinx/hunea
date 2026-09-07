@@ -13,12 +13,41 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tool_runtime::{
     Tool, ToolActivityPayloadPolicy, ToolCall, ToolDefinition, ToolExecutionContext,
-    ToolExecutionFuture, ToolInvocationIdentity, ToolResult,
+    ToolExecutionFuture, ToolInvocationIdentity, ToolPermissionPolicy, ToolResult,
 };
 
 pub(super) const SPAWN_AGENTS_TOOL_NAME: &str = "spawn_agents";
-const SPAWN_AGENTS_DESCRIPTION: &str =
-    "Launch one or more child Agents and wait for their typed completion results.";
+const SPAWN_AGENTS_DESCRIPTION: &str = "\
+Launch child Agents for independent subtasks and wait for their completion reports. \
+Dispatch when subtasks can run in parallel or when exploratory work would flood the main \
+context: each child runs in its own context and only its final report returns. Put multiple \
+independent subtasks in one batch; the call blocks until every child in the batch finishes. \
+Do not dispatch for a single file read or a simple lookup — use read, list_dir, or grep \
+directly. Each objective must be self-contained: children cannot see this conversation, so \
+include the background, constraints, and the exact deliverable. Children inherit this \
+session's tool permissions, so their tool calls may require user approval. Children's \
+results are not shown to the user; restate them in your reply.";
+const SPAWN_AGENTS_PROMPT_GUIDELINES: &str = "\
+When to dispatch:
+- Independent subtasks that can run in parallel: put them in one batch (up to 8 agents) instead of multiple serial calls.
+- Exploratory or high-output work (broad searches, multi-file investigation, drafting) where intermediate output would flood the main context. A child runs in its own context; only its final report returns.
+
+When not to dispatch:
+- Reading a single file or running a simple lookup: use read, list_dir, grep, or find directly.
+- Work that depends on conversation context or tool results a child cannot see.
+
+Writing objectives:
+- Make each objective self-contained: include the background, constraints, and the exact deliverable.
+- Use display_title for a short human-readable label; put detailed requirements in the objective or instructions.
+
+Wait semantics:
+- The call blocks until every child in the batch completes. Prefer one batch of parallel agents over several serial calls.
+
+Results:
+- Each child returns a final report summary. Results are not shown to the user: restate or quote them in your own reply.
+
+Permissions:
+- Children inherit this session's tool permissions; their tool calls may require user approval. Consider the approval cost before dispatching permission-heavy work.";
 const SPAWN_AGENTS_INVALID_INPUT: &str = "spawn_agents arguments are invalid";
 
 /// `spawn_agents` 的 closed delivery error；control-plane source message 不跨越 tool boundary。
@@ -75,7 +104,11 @@ impl Tool for SpawnAgentsTool {
         ToolDefinition::new(SPAWN_AGENTS_TOOL_NAME)
             .with_label("Spawn agents")
             .with_description(SPAWN_AGENTS_DESCRIPTION)
+            // guidelines 是 description 的展开版，经 prompt assembly 注入 system prompt。
+            .with_prompt_guidelines(SPAWN_AGENTS_PROMPT_GUIDELINES)
             .with_activity_payload_policy(ToolActivityPayloadPolicy::MetadataOnly)
+            // spawn 是启动动作而非副作用；child 的实际工具调用各自走权限层。
+            .with_permission_policy(ToolPermissionPolicy::Always)
             .with_input_schema(json!({
                 "type": "object",
                 "properties": {
@@ -215,6 +248,21 @@ mod tests {
         assert_eq!(
             definition.activity_payload_policy,
             ToolActivityPayloadPolicy::MetadataOnly
+        );
+        assert_eq!(definition.permission_policy, ToolPermissionPolicy::Always);
+        let guidelines = definition
+            .prompt_guidelines
+            .as_deref()
+            .expect("spawn_agents should ship prompt guidelines");
+        assert!(guidelines.contains("one batch"));
+        assert!(guidelines.contains("self-contained"));
+        assert!(guidelines.contains("may require user approval"));
+        assert!(
+            definition
+                .description
+                .as_deref()
+                .expect("spawn_agents should keep a description")
+                .contains("self-contained")
         );
         assert_eq!(
             definition.input_schema.as_ref().and_then(|schema| {

@@ -15,7 +15,8 @@ use super::{
         AgentChildRuntimeLeases, AgentChildRuntimeStaticGrants, AgentRuntimeActivationGrants,
         AgentRuntimeConstructionGrants, AgentRuntimeFactory, AgentRuntimePort,
         AgentSessionCapability, SendAgentMessageRequest, SendAgentMessageTool, SpawnAgentsRequest,
-        SpawnAgentsTool, construct_native_agent_runtime, construct_native_child_agent_runtime,
+        SpawnAgentsTool, StopAgentsRequest, StopAgentsTool, construct_native_agent_runtime,
+        construct_native_child_agent_runtime,
     },
     agent_orchestrator::AgentOrchestrator,
     context::{
@@ -690,6 +691,8 @@ pub(super) struct RuntimeComponents {
     spawn_agents_tool: SpawnAgentsTool,
     send_agent_message_receiver: mpsc::UnboundedReceiver<SendAgentMessageRequest>,
     send_agent_message_tool: SendAgentMessageTool,
+    stop_agents_receiver: mpsc::UnboundedReceiver<StopAgentsRequest>,
+    stop_agents_tool: StopAgentsTool,
     activation_staging: ComponentActivationStaging,
     plugin_loader: PluginCompositionLoader<RuntimePluginImplementation>,
     plugins: PluginComposition<RuntimePluginImplementation>,
@@ -798,6 +801,14 @@ impl RuntimeComponents {
         while let Ok(request) = self.send_agent_message_receiver.try_recv() {
             self.agent_orchestrator
                 .handle_send_agent_message_request(request);
+        }
+    }
+
+    /// 消费 host-owned `stop_agents` bridge；排在 send 之后、child facts 之前，使一次
+    /// 停止请求能在同一 consumer pass 内完成 waiter 结算所需的 child drain。
+    pub(super) fn drain_stop_agents_requests(&mut self) {
+        while let Ok(request) = self.stop_agents_receiver.try_recv() {
+            self.agent_orchestrator.handle_stop_agents_request(request);
         }
     }
 
@@ -1017,6 +1028,8 @@ impl RuntimeComponents {
             SpawnAgentsTool::channel(runtime_event_notifier.clone());
         let (send_agent_message_tool, send_agent_message_receiver) =
             SendAgentMessageTool::channel(runtime_event_notifier.clone());
+        let (stop_agents_tool, stop_agents_receiver) =
+            StopAgentsTool::channel(runtime_event_notifier.clone());
         let extension_hooks = ExtensionHookRegistry::new();
         let permission_policy = PermissionPolicy::new();
         let approval_registration = permission_policy
@@ -1035,6 +1048,7 @@ impl RuntimeComponents {
             &options.hunea_config_dir,
             Some(spawn_agents_tool.clone()),
             Some(send_agent_message_tool.clone()),
+            Some(stop_agents_tool.clone()),
         )
         .map_err(|error| error.to_string())?;
         let (prompt_assembly, prompt_registration) = PromptAssembly::adopt_manager(
@@ -1102,6 +1116,8 @@ impl RuntimeComponents {
             spawn_agents_tool,
             send_agent_message_receiver,
             send_agent_message_tool,
+            stop_agents_receiver,
+            stop_agents_tool,
             activation_staging: ComponentActivationStaging {
                 approval_registration: Some(approval_registration),
                 provider_registrations: Some(provider_registrations),
@@ -1538,6 +1554,7 @@ impl RuntimeComponents {
             &options.hunea_config_dir,
             Some(self.spawn_agents_tool.clone()),
             Some(self.send_agent_message_tool.clone()),
+            Some(self.stop_agents_tool.clone()),
         )
         .map_err(|error| error.to_string())?;
         let (fresh_prompt_assembly, fresh_prompt_registration) =
@@ -4016,6 +4033,80 @@ mod tests {
         components.shutdown().expect("runtime should shut down");
     }
 
+    /// spawn 等待中模型经 host bridge 停止 child：stop 回执同步返回，spawn tool call
+    /// 以显式停止分类（cancelled + "Child Agent stopped"）结算，不挂起、不误读为失败。
+    #[tokio::test]
+    async fn stop_agents_tool_stops_running_child_and_settles_spawn_waiter() {
+        let SpawnChainFixture {
+            mut components,
+            scoped_tools,
+            parent_turn_id,
+            runtime_generation,
+            ..
+        } = spawn_chain_fixture("/stop-agents-bridge-session", || {
+            Box::new(ChildAcceptingRuntime::default())
+        })
+        .await;
+
+        let spawn_execution = scoped_spawn_execution(
+            &scoped_tools,
+            parent_turn_id,
+            runtime_generation,
+            serde_json::json!({"agents": [{"objective": "work that will be stopped"}]}),
+        );
+        for _ in 0..16 {
+            components.drain_spawn_agents_requests();
+            if components.child_agent_count_for_test() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(components.child_agent_count_for_test(), 1);
+        let child_id = first_child_of_main(&components);
+        // child 的 terminal event 留在 adapter 内未 drain：stop 发起时保持 Active。
+
+        let stop_execution =
+            scoped_stop_execution(&scoped_tools, parent_turn_id, runtime_generation, child_id);
+        for _ in 0..16 {
+            components.drain_stop_agents_requests();
+            if stop_execution.is_finished() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let stop_result = stop_execution.await.expect("stop tool task should settle");
+        assert_eq!(stop_result.outcome(), ToolResultOutcome::Success);
+        let receipt: serde_json::Value = serde_json::from_str(&stop_result.text_content())
+            .expect("stop tool result should carry typed receipt JSON");
+        assert_eq!(receipt["status"], serde_json::json!("stopped"));
+        assert_eq!(receipt["agent_id"], serde_json::json!(child_id.get()));
+
+        // stop 定格 Cancelled 并持久化；同一 consumer pass 的 child drain 结算 group
+        // waiter（adapter 内滞留的 TurnFinished 不再被接受）。
+        let child_events = components.drain_child_agent_events();
+        assert!(child_events.iter().any(|event| event.agent_id == child_id
+            && matches!(event.kind, AgentEventKind::TurnInterrupted)));
+
+        let tool_result = spawn_execution
+            .await
+            .expect("spawn tool should settle after the explicit stop");
+        assert_eq!(tool_result.outcome(), ToolResultOutcome::Success);
+        let completion: AgentGroupCompletion = serde_json::from_str(&tool_result.text_content())
+            .expect("spawn tool result should carry typed group completion JSON");
+        assert_eq!(completion.children.len(), 1);
+        assert_eq!(completion.children[0].agent_id, child_id);
+        assert_eq!(completion.children[0].outcome, AgentOutcome::Cancelled);
+        assert_eq!(
+            completion.children[0]
+                .summary
+                .as_ref()
+                .map(runtime_domain::agent::AgentOutcomeSummary::as_str),
+            Some("Child Agent stopped")
+        );
+
+        components.shutdown().expect("runtime should shut down");
+    }
+
     #[test]
     fn native_child_construction_tool_grants_exclude_agent_host_tools() {
         let mut options = AppRuntimeOptions::default();
@@ -4025,7 +4116,7 @@ mod tests {
             .agent_root_context_for_test()
             .expect("child-capable Agent should own a root context");
 
-        // main 视图保留 host-owned Agent 工具：派遣与消息入口只对 main turn 开放。
+        // main 视图保留 host-owned Agent 工具：派遣、消息与停止入口只对 main turn 开放。
         let main_names = root_context
             .tools()
             .expect("main tool view should be current")
@@ -4036,6 +4127,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(main_names.contains(&"spawn_agents".to_string()));
         assert!(main_names.contains(&"send_agent_message".to_string()));
+        assert!(main_names.contains(&"stop_agents".to_string()));
 
         let child_context = root_context
             .child(
@@ -4054,6 +4146,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(!registry_names.contains(&"spawn_agents".to_string()));
         assert!(!registry_names.contains(&"send_agent_message".to_string()));
+        assert!(!registry_names.contains(&"stop_agents".to_string()));
         assert!(registry_names.contains(&"read".to_string()));
         let definition_names = definitions
             .into_iter()
@@ -4911,7 +5004,7 @@ mod tests {
         assert_eq!(user_texts[0], "scout the workspace layout");
         assert_eq!(user_texts[1], CHILD_FOLLOWUP_MESSAGE);
 
-        // main 模型视图包含两个 host-owned 工具；child 视图两者都不可见（嵌套封堵）。
+        // main 模型视图包含全部 host-owned 工具；child 视图全部不可见（嵌套封堵）。
         let main_tools = parent_provider
             .first_turn_tools
             .lock()
@@ -4919,15 +5012,14 @@ mod tests {
             .clone();
         assert!(main_tools.contains(&"spawn_agents".to_string()));
         assert!(main_tools.contains(&"send_agent_message".to_string()));
+        assert!(main_tools.contains(&"stop_agents".to_string()));
         for names in &child_turns {
-            assert!(
-                !names.contains(&"spawn_agents".to_string()),
-                "child model-visible schema must not offer spawn_agents"
-            );
-            assert!(
-                !names.contains(&"send_agent_message".to_string()),
-                "child model-visible schema must not offer send_agent_message"
-            );
+            for host_tool in crate::runtime::agent::AGENT_HOST_TOOL_NAMES {
+                assert!(
+                    !names.contains(&host_tool.to_string()),
+                    "child model-visible schema must not offer {host_tool}"
+                );
+            }
         }
 
         // followup 后 child 保持 settled 保留（runtime/context 不销毁）。
@@ -4940,6 +5032,379 @@ mod tests {
             .expect("final assistant item should be preserved");
         assert_eq!(final_item.role(), Some(Role::Assistant));
         assert_eq!(final_item.text_content(), PARENT_FINAL_AFTER_FOLLOWUP_TEXT);
+
+        components.shutdown().expect("runtime should shut down");
+    }
+
+    const PARENT_FINAL_AFTER_STOP_TEXT: &str = "parent acknowledges the stopped child";
+
+    /// child 侧 provider stub：记录 provider-visible tool schema 后挂起——child 在被
+    /// 显式停止前保持运行中，该 future 由 worker cancellation 丢弃。
+    struct ChildHangingProvider {
+        observations: ChildTurnObservations,
+    }
+
+    impl ProviderClient for ChildHangingProvider {
+        fn stream_prompt<'a>(
+            &'a self,
+            request: &'a PromptRequest,
+            _sink: &'a mut (dyn StreamEventSink + Send),
+        ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
+            Box::pin(async move {
+                self.observations.record(request);
+                std::future::pending::<()>().await;
+                unreachable!("hanging child provider must be dropped by worker cancellation")
+            })
+        }
+
+        fn list_models<'a>(
+            &'a self,
+        ) -> ProviderFuture<'a, Result<Vec<ModelDescriptor>, ProviderError>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities::chat_completions()
+        }
+    }
+
+    struct ChildHangingFactory {
+        observations: ChildTurnObservations,
+    }
+
+    impl ProviderClientFactory for ChildHangingFactory {
+        fn create_client(
+            &self,
+            _idle_timeout: Duration,
+        ) -> Result<Arc<dyn ProviderClient>, LlmPortError> {
+            Ok(Arc::new(ChildHangingProvider {
+                observations: self.observations.clone(),
+            }))
+        }
+
+        fn provider_kind(&self) -> runtime_domain::provider::ProviderKind {
+            runtime_domain::provider::ProviderKind::OpenAiCompatible
+        }
+
+        fn prompt_cache_policy(&self) -> conversation_runtime::ProviderPromptCachePolicy {
+            conversation_runtime::ProviderPromptCachePolicy::Disabled
+        }
+
+        fn adapter_kind(&self) -> &'static str {
+            "child-hanging-fixture"
+        }
+    }
+
+    /// main 侧 provider stub（停止侧）：第一轮对已派遣的 child 发起 `stop_agents`，
+    /// 第二轮记录停止回执并返回最终 assistant 文本。
+    struct ParentStoppingProvider {
+        child_agent_id: AgentId,
+        first_turn_tools: Mutex<Vec<String>>,
+        stop_tool_result: Mutex<Option<(String, bool)>>,
+    }
+
+    impl ProviderClient for ParentStoppingProvider {
+        fn stream_prompt<'a>(
+            &'a self,
+            request: &'a PromptRequest,
+            sink: &'a mut (dyn StreamEventSink + Send),
+        ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
+            Box::pin(async move {
+                if !has_tool_result_item(&request.items) {
+                    *self
+                        .first_turn_tools
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = request
+                        .tools
+                        .iter()
+                        .map(|tool| tool.name.clone())
+                        .collect::<Vec<_>>();
+                    let arguments =
+                        serde_json::json!({ "agent_id": self.child_agent_id.get() }).to_string();
+                    let call = ProviderToolCall::new("stop-call", "stop_agents", arguments);
+                    let response = PromptCompletion::new(
+                        vec![ConversationItem::assistant_with_tool_calls(
+                            String::new(),
+                            vec![call],
+                        )],
+                        FinishReason::ToolCalls,
+                        None,
+                    );
+                    sink.emit(StreamEvent::TurnCompleted(response.clone()));
+                    Ok(response)
+                } else {
+                    let tool_result = request.items.iter().find_map(|item| match item {
+                        ConversationItem::ToolResult { is_error, .. } => {
+                            Some((item.text_content(), *is_error))
+                        }
+                        _ => None,
+                    });
+                    *self
+                        .stop_tool_result
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = tool_result;
+                    let response = PromptCompletion::new(
+                        vec![ConversationItem::text(
+                            Role::Assistant,
+                            PARENT_FINAL_AFTER_STOP_TEXT,
+                        )],
+                        FinishReason::Stop,
+                        None,
+                    );
+                    sink.emit(StreamEvent::TurnCompleted(response.clone()));
+                    Ok(response)
+                }
+            })
+        }
+
+        fn list_models<'a>(
+            &'a self,
+        ) -> ProviderFuture<'a, Result<Vec<ModelDescriptor>, ProviderError>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities::chat_completions()
+        }
+    }
+
+    /// 全链集成：spawn（同步等待报告，child 保持运行中）→ 模型经真实 tool loop 授权层
+    /// 调 `stop_agents` → subtree 停止 → spawn tool call 以显式停止分类
+    /// （cancelled + "Child Agent stopped"）返回，等待方不挂起、不误读为自然失败。
+    #[tokio::test]
+    async fn model_tool_call_stops_waiting_child_and_settles_spawn_waiter_through_tool_loop() {
+        let child_observations = ChildTurnObservations::default();
+        let child_factory_observations = child_observations.clone();
+        let SpawnChainFixture {
+            mut components,
+            scoped_tools,
+            parent_turn_id,
+            runtime_generation,
+            ..
+        } = spawn_chain_fixture_with_child_constructor(
+            "/tool-loop-stop-session",
+            move |mut grants| {
+                let llm_port = crate::runtime::llm_port::LlmPort::new();
+                let registration = llm_port
+                    .register(
+                        "tool-loop-stop-test",
+                        "local",
+                        Arc::new(ChildHangingFactory {
+                            observations: child_factory_observations.clone(),
+                        }),
+                    )
+                    .map_err(|error| error.to_string())?;
+                std::mem::forget(registration);
+                grants.llm_port = llm_port;
+                construct_native_child_agent_runtime(grants)
+            },
+        )
+        .await;
+
+        // spawn loop：模型发起 spawn_agents 并同步等待 group completion。
+        let spawn_loop = {
+            let scoped_tools = scoped_tools.clone();
+            tokio::spawn(async move {
+                let provider = ParentToolLoopProvider::default();
+                let request = PromptRequest::new(
+                    "qwen3",
+                    vec![ConversationItem::text(
+                        Role::User,
+                        "dispatch the scout agent",
+                    )],
+                );
+                let cancellation = CancellationToken::new();
+                let options = ToolLoopOptions {
+                    invocation_identity: Some(ToolInvocationIdentity::new(
+                        AgentId::MAIN.get(),
+                        parent_turn_id.get(),
+                        runtime_generation,
+                        u64::MAX,
+                    )),
+                    ..ToolLoopOptions::default()
+                };
+                let completion = run_tool_loop(
+                    &provider,
+                    request,
+                    scoped_tools,
+                    &cancellation,
+                    options,
+                    |_progress| {},
+                )
+                .await
+                .expect("tool loop should settle the spawn turn");
+                (provider, completion)
+            })
+        };
+
+        // 推进 spawn bridge 直到 child 提交且其 provider turn 已启动；spawn tool call
+        // 仍在等待 group completion，停止必须发生在这个等待窗口内。
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while (components.child_agent_count_for_test() == 0 || child_observations.turn_count() == 0)
+            && tokio::time::Instant::now() < deadline
+        {
+            components.drain_spawn_agents_requests();
+            components.drain_child_agent_events();
+            let _ = components.drain_agent_projection_events();
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            components.child_agent_count_for_test(),
+            1,
+            "spawn should commit the child before the stop"
+        );
+        assert_eq!(
+            child_observations.turn_count(),
+            1,
+            "native child should have started its hanging provider turn"
+        );
+        let child_id = first_child_of_main(&components);
+
+        // stop loop：等待中的 spawn 之外，模型的第二个 tool call 经同一授权层发起
+        // stop_agents（顺序 tool loop 内 spawn 未返回，故以独立 loop 表达并发等待场景）。
+        let stop_loop = {
+            let scoped_tools = scoped_tools.clone();
+            tokio::spawn(async move {
+                let provider = ParentStoppingProvider {
+                    child_agent_id: child_id,
+                    first_turn_tools: Mutex::new(Vec::new()),
+                    stop_tool_result: Mutex::new(None),
+                };
+                let request = PromptRequest::new(
+                    "qwen3",
+                    vec![ConversationItem::text(Role::User, "stop the scout agent")],
+                );
+                let cancellation = CancellationToken::new();
+                let options = ToolLoopOptions {
+                    invocation_identity: Some(ToolInvocationIdentity::new(
+                        AgentId::MAIN.get(),
+                        parent_turn_id.get(),
+                        runtime_generation,
+                        u64::MAX,
+                    )),
+                    ..ToolLoopOptions::default()
+                };
+                let completion = run_tool_loop(
+                    &provider,
+                    request,
+                    scoped_tools,
+                    &cancellation,
+                    options,
+                    |_progress| {},
+                )
+                .await
+                .expect("tool loop should settle the stop turn");
+                (provider, completion)
+            })
+        };
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while (!spawn_loop.is_finished() || !stop_loop.is_finished())
+            && tokio::time::Instant::now() < deadline
+        {
+            components.drain_spawn_agents_requests();
+            components.drain_stop_agents_requests();
+            components.drain_child_agent_events();
+            let _ = components.drain_agent_projection_events();
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let (spawn_provider, spawn_completion) =
+            match tokio::time::timeout(Duration::from_secs(10), spawn_loop).await {
+                Ok(joined) => joined.expect("spawn tool loop task should not panic"),
+                Err(_) => panic!("spawn tool loop did not finish within the pump deadline"),
+            };
+        let (stop_provider, stop_completion) =
+            match tokio::time::timeout(Duration::from_secs(10), stop_loop).await {
+                Ok(joined) => joined.expect("stop tool loop task should not panic"),
+                Err(_) => panic!("stop tool loop did not finish within the pump deadline"),
+            };
+
+        // 停止回执：授权层放行，stopped 分类携带 child id 与 title 供模型对齐。
+        let (stop_result_text, stop_is_error) = stop_provider
+            .stop_tool_result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("provider should receive the stop_agents tool result");
+        assert!(
+            !stop_is_error,
+            "stop_agents must not be denied by the tool loop authorization layer"
+        );
+        let receipt: serde_json::Value = serde_json::from_str(&stop_result_text)
+            .expect("stop tool result should carry typed receipt JSON");
+        assert_eq!(receipt["status"], serde_json::json!("stopped"));
+        assert_eq!(receipt["agent_id"], serde_json::json!(child_id.get()));
+        assert_eq!(receipt["title"], serde_json::json!("workspace scout"));
+
+        // spawn 回执：显式停止分类（cancelled + 固定 summary），不是自然失败。
+        let (spawn_result_text, spawn_is_error) = spawn_provider
+            .spawn_tool_result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("provider should receive the spawn tool result");
+        assert!(!spawn_is_error);
+        let group_completion: AgentGroupCompletion = serde_json::from_str(&spawn_result_text)
+            .expect("spawn tool result should carry typed group completion JSON");
+        assert_eq!(group_completion.children.len(), 1);
+        assert_eq!(group_completion.children[0].agent_id, child_id);
+        assert_eq!(
+            group_completion.children[0].outcome,
+            AgentOutcome::Cancelled
+        );
+        assert_eq!(
+            group_completion.children[0]
+                .summary
+                .as_ref()
+                .map(runtime_domain::agent::AgentOutcomeSummary::as_str),
+            Some("Child Agent stopped")
+        );
+
+        // launch-group child 显式停止后保留 settled 投影行。
+        assert_eq!(components.child_agent_count_for_test(), 1);
+
+        // main 模型视图包含全部 host-owned 工具；child 的 provider-visible schema
+        // 不含任何一个（嵌套封堵），普通 workspace 工具仍在。
+        let main_tools = stop_provider
+            .first_turn_tools
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        for host_tool in crate::runtime::agent::AGENT_HOST_TOOL_NAMES {
+            assert!(
+                main_tools.contains(&host_tool.to_string()),
+                "main model view should offer {host_tool}"
+            );
+        }
+        let child_turns = child_observations.turns();
+        for names in &child_turns {
+            for host_tool in crate::runtime::agent::AGENT_HOST_TOOL_NAMES {
+                assert!(
+                    !names.contains(&host_tool.to_string()),
+                    "child model-visible schema must not offer {host_tool}"
+                );
+            }
+        }
+        assert!(
+            child_turns
+                .iter()
+                .any(|names| names.contains(&"read".to_string())),
+            "child should still see ordinary workspace tools"
+        );
+
+        // 两个 loop 的最终 assistant 回复保留。
+        let spawn_final_item = spawn_completion
+            .response
+            .items
+            .last()
+            .expect("spawn loop should keep a final assistant item");
+        assert_eq!(spawn_final_item.text_content(), PARENT_FINAL_TEXT);
+        let stop_final_item = stop_completion
+            .response
+            .items
+            .last()
+            .expect("stop loop should keep a final assistant item");
+        assert_eq!(stop_final_item.text_content(), PARENT_FINAL_AFTER_STOP_TEXT);
 
         components.shutdown().expect("runtime should shut down");
     }
@@ -5900,6 +6365,37 @@ mod tests {
         })
     }
 
+    /// 经 scoped tool view 发起一次 `stop_agents` 调用；identity 的 context epoch 由
+    /// scoped wrapper 在执行时改写为真实 root context epoch（与 production 路径一致）。
+    fn scoped_stop_execution(
+        scoped_tools: &ToolExecutorRegistry,
+        parent_turn_id: AgentTurnId,
+        runtime_generation: u64,
+        agent_id: AgentId,
+    ) -> tokio::task::JoinHandle<ToolResult> {
+        let scoped_tools = scoped_tools.clone();
+        tokio::spawn(async move {
+            let cancellation = CancellationToken::new();
+            scoped_tools
+                .execute_tool_with_context(
+                    ToolCall::new(
+                        "stop-call",
+                        "stop_agents",
+                        serde_json::json!({ "agent_id": agent_id.get() }),
+                    ),
+                    ToolExecutionContext::new(&cancellation).with_invocation_identity(
+                        ToolInvocationIdentity::new(
+                            AgentId::MAIN.get(),
+                            parent_turn_id.get(),
+                            runtime_generation,
+                            u64::MAX,
+                        ),
+                    ),
+                )
+                .await
+        })
+    }
+
     /// 拒绝路径没有可观测的 child 状态变化：循环推进 host bridge 直到 tool task 完成。
     async fn settle_spawn_rejection(
         components: &mut RuntimeComponents,
@@ -6297,6 +6793,14 @@ mod tests {
         let projected_outcome = projected_outcomes[0].clone();
         assert_eq!(projected_outcome.agent_id, child_id);
         assert_eq!(projected_outcome.outcome, AgentOutcome::Cancelled);
+        // 显式停止的 summary 固定标识"被停止"，区别于自然取消的通用占位。
+        assert_eq!(
+            projected_outcome
+                .summary
+                .as_ref()
+                .map(runtime_domain::agent::AgentOutcomeSummary::as_str),
+            Some("Child Agent stopped")
+        );
         assert_eq!(projected_outcome.group_id, launch_group_id);
         assert_eq!(projected_outcome.parent_agent_id, Some(AgentId::MAIN));
 
@@ -6311,7 +6815,8 @@ mod tests {
             }] if *agent_id == child_id
         ));
 
-        // group waiter 收到 group completion；被显式停止的 child outcome 为 Cancelled。
+        // group waiter 收到 group completion；被显式停止的 child outcome 为 Cancelled
+        // 且 summary 明确标识"被停止"。
         let tool_result = execution
             .await
             .expect("spawn tool task should finish after the explicit stop");
@@ -6321,6 +6826,13 @@ mod tests {
         assert_eq!(completion.children.len(), 1);
         assert_eq!(completion.children[0].agent_id, child_id);
         assert_eq!(completion.children[0].outcome, AgentOutcome::Cancelled);
+        assert_eq!(
+            completion.children[0]
+                .summary
+                .as_ref()
+                .map(runtime_domain::agent::AgentOutcomeSummary::as_str),
+            Some("Child Agent stopped")
+        );
 
         // launch-group child 的 settled row 保留（terminal projection 由 session 统一回收）。
         assert_eq!(components.child_agent_count_for_test(), 1);

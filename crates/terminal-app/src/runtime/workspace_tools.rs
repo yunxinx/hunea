@@ -8,13 +8,14 @@ use tool_runtime::builtin::{
 
 use tool_runtime::{ToolCatalog, ToolCatalogError, ToolRegistration};
 
-use super::agent::{SendAgentMessageTool, SpawnAgentsTool};
+use super::agent::{SendAgentMessageTool, SpawnAgentsTool, StopAgentsTool};
 
 pub(crate) fn conversation_workspace_tool_catalog(
     managed_ripgrep: &ManagedRipgrepConfig,
     managed_root: &Path,
     spawn_agents_tool: Option<SpawnAgentsTool>,
     send_agent_message_tool: Option<SendAgentMessageTool>,
+    stop_agents_tool: Option<StopAgentsTool>,
 ) -> Result<(ToolCatalog, ToolRegistration), ToolCatalogError> {
     let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let registry = workspace_tool_registry_with_options(
@@ -34,6 +35,9 @@ pub(crate) fn conversation_workspace_tool_catalog(
     if let Some(send_agent_message_tool) = send_agent_message_tool {
         registration =
             registration.combine(catalog.register("agent-runtime", send_agent_message_tool)?);
+    }
+    if let Some(stop_agents_tool) = stop_agents_tool {
+        registration = registration.combine(catalog.register("agent-runtime", stop_agents_tool)?);
     }
     Ok((catalog, registration))
 }

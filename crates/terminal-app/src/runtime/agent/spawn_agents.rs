@@ -27,7 +27,9 @@ directly. Each objective must be self-contained: children cannot see this conver
 include the background, constraints, and the exact deliverable. Children inherit this \
 session's tool permissions, so their tool calls may require user approval. Children's \
 results are not shown to the user; restate them in your reply. To add instructions or ask \
-a question about a dispatched child later, use send_agent_message with its agent_id.";
+a question about a dispatched child later, use send_agent_message with its agent_id. If a \
+child's direction turns out wrong or its work is no longer needed, stop it with stop_agents \
+instead of waiting for it to finish.";
 const SPAWN_AGENTS_PROMPT_GUIDELINES: &str = "\
 When to dispatch:
 - Independent subtasks that can run in parallel: put them in one batch (up to 8 agents) instead of multiple serial calls.
@@ -49,6 +51,10 @@ Results:
 
 Follow-ups:
 - To add instructions to a dispatched child or ask about its report, call send_agent_message with its agent_id (from this tool's result or the /agents panel).
+
+Stopping:
+- If a child's direction is wrong or its work is no longer needed, call stop_agents with its agent_id instead of waiting for it to finish.
+- A child that already finished does not need to be stopped.
 
 Permissions:
 - Children inherit this session's tool permissions; their tool calls may require user approval. Consider the approval cost before dispatching permission-heavy work.";
@@ -264,6 +270,9 @@ mod tests {
         assert!(guidelines.contains("self-contained"));
         assert!(guidelines.contains("may require user approval"));
         assert!(guidelines.contains("send_agent_message"));
+        assert!(guidelines.contains("stop_agents"));
+        assert!(guidelines.contains("no longer needed"));
+        assert!(guidelines.contains("does not need to be stopped"));
         assert!(
             definition
                 .description
@@ -277,6 +286,13 @@ mod tests {
                 .as_deref()
                 .expect("spawn_agents should keep a description")
                 .contains("send_agent_message")
+        );
+        assert!(
+            definition
+                .description
+                .as_deref()
+                .expect("spawn_agents should keep a description")
+                .contains("stop_agents")
         );
         assert_eq!(
             definition.input_schema.as_ref().and_then(|schema| {

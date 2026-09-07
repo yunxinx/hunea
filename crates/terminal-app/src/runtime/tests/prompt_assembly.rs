@@ -223,6 +223,10 @@ fn spawn_agents_guidelines_enter_prompt_assembly_tool_guidelines_body() {
             .contains("may require user approval"),
         "spawn_agents guidelines body should carry the permission rule"
     );
+    assert!(
+        guidelines_section.body.contains("stop_agents"),
+        "spawn_agents guidelines body should carry the stop rule"
+    );
     cleanup(&root);
 }
 

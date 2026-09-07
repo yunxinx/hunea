@@ -36,6 +36,7 @@ pub(in crate::runtime) enum SendAgentMessageFailure {
     ParentUnavailable,
     NotFound { available_agent_ids: Vec<AgentId> },
     TargetUnavailable,
+    TargetStopped,
     DeliveryUnavailable,
 }
 
@@ -68,6 +69,7 @@ impl SendAgentMessageFailure {
             Self::TargetUnavailable => {
                 "send_agent_message target agent is no longer available".to_string()
             }
+            Self::TargetStopped => "send_agent_message target agent was stopped".to_string(),
             Self::DeliveryUnavailable => "send_agent_message delivery is unavailable".to_string(),
         }
     }

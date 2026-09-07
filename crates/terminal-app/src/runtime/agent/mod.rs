@@ -6,6 +6,7 @@ mod native;
 mod replay;
 mod send_agent_message;
 mod spawn_agents;
+mod stop_agents;
 #[cfg(test)]
 mod tests;
 
@@ -57,6 +58,20 @@ pub(super) use send_agent_message::{
     AgentMessageDelivery, SendAgentMessageFailure, SendAgentMessageRequest, SendAgentMessageTool,
 };
 pub(super) use spawn_agents::{SpawnAgentsFailure, SpawnAgentsRequest, SpawnAgentsTool};
+pub(super) use stop_agents::{
+    AgentStopReceipt, StopAgentsFailure, StopAgentsRequest, StopAgentsTool,
+};
+
+/// host-owned Agent 工具名全集。
+///
+/// main 的工具面包含它们；child 的执行 registry 与 provider-visible definitions 同步
+/// 裁剪整个数组（depth=1 嵌套封堵不变式）。新增 host-owned Agent 工具时必须同时
+/// 补进此数组。
+pub(super) const AGENT_HOST_TOOL_NAMES: [&str; 3] = [
+    spawn_agents::SPAWN_AGENTS_TOOL_NAME,
+    send_agent_message::SEND_AGENT_MESSAGE_TOOL_NAME,
+    stop_agents::STOP_AGENTS_TOOL_NAME,
+];
 
 struct AgentPermissionConstructionGrant {
     runtime_request_policy: RuntimeRequestPolicy,

@@ -76,7 +76,7 @@ pub(crate) fn tool_definitions_for_managed_ripgrep(
     managed_root: &Path,
 ) -> Vec<ToolDefinition> {
     let (catalog, _registration) =
-        conversation_workspace_tool_catalog(managed_ripgrep, managed_root, None)
+        conversation_workspace_tool_catalog(managed_ripgrep, managed_root, None, None)
             .expect("builtin workspace tools must have unique names");
     catalog.definitions()
 }
@@ -491,6 +491,7 @@ impl RuntimeEventPort for AppRuntimeCoordinator {
 
     fn drain_runtime_events(&mut self) -> Vec<RuntimeEvent> {
         self.components.drain_spawn_agents_requests();
+        self.components.drain_send_agent_message_requests();
         // Child facts share the runtime wake with the main adapter.  Drain them at the same
         // consumer boundary so launch-group waiters can settle even before the observer surface
         // is introduced; child projection remains owned by the orchestrator.

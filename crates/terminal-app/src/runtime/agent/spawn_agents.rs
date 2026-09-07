@@ -26,7 +26,8 @@ Do not dispatch for a single file read or a simple lookup — use read, list_dir
 directly. Each objective must be self-contained: children cannot see this conversation, so \
 include the background, constraints, and the exact deliverable. Children inherit this \
 session's tool permissions, so their tool calls may require user approval. Children's \
-results are not shown to the user; restate them in your reply.";
+results are not shown to the user; restate them in your reply. To add instructions or ask \
+a question about a dispatched child later, use send_agent_message with its agent_id.";
 const SPAWN_AGENTS_PROMPT_GUIDELINES: &str = "\
 When to dispatch:
 - Independent subtasks that can run in parallel: put them in one batch (up to 8 agents) instead of multiple serial calls.
@@ -45,6 +46,9 @@ Wait semantics:
 
 Results:
 - Each child returns a final report summary. Results are not shown to the user: restate or quote them in your own reply.
+
+Follow-ups:
+- To add instructions to a dispatched child or ask about its report, call send_agent_message with its agent_id (from this tool's result or the /agents panel).
 
 Permissions:
 - Children inherit this session's tool permissions; their tool calls may require user approval. Consider the approval cost before dispatching permission-heavy work.";
@@ -197,7 +201,9 @@ impl Tool for SpawnAgentsTool {
     }
 }
 
-fn valid_identity(identity: &ToolInvocationIdentity) -> bool {
+/// host-owned Agent 工具共用的 invocation identity 前置校验；缺任一 identity 字段
+/// 的调用在进入 bridge 前 fail closed。
+pub(super) fn valid_identity(identity: &ToolInvocationIdentity) -> bool {
     identity.agent_id() != 0
         && identity.turn_id() != 0
         && identity.runtime_generation() != 0
@@ -257,12 +263,20 @@ mod tests {
         assert!(guidelines.contains("one batch"));
         assert!(guidelines.contains("self-contained"));
         assert!(guidelines.contains("may require user approval"));
+        assert!(guidelines.contains("send_agent_message"));
         assert!(
             definition
                 .description
                 .as_deref()
                 .expect("spawn_agents should keep a description")
                 .contains("self-contained")
+        );
+        assert!(
+            definition
+                .description
+                .as_deref()
+                .expect("spawn_agents should keep a description")
+                .contains("send_agent_message")
         );
         assert_eq!(
             definition.input_schema.as_ref().and_then(|schema| {

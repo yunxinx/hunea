@@ -4,6 +4,7 @@ mod external;
 mod native;
 #[cfg(test)]
 mod replay;
+mod send_agent_message;
 mod spawn_agents;
 #[cfg(test)]
 mod tests;
@@ -52,6 +53,9 @@ pub(super) use native::construct_native_agent_runtime;
 pub(super) use native::construct_native_child_agent_runtime;
 #[cfg(test)]
 pub(super) use replay::{ReplayAgentRuntime, ReplayFixture, ReplayLifecycleProbe};
+pub(super) use send_agent_message::{
+    AgentMessageDelivery, SendAgentMessageFailure, SendAgentMessageRequest, SendAgentMessageTool,
+};
 pub(super) use spawn_agents::{SpawnAgentsFailure, SpawnAgentsRequest, SpawnAgentsTool};
 
 struct AgentPermissionConstructionGrant {

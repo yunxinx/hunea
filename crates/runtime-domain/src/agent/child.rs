@@ -133,6 +133,41 @@ impl fmt::Debug for AgentInstructions {
     }
 }
 
+/// `AgentChildMessage` 保存 parent 在 child turn 边界投递的 followup 消息正文。
+///
+/// 正文会进入 child transcript 与 provider request（用户/模型可见），因此构造边界
+/// 即完成非空与 terminal-control 校验；完整正文不参与任何持久化摘要。
+#[derive(Clone, PartialEq, Eq)]
+pub struct AgentChildMessage(String);
+
+impl AgentChildMessage {
+    /// 创建非空且不含 terminal control 的 delivery-safe 消息。
+    pub fn new(content: impl Into<String>) -> Result<Self, AgentLaunchInputError> {
+        let content = content.into();
+        if content.trim().is_empty() {
+            return Err(AgentLaunchInputError::EmptyChildMessage);
+        }
+        if content.chars().any(is_terminal_control) {
+            return Err(AgentLaunchInputError::ChildMessageContainsTerminalControl);
+        }
+        Ok(Self(content))
+    }
+
+    /// 返回 child followup turn 使用的消息正文。
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for AgentChildMessage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentChildMessage")
+            .field("content_chars", &self.0.chars().count())
+            .finish()
+    }
+}
+
 /// `AgentTitle` 是 launch boundary 解析并冻结的 delivery-safe 单行标题。
 #[derive(Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
@@ -421,7 +456,8 @@ impl fmt::Debug for AgentLaunchBatch {
     }
 }
 
-/// launch input 无法形成安全、确定的 child request。
+/// typed child Agent input（launch request 与 followup 消息）无法形成安全、确定的
+/// child request。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum AgentLaunchInputError {
     #[error("Agent objective must not be empty")]
@@ -450,6 +486,10 @@ pub enum AgentLaunchInputError {
     EmptyBatch,
     #[error("Agent launch batch exceeds the host limit")]
     BatchTooLarge,
+    #[error("Agent message must not be empty")]
+    EmptyChildMessage,
+    #[error("Agent message contains a terminal control character")]
+    ChildMessageContainsTerminalControl,
 }
 
 /// immutable launch fact 中的单个 child identity 与 frozen title。
@@ -925,6 +965,36 @@ mod tests {
             format!("{batch:?}"),
             "AgentLaunchBatch { request_count: 1 }"
         );
+    }
+
+    #[test]
+    fn child_message_rejects_empty_and_controls_without_echoing_them() {
+        for source in ["", "   \t "] {
+            assert_eq!(
+                AgentChildMessage::new(source),
+                Err(AgentLaunchInputError::EmptyChildMessage)
+            );
+        }
+        for source in ["line\nbreak", "tab\tinside", "escape\u{001b}[31m"] {
+            let error = AgentChildMessage::new(source).expect_err("control input must be rejected");
+            assert_eq!(
+                error,
+                AgentLaunchInputError::ChildMessageContainsTerminalControl
+            );
+            assert!(!error.to_string().contains(source));
+        }
+        let message = AgentChildMessage::new("  refine the report  ")
+            .expect("plain message should be accepted");
+        assert_eq!(message.as_str(), "  refine the report  ");
+    }
+
+    #[test]
+    fn child_message_debug_omits_body() {
+        let message =
+            AgentChildMessage::new("PRIVATE_MESSAGE_BODY").expect("message should construct");
+        let debug = format!("{message:?}");
+        assert!(debug.contains("content_chars"));
+        assert!(!debug.contains("PRIVATE_MESSAGE_BODY"));
     }
 
     #[test]

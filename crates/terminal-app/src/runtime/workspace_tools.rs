@@ -8,12 +8,13 @@ use tool_runtime::builtin::{
 
 use tool_runtime::{ToolCatalog, ToolCatalogError, ToolRegistration};
 
-use super::agent::SpawnAgentsTool;
+use super::agent::{SendAgentMessageTool, SpawnAgentsTool};
 
 pub(crate) fn conversation_workspace_tool_catalog(
     managed_ripgrep: &ManagedRipgrepConfig,
     managed_root: &Path,
     spawn_agents_tool: Option<SpawnAgentsTool>,
+    send_agent_message_tool: Option<SendAgentMessageTool>,
 ) -> Result<(ToolCatalog, ToolRegistration), ToolCatalogError> {
     let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let registry = workspace_tool_registry_with_options(
@@ -24,11 +25,15 @@ pub(crate) fn conversation_workspace_tool_catalog(
         },
     );
     let (catalog, registration) = ToolCatalog::adopt_registry("workspace-tools", registry)?;
-    let registration = match spawn_agents_tool {
-        Some(spawn_agents_tool) => {
-            registration.combine(catalog.register("agent-runtime", spawn_agents_tool)?)
-        }
-        None => registration,
-    };
+    // host-owned Agent 工具共享同一 owner registration；缺省（如初始 prompt inventory）
+    // 时整体缺席，不注册半套。
+    let mut registration = registration;
+    if let Some(spawn_agents_tool) = spawn_agents_tool {
+        registration = registration.combine(catalog.register("agent-runtime", spawn_agents_tool)?);
+    }
+    if let Some(send_agent_message_tool) = send_agent_message_tool {
+        registration =
+            registration.combine(catalog.register("agent-runtime", send_agent_message_tool)?);
+    }
     Ok((catalog, registration))
 }

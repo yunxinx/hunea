@@ -22,6 +22,7 @@ use tool_runtime::{ToolDefinition, ToolExecutorRegistry};
 
 #[cfg(test)]
 use super::AgentRuntimeTestHarness;
+use super::send_agent_message::SEND_AGENT_MESSAGE_TOOL_NAME;
 use super::spawn_agents::SPAWN_AGENTS_TOOL_NAME;
 use super::{
     AgentChildRuntimeConstructionGrants, AgentCommand, AgentCommandReceipt,
@@ -159,7 +160,8 @@ pub(in crate::runtime) fn construct_native_child_agent_runtime(
 }
 
 /// Child 的 construction tool 投影：执行 registry 与 provider-visible definitions 同源生成，
-/// 且固定剔除 `spawn_agents`——child 不提供嵌套派遣，执行面与模型视图保持一致。
+/// 且固定剔除 host-owned Agent 工具（`spawn_agents` 与 `send_agent_message`）——child 不提供
+/// 嵌套派遣，也不经 tool 边界收发跨层消息；执行面与模型视图保持一致。
 pub(in crate::runtime) fn child_construction_tool_grants(
     context: &crate::runtime::agent_capability_context::AgentCapabilityContext,
 ) -> Result<(ToolExecutorRegistry, Vec<ToolDefinition>), String> {
@@ -168,7 +170,9 @@ pub(in crate::runtime) fn child_construction_tool_grants(
         .map_err(|error| error.to_string())?
         .construction_registry()
         .map_err(|error| error.to_string())?
-        .filtered(|tool_name| tool_name != SPAWN_AGENTS_TOOL_NAME);
+        .filtered(|tool_name| {
+            tool_name != SPAWN_AGENTS_TOOL_NAME && tool_name != SEND_AGENT_MESSAGE_TOOL_NAME
+        });
     let definitions = tools
         .definitions()
         .definitions()
@@ -1210,6 +1214,10 @@ impl AgentRuntime for NativeAgentRuntime {
                 request_id,
                 option_id,
             } => self.respond_permission(agent_id, target.as_ref(), &request_id, option_id),
+            // SendMessage 由 orchestrator 路由为 followup SubmitTurn；adapter 边界 fail closed。
+            AgentCommand::SendMessage { .. } => Err(AgentRuntimeError::CommandRejected(
+                "Agent messages are routed by the host".to_string(),
+            )),
         }
     }
 

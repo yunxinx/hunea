@@ -114,6 +114,11 @@ fn runtime_receipt(receipt: AgentCommandReceipt) -> RuntimeCommandReceipt {
         AgentCommandReceipt::Interrupted { target } => {
             RuntimeCommandReceipt::Interrupted { target }
         }
+        // 消息回执只由 child 路由产生，main runtime 永远不会交付；
+        // 该分支保持封闭映射，避免主会话 receipt 语义扩散。
+        AgentCommandReceipt::MessageQueued { .. } | AgentCommandReceipt::MessageStarted { .. } => {
+            RuntimeCommandReceipt::Accepted
+        }
     }
 }
 

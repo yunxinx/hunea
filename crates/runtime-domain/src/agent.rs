@@ -22,15 +22,16 @@ mod child;
 
 pub use child::{
     AGENT_LAUNCH_BATCH_LIMIT, AGENT_TITLE_MAX_DISPLAY_WIDTH, AgentActivitySummary,
-    AgentChildCompletion, AgentGroupCompletion, AgentInstructions, AgentLaunchBatch,
-    AgentLaunchChildSnapshot, AgentLaunchGroupId, AgentLaunchInputError, AgentLaunchReceipt,
-    AgentLaunchRequest, AgentLaunchSnapshot, AgentObjective, AgentObjectiveSummary,
-    AgentObservationId, AgentObservationRejection, AgentObservationRequestId, AgentOutcome,
-    AgentOutcomeSnapshot, AgentOutcomeSummary, AgentOverviewDelta, AgentOverviewDeltaKind,
-    AgentOverviewRow, AgentOverviewSnapshot, AgentPermissionRequest, AgentPermissionState,
-    AgentPermissionTarget, AgentPermissionUpdate, AgentPreviewSnapshot, AgentProjectionEvent,
-    AgentProjectionRevision, AgentProjectionStatus, AgentRuntimeGeneration, AgentTitle,
-    AgentTranscriptItem, AgentTranscriptSnapshot, AgentViewSnapshot,
+    AgentChildCompletion, AgentChildMessage, AgentGroupCompletion, AgentInstructions,
+    AgentLaunchBatch, AgentLaunchChildSnapshot, AgentLaunchGroupId, AgentLaunchInputError,
+    AgentLaunchReceipt, AgentLaunchRequest, AgentLaunchSnapshot, AgentObjective,
+    AgentObjectiveSummary, AgentObservationId, AgentObservationRejection,
+    AgentObservationRequestId, AgentOutcome, AgentOutcomeSnapshot, AgentOutcomeSummary,
+    AgentOverviewDelta, AgentOverviewDeltaKind, AgentOverviewRow, AgentOverviewSnapshot,
+    AgentPermissionRequest, AgentPermissionState, AgentPermissionTarget, AgentPermissionUpdate,
+    AgentPreviewSnapshot, AgentProjectionEvent, AgentProjectionRevision, AgentProjectionStatus,
+    AgentRuntimeGeneration, AgentTitle, AgentTranscriptItem, AgentTranscriptSnapshot,
+    AgentViewSnapshot,
 };
 
 /// `AgentId` 标识一个由 runtime host 管理的 Agent handle。
@@ -255,6 +256,15 @@ pub enum AgentCommand {
         request_id: String,
         option_id: Option<String>,
     },
+    /// Parent 在 child turn 边界投递的 followup 消息。
+    ///
+    /// 该命令由 orchestrator 消费并路由为 `SubmitTurn`，不会到达任何 adapter；
+    /// `turn_id` 是路由方分配的关联 id，followup turn 复用该 id。
+    SendMessage {
+        agent_id: AgentId,
+        turn_id: AgentTurnId,
+        message: AgentChildMessage,
+    },
 }
 
 impl fmt::Debug for AgentCommand {
@@ -283,6 +293,12 @@ impl fmt::Debug for AgentCommand {
                 .field("has_request_id", &!request_id.is_empty())
                 .field("has_option", &option_id.is_some())
                 .finish(),
+            Self::SendMessage { message, .. } => f
+                .debug_struct("SendMessage")
+                .field("has_agent_id", &true)
+                .field("has_turn_id", &true)
+                .field("message", message)
+                .finish(),
         }
     }
 }
@@ -293,7 +309,8 @@ impl AgentCommand {
         match self {
             Self::SubmitTurn { agent_id, .. }
             | Self::Interrupt { agent_id, .. }
-            | Self::RespondPermission { agent_id, .. } => *agent_id,
+            | Self::RespondPermission { agent_id, .. }
+            | Self::SendMessage { agent_id, .. } => *agent_id,
         }
     }
 }
@@ -310,6 +327,14 @@ pub enum AgentCommandReceipt {
     Interrupted {
         target: Option<RuntimeTarget>,
     },
+    /// Active child 的消息已入队；当前 turn 终态后自动开始下一 turn。
+    MessageQueued {
+        turn_id: AgentTurnId,
+    },
+    /// Settled child 的消息已立即开始 followup turn。
+    MessageStarted {
+        turn_id: AgentTurnId,
+    },
 }
 
 impl fmt::Debug for AgentCommandReceipt {
@@ -321,6 +346,8 @@ impl fmt::Debug for AgentCommandReceipt {
                 .debug_struct("Interrupted")
                 .field("has_target", &target.is_some())
                 .finish(),
+            Self::MessageQueued { .. } => formatter.write_str("MessageQueued"),
+            Self::MessageStarted { .. } => formatter.write_str("MessageStarted"),
         }
     }
 }
@@ -508,6 +535,42 @@ mod tests {
             "deliver this\n\nPRIVATE_CONTROL_INSTRUCTIONS"
         );
         assert_eq!(transcript_message.content, "deliver this");
+    }
+
+    #[test]
+    fn send_message_command_routes_identity_and_omits_body() {
+        let command = super::AgentCommand::SendMessage {
+            agent_id: AgentId::new(41),
+            turn_id: AgentTurnId::new(42),
+            message: super::AgentChildMessage::new("PRIVATE_MESSAGE_BODY").unwrap(),
+        };
+
+        assert_eq!(command.agent_id(), AgentId::new(41));
+        let debug = format!("{command:?}");
+        assert!(debug.contains("SendMessage"));
+        assert!(debug.contains("content_chars"));
+        assert!(!debug.contains("PRIVATE_MESSAGE_BODY"));
+        assert!(!debug.contains("41"));
+        assert!(!debug.contains("42"));
+
+        assert_eq!(
+            format!(
+                "{:?}",
+                super::AgentCommandReceipt::MessageQueued {
+                    turn_id: AgentTurnId::new(42)
+                }
+            ),
+            "MessageQueued"
+        );
+        assert_eq!(
+            format!(
+                "{:?}",
+                super::AgentCommandReceipt::MessageStarted {
+                    turn_id: AgentTurnId::new(42)
+                }
+            ),
+            "MessageStarted"
+        );
     }
 
     #[test]

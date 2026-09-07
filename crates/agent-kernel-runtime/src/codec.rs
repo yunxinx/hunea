@@ -128,6 +128,11 @@ pub(super) fn encode_command(
                 request_id,
             },
         )),
+        // SendMessage 由 host orchestrator 路由为 followup SubmitTurn；kernel 协议
+        // 没有消息 method，该命令在 adapter 边界 fail closed。
+        AgentCommand::SendMessage { .. } => Err(AgentRuntimeError::CommandRejected(
+            "External Agent messages are unavailable".to_string(),
+        )),
     }
 }
 

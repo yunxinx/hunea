@@ -14,8 +14,8 @@ use super::{
     agent::{
         AgentChildRuntimeLeases, AgentChildRuntimeStaticGrants, AgentRuntimeActivationGrants,
         AgentRuntimeConstructionGrants, AgentRuntimeFactory, AgentRuntimePort,
-        AgentSessionCapability, SpawnAgentsRequest, SpawnAgentsTool,
-        construct_native_agent_runtime, construct_native_child_agent_runtime,
+        AgentSessionCapability, SendAgentMessageRequest, SendAgentMessageTool, SpawnAgentsRequest,
+        SpawnAgentsTool, construct_native_agent_runtime, construct_native_child_agent_runtime,
     },
     agent_orchestrator::AgentOrchestrator,
     context::{
@@ -688,6 +688,8 @@ pub(super) struct RuntimeComponents {
     runtime_event_notifier: RuntimeEventNotifier,
     spawn_agents_receiver: mpsc::UnboundedReceiver<SpawnAgentsRequest>,
     spawn_agents_tool: SpawnAgentsTool,
+    send_agent_message_receiver: mpsc::UnboundedReceiver<SendAgentMessageRequest>,
+    send_agent_message_tool: SendAgentMessageTool,
     activation_staging: ComponentActivationStaging,
     plugin_loader: PluginCompositionLoader<RuntimePluginImplementation>,
     plugins: PluginComposition<RuntimePluginImplementation>,
@@ -788,6 +790,14 @@ impl RuntimeComponents {
     pub(super) fn drain_spawn_agents_requests(&mut self) {
         while let Ok(request) = self.spawn_agents_receiver.try_recv() {
             self.agent_orchestrator.handle_spawn_agents_request(request);
+        }
+    }
+
+    /// 消费 host-owned `send_agent_message` bridge；与 spawn bridge 同一 drain 边界。
+    pub(super) fn drain_send_agent_message_requests(&mut self) {
+        while let Ok(request) = self.send_agent_message_receiver.try_recv() {
+            self.agent_orchestrator
+                .handle_send_agent_message_request(request);
         }
     }
 
@@ -1005,6 +1015,8 @@ impl RuntimeComponents {
         let runtime_event_notifier = RuntimeEventNotifier::default();
         let (spawn_agents_tool, spawn_agents_receiver) =
             SpawnAgentsTool::channel(runtime_event_notifier.clone());
+        let (send_agent_message_tool, send_agent_message_receiver) =
+            SendAgentMessageTool::channel(runtime_event_notifier.clone());
         let extension_hooks = ExtensionHookRegistry::new();
         let permission_policy = PermissionPolicy::new();
         let approval_registration = permission_policy
@@ -1022,6 +1034,7 @@ impl RuntimeComponents {
             &options.managed_ripgrep,
             &options.hunea_config_dir,
             Some(spawn_agents_tool.clone()),
+            Some(send_agent_message_tool.clone()),
         )
         .map_err(|error| error.to_string())?;
         let (prompt_assembly, prompt_registration) = PromptAssembly::adopt_manager(
@@ -1087,6 +1100,8 @@ impl RuntimeComponents {
             runtime_event_notifier,
             spawn_agents_receiver,
             spawn_agents_tool,
+            send_agent_message_receiver,
+            send_agent_message_tool,
             activation_staging: ComponentActivationStaging {
                 approval_registration: Some(approval_registration),
                 provider_registrations: Some(provider_registrations),
@@ -1522,6 +1537,7 @@ impl RuntimeComponents {
             &options.managed_ripgrep,
             &options.hunea_config_dir,
             Some(self.spawn_agents_tool.clone()),
+            Some(self.send_agent_message_tool.clone()),
         )
         .map_err(|error| error.to_string())?;
         let (fresh_prompt_assembly, fresh_prompt_registration) =
@@ -3420,6 +3436,9 @@ mod tests {
                     Ok(AgentCommandReceipt::Interrupted { target })
                 }
                 AgentCommand::RespondPermission { .. } => Ok(AgentCommandReceipt::Accepted),
+                AgentCommand::SendMessage { .. } => Err(AgentRuntimeError::CommandRejected(
+                    "child runtime does not route messages".to_string(),
+                )),
             }
         }
 
@@ -3446,6 +3465,93 @@ mod tests {
 
         fn suspend(&mut self) -> Result<(), AgentRuntimeError> {
             self.is_shutdown = true;
+            Ok(())
+        }
+
+        fn activity(&self) -> AgentRuntimeActivity {
+            AgentRuntimeActivity::Idle
+        }
+
+        fn session(&self) -> Option<&dyn AgentSessionCapability> {
+            None
+        }
+
+        fn session_mut(&mut self) -> Option<&mut dyn AgentSessionCapability> {
+            None
+        }
+
+        fn has_pending_work(&self) -> bool {
+            !self.events.is_empty()
+        }
+    }
+
+    /// terminal 事实先于 authority 清理就绪的 child：`shutdown` 按共享 flag 决定成败，
+    /// 用于构造 cleanup 长期 blocked 的 child。
+    struct CleanupBlockedChildRuntime {
+        events: Vec<AgentEvent>,
+        shutdown_blocked: Arc<AtomicBool>,
+    }
+
+    impl AgentRuntime for CleanupBlockedChildRuntime {
+        fn dispatch(
+            &mut self,
+            command: AgentCommand,
+        ) -> Result<AgentCommandReceipt, AgentRuntimeError> {
+            match command {
+                AgentCommand::SubmitTurn {
+                    agent_id,
+                    turn_id,
+                    request,
+                } => {
+                    let target = request.target();
+                    self.events.push(AgentEvent {
+                        agent_id,
+                        turn_id,
+                        target: target.clone(),
+                        kind: AgentEventKind::TurnFinished {
+                            response: runtime_domain::session::ConversationResponse::assistant_text(
+                                "child complete",
+                            ),
+                            metrics: None,
+                            context_usage: None,
+                        },
+                    });
+                    Ok(AgentCommandReceipt::TurnStarted {
+                        turn_id,
+                        target,
+                        activity_label: request.activity_label().to_string(),
+                    })
+                }
+                AgentCommand::Interrupt { target, .. } => {
+                    Ok(AgentCommandReceipt::Interrupted { target })
+                }
+                AgentCommand::RespondPermission { .. } => Ok(AgentCommandReceipt::Accepted),
+                AgentCommand::SendMessage { .. } => Err(AgentRuntimeError::CommandRejected(
+                    "child runtime does not route messages".to_string(),
+                )),
+            }
+        }
+
+        fn drain_events(&mut self) -> Vec<AgentEvent> {
+            std::mem::take(&mut self.events)
+        }
+
+        fn shutdown(&mut self) -> Result<(), AgentRuntimeError> {
+            if self.shutdown_blocked.load(Ordering::SeqCst) {
+                return Err(AgentRuntimeError::Shutdown(
+                    "closed test failure".to_string(),
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    impl AgentRuntimePort for CleanupBlockedChildRuntime {
+        fn activate(&mut self, _grants: AgentRuntimeActivationGrants) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn suspend(&mut self) -> Result<(), AgentRuntimeError> {
             Ok(())
         }
 
@@ -3831,8 +3937,87 @@ mod tests {
         components.shutdown().expect("runtime should shut down");
     }
 
+    /// spawn 等待中的 group completion 由 child terminal 事实本身结算：outcome 持久化
+    /// 与 terminal fact 交付都不依赖 authority 清理收敛，terminal 之后的任何一环
+    /// （清理 pending 等）都不得阻塞报告回传。本测试在 child cleanup 持续 blocked 时
+    /// 只执行一次 drain，之后不再调用任何 drain 泵。
+    #[tokio::test]
+    async fn group_completion_settles_from_the_terminal_fact_without_authority_release() {
+        let shutdown_blocked = Arc::new(AtomicBool::new(true));
+        let runtime_shutdown_blocked = Arc::clone(&shutdown_blocked);
+        let SpawnChainFixture {
+            mut components,
+            scoped_tools,
+            parent_turn_id,
+            runtime_generation,
+            ..
+        } = spawn_chain_fixture("/cleanup-blocked-completion-session", move || {
+            Box::new(CleanupBlockedChildRuntime {
+                events: Vec::new(),
+                shutdown_blocked: Arc::clone(&runtime_shutdown_blocked),
+            })
+        })
+        .await;
+
+        let execution = scoped_spawn_execution(
+            &scoped_tools,
+            parent_turn_id,
+            runtime_generation,
+            serde_json::json!({"agents": [{"objective": "report before cleanup converges"}]}),
+        );
+        for _ in 0..16 {
+            components.drain_spawn_agents_requests();
+            if components.child_agent_count_for_test() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(components.child_agent_count_for_test(), 1);
+        let child_id = first_child_of_main(&components);
+
+        // 唯一一次 child drain：terminal 事实被接受、child settle（runtime 保留）、
+        // outcome fact 落盘、terminal fact 同轮交付；cleanup 完全不参与该链路。
+        let child_events = components.drain_child_agent_events();
+        assert_eq!(child_events.len(), 1);
+        assert!(child_events[0].kind.is_terminal());
+        assert!(components.agent_orchestrator.child_has_authority(child_id));
+        assert_eq!(
+            components.agent_orchestrator.child_status(child_id),
+            Some(runtime_domain::agent::AgentProjectionStatus::Completed)
+        );
+        let projection_events = components.drain_agent_projection_events();
+        assert_eq!(
+            projected_outcome_facts(&projection_events).len(),
+            1,
+            "outcome fact must persist while authority cleanup is blocked"
+        );
+
+        // 不再有任何 drain 调用：completion 必须由上一步已成立的事实送达等待方。
+        let tool_result = tokio::time::timeout(Duration::from_secs(1), execution)
+            .await
+            .expect("group completion must settle without a further drain round")
+            .expect("spawn tool task should not panic");
+        assert_eq!(tool_result.outcome(), ToolResultOutcome::Success);
+        let completion: AgentGroupCompletion = serde_json::from_str(&tool_result.text_content())
+            .expect("spawn tool should return typed group completion JSON");
+        assert_eq!(completion.children.len(), 1);
+        assert_eq!(completion.children[0].agent_id, child_id);
+        assert_eq!(completion.children[0].outcome, AgentOutcome::Completed);
+        assert_eq!(
+            completion.children[0]
+                .summary
+                .as_ref()
+                .expect("completed child should carry a summary")
+                .as_str(),
+            "child complete"
+        );
+
+        shutdown_blocked.store(false, Ordering::SeqCst);
+        components.shutdown().expect("runtime should shut down");
+    }
+
     #[test]
-    fn native_child_construction_tool_grants_exclude_spawn_agents() {
+    fn native_child_construction_tool_grants_exclude_agent_host_tools() {
         let mut options = AppRuntimeOptions::default();
         let mut components =
             RuntimeComponents::new(&mut options).expect("runtime components should initialize");
@@ -3840,7 +4025,7 @@ mod tests {
             .agent_root_context_for_test()
             .expect("child-capable Agent should own a root context");
 
-        // main 视图保留 spawn_agents：派遣入口只对 main turn 开放。
+        // main 视图保留 host-owned Agent 工具：派遣与消息入口只对 main turn 开放。
         let main_names = root_context
             .tools()
             .expect("main tool view should be current")
@@ -3850,6 +4035,7 @@ mod tests {
             .map(|definition| definition.name)
             .collect::<Vec<_>>();
         assert!(main_names.contains(&"spawn_agents".to_string()));
+        assert!(main_names.contains(&"send_agent_message".to_string()));
 
         let child_context = root_context
             .child(
@@ -3867,6 +4053,7 @@ mod tests {
             .map(|definition| definition.name.clone())
             .collect::<Vec<_>>();
         assert!(!registry_names.contains(&"spawn_agents".to_string()));
+        assert!(!registry_names.contains(&"send_agent_message".to_string()));
         assert!(registry_names.contains(&"read".to_string()));
         let definition_names = definitions
             .into_iter()
@@ -4133,10 +4320,12 @@ mod tests {
         }
     }
 
-    /// child 侧 provider 观察：记录 native child 每轮收到的 provider-visible tool schema。
+    /// child 侧 provider 观察：记录 native child 每轮收到的 provider-visible tool schema
+    /// 与最后一条 user 消息（followup turn 的消息正文应在队尾）。
     #[derive(Clone, Default)]
     struct ChildTurnObservations {
         tool_names_per_turn: Arc<Mutex<Vec<Vec<String>>>>,
+        last_user_texts_per_turn: Arc<Mutex<Vec<String>>>,
     }
 
     impl ChildTurnObservations {
@@ -4146,14 +4335,41 @@ mod tests {
                 .iter()
                 .map(|tool| tool.name.clone())
                 .collect::<Vec<_>>();
-            self.tool_names_per_turn
+            let last_user_text = request
+                .items
+                .iter()
+                .rev()
+                .find(|item| item.role() == Some(Role::User))
+                .map(|item| item.text_content())
+                .unwrap_or_default();
+            let mut guard = self
+                .tool_names_per_turn
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.push(names);
+            drop(guard);
+            self.last_user_texts_per_turn
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(names);
+                .push(last_user_text);
         }
 
         fn turns(&self) -> Vec<Vec<String>> {
             self.tool_names_per_turn
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+
+        fn turn_count(&self) -> usize {
+            self.tool_names_per_turn
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len()
+        }
+
+        fn last_user_texts(&self) -> Vec<String> {
+            self.last_user_texts_per_turn
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone()
@@ -4376,6 +4592,761 @@ mod tests {
         components.shutdown().expect("runtime should shut down");
     }
 
+    const CHILD_FOLLOWUP_REPORT_TEXT: &str = "child followup refined report";
+    const CHILD_FOLLOWUP_MESSAGE: &str = "please refine the report with concrete numbers";
+    const PARENT_FINAL_AFTER_FOLLOWUP_TEXT: &str = "parent restates the follow-up report";
+
+    /// main 侧 provider stub：第一轮发起 `spawn_agents`，第二轮解析 group completion 并
+    /// 发起 `send_agent_message`，第三轮记录消息回执并返回最终 assistant 文本。
+    #[derive(Default)]
+    struct ParentMessagingProvider {
+        first_turn_tools: Mutex<Vec<String>>,
+        spawn_tool_result: Mutex<Option<(String, bool)>>,
+        send_tool_result: Mutex<Option<(String, bool)>>,
+    }
+
+    fn tool_result_items(request: &PromptRequest) -> Vec<(String, bool)> {
+        request
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                ConversationItem::ToolResult { is_error, .. } => {
+                    Some((item.text_content(), *is_error))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    impl ProviderClient for ParentMessagingProvider {
+        fn stream_prompt<'a>(
+            &'a self,
+            request: &'a PromptRequest,
+            sink: &'a mut (dyn StreamEventSink + Send),
+        ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
+            Box::pin(async move {
+                let tool_results = tool_result_items(request);
+                if tool_results.is_empty() {
+                    *self
+                        .first_turn_tools
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = request
+                        .tools
+                        .iter()
+                        .map(|tool| tool.name.clone())
+                        .collect::<Vec<_>>();
+                    let arguments = serde_json::json!({
+                        "agents": [{
+                            "objective": "scout the workspace layout",
+                            "display_title": "workspace scout"
+                        }]
+                    })
+                    .to_string();
+                    let call = ProviderToolCall::new("spawn-call", "spawn_agents", arguments);
+                    let response = PromptCompletion::new(
+                        vec![ConversationItem::assistant_with_tool_calls(
+                            String::new(),
+                            vec![call],
+                        )],
+                        FinishReason::ToolCalls,
+                        None,
+                    );
+                    sink.emit(StreamEvent::TurnCompleted(response.clone()));
+                    Ok(response)
+                } else if tool_results.len() == 1 {
+                    *self
+                        .spawn_tool_result
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(tool_results[0].clone());
+                    let completion: AgentGroupCompletion = serde_json::from_str(&tool_results[0].0)
+                        .map_err(|_| {
+                            ProviderError::Protocol("spawn result is not JSON".to_string())
+                        })?;
+                    let child_agent_id = completion
+                        .children
+                        .first()
+                        .expect("spawn completion should carry the child")
+                        .agent_id
+                        .get();
+                    let arguments = serde_json::json!({
+                        "agent_id": child_agent_id,
+                        "message": CHILD_FOLLOWUP_MESSAGE
+                    })
+                    .to_string();
+                    let call = ProviderToolCall::new("send-call", "send_agent_message", arguments);
+                    let response = PromptCompletion::new(
+                        vec![ConversationItem::assistant_with_tool_calls(
+                            String::new(),
+                            vec![call],
+                        )],
+                        FinishReason::ToolCalls,
+                        None,
+                    );
+                    sink.emit(StreamEvent::TurnCompleted(response.clone()));
+                    Ok(response)
+                } else {
+                    *self
+                        .send_tool_result
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(tool_results[1].clone());
+                    let response = PromptCompletion::new(
+                        vec![ConversationItem::text(
+                            Role::Assistant,
+                            PARENT_FINAL_AFTER_FOLLOWUP_TEXT,
+                        )],
+                        FinishReason::Stop,
+                        None,
+                    );
+                    sink.emit(StreamEvent::TurnCompleted(response.clone()));
+                    Ok(response)
+                }
+            })
+        }
+
+        fn list_models<'a>(
+            &'a self,
+        ) -> ProviderFuture<'a, Result<Vec<ModelDescriptor>, ProviderError>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities::chat_completions()
+        }
+    }
+
+    /// child 侧 provider stub：首个 turn 返回 launch 报告，followup turn 返回精炼报告。
+    struct ChildFollowupReportProvider {
+        observations: ChildTurnObservations,
+    }
+
+    impl ProviderClient for ChildFollowupReportProvider {
+        fn stream_prompt<'a>(
+            &'a self,
+            request: &'a PromptRequest,
+            sink: &'a mut (dyn StreamEventSink + Send),
+        ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
+            Box::pin(async move {
+                self.observations.record(request);
+                let answer = if self.observations.turn_count() == 1 {
+                    CHILD_REPORT_TEXT
+                } else {
+                    CHILD_FOLLOWUP_REPORT_TEXT
+                };
+                let response = PromptCompletion::new(
+                    vec![ConversationItem::text(Role::Assistant, answer)],
+                    FinishReason::Stop,
+                    None,
+                );
+                sink.emit(StreamEvent::TurnCompleted(response.clone()));
+                Ok(response)
+            })
+        }
+
+        fn list_models<'a>(
+            &'a self,
+        ) -> ProviderFuture<'a, Result<Vec<ModelDescriptor>, ProviderError>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities::chat_completions()
+        }
+    }
+
+    struct ChildFollowupReportFactory {
+        observations: ChildTurnObservations,
+    }
+
+    impl ProviderClientFactory for ChildFollowupReportFactory {
+        fn create_client(
+            &self,
+            _idle_timeout: Duration,
+        ) -> Result<Arc<dyn ProviderClient>, LlmPortError> {
+            Ok(Arc::new(ChildFollowupReportProvider {
+                observations: self.observations.clone(),
+            }))
+        }
+
+        fn provider_kind(&self) -> runtime_domain::provider::ProviderKind {
+            runtime_domain::provider::ProviderKind::OpenAiCompatible
+        }
+
+        fn prompt_cache_policy(&self) -> conversation_runtime::ProviderPromptCachePolicy {
+            conversation_runtime::ProviderPromptCachePolicy::Disabled
+        }
+
+        fn adapter_kind(&self) -> &'static str {
+            "child-followup-fixture"
+        }
+    }
+
+    /// 全链集成：spawn（同步等待报告）→ 模型在同一 tool loop 内调
+    /// `send_agent_message`（经真实授权层）→ settled child 的 followup turn 执行 →
+    /// 消息回执（followup 报告摘要）作为 ToolResult 回到父模型上下文。
+    #[tokio::test]
+    async fn model_tool_call_sends_followup_message_and_returns_report_through_tool_loop() {
+        let child_observations = ChildTurnObservations::default();
+        let child_factory_observations = child_observations.clone();
+        let SpawnChainFixture {
+            mut components,
+            scoped_tools,
+            parent_turn_id,
+            runtime_generation,
+            ..
+        } = spawn_chain_fixture_with_child_constructor(
+            "/tool-loop-message-session",
+            move |mut grants| {
+                let llm_port = crate::runtime::llm_port::LlmPort::new();
+                let registration = llm_port
+                    .register(
+                        "tool-loop-message-test",
+                        "local",
+                        Arc::new(ChildFollowupReportFactory {
+                            observations: child_factory_observations.clone(),
+                        }),
+                    )
+                    .map_err(|error| error.to_string())?;
+                std::mem::forget(registration);
+                grants.llm_port = llm_port;
+                construct_native_child_agent_runtime(grants)
+            },
+        )
+        .await;
+
+        let loop_task = tokio::spawn(async move {
+            let provider = ParentMessagingProvider::default();
+            let request = PromptRequest::new(
+                "qwen3",
+                vec![ConversationItem::text(Role::User, "dispatch and follow up")],
+            );
+            let cancellation = CancellationToken::new();
+            let options = ToolLoopOptions {
+                invocation_identity: Some(ToolInvocationIdentity::new(
+                    AgentId::MAIN.get(),
+                    parent_turn_id.get(),
+                    runtime_generation,
+                    u64::MAX,
+                )),
+                ..ToolLoopOptions::default()
+            };
+            let completion = run_tool_loop(
+                &provider,
+                request,
+                scoped_tools,
+                &cancellation,
+                options,
+                |_progress| {},
+            )
+            .await
+            .expect("tool loop should complete the spawn and follow-up turn");
+            (provider, completion)
+        });
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !loop_task.is_finished() && tokio::time::Instant::now() < deadline {
+            components.drain_spawn_agents_requests();
+            components.drain_send_agent_message_requests();
+            components.drain_child_agent_events();
+            let _ = components.drain_agent_projection_events();
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let (parent_provider, completion) =
+            match tokio::time::timeout(Duration::from_secs(10), loop_task).await {
+                Ok(joined) => joined.expect("tool loop task should not panic"),
+                Err(_) => panic!("tool loop did not finish within the pump deadline"),
+            };
+
+        // spawn 回执：child 完成 launch turn，摘要为 committed final answer。
+        let (spawn_result_text, spawn_is_error) = parent_provider
+            .spawn_tool_result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("provider should receive the spawn tool result");
+        assert!(!spawn_is_error);
+        let group_completion: AgentGroupCompletion = serde_json::from_str(&spawn_result_text)
+            .expect("spawn tool result should carry typed group completion JSON");
+        let child_id = group_completion.children[0].agent_id;
+        assert_eq!(
+            group_completion.children[0]
+                .summary
+                .as_ref()
+                .expect("spawned child should carry a summary")
+                .as_str(),
+            CHILD_REPORT_TEXT
+        );
+
+        // send 回执：授权层放行（非 error），followup 报告摘要直达父模型。
+        let (send_result_text, send_is_error) = parent_provider
+            .send_tool_result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("provider should receive the send_agent_message tool result");
+        assert!(
+            !send_is_error,
+            "send_agent_message must not be denied by the tool loop authorization layer"
+        );
+        let delivery: serde_json::Value = serde_json::from_str(&send_result_text)
+            .expect("send tool result should carry typed delivery JSON");
+        assert_eq!(delivery["agent_id"], serde_json::json!(child_id.get()));
+        assert_eq!(delivery["outcome"], serde_json::json!("completed"));
+        assert_eq!(
+            delivery["summary"],
+            serde_json::json!(CHILD_FOLLOWUP_REPORT_TEXT)
+        );
+        assert_eq!(
+            delivery["queued"],
+            serde_json::json!(false),
+            "message to a settled child should start the follow-up turn immediately"
+        );
+
+        // child 连续执行两个 provider turn：launch objective 与 followup 消息分别是
+        // 各自 turn 的最后一条 user 消息（transcript 连续）。
+        let child_turns = child_observations.turns();
+        assert_eq!(child_turns.len(), 2);
+        let user_texts = child_observations.last_user_texts();
+        assert_eq!(user_texts[0], "scout the workspace layout");
+        assert_eq!(user_texts[1], CHILD_FOLLOWUP_MESSAGE);
+
+        // main 模型视图包含两个 host-owned 工具；child 视图两者都不可见（嵌套封堵）。
+        let main_tools = parent_provider
+            .first_turn_tools
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert!(main_tools.contains(&"spawn_agents".to_string()));
+        assert!(main_tools.contains(&"send_agent_message".to_string()));
+        for names in &child_turns {
+            assert!(
+                !names.contains(&"spawn_agents".to_string()),
+                "child model-visible schema must not offer spawn_agents"
+            );
+            assert!(
+                !names.contains(&"send_agent_message".to_string()),
+                "child model-visible schema must not offer send_agent_message"
+            );
+        }
+
+        // followup 后 child 保持 settled 保留（runtime/context 不销毁）。
+        assert_eq!(components.child_agent_count_for_test(), 1);
+
+        let final_item = completion
+            .response
+            .items
+            .last()
+            .expect("final assistant item should be preserved");
+        assert_eq!(final_item.role(), Some(Role::Assistant));
+        assert_eq!(final_item.text_content(), PARENT_FINAL_AFTER_FOLLOWUP_TEXT);
+
+        components.shutdown().expect("runtime should shut down");
+    }
+
+    const QUEUED_CHILD_OBJECTIVE: &str = "research the migration path";
+    const QUEUED_CHILD_MESSAGE: &str = "please refine the report";
+    const QUEUED_CHILD_FIRST_ANSWER: &str = "first answer";
+    const QUEUED_CHILD_REFINED_ANSWER: &str = "refined answer";
+
+    /// 交互式 child fixture：每次 SubmitTurn 先冒一次 permission，respond 后交付该
+    /// turn 的 committed answer（turn 序号决定答复文本）。事件同步 staged，供测试在
+    /// drain 之间按步推进。
+    #[derive(Clone, Default)]
+    struct InteractiveChildRuntime {
+        state: Arc<Mutex<InteractiveChildState>>,
+    }
+
+    #[derive(Default)]
+    struct InteractiveChildState {
+        staged_events: Vec<AgentEvent>,
+        submitted_messages: Vec<String>,
+        is_shutdown: bool,
+    }
+
+    impl InteractiveChildRuntime {
+        fn submitted_messages(&self) -> Vec<String> {
+            self.state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .submitted_messages
+                .clone()
+        }
+    }
+
+    impl AgentRuntime for InteractiveChildRuntime {
+        fn dispatch(
+            &mut self,
+            command: AgentCommand,
+        ) -> Result<AgentCommandReceipt, AgentRuntimeError> {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.is_shutdown {
+                return Err(AgentRuntimeError::Disposed);
+            }
+            match command {
+                AgentCommand::SubmitTurn {
+                    agent_id,
+                    turn_id,
+                    request,
+                } => {
+                    let target = request.target();
+                    let turn_index = state.submitted_messages.len();
+                    state
+                        .submitted_messages
+                        .push(request.conversation_request().message_text().to_string());
+                    state.staged_events.push(AgentEvent {
+                        agent_id,
+                        turn_id,
+                        target: target.clone(),
+                        kind: AgentEventKind::PermissionRequested {
+                            request: child_permission_request(&format!("perm-{turn_index}")),
+                        },
+                    });
+                    Ok(AgentCommandReceipt::TurnStarted {
+                        turn_id,
+                        target,
+                        activity_label: request.activity_label().to_string(),
+                    })
+                }
+                AgentCommand::RespondPermission {
+                    agent_id, target, ..
+                } => {
+                    let turn_index = state.submitted_messages.len().saturating_sub(1);
+                    let answer = if turn_index == 0 {
+                        QUEUED_CHILD_FIRST_ANSWER
+                    } else {
+                        QUEUED_CHILD_REFINED_ANSWER
+                    };
+                    state.staged_events.push(AgentEvent {
+                        agent_id,
+                        turn_id: AgentTurnId::new(agent_id.get()),
+                        target: target.unwrap_or_else(|| {
+                            runtime_domain::session::RuntimeTarget::provider("local", "qwen3")
+                        }),
+                        kind: AgentEventKind::TurnFinished {
+                            response: runtime_domain::session::ConversationResponse::assistant_text(
+                                answer,
+                            ),
+                            metrics: None,
+                            context_usage: None,
+                        },
+                    });
+                    Ok(AgentCommandReceipt::Accepted)
+                }
+                AgentCommand::Interrupt { target, .. } => {
+                    Ok(AgentCommandReceipt::Interrupted { target })
+                }
+                AgentCommand::SendMessage { .. } => Err(AgentRuntimeError::CommandRejected(
+                    "child runtime does not route messages".to_string(),
+                )),
+            }
+        }
+
+        fn drain_events(&mut self) -> Vec<AgentEvent> {
+            std::mem::take(
+                &mut self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .staged_events,
+            )
+        }
+
+        fn shutdown(&mut self) -> Result<(), AgentRuntimeError> {
+            self.state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_shutdown = true;
+            Ok(())
+        }
+    }
+
+    impl AgentRuntimePort for InteractiveChildRuntime {
+        fn activate(&mut self, _grants: AgentRuntimeActivationGrants) -> Result<(), String> {
+            self.state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_shutdown = false;
+            Ok(())
+        }
+
+        fn suspend(&mut self) -> Result<(), AgentRuntimeError> {
+            Ok(())
+        }
+
+        fn activity(&self) -> AgentRuntimeActivity {
+            AgentRuntimeActivity::Idle
+        }
+
+        fn session(&self) -> Option<&dyn AgentSessionCapability> {
+            None
+        }
+
+        fn session_mut(&mut self) -> Option<&mut dyn AgentSessionCapability> {
+            None
+        }
+
+        fn has_pending_work(&self) -> bool {
+            false
+        }
+    }
+
+    /// 经 scoped tool view 发起一次 `send_agent_message` 调用；identity epoch 与
+    /// production 路径一致由 scoped wrapper 在执行时改写。
+    fn scoped_send_execution(
+        scoped_tools: &ToolExecutorRegistry,
+        parent_turn_id: AgentTurnId,
+        runtime_generation: u64,
+        agent_id: AgentId,
+        message: &str,
+    ) -> tokio::task::JoinHandle<ToolResult> {
+        let scoped_tools = scoped_tools.clone();
+        let arguments = serde_json::json!({ "agent_id": agent_id.get(), "message": message });
+        tokio::spawn(async move {
+            let cancellation = CancellationToken::new();
+            scoped_tools
+                .execute_tool_with_context(
+                    ToolCall::new("send-call", "send_agent_message", arguments),
+                    ToolExecutionContext::new(&cancellation).with_invocation_identity(
+                        ToolInvocationIdentity::new(
+                            AgentId::MAIN.get(),
+                            parent_turn_id.get(),
+                            runtime_generation,
+                            u64::MAX,
+                        ),
+                    ),
+                )
+                .await
+        })
+    }
+
+    fn permission_target_for(
+        projection_events: &[AgentProjectionEvent],
+        request_id: &str,
+    ) -> Option<runtime_domain::agent::AgentPermissionTarget> {
+        projection_events.iter().find_map(|event| match event {
+            AgentProjectionEvent::AgentPermissionUpdated { update } => update
+                .request
+                .as_ref()
+                .filter(|request| request.target.request_id == request_id)
+                .map(|request| request.target.clone()),
+            _ => None,
+        })
+    }
+
+    /// 推进 host bridge、child 事件与 projection，返回本批 projection events。
+    fn pump_agent_bridges(components: &mut RuntimeComponents) -> Vec<AgentProjectionEvent> {
+        components.drain_spawn_agents_requests();
+        components.drain_send_agent_message_requests();
+        components.drain_child_agent_events();
+        components.drain_agent_projection_events()
+    }
+
+    /// Active 排队路径：child 运行中收到的消息在当前 turn 结束后自动开始 followup；
+    /// followup turn 的 permission 照常冒泡，respond 后报告摘要回传消息等待方。
+    #[tokio::test]
+    async fn send_agent_message_queues_behind_running_turn_and_settles_after_followup() {
+        let child = InteractiveChildRuntime::default();
+        let child_for_factory = child.clone();
+        let SpawnChainFixture {
+            mut components,
+            scoped_tools,
+            parent_turn_id,
+            runtime_generation,
+            ..
+        } = spawn_chain_fixture("/send-message-queued-session", move || {
+            Box::new(child_for_factory.clone())
+        })
+        .await;
+
+        let spawn_execution = scoped_spawn_execution(
+            &scoped_tools,
+            parent_turn_id,
+            runtime_generation,
+            serde_json::json!({
+                "agents": [{
+                    "objective": QUEUED_CHILD_OBJECTIVE,
+                    "display_title": "queued scout"
+                }]
+            }),
+        );
+        let launch_target = {
+            let mut found = None;
+            for _ in 0..64 {
+                let projection = pump_agent_bridges(&mut components);
+                if let Some(target) = permission_target_for(&projection, "perm-0") {
+                    found = Some(target);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            found.expect("launch permission did not surface within the pump budget")
+        };
+
+        // Active（等待 permission）期间发送消息：只入队，不产生 turn。
+        let agent_id = launch_target.agent_id;
+        let send_execution = scoped_send_execution(
+            &scoped_tools,
+            parent_turn_id,
+            runtime_generation,
+            agent_id,
+            QUEUED_CHILD_MESSAGE,
+        );
+        for _ in 0..8 {
+            pump_agent_bridges(&mut components);
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !send_execution.is_finished(),
+            "queued message must not settle before the running turn terminates"
+        );
+
+        // respond → turn 1 terminal → followup 自动开始 → 新 permission 冒泡。
+        components
+            .respond_child_agent_permission(launch_target, Some("allow-1".to_string()))
+            .expect("launch permission response should dispatch");
+        let followup_target = {
+            let mut found = None;
+            for _ in 0..64 {
+                let projection = pump_agent_bridges(&mut components);
+                tokio::task::yield_now().await;
+                if let Some(target) = permission_target_for(&projection, "perm-1") {
+                    found = Some(target);
+                    break;
+                }
+            }
+            found.expect("follow-up permission did not surface within the pump budget")
+        };
+        assert!(
+            !send_execution.is_finished(),
+            "the follow-up turn must finish before the message receipt settles"
+        );
+
+        components
+            .respond_child_agent_permission(followup_target, Some("allow-1".to_string()))
+            .expect("follow-up permission response should dispatch");
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                pump_agent_bridges(&mut components);
+                if send_execution.is_finished() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            send_execution.await.expect("send task should not panic")
+        })
+        .await
+        .unwrap_or_else(|_| panic!("send_agent_message did not settle after the follow-up turn"));
+
+        assert!(!result.is_error());
+        let delivery: serde_json::Value = serde_json::from_str(&result.text_content())
+            .expect("send tool result should carry typed delivery JSON");
+        assert_eq!(delivery["agent_id"], serde_json::json!(agent_id.get()));
+        assert_eq!(delivery["outcome"], serde_json::json!("completed"));
+        assert_eq!(
+            delivery["summary"],
+            serde_json::json!(QUEUED_CHILD_REFINED_ANSWER)
+        );
+        assert_eq!(
+            delivery["queued"],
+            serde_json::json!(true),
+            "message sent to a running child must be reported as queued"
+        );
+
+        // transcript 连续：objective 与 followup 消息先后成为各 turn 的 user 输入。
+        assert_eq!(
+            child.submitted_messages(),
+            vec![QUEUED_CHILD_OBJECTIVE, QUEUED_CHILD_MESSAGE]
+        );
+
+        let spawn_result = spawn_execution
+            .await
+            .expect("spawn tool task should finish after group completion");
+        assert!(!spawn_result.is_error());
+        assert!(
+            spawn_result
+                .text_content()
+                .contains(QUEUED_CHILD_FIRST_ANSWER)
+        );
+
+        assert_eq!(components.child_agent_count_for_test(), 1);
+        components.shutdown().expect("runtime should shut down");
+    }
+
+    /// NotFound 路径：目标 agent 不存在时返回 closed 文案并列出 caller 可寻址的
+    /// child id，帮助模型纠错。
+    #[tokio::test]
+    async fn send_agent_message_unknown_target_lists_available_agent_ids() {
+        let child = InteractiveChildRuntime::default();
+        let child_for_factory = child.clone();
+        let SpawnChainFixture {
+            mut components,
+            scoped_tools,
+            parent_turn_id,
+            runtime_generation,
+            ..
+        } = spawn_chain_fixture("/send-message-notfound-session", move || {
+            Box::new(child_for_factory.clone())
+        })
+        .await;
+
+        let spawn_execution = scoped_spawn_execution(
+            &scoped_tools,
+            parent_turn_id,
+            runtime_generation,
+            serde_json::json!({
+                "agents": [{"objective": QUEUED_CHILD_OBJECTIVE, "display_title": "scout"}]
+            }),
+        );
+        let agent_id = {
+            let mut found = None;
+            for _ in 0..64 {
+                let projection = pump_agent_bridges(&mut components);
+                if let Some(target) = permission_target_for(&projection, "perm-0") {
+                    found = Some(target.agent_id);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            found.expect("launch permission did not surface within the pump budget")
+        };
+
+        let send_execution = scoped_send_execution(
+            &scoped_tools,
+            parent_turn_id,
+            runtime_generation,
+            AgentId::new(agent_id.get().saturating_add(100)),
+            "are you there?",
+        );
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                pump_agent_bridges(&mut components);
+                if send_execution.is_finished() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            send_execution.await.expect("send task should not panic")
+        })
+        .await
+        .unwrap_or_else(|_| panic!("send_agent_message rejection did not settle"));
+
+        assert!(result.is_error());
+        let text = result.text_content();
+        assert!(text.contains("send_agent_message target agent was not found"));
+        assert!(
+            text.contains(&format!("available agent ids: {}", agent_id.get())),
+            "closed NotFound text should list the addressable child id: {text}"
+        );
+
+        // 拒绝路径无 child 状态副作用：spawn 等待方由 shutdown 边界统一收敛。
+        components.shutdown().expect("runtime should shut down");
+        let _ = spawn_execution.await;
+    }
+
     /// 提交 turn 时先发出 permission request，respond 后继续 tool activity 并 terminal。
     struct PermissionChildRuntime {
         events: Vec<AgentEvent>,
@@ -4460,6 +5431,9 @@ mod tests {
                 AgentCommand::Interrupt { target, .. } => {
                     Ok(AgentCommandReceipt::Interrupted { target })
                 }
+                AgentCommand::SendMessage { .. } => Err(AgentRuntimeError::CommandRejected(
+                    "child runtime does not route messages".to_string(),
+                )),
             }
         }
 
@@ -5243,7 +6217,9 @@ mod tests {
         assert_eq!(completion.children.len(), 1);
         assert_eq!(completion.children[0].agent_id, child_id);
         assert_eq!(completion.children[0].outcome, AgentOutcome::Completed);
-        assert!(!components.agent_orchestrator.child_has_authority(child_id));
+        // completion 后 child settle：runtime/context 保留作 followup 宿主，不再随
+        // terminal 释放。
+        assert!(components.agent_orchestrator.child_has_authority(child_id));
 
         components.shutdown().expect("runtime should shut down");
     }
@@ -5362,6 +6338,194 @@ mod tests {
         };
         assert_eq!(restored_outcome, projected_outcome);
         assert_eq!(restored_outcome.outcome, AgentOutcome::Cancelled);
+
+        components.shutdown().expect("runtime should shut down");
+    }
+
+    /// 提交 turn 后停在 permission 请求上的 child；shutdown 成败由共享 flag 控制，
+    /// 用于构造显式 stop 清理长期 blocked 的 launch-group child。
+    struct BlockedStopChildRuntime {
+        events: Vec<AgentEvent>,
+        is_shutdown: bool,
+        shutdown_blocked: Arc<AtomicBool>,
+    }
+
+    impl AgentRuntime for BlockedStopChildRuntime {
+        fn dispatch(
+            &mut self,
+            command: AgentCommand,
+        ) -> Result<AgentCommandReceipt, AgentRuntimeError> {
+            if self.is_shutdown {
+                return Err(AgentRuntimeError::Disposed);
+            }
+            match command {
+                AgentCommand::SubmitTurn {
+                    agent_id,
+                    turn_id,
+                    request,
+                } => {
+                    let target = request.target();
+                    self.events.push(AgentEvent {
+                        agent_id,
+                        turn_id,
+                        target: target.clone(),
+                        kind: AgentEventKind::PermissionRequested {
+                            request: child_permission_request("perm-1"),
+                        },
+                    });
+                    Ok(AgentCommandReceipt::TurnStarted {
+                        turn_id,
+                        target,
+                        activity_label: request.activity_label().to_string(),
+                    })
+                }
+                AgentCommand::RespondPermission { .. } => Ok(AgentCommandReceipt::Accepted),
+                AgentCommand::Interrupt { target, .. } => {
+                    Ok(AgentCommandReceipt::Interrupted { target })
+                }
+                AgentCommand::SendMessage { .. } => Err(AgentRuntimeError::CommandRejected(
+                    "child runtime does not route messages".to_string(),
+                )),
+            }
+        }
+
+        fn drain_events(&mut self) -> Vec<AgentEvent> {
+            std::mem::take(&mut self.events)
+        }
+
+        fn shutdown(&mut self) -> Result<(), AgentRuntimeError> {
+            if self.shutdown_blocked.load(Ordering::SeqCst) {
+                return Err(AgentRuntimeError::Shutdown(
+                    "closed test failure".to_string(),
+                ));
+            }
+            self.is_shutdown = true;
+            Ok(())
+        }
+    }
+
+    impl AgentRuntimePort for BlockedStopChildRuntime {
+        fn activate(&mut self, _grants: AgentRuntimeActivationGrants) -> Result<(), String> {
+            self.is_shutdown = false;
+            Ok(())
+        }
+
+        fn suspend(&mut self) -> Result<(), AgentRuntimeError> {
+            self.is_shutdown = true;
+            Ok(())
+        }
+
+        fn activity(&self) -> AgentRuntimeActivity {
+            AgentRuntimeActivity::Idle
+        }
+
+        fn session(&self) -> Option<&dyn AgentSessionCapability> {
+            None
+        }
+
+        fn session_mut(&mut self) -> Option<&mut dyn AgentSessionCapability> {
+            None
+        }
+
+        fn has_pending_work(&self) -> bool {
+            !self.events.is_empty()
+        }
+    }
+
+    #[tokio::test]
+    async fn launch_group_stop_with_blocked_cleanup_holds_terminal_fact_until_retry() {
+        let shutdown_blocked = Arc::new(AtomicBool::new(true));
+        let runtime_shutdown_blocked = Arc::clone(&shutdown_blocked);
+        let SpawnChainFixture {
+            mut components,
+            scoped_tools,
+            parent_turn_id,
+            runtime_generation,
+            ..
+        } = spawn_chain_fixture("/blocked-stop-session", move || {
+            Box::new(BlockedStopChildRuntime {
+                events: Vec::new(),
+                is_shutdown: true,
+                shutdown_blocked: Arc::clone(&runtime_shutdown_blocked),
+            })
+        })
+        .await;
+
+        let execution = scoped_spawn_execution(
+            &scoped_tools,
+            parent_turn_id,
+            runtime_generation,
+            serde_json::json!({
+                "agents": [{"objective": "stop while the permission is pending"}]
+            }),
+        );
+        for _ in 0..16 {
+            components.drain_spawn_agents_requests();
+            if components.child_agent_count_for_test() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(components.child_agent_count_for_test(), 1);
+        let child_id = first_child_of_main(&components);
+        assert_eq!(
+            components.drain_child_agent_events().len(),
+            1,
+            "permission request should be delivered before the stop"
+        );
+        let _ = components.drain_agent_projection_events();
+
+        // 显式 stop 清理 blocked：Cancelled terminal fact 冻结但暂缓交付（Disposing
+        // 未收敛），owner 保留在同一 record 上。
+        assert!(
+            components
+                .stop_child_agent_with_generation(
+                    child_id,
+                    runtime_domain::agent::AgentRuntimeGeneration::new(runtime_generation),
+                )
+                .is_err(),
+            "blocked child cleanup must reject the typed stop"
+        );
+        assert_eq!(
+            components.agent_orchestrator.child_status(child_id),
+            Some(runtime_domain::agent::AgentProjectionStatus::CleanupBlocked)
+        );
+        assert!(components.agent_orchestrator.child_has_authority(child_id));
+        assert!(
+            components.drain_child_agent_events().is_empty(),
+            "terminal fact must be held while the stop cleanup is blocked"
+        );
+
+        // group completion 只依赖 terminal 事实与 outcome 持久化：清理 blocked 期间
+        // 照常送达 Cancelled。
+        let tool_result = execution
+            .await
+            .expect("group completion should settle from the frozen terminal fact");
+        assert_eq!(tool_result.outcome(), ToolResultOutcome::Success);
+        let completion: AgentGroupCompletion = serde_json::from_str(&tool_result.text_content())
+            .expect("spawn tool should return typed group completion JSON");
+        assert_eq!(completion.children.len(), 1);
+        assert_eq!(completion.children[0].outcome, AgentOutcome::Cancelled);
+
+        // 清理收敛后（drain 边界的同一 owner 重试）：held terminal fact 补交且
+        // exactly-once，launch-group 投影行按 stop 语义保留。
+        shutdown_blocked.store(false, Ordering::SeqCst);
+        let terminal_events = components.drain_child_agent_events();
+        assert!(matches!(
+            terminal_events.as_slice(),
+            [AgentEvent {
+                agent_id,
+                kind: AgentEventKind::TurnInterrupted,
+                ..
+            }] if *agent_id == child_id
+        ));
+        assert!(components.drain_child_agent_events().is_empty());
+        assert!(!components.agent_orchestrator.child_has_authority(child_id));
+        assert_eq!(
+            components.child_agent_count_for_test(),
+            1,
+            "launch-group settled row must survive the explicit stop"
+        );
 
         components.shutdown().expect("runtime should shut down");
     }
@@ -5925,7 +7089,8 @@ mod tests {
             .await
             .expect("retry launch tool task should finish");
         assert_eq!(retry_result.outcome(), ToolResultOutcome::Success);
-        assert_eq!(shutdown_calls.load(Ordering::SeqCst), 2);
+        // retry child 的 terminal 只 settle 不清理：runtime 保留至显式 shutdown。
+        assert_eq!(shutdown_calls.load(Ordering::SeqCst), 1);
         assert_eq!(replay_port.append_attempts(), 3);
         assert_eq!(
             replay_port
@@ -5938,6 +7103,11 @@ mod tests {
         );
 
         components.shutdown().expect("runtime should shut down");
+        assert_eq!(
+            shutdown_calls.load(Ordering::SeqCst),
+            2,
+            "runtime shutdown must fully dispose the settled child"
+        );
     }
 
     #[tokio::test]
@@ -6245,9 +7415,16 @@ mod tests {
             .expect("retry batch should return typed completion");
         assert_eq!(completion.children.len(), 2);
         assert_eq!(construction_attempts.load(Ordering::SeqCst), 4);
-        assert_eq!(shutdown_calls.load(Ordering::SeqCst), 3);
+        // retry batch 的两个 child terminal 只 settle 不清理：仅首次失败的 rollback
+        // 触发过一次 shutdown。
+        assert_eq!(shutdown_calls.load(Ordering::SeqCst), 1);
 
         components.shutdown().expect("runtime should shut down");
+        assert_eq!(
+            shutdown_calls.load(Ordering::SeqCst),
+            3,
+            "runtime shutdown must fully dispose both settled children"
+        );
     }
 
     /// 为 quiesce 系列测试注册一个 active child。`register_child_for_test` 是 cfg(test)

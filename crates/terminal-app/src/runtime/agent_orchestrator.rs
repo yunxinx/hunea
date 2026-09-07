@@ -9,15 +9,16 @@ use tokio::sync::oneshot;
 
 use crate::session_store_bridge::run_session_store_future;
 use runtime_domain::agent::{
-    AgentActivitySummary, AgentChildCompletion, AgentCommand, AgentCommandReceipt, AgentEvent,
-    AgentEventKind, AgentGroupCompletion, AgentId, AgentLaunchBatch, AgentLaunchChildSnapshot,
-    AgentLaunchGroupId, AgentLaunchReceipt, AgentObjectiveSummary, AgentObservationId,
-    AgentObservationRejection, AgentObservationRequestId, AgentOutcome, AgentOutcomeSummary,
-    AgentOverviewDelta, AgentOverviewDeltaKind, AgentOverviewRow, AgentOverviewSnapshot,
-    AgentPermissionRequest, AgentPermissionState, AgentPermissionTarget, AgentPermissionUpdate,
-    AgentPreviewSnapshot, AgentProjectionEvent, AgentProjectionRevision, AgentProjectionStatus,
-    AgentRuntimeError, AgentRuntimeGeneration, AgentTitle, AgentTranscriptItem,
-    AgentTranscriptSnapshot, AgentTurnId, AgentTurnRequest, AgentViewSnapshot,
+    AgentActivitySummary, AgentChildCompletion, AgentChildMessage, AgentCommand,
+    AgentCommandReceipt, AgentEvent, AgentEventKind, AgentGroupCompletion, AgentId,
+    AgentLaunchBatch, AgentLaunchChildSnapshot, AgentLaunchGroupId, AgentLaunchReceipt,
+    AgentObjectiveSummary, AgentObservationId, AgentObservationRejection,
+    AgentObservationRequestId, AgentOutcome, AgentOutcomeSummary, AgentOverviewDelta,
+    AgentOverviewDeltaKind, AgentOverviewRow, AgentOverviewSnapshot, AgentPermissionRequest,
+    AgentPermissionState, AgentPermissionTarget, AgentPermissionUpdate, AgentPreviewSnapshot,
+    AgentProjectionEvent, AgentProjectionRevision, AgentProjectionStatus, AgentRuntimeError,
+    AgentRuntimeGeneration, AgentTitle, AgentTranscriptItem, AgentTranscriptSnapshot, AgentTurnId,
+    AgentTurnRequest, AgentViewSnapshot,
 };
 use runtime_domain::session::RuntimeTarget;
 use runtime_domain::session::{
@@ -25,9 +26,10 @@ use runtime_domain::session::{
 };
 
 use super::agent::{
-    AgentChildRuntimeLeases, AgentChildRuntimeStaticGrants, AgentRuntimeActivationGrants,
-    AgentRuntimeActivity, AgentRuntimePort, AgentSessionCapability, ChildAgentFactory,
-    SpawnAgentsFailure, SpawnAgentsRequest,
+    AgentChildRuntimeLeases, AgentChildRuntimeStaticGrants, AgentMessageDelivery,
+    AgentRuntimeActivationGrants, AgentRuntimeActivity, AgentRuntimePort, AgentSessionCapability,
+    ChildAgentFactory, SendAgentMessageFailure, SendAgentMessageRequest, SpawnAgentsFailure,
+    SpawnAgentsRequest,
 };
 use super::agent_capability_context::{
     AgentCapabilityContext, AgentChildCapabilityGrants, AgentContextOwner,
@@ -37,6 +39,9 @@ use super::context::{CapabilityLease, PromptAssemblyCapability, ToolCatalogCapab
 use super::effect_scope::EffectScope;
 
 const MAX_ACTIVE_CHILD_AGENTS: usize = 32;
+/// settled child 常驻 runtime/context/transcript 是支持后续 followup turn 的内存代价；
+/// 上限兜底防止已完成 child 无限累积，超限按最旧淘汰并走完整清理路径。
+const MAX_SETTLED_CHILD_AGENTS: usize = 16;
 const CHILD_COMPLETED_WITHOUT_REPORT_TEXT: &str = "Child Agent completed without a report";
 
 /// Child adapter 由 context effect 和 registry record 共同引用，但 runtime owner 始终唯一。
@@ -123,6 +128,22 @@ impl ChildRuntimeHandle {
     }
 }
 
+/// Child authority 的 lifecycle 阶段；与投影 `status` 正交。
+///
+/// `Settled` 与 `Disposed` 是 terminal 后的两个稳定态：前者保留 runtime/context 作
+/// followup 宿主，后者已完全释放、只剩投影行。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChildLifecycle {
+    /// turn 运行或等待 permission；占并发额度。
+    Active,
+    /// terminal 已定格；runtime/context 保留，不占并发额度。
+    Settled,
+    /// 显式清理（stop/session 切换/淘汰/替换）已发起但未收敛；owner 保留供重试。
+    Disposing,
+    /// authority 已完全释放；行仅作为 terminal 投影保留，直到显式 tree 清理移除。
+    Disposed,
+}
+
 /// 一个 child 的 runtime、context 与 projection 必须由同一个 record 持有。
 ///
 /// 该结构不实现 `Clone`，避免把 adapter 或 cleanup owner 隐式复制到 registry 之外。
@@ -137,6 +158,9 @@ struct ChildAgentRecord {
     target: Option<RuntimeTarget>,
     context: Option<AgentCapabilityContext>,
     runtime: ChildRuntimeHandle,
+    lifecycle: ChildLifecycle,
+    /// 清理发起到收敛期间记住发起方的投影保留意图，重试复用同一意图。
+    retain_projection_on_dispose: bool,
     status: AgentProjectionStatus,
     latest_activity: AgentActivitySummary,
     latest_committed_answer: Option<String>,
@@ -146,6 +170,10 @@ struct ChildAgentRecord {
     transcript_tool_items: BTreeMap<String, usize>,
     /// authoritative permission FIFO；head 是唯一可交互的 unresolved request。
     pending_permissions: VecDeque<AgentPermissionRequest>,
+    /// Active/未持久化 settled 期间到达的 `SendMessage`；turn 边界后按序转为 followup turn。
+    queued_messages: VecDeque<AgentCommand>,
+    /// 当前 turn 是否由 followup 消息触发；followup 的 outcome fact 不关联 launch group。
+    current_turn_is_followup: bool,
     terminal_outcome_seen: bool,
     outcome_persisted: bool,
     pending_outcome: Option<runtime_domain::agent::AgentOutcomeSnapshot>,
@@ -177,12 +205,16 @@ impl ChildAgentRecord {
             target,
             context: Some(context),
             runtime,
+            lifecycle: ChildLifecycle::Active,
+            retain_projection_on_dispose: false,
             status: AgentProjectionStatus::Pending,
             latest_activity: AgentActivitySummary::Preparing,
             latest_committed_answer: None,
             transcript: Vec::new(),
             transcript_tool_items: BTreeMap::new(),
             pending_permissions: VecDeque::new(),
+            queued_messages: VecDeque::new(),
+            current_turn_is_followup: false,
             terminal_outcome_seen: false,
             outcome_persisted: false,
             pending_outcome: None,
@@ -196,6 +228,15 @@ impl ChildAgentRecord {
 
     fn is_terminal(&self) -> bool {
         self.terminal_status.is_some()
+    }
+
+    /// terminal fact 的交付 gate：`Settled`（authority 保留、投影已定格）与 `Disposed`
+    /// （authority 已完全释放）都可交付；`Disposing` 收敛前持有 owner，暂不交付。
+    fn terminal_fact_deliverable(&self) -> bool {
+        matches!(
+            self.lifecycle,
+            ChildLifecycle::Settled | ChildLifecycle::Disposed
+        )
     }
 
     fn admission_open(&self) -> bool {
@@ -274,6 +315,8 @@ pub(super) struct AgentOrchestrator {
     projection_revision: u64,
     next_launch_group_id: u64,
     group_waiters: BTreeMap<AgentLaunchGroupId, GroupWaiter>,
+    /// per-child FIFO 的消息回执等待方；与 `queued_messages` 的消费顺序一一对齐。
+    message_waiters: BTreeMap<AgentId, VecDeque<MessageWaiter>>,
     main_turn_id: Option<AgentTurnId>,
 }
 
@@ -281,6 +324,18 @@ struct GroupWaiter {
     parent_agent_id: AgentId,
     child_ids: Vec<AgentId>,
     response: oneshot::Sender<Result<AgentGroupCompletion, SpawnAgentsFailure>>,
+}
+
+/// `send_agent_message` 的同步等待回执：在消息触发的 turn terminal fact 交付点结算。
+struct MessageWaiter {
+    was_queued: bool,
+    response: oneshot::Sender<Result<AgentMessageDelivery, SendAgentMessageFailure>>,
+}
+
+/// `send_child_message` 受理成功后等待结算所需的派发事实。
+struct MessageDispatch {
+    agent_id: AgentId,
+    was_queued: bool,
 }
 
 type StagedChild = (AgentId, ChildAgentRecord, AgentTurnRequest);
@@ -311,6 +366,7 @@ impl AgentOrchestrator {
             projection_revision: 0,
             next_launch_group_id: 1,
             group_waiters: BTreeMap::new(),
+            message_waiters: BTreeMap::new(),
             main_turn_id: None,
         }
     }
@@ -355,8 +411,11 @@ impl AgentOrchestrator {
     }
 
     pub(super) fn prepare_main_replacement_generation(
-        &self,
+        &mut self,
     ) -> Result<AgentRuntimeGeneration, AgentRuntimeError> {
+        // replacement 边界不保留 settled child：先完整清理（连同 active 后代），
+        // 清理失败即拒绝切换；剩余 live work 仍由 validate 拒绝。
+        self.dispose_settled_children()?;
         self.validate_replace_main()?;
         self.generation
             .get()
@@ -387,6 +446,7 @@ impl AgentOrchestrator {
         self.root_context = None;
         self.child_leases = None;
         self.fail_group_waiters(SpawnAgentsFailure::Unavailable);
+        self.fail_all_message_waiters();
         // generation 切换使全部 observation 失效；旧 observation id 不再收到任何 delta。
         self.observations.clear();
         self.children.clear();
@@ -489,6 +549,301 @@ impl AgentOrchestrator {
         record.runtime.dispatch(command)
     }
 
+    /// Parent→child 消息的 orchestrator 路由入口。
+    ///
+    /// Active child 只入队（turn 边界后自动开始下一 turn）；Settled child 且上一个
+    /// turn 的 outcome 已持久化时立即开始 followup turn；Settled 但 outcome 持久化
+    /// 未收敛时同样入队，由 drain 侧 gate 在持久化完成后投递。Disposing/Disposed、
+    /// unknown 与 stale generation 一律 closed 拒绝。
+    pub(super) fn send_child_message(
+        &mut self,
+        agent_id: AgentId,
+        message: AgentChildMessage,
+    ) -> Result<AgentCommandReceipt, AgentRuntimeError> {
+        self.reconcile_revoked_children();
+        // child turn id 沿用 launch 分配规则（由 agent id 派生）；followup turn 复用
+        // 同一 id，permission target 与 parent-turn 匹配语义保持稳定。
+        let turn_id = AgentTurnId::new(agent_id.get());
+        {
+            let Some(record) = self.children.get_mut(&agent_id) else {
+                return Err(AgentRuntimeError::UnknownAgent);
+            };
+            if record.generation != self.generation {
+                return Err(AgentRuntimeError::UnknownAgent);
+            }
+            // Disposing/Disposed 的 child 不是可寻址的消息目标；拒绝路径不产生投影副作用。
+            if !matches!(
+                record.lifecycle,
+                ChildLifecycle::Active | ChildLifecycle::Settled
+            ) {
+                return Err(AgentRuntimeError::UnknownAgent);
+            }
+            if record
+                .context
+                .as_ref()
+                .is_none_or(|context| !context.is_current())
+            {
+                record.status = AgentProjectionStatus::CleanupBlocked;
+                return Err(AgentRuntimeError::Disposed);
+            }
+            record.queued_messages.push_back(AgentCommand::SendMessage {
+                agent_id,
+                turn_id,
+                message,
+            });
+        }
+        let starts_followup_now = self.children.get(&agent_id).is_some_and(|record| {
+            matches!(record.lifecycle, ChildLifecycle::Settled) && record.outcome_persisted
+        });
+        if starts_followup_now {
+            self.start_child_followup_turn(agent_id);
+            Ok(AgentCommandReceipt::MessageStarted { turn_id })
+        } else {
+            Ok(AgentCommandReceipt::MessageQueued { turn_id })
+        }
+    }
+
+    /// 处理 host-owned `send_agent_message` request；tool bridge 不直接持有 child authority。
+    ///
+    /// 受理成功后登记 per-child FIFO waiter，由消息触发的 followup turn terminal fact
+    /// 交付点（或 disposal 边界）结算；拒绝路径同步返回 closed failure。
+    pub(super) fn handle_send_agent_message_request(&mut self, request: SendAgentMessageRequest) {
+        let SendAgentMessageRequest {
+            identity,
+            agent_id,
+            message,
+            response,
+        } = request;
+        match self.deliver_child_message(identity, agent_id, message) {
+            Ok(dispatch) => {
+                self.message_waiters
+                    .entry(dispatch.agent_id)
+                    .or_default()
+                    .push_back(MessageWaiter {
+                        was_queued: dispatch.was_queued,
+                        response,
+                    });
+            }
+            Err(failure) => {
+                let _ = response.send(Err(failure));
+            }
+        }
+    }
+
+    /// `send_agent_message` 的 identity/target 校验与消息派发。
+    ///
+    /// caller 校验与 `launch_batch` 同源（generation、parent turn、context epoch），
+    /// 但不要求消息 turn 等于 launch turn——followup 允许跨 main turn 追加。
+    fn deliver_child_message(
+        &mut self,
+        identity: tool_runtime::ToolInvocationIdentity,
+        agent_id: AgentId,
+        message: AgentChildMessage,
+    ) -> Result<MessageDispatch, SendAgentMessageFailure> {
+        let caller = AgentId::new(identity.agent_id());
+        if identity.runtime_generation() != self.generation.get()
+            || caller.get() == 0
+            || identity.turn_id() == 0
+            || identity.context_epoch() == 0
+        {
+            return Err(SendAgentMessageFailure::StaleGeneration);
+        }
+        if !self.parent_turn_matches(caller, AgentTurnId::new(identity.turn_id())) {
+            return Err(SendAgentMessageFailure::ParentUnavailable);
+        }
+        let caller_context = self
+            .parent_context(caller)
+            .map_err(|_| SendAgentMessageFailure::ParentUnavailable)?;
+        if caller_context.epoch() != identity.context_epoch() {
+            return Err(SendAgentMessageFailure::ParentUnavailable);
+        }
+        if !self
+            .children
+            .get(&agent_id)
+            .is_some_and(|record| self.child_is_message_target(caller, record))
+        {
+            return Err(SendAgentMessageFailure::NotFound {
+                available_agent_ids: self.addressable_message_targets(caller),
+            });
+        }
+        let receipt = match self.send_child_message(agent_id, message) {
+            Ok(receipt) => receipt,
+            // send_child_message 只产生 UnknownAgent/Disposed 两类 closed 拒绝，均折叠为
+            // “目标不可寻址”；available 列表帮助模型纠错，不透传 raw 错误。
+            Err(_) => {
+                return Err(SendAgentMessageFailure::NotFound {
+                    available_agent_ids: self.addressable_message_targets(caller),
+                });
+            }
+        };
+        Ok(MessageDispatch {
+            agent_id,
+            was_queued: matches!(receipt, AgentCommandReceipt::MessageQueued { .. }),
+        })
+    }
+
+    /// 消息目标必须是 caller 的 direct child 且 authority 仍可寻址。
+    fn child_is_message_target(&self, caller: AgentId, record: &ChildAgentRecord) -> bool {
+        record.generation == self.generation
+            && matches!(
+                record.lifecycle,
+                ChildLifecycle::Active | ChildLifecycle::Settled
+            )
+            && record.parent_agent_id == caller
+    }
+
+    /// caller 当前可寻址的消息目标列表；只进入 closed NotFound 文案。
+    fn addressable_message_targets(&self, caller: AgentId) -> Vec<AgentId> {
+        self.children
+            .iter()
+            .filter(|(_, record)| self.child_is_message_target(caller, record))
+            .map(|(agent_id, _)| *agent_id)
+            .collect()
+    }
+
+    /// followup turn terminal fact 交付后结算该 child 的队头消息 waiter。
+    ///
+    /// pending terminal event 每个 turn 恰好交付一次，且每条消息恰好触发一个 turn，
+    /// 因此按 child FIFO 弹出一个 waiter 与消息消费顺序严格对齐。
+    fn settle_message_waiter(&mut self, agent_id: AgentId) {
+        let Some(waiter) = self
+            .message_waiters
+            .get_mut(&agent_id)
+            .and_then(VecDeque::pop_front)
+        else {
+            return;
+        };
+        let delivery = self.children.get(&agent_id).map(|record| {
+            AgentMessageDelivery::new(
+                agent_id,
+                record.title.clone(),
+                outcome_for_status(record.terminal_status),
+                safe_outcome_summary(record),
+                waiter.was_queued,
+            )
+        });
+        let _ = match delivery {
+            Some(delivery) => waiter.response.send(Ok(delivery)),
+            None => waiter
+                .response
+                .send(Err(SendAgentMessageFailure::TargetUnavailable)),
+        };
+        if self
+            .message_waiters
+            .get(&agent_id)
+            .is_some_and(VecDeque::is_empty)
+        {
+            self.message_waiters.remove(&agent_id);
+        }
+    }
+
+    /// disposal 发起即结算该 child 的全部消息 waiter：Disposing child 不再执行任何
+    /// turn，排队消息与其等待回执一并 closed 失败。
+    fn fail_child_message_waiters(&mut self, agent_id: AgentId) {
+        if let Some(waiters) = self.message_waiters.remove(&agent_id) {
+            for waiter in waiters {
+                let _ = waiter
+                    .response
+                    .send(Err(SendAgentMessageFailure::TargetUnavailable));
+            }
+        }
+    }
+
+    fn fail_all_message_waiters(&mut self) {
+        for (_, waiters) in std::mem::take(&mut self.message_waiters) {
+            for waiter in waiters {
+                let _ = waiter
+                    .response
+                    .send(Err(SendAgentMessageFailure::TargetUnavailable));
+            }
+        }
+    }
+
+    /// 把队列头部的 `SendMessage` 转为 followup turn 并提交 child runtime。
+    ///
+    /// 前提：record 处于 Settled 且上一个 turn 的 outcome 已持久化、terminal 事实已
+    /// 交付（drain 侧 gate 保证），因此这里可以安全重置 terminal 状态。每个 turn 只
+    /// 消费一条消息，保持 `SubmitTurn` 的单 user 消息语义。
+    fn start_child_followup_turn(&mut self, agent_id: AgentId) {
+        {
+            let Some(record) = self.children.get_mut(&agent_id) else {
+                return;
+            };
+            // 无 provider target 的 record 无法构造 followup request；消息留在队列，
+            // 由下一次 drain 重试（launch 提交的 record 恒有 target）。
+            let Some(target) = record.target.clone() else {
+                return;
+            };
+            let Some(AgentCommand::SendMessage {
+                turn_id, message, ..
+            }) = record.queued_messages.pop_front()
+            else {
+                return;
+            };
+            record.terminal_outcome_seen = false;
+            record.terminal_status = None;
+            record.outcome_persisted = false;
+            record.pending_outcome = None;
+            record.pending_terminal_event = None;
+            record.lifecycle = ChildLifecycle::Active;
+            record.current_turn_is_followup = true;
+            record.status = AgentProjectionStatus::Pending;
+            record.latest_activity = AgentActivitySummary::Preparing;
+            record.started_at_ms = runtime_domain::time::unix_timestamp_ms().unwrap_or(0);
+            record.transcript.push(AgentTranscriptItem::User {
+                content: message.as_str().to_string(),
+            });
+            let request = child_followup_turn_request(&target, &message);
+            if record
+                .runtime
+                .dispatch(AgentCommand::SubmitTurn {
+                    agent_id,
+                    turn_id,
+                    request: Box::new(request),
+                })
+                .is_err()
+            {
+                // 与 launch 的 initial dispatch 失败同构：followup turn 直接定格为
+                // Failed terminal，由下一次 drain 交付 terminal 事实与 outcome。
+                apply_child_projection(
+                    record,
+                    &AgentEventKind::TurnFailed {
+                        message: "Child Agent failed to start".to_string(),
+                    },
+                );
+                record.terminal_outcome_seen = true;
+                record.pending_terminal_event = Some(AgentEvent {
+                    agent_id,
+                    turn_id,
+                    target,
+                    kind: AgentEventKind::TurnFailed {
+                        message: "Child Agent failed to start".to_string(),
+                    },
+                });
+                freeze_pending_outcome(agent_id, record);
+            }
+        }
+        self.projection_revision = self.projection_revision.saturating_add(1);
+        self.publish_child_facts(agent_id, false);
+    }
+
+    /// settle/waiter 收敛后，把已可投递的排队消息转为 followup turn（每 child 一条）。
+    fn dispatch_queued_child_messages(&mut self) {
+        let ready_ids = self
+            .children
+            .iter()
+            .filter(|(_, record)| {
+                matches!(record.lifecycle, ChildLifecycle::Settled)
+                    && record.outcome_persisted
+                    && !record.queued_messages.is_empty()
+            })
+            .map(|(agent_id, _)| *agent_id)
+            .collect::<Vec<_>>();
+        for agent_id in ready_ids {
+            self.start_child_followup_turn(agent_id);
+        }
+    }
+
     /// 取出 child adapter 的 facts，并在 identity/turn/terminal 边界更新 authoritative record。
     ///
     /// 未知 Agent、错误 turn、旧 generation 或 terminal 后的 late event 都被丢弃；它们不能
@@ -506,17 +861,29 @@ impl AgentOrchestrator {
                 self.accept_child_event(agent_id, event, &mut accepted);
             }
         }
-        self.release_terminal_authority();
+        self.settle_terminal_children();
         self.persist_terminal_outcomes();
-        for record in self.children.values_mut() {
-            if record.context.is_none()
-                && record.outcome_persisted
+        // followup turn 的 terminal fact 交付点即消息 waiter 的结算点：pending event
+        // 每个 turn 恰好交付一次，waiter 与消息触发的 turn 一一对齐。
+        let mut followup_terminal_child_ids = Vec::new();
+        for (agent_id, record) in self.children.iter_mut() {
+            if record.outcome_persisted
+                && record.terminal_fact_deliverable()
                 && let Some(event) = record.pending_terminal_event.take()
             {
+                if record.current_turn_is_followup {
+                    followup_terminal_child_ids.push(*agent_id);
+                }
                 accepted.push(event);
             }
         }
+        for agent_id in followup_terminal_child_ids {
+            self.settle_message_waiter(agent_id);
+        }
         self.try_complete_group_waiters();
+        // waiter/terminal 事实收敛后才允许 followup：followup 会重置 terminal 投影，
+        // 先结算才能保证 group completion 不被推迟。
+        self.dispatch_queued_child_messages();
         accepted
     }
 
@@ -972,14 +1339,13 @@ impl AgentOrchestrator {
     }
 
     fn persist_terminal_outcomes(&mut self) {
+        // terminal 事实一旦冻结即可持久化；authority 保留（settled）与清理收敛都不
+        // 阻塞 durable fact 与报告回传，失败的清理由 settle pass 以同一 owner 重试。
         let outcome_ids = self
             .children
             .iter()
             .filter_map(|(agent_id, record)| {
-                (record.context.is_none()
-                    && record.terminal_status.is_some()
-                    && !record.outcome_persisted)
-                    .then_some(*agent_id)
+                (record.terminal_status.is_some() && !record.outcome_persisted).then_some(*agent_id)
             })
             .collect::<Vec<_>>();
         for agent_id in outcome_ids {
@@ -1051,6 +1417,8 @@ impl AgentOrchestrator {
         Ok(AgentLaunchGroupId::new(value))
     }
 
+    /// Group completion 的送达条件是全部 child 的 terminal 事实与 durable outcome；
+    /// authority 清理收敛不是前置条件，清理 blocked 不得阻塞报告回传。
     fn try_complete_group_waiters(&mut self) {
         let completed = self
             .group_waiters
@@ -1063,9 +1431,7 @@ impl AgentOrchestrator {
                     .collect::<Option<Vec<_>>>()?;
                 children
                     .iter()
-                    .all(|record| {
-                        record.is_terminal() && record.context.is_none() && record.outcome_persisted
-                    })
+                    .all(|record| record.is_terminal() && record.outcome_persisted)
                     .then_some((*group_id, waiter.parent_agent_id, waiter.child_ids.clone()))
             })
             .collect::<Vec<_>>();
@@ -1107,10 +1473,12 @@ impl AgentOrchestrator {
         self.publish_child_facts(agent_id, false);
     }
 
+    /// 并发额度只统计 Active child；settled 不占额度，Disposing/Disposed 的 authority
+    /// 分别由 cleanup 重试与显式 tree 清理兜底。
     fn active_child_count(&self) -> usize {
         self.children
             .values()
-            .filter(|record| record.context.is_some())
+            .filter(|record| matches!(record.lifecycle, ChildLifecycle::Active))
             .count()
     }
 
@@ -1519,7 +1887,10 @@ impl AgentOrchestrator {
 
     /// Provider/parent scope revoke may run outside the orchestrator call stack. Reconcile such
     /// records before accepting commands, events or snapshots so disposed contexts cannot remain
-    /// an admission path for a generic child adapter.
+    /// an admission path for a generic child adapter. Revocation covers settled children too:
+    /// their authority is gone with the context tree, so they take the full disposal path.
+    /// In-flight `Disposing` children are excluded here—their own `begin_disposal` already closed
+    /// the context, and their retry must keep the original disposal intent.
     fn reconcile_revoked_children(&mut self) {
         let revoked = self
             .children
@@ -1528,14 +1899,15 @@ impl AgentOrchestrator {
                 record
                     .context
                     .as_ref()
-                    .filter(|context| !context.is_current())
-                    .and_then(|_| record.terminal_status.is_none().then_some(*agent_id))
+                    .is_some_and(|context| !context.is_current())
+                    .then_some(*agent_id)
+                    .filter(|_| !matches!(record.lifecycle, ChildLifecycle::Disposing))
             })
             .collect::<Vec<_>>();
         if !revoked.is_empty() {
             let _ = self.dispose_child_ids(revoked, false);
         }
-        self.release_terminal_authority();
+        self.settle_terminal_children();
     }
 
     fn allocate_agent_id(&mut self) -> Result<AgentId, AgentRuntimeError> {
@@ -1548,18 +1920,8 @@ impl AgentOrchestrator {
 
     #[cfg(test)]
     pub(super) fn child_count(&self) -> usize {
-        self.children
-            .values()
-            .filter(|record| {
-                record.context.is_some()
-                    || matches!(
-                        record.terminal_status,
-                        Some(AgentProjectionStatus::Completed)
-                            | Some(AgentProjectionStatus::Failed)
-                            | Some(AgentProjectionStatus::Cancelled)
-                    )
-            })
-            .count()
+        // 每个注册行都持有 authority 或已定格 terminal 投影，registry 大小即 child 数。
+        self.children.len()
     }
 
     #[cfg(test)]
@@ -1625,11 +1987,32 @@ impl AgentOrchestrator {
         );
     }
 
+    /// 为 test-registered child 标注 provider target；生产路径在 staging 时设置。
+    #[cfg(test)]
+    pub(super) fn mark_child_target_for_test(&mut self, agent_id: AgentId, target: RuntimeTarget) {
+        if let Some(record) = self.children.get_mut(&agent_id) {
+            record.target = Some(target);
+        }
+    }
+
+    /// 为 test-registered child 标注 launch group；生产路径只有 `launch_batch` 会设置。
+    #[cfg(test)]
+    pub(super) fn mark_child_launch_group_for_test(
+        &mut self,
+        agent_id: AgentId,
+        group_id: AgentLaunchGroupId,
+    ) {
+        if let Some(record) = self.children.get_mut(&agent_id) {
+            record.launch_group_id = Some(group_id);
+        }
+    }
+
     pub(super) fn suspend(&mut self) -> Result<(), AgentRuntimeError> {
         if let Some(context) = &self.root_context {
             context.begin_disposal();
         }
         self.fail_group_waiters(SpawnAgentsFailure::Unavailable);
+        self.fail_all_message_waiters();
         self.observations.clear();
         let child_result = self.dispose_children();
         let runtime_result = self.main_runtime.suspend();
@@ -1662,6 +2045,7 @@ impl AgentOrchestrator {
             context.begin_disposal();
         }
         self.fail_group_waiters(SpawnAgentsFailure::Unavailable);
+        self.fail_all_message_waiters();
         self.observations.clear();
         let child_result = self.dispose_children();
         let runtime_result = self.main_runtime.shutdown();
@@ -1690,13 +2074,18 @@ impl AgentOrchestrator {
     }
 
     fn dispose_children(&mut self) -> Result<(), AgentRuntimeError> {
-        let mut child_ids = self.descendant_ids_postorder(AgentId::MAIN);
+        self.dispose_child_ids(self.registry_disposal_order(), false)
+    }
+
+    /// 全 registry 的 disposal 顺序：MAIN 子树按 descendants-first，游离 record 追加在后。
+    fn registry_disposal_order(&self) -> Vec<AgentId> {
+        let mut ids = self.descendant_ids_postorder(AgentId::MAIN);
         for agent_id in self.children.keys().copied().collect::<Vec<_>>() {
-            if !child_ids.contains(&agent_id) {
-                child_ids.push(agent_id);
+            if !ids.contains(&agent_id) {
+                ids.push(agent_id);
             }
         }
-        self.dispose_child_ids(child_ids, false)
+        ids
     }
 
     fn fail_group_waiters(&mut self, failure: SpawnAgentsFailure) {
@@ -1714,6 +2103,10 @@ impl AgentOrchestrator {
             let mut stopping_started = false;
             let mut permission_cleared = false;
             if let Some(record) = self.children.get_mut(agent_id) {
+                record.lifecycle = ChildLifecycle::Disposing;
+                record.retain_projection_on_dispose = retain_terminal_projection;
+                // Disposing child 不再执行任何 turn：排队消息随 authority 一并失效。
+                record.queued_messages.clear();
                 if record.status != AgentProjectionStatus::Stopping {
                     stopping_started = true;
                 }
@@ -1749,6 +2142,8 @@ impl AgentOrchestrator {
             if permission_cleared {
                 self.queue_permission_cleared(*agent_id);
             }
+            // 消息等待方不随清理收敛挂起：disposal 发起即 closed 结算。
+            self.fail_child_message_waiters(*agent_id);
         }
         let mut first_error = None;
         let mut ready_to_remove = Vec::new();
@@ -1792,6 +2187,7 @@ impl AgentOrchestrator {
                 } else {
                     let parent_agent_id = record.parent_agent_id;
                     record.context = None;
+                    record.lifecycle = ChildLifecycle::Disposed;
                     record.status = record
                         .terminal_status
                         .unwrap_or(AgentProjectionStatus::Cancelled);
@@ -1840,55 +2236,111 @@ impl AgentOrchestrator {
         first_error.map_or(Ok(()), Err)
     }
 
-    /// Terminal projection 与 runtime authority 分离：row 留在 overview，worker/context 在
-    /// descendants 收敛后立即撤销。cleanup 失败时 terminal fact 暂不向 parent 发布。
-    fn release_terminal_authority(&mut self) {
-        let child_ids = self.descendant_ids_postorder(AgentId::MAIN);
-        for agent_id in child_ids {
-            let has_owned_descendant =
-                self.children_by_parent
-                    .get(&agent_id)
-                    .is_some_and(|children| {
-                        children.iter().any(|child| {
-                            self.children
-                                .get(child)
-                                .is_some_and(|record| record.context.is_some())
-                        })
-                    });
-            let mut projection_changed = false;
-            {
-                let Some(record) = self.children.get_mut(&agent_id) else {
-                    continue;
-                };
-                if record.terminal_status.is_none()
-                    || record.context.is_none()
-                    || has_owned_descendant
-                {
-                    continue;
-                }
-                let context = record
-                    .context
-                    .as_ref()
-                    .expect("terminal authority check must retain context");
-                context.begin_disposal();
-                if record.runtime.shutdown().is_err() || !context.dispose().is_success() {
-                    if record.status != AgentProjectionStatus::CleanupBlocked {
-                        projection_changed = true;
-                    }
-                    record.status = AgentProjectionStatus::CleanupBlocked;
-                } else {
-                    record.context = None;
-                    record.status = record
-                        .terminal_status
-                        .expect("terminal cleanup must retain settled projection");
-                    projection_changed = true;
-                }
-            }
-            if projection_changed {
-                self.projection_revision = self.projection_revision.saturating_add(1);
-                self.publish_child_facts(agent_id, false);
+    /// Terminal 定格后的 settle：runtime/context 不再销毁，作为后续 followup turn 的
+    /// 宿主保留；投影定格为 terminal_status，并发额度随之释放。settled 超限按最旧
+    /// 淘汰，未收敛的显式清理在此以同一 owner 重试。
+    fn settle_terminal_children(&mut self) {
+        self.retry_disposing_children();
+        self.freeze_settled_children();
+        self.evict_settled_children_over_limit();
+    }
+
+    /// 把已成立 terminal 事实的 Active child 转入 Settled。
+    ///
+    /// settle 是纯投影定格，不触碰 runtime/context，因此不产生新的 revision。
+    fn freeze_settled_children(&mut self) {
+        let settled_ids = self
+            .children
+            .iter()
+            .filter(|(_, record)| {
+                matches!(record.lifecycle, ChildLifecycle::Active)
+                    && record.terminal_status.is_some()
+            })
+            .map(|(agent_id, _)| *agent_id)
+            .collect::<Vec<_>>();
+        for agent_id in settled_ids {
+            if let Some(record) = self.children.get_mut(&agent_id) {
+                record.lifecycle = ChildLifecycle::Settled;
+                record.status = record
+                    .terminal_status
+                    .expect("settled child must carry a terminal status");
             }
         }
+    }
+
+    /// 显式清理未收敛的 child 以同一 owner 幂等重试；descendants-first 让被后代
+    /// 阻塞的 parent 在同一 pass 内收敛。
+    fn retry_disposing_children(&mut self) {
+        if !self
+            .children
+            .values()
+            .any(|record| matches!(record.lifecycle, ChildLifecycle::Disposing))
+        {
+            return;
+        }
+        let pending = self
+            .registry_disposal_order()
+            .into_iter()
+            .filter_map(|agent_id| {
+                self.children.get(&agent_id).and_then(|record| {
+                    matches!(record.lifecycle, ChildLifecycle::Disposing)
+                        .then_some((agent_id, record.retain_projection_on_dispose))
+                })
+            })
+            .collect::<Vec<_>>();
+        for (agent_id, retain_projection) in pending {
+            let _ = self.dispose_child_ids(vec![agent_id], retain_projection);
+        }
+    }
+
+    /// settled 数量超过上限时按最旧淘汰。agent id 按分配单调递增，BTreeMap 顺序即
+    /// 创建顺序；淘汰复用显式 stop 的完整清理路径（launch-group 投影行按既有语义保留）。
+    fn evict_settled_children_over_limit(&mut self) {
+        while self.settled_child_count() > MAX_SETTLED_CHILD_AGENTS {
+            let Some(oldest) = self
+                .children
+                .iter()
+                .find(|(_, record)| matches!(record.lifecycle, ChildLifecycle::Settled))
+                .map(|(agent_id, _)| *agent_id)
+            else {
+                break;
+            };
+            if self.stop_child(oldest).is_err() {
+                // CleanupBlocked：owner 保留，本 pass 停止淘汰，下轮 settle 重试。
+                break;
+            }
+        }
+    }
+
+    fn settled_child_count(&self) -> usize {
+        self.children
+            .values()
+            .filter(|record| matches!(record.lifecycle, ChildLifecycle::Settled))
+            .count()
+    }
+
+    /// generation replacement 边界对 settled child 立即完整清理（连同 active 后代，
+    /// 保持 descendants-first 顺序）；失败则拒绝切换，旧 generation 保持 authority。
+    fn dispose_settled_children(&mut self) -> Result<(), AgentRuntimeError> {
+        let settled_roots = self
+            .children
+            .iter()
+            .filter(|(_, record)| matches!(record.lifecycle, ChildLifecycle::Settled))
+            .map(|(agent_id, _)| *agent_id)
+            .collect::<Vec<_>>();
+        if settled_roots.is_empty() {
+            return Ok(());
+        }
+        let mut seen = BTreeSet::new();
+        let mut subtree_ids = Vec::new();
+        for root in settled_roots {
+            for agent_id in self.subtree_ids(root) {
+                if seen.insert(agent_id) {
+                    subtree_ids.push(agent_id);
+                }
+            }
+        }
+        self.dispose_child_ids(subtree_ids, false)
     }
 
     /// 在 Agent component activation boundary 创建唯一 root capability context。
@@ -1983,6 +2435,20 @@ fn child_turn_request(
     .with_direct_instructions(request.instructions().clone())
 }
 
+/// followup turn 的 user 消息即消息正文；不带 direct instructions——launch 的
+/// control 指令只属于 launch 边界，followup 依赖 child 保留的 conversation 上下文。
+fn child_followup_turn_request(
+    target: &RuntimeTarget,
+    message: &AgentChildMessage,
+) -> AgentTurnRequest {
+    let RuntimeTarget::Provider(target) = target;
+    AgentTurnRequest::from_conversation_request(ConversationTurnRequest::new_user_text(
+        target.provider_id.clone(),
+        target.model_id.clone(),
+        message.as_str(),
+    ))
+}
+
 fn outcome_for_status(status: Option<AgentProjectionStatus>) -> AgentOutcome {
     match status {
         Some(AgentProjectionStatus::Completed) => AgentOutcome::Completed,
@@ -2034,7 +2500,12 @@ fn freeze_pending_outcome(agent_id: AgentId, record: &mut ChildAgentRecord) {
     record.pending_outcome = Some(runtime_domain::agent::AgentOutcomeSnapshot {
         agent_id,
         title: record.title.clone(),
-        group_id: record.launch_group_id,
+        // group_id 回答"该 outcome 完成哪个 launch group"：followup turn 的 outcome
+        // 是消息触发的独立 durable fact（group completion 已随首个 terminal 交付），
+        // 不再归属 launch group；parent 关联保持不变。
+        group_id: record
+            .launch_group_id
+            .filter(|_| !record.current_turn_is_followup),
         parent_agent_id: Some(record.parent_agent_id),
         parent_turn_id: record.parent_turn_id,
         outcome: outcome_for_status(Some(terminal_status)),
@@ -2568,6 +3039,56 @@ mod tests {
         }
     }
 
+    /// 携带预置 events 并记录 shutdown 次数的 child runtime fixture。
+    struct ShutdownCountingRuntime {
+        events: Vec<AgentEvent>,
+        shutdown_calls: Arc<AtomicUsize>,
+    }
+
+    impl AgentRuntime for ShutdownCountingRuntime {
+        fn dispatch(
+            &mut self,
+            _command: AgentCommand,
+        ) -> Result<AgentCommandReceipt, AgentRuntimeError> {
+            Ok(AgentCommandReceipt::Accepted)
+        }
+
+        fn drain_events(&mut self) -> Vec<AgentEvent> {
+            std::mem::take(&mut self.events)
+        }
+
+        fn shutdown(&mut self) -> Result<(), AgentRuntimeError> {
+            self.shutdown_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    impl AgentRuntimePort for ShutdownCountingRuntime {
+        fn activate(&mut self, _grants: AgentRuntimeActivationGrants) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn suspend(&mut self) -> Result<(), AgentRuntimeError> {
+            Ok(())
+        }
+
+        fn activity(&self) -> AgentRuntimeActivity {
+            AgentRuntimeActivity::Idle
+        }
+
+        fn session(&self) -> Option<&dyn AgentSessionCapability> {
+            None
+        }
+
+        fn session_mut(&mut self) -> Option<&mut dyn AgentSessionCapability> {
+            None
+        }
+
+        fn has_pending_work(&self) -> bool {
+            false
+        }
+    }
+
     struct RecordingShutdownRuntime {
         label: &'static str,
         context: AgentCapabilityContext,
@@ -3073,7 +3594,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_fact_waits_for_authority_cleanup_and_retries_the_same_owner() {
+    fn terminal_fact_settles_and_delivers_while_runtime_is_retained() {
         let agent_id = AgentId::new(2);
         let turn_id = AgentTurnId::new(7);
         let terminal = AgentEvent {
@@ -3088,34 +3609,1060 @@ mod tests {
                 context_usage: None,
             },
         };
+        let shutdown_calls = Arc::new(AtomicUsize::new(0));
         let mut orchestrator =
             AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
         orchestrator.register_child_for_test(
             agent_id,
             AgentId::MAIN,
             turn_id,
-            test_title("terminal cleanup"),
-            test_context("terminal-cleanup"),
-            Box::new(FailingShutdownRuntime {
-                failures_remaining: 1,
+            test_title("terminal settle"),
+            test_context("terminal-settle"),
+            Box::new(ShutdownCountingRuntime {
                 events: vec![terminal.clone()],
+                shutdown_calls: Arc::clone(&shutdown_calls),
             }),
         );
 
-        assert!(orchestrator.drain_child_events().is_empty());
-        assert_eq!(
-            orchestrator.child_status(agent_id),
-            Some(AgentProjectionStatus::CleanupBlocked)
-        );
-        assert!(orchestrator.child_has_authority(agent_id));
-
+        // terminal 事实在同一 drain 内 settle 并交付，不等待任何 authority 清理。
         assert_eq!(orchestrator.drain_child_events(), vec![terminal]);
         assert_eq!(
             orchestrator.child_status(agent_id),
             Some(AgentProjectionStatus::Completed)
         );
-        assert!(!orchestrator.child_has_authority(agent_id));
+        assert!(
+            orchestrator.child_has_authority(agent_id),
+            "settled child must retain its runtime and context"
+        );
+        assert_eq!(
+            shutdown_calls.load(Ordering::SeqCst),
+            0,
+            "settle must not shut down the retained child runtime"
+        );
+        assert_eq!(
+            orchestrator.active_child_count(),
+            0,
+            "settled child must not consume the active child quota"
+        );
         assert_eq!(orchestrator.child_count(), 1);
+
+        // exactly-once：terminal 已交付，后续 drain 不再重复。
+        assert!(orchestrator.drain_child_events().is_empty());
+
+        // 显式 stop 对 settled child 走完整清理：runtime 收敛、行移除。
+        orchestrator
+            .stop_child(agent_id)
+            .expect("explicit stop should fully dispose the settled child");
+        assert_eq!(shutdown_calls.load(Ordering::SeqCst), 1);
+        assert!(!orchestrator.child_has_authority(agent_id));
+        assert_eq!(orchestrator.child_count(), 0);
+    }
+
+    #[test]
+    fn settled_children_over_the_cap_are_evicted_oldest_first() {
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let shutdown_calls = Arc::new(AtomicUsize::new(0));
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        for index in 0..=(MAX_SETTLED_CHILD_AGENTS as u64) {
+            let agent_id = AgentId::new(index + 2);
+            let turn_id = AgentTurnId::new(agent_id.get());
+            orchestrator.register_child_for_test(
+                agent_id,
+                AgentId::MAIN,
+                turn_id,
+                test_title("cap settled child"),
+                test_context(&format!("cap-settled-child-{index}")),
+                Box::new(ShutdownCountingRuntime {
+                    events: vec![child_event(
+                        agent_id,
+                        turn_id,
+                        &target,
+                        AgentEventKind::TurnFinished {
+                            response: runtime_domain::session::ConversationResponse::assistant_text(
+                                "settled answer",
+                            ),
+                            metrics: None,
+                            context_usage: None,
+                        },
+                    )],
+                    shutdown_calls: Arc::clone(&shutdown_calls),
+                }),
+            );
+        }
+
+        let _ = orchestrator.drain_child_events();
+
+        // 超限淘汰最旧（agent id 最小）：其余 settled child 的 runtime 保留。
+        assert_eq!(orchestrator.child_count(), MAX_SETTLED_CHILD_AGENTS);
+        assert!(!orchestrator.child_has_authority(AgentId::new(2)));
+        assert!(orchestrator.child_has_authority(AgentId::new(3)));
+        assert_eq!(
+            shutdown_calls.load(Ordering::SeqCst),
+            1,
+            "eviction must run the full cleanup path for the oldest settled child"
+        );
+        assert_eq!(orchestrator.active_child_count(), 0);
+    }
+
+    #[test]
+    fn blocked_settled_eviction_retains_owner_and_retries_to_convergence() {
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let finished_event = |agent_id: AgentId, turn_id: AgentTurnId| {
+            child_event(
+                agent_id,
+                turn_id,
+                &target,
+                AgentEventKind::TurnFinished {
+                    response: runtime_domain::session::ConversationResponse::assistant_text(
+                        "settled answer",
+                    ),
+                    metrics: None,
+                    context_usage: None,
+                },
+            )
+        };
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        // 最旧 settled child 的 runtime shutdown 第一次失败：淘汰被阻断。
+        let oldest_id = AgentId::new(2);
+        orchestrator.register_child_for_test(
+            oldest_id,
+            AgentId::MAIN,
+            AgentTurnId::new(oldest_id.get()),
+            test_title("blocked eviction"),
+            test_context("blocked-eviction"),
+            Box::new(FailingShutdownRuntime {
+                failures_remaining: 1,
+                events: vec![finished_event(oldest_id, AgentTurnId::new(oldest_id.get()))],
+            }),
+        );
+        for index in 1..=(MAX_SETTLED_CHILD_AGENTS as u64) {
+            let agent_id = AgentId::new(index + 2);
+            let turn_id = AgentTurnId::new(agent_id.get());
+            orchestrator.register_child_for_test(
+                agent_id,
+                AgentId::MAIN,
+                turn_id,
+                test_title("cap settled child"),
+                test_context(&format!("blocked-eviction-child-{index}")),
+                Box::new(StubMainRuntime {
+                    events: vec![finished_event(agent_id, turn_id)],
+                }),
+            );
+        }
+
+        // 首轮 drain：terminal 事实成立、淘汰被阻断，被阻断 child 的 terminal fact
+        // 暂缓交付（Disposing 未收敛），其余 child 正常 settle。
+        let delivered = orchestrator.drain_child_events();
+        assert_eq!(delivered.len(), MAX_SETTLED_CHILD_AGENTS);
+        assert!(delivered.iter().all(|event| event.agent_id != oldest_id));
+        assert_eq!(
+            orchestrator.child_status(oldest_id),
+            Some(AgentProjectionStatus::CleanupBlocked)
+        );
+        assert!(orchestrator.child_has_authority(oldest_id));
+        assert_eq!(orchestrator.child_count(), MAX_SETTLED_CHILD_AGENTS + 1);
+        // durable outcome fact 不受阻断影响：全部 17 个 child 的 outcome 已持久化投影。
+        assert_eq!(
+            orchestrator
+                .drain_projection_events()
+                .iter()
+                .filter(|event| matches!(event, AgentProjectionEvent::AgentOutcomeFact { .. }))
+                .count(),
+            MAX_SETTLED_CHILD_AGENTS + 1
+        );
+
+        // 下轮 settle 以同一 owner 重试：收敛后行随 stop 意图移除；held terminal fact
+        // 随完全释放的行一并终结（durable outcome 已交付，AgentEvent 流不再补发）。
+        assert!(orchestrator.drain_child_events().is_empty());
+        assert!(!orchestrator.child_has_authority(oldest_id));
+        assert_eq!(orchestrator.child_count(), MAX_SETTLED_CHILD_AGENTS);
+    }
+
+    /// 先交付 staged events、随后拒绝 SubmitTurn 的 fixture：构造 followup dispatch
+    /// 失败路径。
+    struct TerminalThenBusyRuntime {
+        events: Vec<AgentEvent>,
+    }
+
+    impl AgentRuntime for TerminalThenBusyRuntime {
+        fn dispatch(
+            &mut self,
+            command: AgentCommand,
+        ) -> Result<AgentCommandReceipt, AgentRuntimeError> {
+            match command {
+                AgentCommand::SubmitTurn { .. } => Err(AgentRuntimeError::Busy),
+                _ => Ok(AgentCommandReceipt::Accepted),
+            }
+        }
+
+        fn drain_events(&mut self) -> Vec<AgentEvent> {
+            std::mem::take(&mut self.events)
+        }
+
+        fn shutdown(&mut self) -> Result<(), AgentRuntimeError> {
+            Ok(())
+        }
+    }
+
+    impl AgentRuntimePort for TerminalThenBusyRuntime {
+        fn activate(&mut self, _grants: AgentRuntimeActivationGrants) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn suspend(&mut self) -> Result<(), AgentRuntimeError> {
+            Ok(())
+        }
+
+        fn activity(&self) -> AgentRuntimeActivity {
+            AgentRuntimeActivity::Idle
+        }
+
+        fn session(&self) -> Option<&dyn AgentSessionCapability> {
+            None
+        }
+
+        fn session_mut(&mut self) -> Option<&mut dyn AgentSessionCapability> {
+            None
+        }
+
+        fn has_pending_work(&self) -> bool {
+            false
+        }
+    }
+
+    fn loaded_view_snapshot(events: Vec<AgentProjectionEvent>) -> AgentViewSnapshot {
+        events
+            .into_iter()
+            .find_map(|event| match event {
+                AgentProjectionEvent::AgentViewSnapshotLoaded { snapshot, .. } => Some(snapshot),
+                _ => None,
+            })
+            .expect("view observation should deliver a snapshot")
+    }
+
+    fn outcome_facts(
+        events: &[AgentProjectionEvent],
+    ) -> Vec<runtime_domain::agent::AgentOutcomeSnapshot> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                AgentProjectionEvent::AgentOutcomeFact { snapshot } => Some(snapshot.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn child_message(content: &str) -> AgentChildMessage {
+        AgentChildMessage::new(content).expect("test message should construct")
+    }
+
+    fn submitted_turn_texts(submitted: &ScriptedSubmittedTurns) -> Vec<String> {
+        submitted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|(_, text)| text.clone())
+            .collect()
+    }
+
+    #[test]
+    fn active_child_message_queues_until_the_turn_boundary() {
+        let agent_id = AgentId::new(2);
+        let turn_id = AgentTurnId::new(agent_id.get());
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let (runtime, staged, dispatched, submitted_turns) = ScriptedChildRuntime::new(Vec::new());
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        orchestrator.register_child_for_test(
+            agent_id,
+            AgentId::MAIN,
+            turn_id,
+            test_title("queued message child"),
+            test_context("queued-message-child"),
+            Box::new(runtime),
+        );
+        orchestrator.mark_child_target_for_test(agent_id, target.clone());
+
+        let receipt = orchestrator
+            .send_child_message(
+                agent_id,
+                child_message("extend the research with citations"),
+            )
+            .expect("active child should accept the message");
+        assert_eq!(receipt, AgentCommandReceipt::MessageQueued { turn_id });
+        // 队列对 dispatch 与 projection 完全不可见，消息在 turn 边界前不产生副作用。
+        assert!(
+            dispatched
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
+        );
+        assert!(submitted_turn_texts(&submitted_turns).is_empty());
+        assert!(orchestrator.drain_projection_events().is_empty());
+
+        // terminal 后同一 drain 内自动开始 followup turn：消息成为下一 turn 的
+        // user 消息，record 回到 Active。
+        staged
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(child_event(
+                agent_id,
+                turn_id,
+                &target,
+                finished_turn_event("first answer"),
+            ));
+        let accepted = orchestrator.drain_child_events();
+        assert_eq!(accepted.len(), 1);
+        assert!(accepted[0].kind.is_terminal());
+        assert_eq!(
+            *dispatched
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec!["submit_turn"]
+        );
+        assert_eq!(
+            submitted_turn_texts(&submitted_turns),
+            vec!["extend the research with citations".to_string()]
+        );
+        assert_eq!(
+            orchestrator.child_status(agent_id),
+            Some(AgentProjectionStatus::Pending)
+        );
+        assert_eq!(orchestrator.active_child_count(), 1);
+        assert!(orchestrator.child_has_authority(agent_id));
+
+        orchestrator.observe_agent_transcript(AgentObservationRequestId::new(1), agent_id);
+        let snapshot = loaded_view_snapshot(orchestrator.drain_projection_events());
+        assert_eq!(
+            snapshot.transcript.items,
+            vec![
+                AgentTranscriptItem::Assistant {
+                    content: "first answer".to_string()
+                },
+                AgentTranscriptItem::User {
+                    content: "extend the research with citations".to_string()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn settled_child_message_starts_followup_with_continuous_transcript() {
+        let agent_id = AgentId::new(2);
+        let turn_id = AgentTurnId::new(agent_id.get());
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let (runtime, staged, dispatched, submitted_turns) = ScriptedChildRuntime::new(vec![
+            child_event(
+                agent_id,
+                turn_id,
+                &target,
+                AgentEventKind::ToolActivityStarted {
+                    activity: runtime_domain::session::RuntimeToolActivity {
+                        activity_id: "tool-1".to_string(),
+                        title: "Read file".to_string(),
+                        kind: runtime_domain::session::RuntimeToolKind::Read,
+                        status: runtime_domain::session::RuntimeToolActivityStatus::InProgress,
+                        content: vec![runtime_domain::session::RuntimeToolActivityContent::Text(
+                            "safe child tool content".to_string(),
+                        )],
+                        locations: Vec::new(),
+                        raw_input: None,
+                        raw_output: None,
+                    },
+                },
+            ),
+            child_event(
+                agent_id,
+                turn_id,
+                &target,
+                finished_turn_event("first answer"),
+            ),
+        ]);
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        orchestrator.register_child_for_test(
+            agent_id,
+            AgentId::MAIN,
+            turn_id,
+            test_title("followup child"),
+            test_context("followup-child"),
+            Box::new(runtime),
+        );
+        orchestrator.mark_child_target_for_test(agent_id, target.clone());
+        orchestrator.mark_child_launch_group_for_test(agent_id, AgentLaunchGroupId::new(7));
+
+        let accepted = orchestrator.drain_child_events();
+        assert_eq!(accepted.len(), 2);
+        assert_eq!(
+            orchestrator.child_status(agent_id),
+            Some(AgentProjectionStatus::Completed)
+        );
+        assert_eq!(orchestrator.active_child_count(), 0);
+        let first_outcomes = outcome_facts(&orchestrator.drain_projection_events());
+        assert_eq!(first_outcomes.len(), 1);
+        assert_eq!(first_outcomes[0].group_id, Some(AgentLaunchGroupId::new(7)));
+
+        // settled child 的消息立即开始 followup turn，不必等待下一次 drain。
+        let receipt = orchestrator
+            .send_child_message(agent_id, child_message("refine the report"))
+            .expect("settled child should accept the message");
+        assert_eq!(receipt, AgentCommandReceipt::MessageStarted { turn_id });
+        assert_eq!(
+            *dispatched
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec!["submit_turn"]
+        );
+        assert_eq!(
+            submitted_turn_texts(&submitted_turns),
+            vec!["refine the report".to_string()]
+        );
+        assert_eq!(
+            orchestrator.child_status(agent_id),
+            Some(AgentProjectionStatus::Pending)
+        );
+        assert_eq!(orchestrator.active_child_count(), 1);
+
+        // followup terminal 复用既有管线：投影 settle、新 outcome fact 追加；
+        // followup outcome 是消息触发的独立 durable fact，不归属 launch group。
+        staged
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(child_event(
+                agent_id,
+                turn_id,
+                &target,
+                finished_turn_event("refined answer"),
+            ));
+        let accepted = orchestrator.drain_child_events();
+        assert_eq!(accepted.len(), 1);
+        assert!(accepted[0].kind.is_terminal());
+        assert_eq!(
+            orchestrator.child_status(agent_id),
+            Some(AgentProjectionStatus::Completed)
+        );
+        let second_outcomes = outcome_facts(&orchestrator.drain_projection_events());
+        assert_eq!(second_outcomes.len(), 1);
+        assert_eq!(
+            second_outcomes[0].group_id, None,
+            "followup outcome must not re-associate with the launch group"
+        );
+        assert_eq!(
+            second_outcomes[0]
+                .summary
+                .as_ref()
+                .map(|summary| summary.as_str()),
+            Some("refined answer")
+        );
+        assert_eq!(second_outcomes[0].parent_agent_id, Some(AgentId::MAIN));
+
+        // transcript 连续：前序 tool/assistant 保留，followup user/assistant 顺序追加。
+        orchestrator.observe_agent_transcript(AgentObservationRequestId::new(2), agent_id);
+        let snapshot = loaded_view_snapshot(orchestrator.drain_projection_events());
+        assert_eq!(
+            snapshot.transcript.items,
+            vec![
+                AgentTranscriptItem::Tool {
+                    title: "Read file".to_string(),
+                    content: "safe child tool content".to_string()
+                },
+                AgentTranscriptItem::Assistant {
+                    content: "first answer".to_string()
+                },
+                AgentTranscriptItem::User {
+                    content: "refine the report".to_string()
+                },
+                AgentTranscriptItem::Assistant {
+                    content: "refined answer".to_string()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn queued_messages_consume_one_per_turn_in_fifo_order() {
+        let agent_id = AgentId::new(2);
+        let turn_id = AgentTurnId::new(agent_id.get());
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let (runtime, staged, _dispatched, submitted_turns) = ScriptedChildRuntime::new(Vec::new());
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        orchestrator.register_child_for_test(
+            agent_id,
+            AgentId::MAIN,
+            turn_id,
+            test_title("multi message child"),
+            test_context("multi-message-child"),
+            Box::new(runtime),
+        );
+        orchestrator.mark_child_target_for_test(agent_id, target.clone());
+
+        for content in ["first follow-up", "second follow-up"] {
+            let receipt = orchestrator
+                .send_child_message(agent_id, child_message(content))
+                .expect("active child should queue every message");
+            assert_eq!(receipt, AgentCommandReceipt::MessageQueued { turn_id });
+        }
+
+        // 单 turn 单消息：第一个 terminal 只消费队头。
+        staged
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(child_event(
+                agent_id,
+                turn_id,
+                &target,
+                finished_turn_event("first answer"),
+            ));
+        let _ = orchestrator.drain_child_events();
+        assert_eq!(
+            submitted_turn_texts(&submitted_turns),
+            vec!["first follow-up".to_string()]
+        );
+
+        staged
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(child_event(
+                agent_id,
+                turn_id,
+                &target,
+                finished_turn_event("second answer"),
+            ));
+        let _ = orchestrator.drain_child_events();
+        assert_eq!(
+            submitted_turn_texts(&submitted_turns),
+            vec![
+                "first follow-up".to_string(),
+                "second follow-up".to_string()
+            ]
+        );
+
+        orchestrator.observe_agent_transcript(AgentObservationRequestId::new(3), agent_id);
+        let snapshot = loaded_view_snapshot(orchestrator.drain_projection_events());
+        let user_items = snapshot
+            .transcript
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                AgentTranscriptItem::User { content } => Some(content.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            user_items,
+            vec![
+                "first follow-up".to_string(),
+                "second follow-up".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn followup_dispatch_failure_marks_the_turn_failed() {
+        let agent_id = AgentId::new(2);
+        let turn_id = AgentTurnId::new(agent_id.get());
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        orchestrator.register_child_for_test(
+            agent_id,
+            AgentId::MAIN,
+            turn_id,
+            test_title("failing followup"),
+            test_context("failing-followup"),
+            Box::new(TerminalThenBusyRuntime {
+                events: vec![child_event(
+                    agent_id,
+                    turn_id,
+                    &target,
+                    finished_turn_event("first answer"),
+                )],
+            }),
+        );
+        orchestrator.mark_child_target_for_test(agent_id, target.clone());
+        let _ = orchestrator.drain_child_events();
+        let _ = orchestrator.drain_projection_events();
+        assert_eq!(
+            orchestrator.child_status(agent_id),
+            Some(AgentProjectionStatus::Completed)
+        );
+
+        let receipt = orchestrator
+            .send_child_message(agent_id, child_message("please continue"))
+            .expect("settled child should accept the message");
+        assert_eq!(receipt, AgentCommandReceipt::MessageStarted { turn_id });
+        // dispatch 失败在受理后同步定格为 Failed terminal，不丢弃消息事实。
+        assert_eq!(
+            orchestrator.child_status(agent_id),
+            Some(AgentProjectionStatus::Failed)
+        );
+
+        // terminal 事实与 followup outcome 由下一次 drain 交付。
+        let accepted = orchestrator.drain_child_events();
+        assert_eq!(accepted.len(), 1);
+        assert!(matches!(
+            &accepted[0].kind,
+            AgentEventKind::TurnFailed { message } if message == "Child Agent failed to start"
+        ));
+        let outcomes = outcome_facts(&orchestrator.drain_projection_events());
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].outcome, AgentOutcome::Failed);
+    }
+
+    #[test]
+    fn send_child_message_rejects_unknown_main_and_disposing_targets() {
+        let agent_id = AgentId::new(2);
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+
+        assert!(matches!(
+            orchestrator.send_child_message(AgentId::new(99), child_message("unknown")),
+            Err(AgentRuntimeError::UnknownAgent)
+        ));
+        assert!(matches!(
+            orchestrator.send_child_message(AgentId::MAIN, child_message("main")),
+            Err(AgentRuntimeError::UnknownAgent)
+        ));
+
+        // 显式清理未收敛（Disposing）的 child 不是合法消息目标；失败重试由同一
+        // owner 继续，消息在此期间 closed 拒绝。
+        orchestrator.register_child_for_test(
+            agent_id,
+            AgentId::MAIN,
+            AgentTurnId::new(agent_id.get()),
+            test_title("disposing child"),
+            test_context("disposing-child"),
+            Box::new(FailingShutdownRuntime {
+                failures_remaining: 3,
+                events: Vec::new(),
+            }),
+        );
+        assert!(orchestrator.stop_child(agent_id).is_err());
+        assert!(matches!(
+            orchestrator.send_child_message(agent_id, child_message("blocked")),
+            Err(AgentRuntimeError::UnknownAgent)
+        ));
+        assert_eq!(
+            orchestrator.child_status(agent_id),
+            Some(AgentProjectionStatus::CleanupBlocked)
+        );
+        assert_eq!(orchestrator.child_count(), 1);
+
+        // 清理收敛后行移除，消息照旧 closed 拒绝（等同 unknown target）。
+        while orchestrator.stop_child(agent_id).is_err() {}
+        assert_eq!(orchestrator.child_count(), 0);
+        assert!(matches!(
+            orchestrator.send_child_message(agent_id, child_message("removed")),
+            Err(AgentRuntimeError::UnknownAgent)
+        ));
+    }
+
+    #[test]
+    fn followup_turn_permissions_keep_the_fifo_pipeline() {
+        let agent_id = AgentId::new(2);
+        let turn_id = AgentTurnId::new(agent_id.get());
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let (runtime, staged, dispatched, _submitted_turns) =
+            ScriptedChildRuntime::new(vec![child_event(
+                agent_id,
+                turn_id,
+                &target,
+                finished_turn_event("first answer"),
+            )]);
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        orchestrator.register_child_for_test(
+            agent_id,
+            AgentId::MAIN,
+            turn_id,
+            test_title("followup permission child"),
+            test_context("followup-permission-child"),
+            Box::new(runtime),
+        );
+        orchestrator.mark_child_target_for_test(agent_id, target.clone());
+        let _ = orchestrator.drain_child_events();
+        let _ = orchestrator.drain_projection_events();
+
+        orchestrator
+            .send_child_message(agent_id, child_message("run the safety checks"))
+            .expect("settled child should start the followup turn");
+
+        // followup turn 的 permission fact 照常进入 FIFO 并投影 head。
+        staged
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(child_event(
+                agent_id,
+                turn_id,
+                &target,
+                AgentEventKind::PermissionRequested {
+                    request: permission_request("perm-followup"),
+                },
+            ));
+        let accepted = orchestrator.drain_child_events();
+        assert_eq!(accepted.len(), 1);
+        assert!(matches!(
+            accepted[0].kind,
+            AgentEventKind::PermissionRequested { .. }
+        ));
+        let updates = permission_updates(&orchestrator.drain_projection_events());
+        assert_eq!(updates.len(), 1);
+        let head = updates[0]
+            .request
+            .as_ref()
+            .expect("followup permission should be the FIFO head");
+        assert_eq!(head.target.request_id, "perm-followup");
+        assert_eq!(head.target.turn_id, turn_id);
+        assert_eq!(head.state, AgentPermissionState::Pending);
+
+        // respond 照常经 identity 校验提交到 child runtime。
+        orchestrator
+            .respond_agent_permission(
+                permission_target(
+                    agent_id,
+                    turn_id,
+                    orchestrator.generation(),
+                    &target,
+                    "perm-followup",
+                ),
+                Some("allow-1".into()),
+            )
+            .expect("followup permission response should dispatch");
+        assert_eq!(
+            *dispatched
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec!["submit_turn", "respond_permission"]
+        );
+        let _ = orchestrator.drain_projection_events();
+
+        // terminal 清空 FIFO 并投影 None。
+        staged
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(child_event(
+                agent_id,
+                turn_id,
+                &target,
+                finished_turn_event("checks passed"),
+            ));
+        let _ = orchestrator.drain_child_events();
+        let updates = permission_updates(&orchestrator.drain_projection_events());
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].request, None);
+    }
+
+    /// 以 child caller 身份构造一次 `send_agent_message` host request，并返回回执
+    /// receiver；caller 是 target 的 direct parent，与生产 MAIN caller 共用同一校验面。
+    fn child_caller_message_request(
+        orchestrator: &mut AgentOrchestrator,
+        caller_id: AgentId,
+        caller_context: &AgentCapabilityContext,
+        caller_turn_id: AgentTurnId,
+        target_id: AgentId,
+        message: &str,
+    ) -> oneshot::Receiver<Result<AgentMessageDelivery, SendAgentMessageFailure>> {
+        let (response, receiver) = oneshot::channel();
+        orchestrator.handle_send_agent_message_request(SendAgentMessageRequest {
+            identity: tool_runtime::ToolInvocationIdentity::new(
+                caller_id.get(),
+                caller_turn_id.get(),
+                orchestrator.generation().get(),
+                caller_context.epoch(),
+            ),
+            agent_id: target_id,
+            message: child_message(message),
+            response,
+        });
+        receiver
+    }
+
+    /// 注册一个 parented target child（caller 的 direct child），返回 staged 队列。
+    fn register_message_target_child(
+        orchestrator: &mut AgentOrchestrator,
+        caller_id: AgentId,
+        target_id: AgentId,
+        target: RuntimeTarget,
+        staged_events: Vec<AgentEvent>,
+    ) -> ScriptedEventQueue {
+        let (runtime, staged, _dispatched, _submitted) = ScriptedChildRuntime::new(staged_events);
+        orchestrator.register_child_for_test(
+            target_id,
+            caller_id,
+            AgentTurnId::new(target_id.get()),
+            test_title("message target"),
+            test_context("message-target"),
+            Box::new(runtime),
+        );
+        orchestrator.mark_child_target_for_test(target_id, target);
+        staged
+    }
+
+    fn register_message_caller_child(
+        orchestrator: &mut AgentOrchestrator,
+        caller_id: AgentId,
+        caller_turn_id: AgentTurnId,
+    ) -> AgentCapabilityContext {
+        let (runtime, _staged, _dispatched, _submitted) = ScriptedChildRuntime::new(Vec::new());
+        let context = test_context("message-caller");
+        orchestrator.register_child_for_test(
+            caller_id,
+            AgentId::MAIN,
+            caller_turn_id,
+            test_title("message caller"),
+            context.clone(),
+            Box::new(runtime),
+        );
+        context
+    }
+
+    #[test]
+    fn message_waiters_settle_in_fifo_order_across_followup_turns() {
+        let caller_id = AgentId::new(2);
+        let target_id = AgentId::new(3);
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        let caller_context =
+            register_message_caller_child(&mut orchestrator, caller_id, AgentTurnId::new(20));
+        let staged = register_message_target_child(
+            &mut orchestrator,
+            caller_id,
+            target_id,
+            target.clone(),
+            Vec::new(),
+        );
+
+        let mut first_receiver = child_caller_message_request(
+            &mut orchestrator,
+            caller_id,
+            &caller_context,
+            AgentTurnId::new(20),
+            target_id,
+            "first follow-up",
+        );
+        let mut second_receiver = child_caller_message_request(
+            &mut orchestrator,
+            caller_id,
+            &caller_context,
+            AgentTurnId::new(20),
+            target_id,
+            "second follow-up",
+        );
+        // Active child 的排队消息不产生投影副作用（与 spawn 前的 staging 语义一致）。
+        assert!(orchestrator.drain_projection_events().is_empty());
+
+        // launch turn terminal：不结算任何 waiter，只触发第一条消息的 followup turn。
+        staged
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(child_event(
+                target_id,
+                AgentTurnId::new(target_id.get()),
+                &target,
+                finished_turn_event("first answer"),
+            ));
+        let _ = orchestrator.drain_child_events();
+        assert!(
+            first_receiver.try_recv().is_err(),
+            "launch turn terminal must not settle a message waiter"
+        );
+
+        // followup turn 1 terminal：结算第一个 waiter；消息 2 的 followup 随后自动开始。
+        staged
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(child_event(
+                target_id,
+                AgentTurnId::new(target_id.get()),
+                &target,
+                finished_turn_event("first refined"),
+            ));
+        let _ = orchestrator.drain_child_events();
+        let first_delivery = first_receiver
+            .try_recv()
+            .expect("first waiter should settle on its follow-up turn")
+            .expect("first delivery should succeed");
+        // 断言 tool boundary 实际交付的 JSON face。
+        let payload = serde_json::to_value(&first_delivery).expect("delivery should serialize");
+        assert_eq!(payload["summary"], serde_json::json!("first refined"));
+        assert_eq!(payload["queued"], serde_json::json!(true));
+        assert!(
+            second_receiver.try_recv().is_err(),
+            "the second waiter must wait for its own follow-up turn"
+        );
+
+        staged
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(child_event(
+                target_id,
+                AgentTurnId::new(target_id.get()),
+                &target,
+                finished_turn_event("second refined"),
+            ));
+        let _ = orchestrator.drain_child_events();
+        let second_delivery = second_receiver
+            .try_recv()
+            .expect("second waiter should settle after the second follow-up turn")
+            .expect("second delivery should succeed");
+        let payload = serde_json::to_value(&second_delivery).expect("delivery should serialize");
+        assert_eq!(payload["summary"], serde_json::json!("second refined"));
+        assert_eq!(payload["queued"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn stopping_a_child_fails_its_pending_message_waiters_closed() {
+        let caller_id = AgentId::new(2);
+        let target_id = AgentId::new(3);
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        let caller_context =
+            register_message_caller_child(&mut orchestrator, caller_id, AgentTurnId::new(20));
+        let _staged = register_message_target_child(
+            &mut orchestrator,
+            caller_id,
+            target_id,
+            target,
+            Vec::new(),
+        );
+
+        let mut receiver = child_caller_message_request(
+            &mut orchestrator,
+            caller_id,
+            &caller_context,
+            AgentTurnId::new(20),
+            target_id,
+            "work that will be cancelled",
+        );
+        orchestrator
+            .stop_child(target_id)
+            .expect("stopping the target child should converge");
+        let failure = receiver
+            .try_recv()
+            .expect("disposal must settle the pending message waiter")
+            .expect_err("waiter must receive a closed failure");
+        assert_eq!(failure, SendAgentMessageFailure::TargetUnavailable);
+        assert_eq!(
+            failure.delivery_message(),
+            "send_agent_message target agent is no longer available"
+        );
+
+        // 已 disposal 的 target 不再是可寻址消息目标。
+        let mut receiver = child_caller_message_request(
+            &mut orchestrator,
+            caller_id,
+            &caller_context,
+            AgentTurnId::new(20),
+            target_id,
+            "after stop",
+        );
+        let failure = receiver
+            .try_recv()
+            .expect("stopped target should reject synchronously")
+            .expect_err("unknown target must fail closed");
+        assert!(matches!(failure, SendAgentMessageFailure::NotFound { .. }));
+        assert!(
+            failure
+                .delivery_message()
+                .contains("no child agent is available from this caller")
+        );
+    }
+
+    #[test]
+    fn suspending_the_orchestrator_fails_pending_message_waiters() {
+        let caller_id = AgentId::new(2);
+        let target_id = AgentId::new(3);
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        let caller_context =
+            register_message_caller_child(&mut orchestrator, caller_id, AgentTurnId::new(20));
+        let _staged = register_message_target_child(
+            &mut orchestrator,
+            caller_id,
+            target_id,
+            target,
+            Vec::new(),
+        );
+
+        let mut receiver = child_caller_message_request(
+            &mut orchestrator,
+            caller_id,
+            &caller_context,
+            AgentTurnId::new(20),
+            target_id,
+            "message interrupted by suspend",
+        );
+        orchestrator.suspend().expect("suspend should converge");
+        let failure = receiver
+            .try_recv()
+            .expect("suspend must settle every pending message waiter")
+            .expect_err("waiter must receive a closed failure");
+        assert_eq!(failure, SendAgentMessageFailure::TargetUnavailable);
+    }
+
+    #[test]
+    fn session_transition_and_suspend_fully_dispose_settled_children() {
+        let agent_id = AgentId::new(2);
+        let turn_id = AgentTurnId::new(7);
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let shutdown_calls = Arc::new(AtomicUsize::new(0));
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        let register_settled_child =
+            |orchestrator: &mut AgentOrchestrator, shutdown_calls: Arc<AtomicUsize>| {
+                orchestrator.register_child_for_test(
+                    agent_id,
+                    AgentId::MAIN,
+                    turn_id,
+                    test_title("settled disposal"),
+                    test_context("settled-disposal"),
+                    Box::new(ShutdownCountingRuntime {
+                        events: vec![child_event(
+                            agent_id,
+                            turn_id,
+                            &target,
+                            AgentEventKind::TurnFinished {
+                                response:
+                                    runtime_domain::session::ConversationResponse::assistant_text(
+                                        "settled answer",
+                                    ),
+                                metrics: None,
+                                context_usage: None,
+                            },
+                        )],
+                        shutdown_calls,
+                    }),
+                );
+            };
+
+        register_settled_child(&mut orchestrator, Arc::clone(&shutdown_calls));
+        assert_eq!(orchestrator.drain_child_events().len(), 1);
+        assert!(orchestrator.child_has_authority(agent_id));
+
+        // session 切换对 settled child 立即完整清理，不经过 settled 保留。
+        orchestrator
+            .dispose_children_for_session_transition()
+            .expect("session transition should fully dispose the settled child");
+        assert!(!orchestrator.child_has_authority(agent_id));
+        assert_eq!(orchestrator.child_count(), 0);
+        assert_eq!(shutdown_calls.load(Ordering::SeqCst), 1);
+
+        register_settled_child(&mut orchestrator, Arc::clone(&shutdown_calls));
+        assert_eq!(orchestrator.drain_child_events().len(), 1);
+        assert!(orchestrator.child_has_authority(agent_id));
+
+        orchestrator
+            .suspend()
+            .expect("suspend should fully dispose the settled child");
+        assert!(!orchestrator.child_has_authority(agent_id));
+        assert_eq!(orchestrator.child_count(), 0);
+        assert_eq!(shutdown_calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -3205,6 +4752,7 @@ mod tests {
             orchestrator.child_status(agent_id),
             Some(AgentProjectionStatus::CleanupBlocked)
         );
+        assert_eq!(orchestrator.child_count(), 1);
         assert!(matches!(
             orchestrator.dispatch_child(AgentCommand::Interrupt {
                 agent_id,
@@ -3213,10 +4761,10 @@ mod tests {
             Err(AgentRuntimeError::UnknownAgent)
         ));
 
-        orchestrator
-            .stop_child(agent_id)
-            .expect("retained context inverse should retry");
+        // dispatch 边界的 settle pass 以同一 owner 重试未收敛清理：inverse 第二次
+        // 成功后 stop 意图完整完成（authority 释放 + 行移除）。
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert!(!orchestrator.child_has_authority(agent_id));
         assert_eq!(orchestrator.child_count(), 0);
     }
 
@@ -3349,28 +4897,40 @@ mod tests {
             .expect("replacement should proceed after retained owner converges");
     }
 
-    /// 可分阶段注入 events、并记录 dispatched command 的 child runtime fixture。
+    /// 可分阶段注入 events、并记录 dispatched command 与提交 turn 文本的 child runtime fixture。
     type ScriptedEventQueue = Arc<Mutex<Vec<AgentEvent>>>;
     type ScriptedDispatchLog = Arc<Mutex<Vec<&'static str>>>;
+    type ScriptedSubmittedTurns = Arc<Mutex<Vec<(AgentTurnId, String)>>>;
 
     struct ScriptedChildRuntime {
         events: ScriptedEventQueue,
         dispatched: ScriptedDispatchLog,
+        submitted_turns: ScriptedSubmittedTurns,
         is_shutdown: bool,
     }
 
     impl ScriptedChildRuntime {
-        fn new(events: Vec<AgentEvent>) -> (Self, ScriptedEventQueue, ScriptedDispatchLog) {
+        fn new(
+            events: Vec<AgentEvent>,
+        ) -> (
+            Self,
+            ScriptedEventQueue,
+            ScriptedDispatchLog,
+            ScriptedSubmittedTurns,
+        ) {
             let events = Arc::new(Mutex::new(events));
             let dispatched = Arc::new(Mutex::new(Vec::new()));
+            let submitted_turns = Arc::new(Mutex::new(Vec::new()));
             (
                 Self {
                     events: Arc::clone(&events),
                     dispatched: Arc::clone(&dispatched),
+                    submitted_turns: Arc::clone(&submitted_turns),
                     is_shutdown: false,
                 },
                 events,
                 dispatched,
+                submitted_turns,
             )
         }
     }
@@ -3387,6 +4947,12 @@ mod tests {
                 AgentCommand::SubmitTurn { .. } => "submit_turn",
                 AgentCommand::Interrupt { .. } => "interrupt",
                 AgentCommand::RespondPermission { .. } => "respond_permission",
+                // SendMessage 由 orchestrator 路由，adapter 边界 fail closed。
+                AgentCommand::SendMessage { .. } => {
+                    return Err(AgentRuntimeError::CommandRejected(
+                        "child runtime does not route messages".to_string(),
+                    ));
+                }
             };
             self.dispatched
                 .lock()
@@ -3395,15 +4961,27 @@ mod tests {
             Ok(match command {
                 AgentCommand::SubmitTurn {
                     turn_id, request, ..
-                } => AgentCommandReceipt::TurnStarted {
-                    turn_id,
-                    target: request.target(),
-                    activity_label: request.activity_label().to_string(),
-                },
+                } => {
+                    self.submitted_turns
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push((
+                            turn_id,
+                            request.conversation_request().message_text().to_string(),
+                        ));
+                    AgentCommandReceipt::TurnStarted {
+                        turn_id,
+                        target: request.target(),
+                        activity_label: request.activity_label().to_string(),
+                    }
+                }
                 AgentCommand::Interrupt { target, .. } => {
                     AgentCommandReceipt::Interrupted { target }
                 }
                 AgentCommand::RespondPermission { .. } => AgentCommandReceipt::Accepted,
+                AgentCommand::SendMessage { .. } => {
+                    unreachable!("SendMessage is rejected before the dispatch log records it")
+                }
             })
         }
 
@@ -3717,28 +5295,29 @@ mod tests {
         let agent_id = AgentId::new(2);
         let turn_id = AgentTurnId::new(7);
         let target = RuntimeTarget::provider("local", "qwen3");
-        let (runtime, staged_events, dispatched) = ScriptedChildRuntime::new(vec![
-            child_event(
-                agent_id,
-                turn_id,
-                &target,
-                AgentEventKind::PermissionRequested {
-                    request: permission_request("perm-1"),
-                },
-            ),
-            child_event(
-                agent_id,
-                turn_id,
-                &target,
-                AgentEventKind::TurnFinished {
-                    response: runtime_domain::session::ConversationResponse::assistant_text(
-                        "committed answer",
-                    ),
-                    metrics: None,
-                    context_usage: None,
-                },
-            ),
-        ]);
+        let (runtime, staged_events, dispatched, _submitted_turns) =
+            ScriptedChildRuntime::new(vec![
+                child_event(
+                    agent_id,
+                    turn_id,
+                    &target,
+                    AgentEventKind::PermissionRequested {
+                        request: permission_request("perm-1"),
+                    },
+                ),
+                child_event(
+                    agent_id,
+                    turn_id,
+                    &target,
+                    AgentEventKind::TurnFinished {
+                        response: runtime_domain::session::ConversationResponse::assistant_text(
+                            "committed answer",
+                        ),
+                        metrics: None,
+                        context_usage: None,
+                    },
+                ),
+            ]);
         let mut orchestrator =
             AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
         orchestrator.register_child_for_test(
@@ -3790,7 +5369,8 @@ mod tests {
             orchestrator.child_status(agent_id),
             Some(AgentProjectionStatus::Completed)
         );
-        assert!(!orchestrator.child_has_authority(agent_id));
+        // settled child 保留 runtime/context 作 followup 宿主；投影只反映 terminal 定格。
+        assert!(orchestrator.child_has_authority(agent_id));
 
         // permission 投影由 child fact 驱动，与 observation 打开/关闭无关。
         let updates = permission_updates(&orchestrator.drain_projection_events());
@@ -4034,14 +5614,15 @@ mod tests {
         let agent_id = AgentId::new(2);
         let turn_id = AgentTurnId::new(7);
         let target = RuntimeTarget::provider("local", "qwen3");
-        let (runtime, _staged, dispatched) = ScriptedChildRuntime::new(vec![child_event(
-            agent_id,
-            turn_id,
-            &target,
-            AgentEventKind::PermissionRequested {
-                request: permission_request("perm-1"),
-            },
-        )]);
+        let (runtime, _staged, dispatched, _submitted_turns) =
+            ScriptedChildRuntime::new(vec![child_event(
+                agent_id,
+                turn_id,
+                &target,
+                AgentEventKind::PermissionRequested {
+                    request: permission_request("perm-1"),
+                },
+            )]);
         let mut orchestrator =
             AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
         orchestrator.register_child_for_test(
@@ -4138,14 +5719,15 @@ mod tests {
         let agent_id = AgentId::new(2);
         let turn_id = AgentTurnId::new(7);
         let target = RuntimeTarget::provider("local", "qwen3");
-        let (runtime, staged, _dispatched) = ScriptedChildRuntime::new(vec![child_event(
-            agent_id,
-            turn_id,
-            &target,
-            AgentEventKind::PermissionRequested {
-                request: permission_request("perm-1"),
-            },
-        )]);
+        let (runtime, staged, _dispatched, _submitted_turns) =
+            ScriptedChildRuntime::new(vec![child_event(
+                agent_id,
+                turn_id,
+                &target,
+                AgentEventKind::PermissionRequested {
+                    request: permission_request("perm-1"),
+                },
+            )]);
         let mut orchestrator =
             AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
         orchestrator.register_child_for_test(

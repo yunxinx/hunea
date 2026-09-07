@@ -311,6 +311,10 @@ impl AgentRuntime for ReplayAgentRuntime {
                 request_id,
                 option_id,
             } => self.respond_permission(agent_id, target.as_ref(), &request_id, option_id),
+            // SendMessage 由 orchestrator 路由为 followup SubmitTurn；adapter 边界 fail closed。
+            AgentCommand::SendMessage { .. } => Err(AgentRuntimeError::CommandRejected(
+                "Agent messages are routed by the host".to_string(),
+            )),
         }
     }
 

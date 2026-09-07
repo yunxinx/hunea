@@ -15,13 +15,20 @@ mod tests;
 
 pub(crate) use pending_permission::{AgentPendingPermissionProjection, AgentsPanelPillNavigation};
 pub(crate) use state::{
-    AgentsPanelAgentView, AgentsPanelPreviewPermissionChoice, AgentsPanelState, AgentsPanelSurface,
-    PendingAgentObservationStops,
+    AgentsPanelActivityFold, AgentsPanelAgentView, AgentsPanelPreviewPermissionChoice,
+    AgentsPanelState, AgentsPanelSurface, PendingAgentObservationStops,
 };
 
-use runtime_domain::agent::{AgentActivitySummary, AgentProjectionStatus};
+use ratatui::style::Style;
+use runtime_domain::agent::{AgentActivitySummary, AgentProjectionStatus, AgentTranscriptItem};
+
+use crate::theme::{
+    TerminalColorCapability, TerminalPalette, accent_text_style, approval_rejected_text_style,
+    command_accent_text_style, success_text_style, system_error_text_style, tertiary_text_style,
+};
 
 /// 状态列固定显示宽度；8 态文本标签在此列内左对齐。
+/// 上限由最长标签 `Permission` 决定。
 pub(super) const AGENTS_STATUS_COLUMN_WIDTH: usize = 10;
 /// elapsed 列固定显示宽度（如 `1m23s` / `999h59m`），行内右对齐。
 pub(super) const AGENTS_ELAPSED_COLUMN_WIDTH: usize = 7;
@@ -32,11 +39,45 @@ pub(super) fn agent_status_label(status: AgentProjectionStatus) -> &'static str 
         AgentProjectionStatus::Pending => "Pending",
         AgentProjectionStatus::Working => "Working",
         AgentProjectionStatus::WaitingPermission => "Permission",
-        AgentProjectionStatus::Completed => "Completed",
+        AgentProjectionStatus::Completed => "Done",
         AgentProjectionStatus::Failed => "Failed",
         AgentProjectionStatus::Cancelled => "Cancelled",
         AgentProjectionStatus::Stopping => "Stopping",
         AgentProjectionStatus::CleanupBlocked => "Cleanup",
+    }
+}
+
+/// 状态点与状态文字共用的语义样式：颜色按状态映射到既有 palette 槽位，
+/// 终端默认配色下部分槽位退化为 `Color::Reset`（无前景色），
+/// 由点符号与文字标签保底区分。
+pub(super) fn agent_status_dot_style(
+    status: AgentProjectionStatus,
+    palette: &TerminalPalette,
+) -> Style {
+    match status {
+        AgentProjectionStatus::Working => command_accent_text_style(*palette),
+        AgentProjectionStatus::WaitingPermission => accent_text_style(*palette),
+        AgentProjectionStatus::Completed => success_text_style(*palette),
+        AgentProjectionStatus::Failed => system_error_text_style(*palette),
+        AgentProjectionStatus::Cancelled => approval_rejected_text_style(*palette),
+        AgentProjectionStatus::Pending
+        | AgentProjectionStatus::Stopping
+        | AgentProjectionStatus::CleanupBlocked => tertiary_text_style(*palette),
+    }
+}
+
+/// 状态点符号。显式配色下颜色可承载区分度，统一实心；
+/// 终端默认配色下颜色不可靠，运行中用实心、终态用空心保底区分。
+pub(super) fn agent_status_dot_symbol(
+    status: AgentProjectionStatus,
+    palette: &TerminalPalette,
+) -> &'static str {
+    if palette.color_capability() == TerminalColorCapability::TerminalDefault
+        && !agent_status_is_running(status)
+    {
+        "○"
+    } else {
+        "●"
     }
 }
 
@@ -50,8 +91,8 @@ pub(super) fn pad_agents_status_column(label: &str, width_budget: usize) -> Stri
     format!("{label}{}", " ".repeat(padding))
 }
 
-/// `x` 二次确认只对仍在运行的 child 生效；终态 child 无需 stop。
-pub(super) fn agent_status_is_stoppable(status: AgentProjectionStatus) -> bool {
+/// 是否仍在运行（未进入终态）：`x` stop 确认与状态点实/空心共用该判定。
+pub(super) fn agent_status_is_running(status: AgentProjectionStatus) -> bool {
     matches!(
         status,
         AgentProjectionStatus::Pending
@@ -71,6 +112,59 @@ pub(super) fn agent_activity_summary_text(activity: &AgentActivitySummary) -> St
         AgentActivitySummary::WaitingPermission { summary } => format!("waiting: {summary}"),
         AgentActivitySummary::Idle => "idle".to_string(),
     }
+}
+
+/// 活动折叠区展示的最近活动条数上限；更早条目折叠为 `+N more`。
+pub(super) const AGENTS_ACTIVITY_FOLD_ENTRY_COUNT: usize = 3;
+/// 折叠区整区隐藏的宽度阈值：更窄的终端上主行已进入列让位区间。
+pub(super) const AGENTS_ACTIVITY_FOLD_MIN_WIDTH: usize = 60;
+/// 折叠区行数上限（3 条活动 + 1 行 `+N more`）：list 页行预算的固定预留量。
+pub(super) const AGENTS_ACTIVITY_FOLD_MAX_LINES: usize = AGENTS_ACTIVITY_FOLD_ENTRY_COUNT + 1;
+/// 折叠区单条摘要的缓存宽度上限；渲染时再按实际列宽二次截断，
+/// 这里只避免把长正文整段复制进折叠区缓存。
+const AGENTS_ACTIVITY_FOLD_ENTRY_CACHE_WIDTH: usize = 200;
+
+/// 折叠区条目提取：transcript 尾部的 tool/assistant 条目转单行摘要。
+///
+/// User 条目是发起指令而非 agent 活动，不进入折叠区。返回
+/// （最近 entries, 被折叠的更早条数）。
+pub(super) fn agents_activity_fold_entries(items: &[AgentTranscriptItem]) -> (Vec<String>, usize) {
+    let eligible: Vec<String> = items.iter().filter_map(activity_fold_entry_text).collect();
+    let hidden = eligible
+        .len()
+        .saturating_sub(AGENTS_ACTIVITY_FOLD_ENTRY_COUNT);
+    (eligible[hidden..].to_vec(), hidden)
+}
+
+/// 单条活动的单行摘要：多行内容只取首个非空行，空内容条目整体跳过。
+fn activity_fold_entry_text(item: &AgentTranscriptItem) -> Option<String> {
+    let source = match item {
+        AgentTranscriptItem::Tool { title, content } => {
+            let title = title.trim();
+            if title.is_empty() { content } else { title }
+        }
+        AgentTranscriptItem::Assistant { content } => content,
+        AgentTranscriptItem::User { .. } => return None,
+    };
+    let first_line = source
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    Some(crate::status_line::truncate_display_width_with_ellipsis(
+        first_line,
+        AGENTS_ACTIVITY_FOLD_ENTRY_CACHE_WIDTH,
+    ))
+}
+
+/// list 页行预算：每行 1 行，另为选中行的活动折叠区恒定预留
+/// `AGENTS_ACTIVITY_FOLD_MAX_LINES` 行。
+///
+/// 预留不随折叠区实际可见性变化——page 边界若随 selection/事件抖动，
+/// 翻页与鼠标行换算会在导航中错位；渲染与输入路径必须共用本函数。
+pub(super) fn agents_panel_list_page_size(height: u16) -> usize {
+    crate::fullscreen_list_chrome::fullscreen_list_page_size_for_height(height)
+        .saturating_sub(AGENTS_ACTIVITY_FOLD_MAX_LINES)
+        .max(1)
 }
 
 /// elapsed 的紧凑标签；最长 `999h59m`，列内右对齐时不超过 7 列。

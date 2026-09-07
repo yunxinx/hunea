@@ -1,6 +1,8 @@
+mod activity_fold;
 mod common;
 mod lifecycle;
 mod list;
+mod list_render;
 mod pending_permission;
 mod permission;
 mod preview;

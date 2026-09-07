@@ -53,6 +53,11 @@ pub fn system_error_text_style(palette: TerminalPalette) -> Style {
     apply_foreground(Style::new(), palette.system_error)
 }
 
+/// `success_text_style` 返回正面完成状态的强调文字样式。
+pub fn success_text_style(palette: TerminalPalette) -> Style {
+    apply_foreground(Style::new(), palette.success)
+}
+
 /// `quote_text_style` 返回 Markdown 引用块的文字样式。
 pub fn quote_text_style(palette: TerminalPalette) -> Style {
     apply_foreground(Style::new().italic(), palette.quote)
@@ -148,7 +153,7 @@ mod tests {
     use super::{
         accent_text_style, approval_rejected_text_style, command_accent_text_style,
         muted_text_style, panel_block, primary_text_style, quote_text_style, secondary_text_style,
-        surface_emphasis_style, surface_text_style, system_error_text_style,
+        success_text_style, surface_emphasis_style, surface_text_style, system_error_text_style,
         table_header_text_style, tertiary_text_style,
     };
     use crate::theme::{default_palette, terminal_default_palette};
@@ -174,6 +179,7 @@ mod tests {
             system_error_text_style(palette).fg,
             Some(palette.system_error)
         );
+        assert_eq!(success_text_style(palette).fg, Some(palette.success));
         assert_eq!(
             table_header_text_style(palette).fg,
             Some(palette.table_header)

@@ -48,8 +48,9 @@ fn every_row_is_a_single_physical_line() {
 fn moderate_width_hides_tokens_first() {
     let mut model = ready_panel_model();
 
-    // body_budget = 55 - 2 - 10 - 1 - 2 = 40；全 metrics 需 45，丢 tokens 后 37 可容纳。
-    let buffer = render_model_buffer(&mut model, 55, 24);
+    // usable 58；全 metrics 需 fixed 15 + title 16 + latest 8 + 间隔 2 + metrics 24 = 65，
+    // 丢 tokens 后需 56 可容纳。
+    let buffer = render_model_buffer(&mut model, 60, 24);
     let rows = rendered_rows(&buffer);
     let row = rows
         .iter()
@@ -67,7 +68,7 @@ fn moderate_width_hides_tokens_first() {
 fn narrow_width_hides_tools_then_elapsed() {
     let mut model = ready_panel_model();
 
-    // body_budget = 48 - 15 = 33；elapsed+tools 需 37 → 丢 tools；elapsed 需 29 可容纳。
+    // usable 46；丢 tokens 后仍需 56，再丢 tools 后需 46 恰好容纳。
     let buffer = render_model_buffer(&mut model, 48, 24);
     let rows = rendered_rows(&buffer);
     let row = rows
@@ -86,7 +87,7 @@ fn narrow_width_hides_tools_then_elapsed() {
 fn tighter_width_hides_elapsed() {
     let mut model = ready_panel_model();
 
-    // body_budget = 42 - 15 = 27；elapsed 需 29 → 全部 metric 让位。
+    // usable 40；elapsed 也让位后仍 ≥ title 16 + latest 8 + 间隔，latest 保留。
     let buffer = render_model_buffer(&mut model, 42, 24);
     let rows = rendered_rows(&buffer);
     let row = rows
@@ -107,7 +108,7 @@ fn tighter_width_hides_elapsed() {
 fn extreme_narrow_keeps_status_and_title_only() {
     let mut model = ready_panel_model();
 
-    // body_budget = 30 - 15 = 15 ≤ title min 12 + gap + latest min 8 → latest 隐藏。
+    // 弹性预算 = 30 - 2 - 15 = 13 ≤ title min 16 → 极窄回退仅状态 + 标题。
     let buffer = render_model_buffer(&mut model, 30, 24);
     let rows = rendered_rows(&buffer);
     let row = rows
@@ -169,7 +170,7 @@ fn status_labels_render_as_text_for_each_state() {
     let buffer = render_model_buffer(&mut model, 100, 24);
     let rendered = rendered_rows(&buffer).join("\n");
     assert!(rendered.contains("Working"));
-    assert!(rendered.contains("Completed"));
+    assert!(rendered.contains("Done"));
     assert!(rendered.contains("Failed"));
 }
 

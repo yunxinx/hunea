@@ -9,12 +9,10 @@ use crate::{
     agents_panel::{
         AgentsPanelAgentView, AgentsPanelPillNavigation, AgentsPanelPreviewPermissionChoice,
         AgentsPanelState, AgentsPanelSurface, PendingAgentObservationStops,
-        agent_status_is_stoppable, agents_panel_rejection_text,
+        agent_status_is_running, agents_panel_list_page_size, agents_panel_rejection_text,
         preview::initial_preview_permission_choice,
     },
-    fullscreen_list_chrome::{
-        fullscreen_list_body_visible_offset_for_row, fullscreen_list_page_size_for_height,
-    },
+    fullscreen_list_chrome::fullscreen_list_body_visible_offset_for_row,
     list_selection::ListNavigationDirection,
     overlay_input_result::OverlayInputResult,
     text_search::is_picker_search_text_key,
@@ -183,6 +181,10 @@ impl Model {
             matched_live_record = true;
         }
         if matched_live_record {
+            // view snapshot 到达可能让选中 agent 的折叠区首次可渲染。
+            if let Some(panel) = self.agents_panel.as_mut() {
+                panel.refresh_selected_activity_fold();
+            }
             self.sync_agents_panel_transcript_surface(agent_id);
             self.sync_agents_panel_preview_permission(agent_id);
             return;
@@ -215,6 +217,10 @@ impl Model {
             matched = true;
         }
         if matched {
+            // 选中 agent 的 snapshot 内容更新即折叠区数据更新。
+            if let Some(panel) = self.agents_panel.as_mut() {
+                panel.refresh_selected_activity_fold();
+            }
             self.sync_agents_panel_transcript_surface(agent_id);
             self.sync_agents_panel_preview_permission(agent_id);
         }
@@ -381,14 +387,14 @@ impl Model {
                 OverlayInputResult::Handled
             }
             KeyCode::Left | KeyCode::Char('h') if key.modifiers.is_empty() => {
-                let page_size = fullscreen_list_page_size_for_height(self.height);
+                let page_size = agents_panel_list_page_size(self.height);
                 if let Some(panel) = self.agents_panel.as_mut() {
                     panel.move_page(ListNavigationDirection::Previous, page_size);
                 }
                 OverlayInputResult::Handled
             }
             KeyCode::Right | KeyCode::Char('l') if key.modifiers.is_empty() => {
-                let page_size = fullscreen_list_page_size_for_height(self.height);
+                let page_size = agents_panel_list_page_size(self.height);
                 if let Some(panel) = self.agents_panel.as_mut() {
                     panel.move_page(ListNavigationDirection::Next, page_size);
                 }
@@ -413,7 +419,7 @@ impl Model {
         let Some(row) = panel.selected_row() else {
             return OverlayInputResult::Handled;
         };
-        if !agent_status_is_stoppable(row.status) {
+        if !agent_status_is_running(row.status) {
             return OverlayInputResult::Handled;
         }
         let agent_id = row.agent_id;
@@ -669,14 +675,15 @@ impl Model {
         else {
             return OverlayInputResult::Handled;
         };
-        let page_size = fullscreen_list_page_size_for_height(self.height);
+        let page_size = agents_panel_list_page_size(self.height);
         let selection_before = self
             .agents_panel
             .as_ref()
             .and_then(|panel| panel.selected_row())
             .map(|row| row.agent_id);
         if let Some(panel) = self.agents_panel.as_mut() {
-            panel.select_visible_row(page_size, visible_offset);
+            // 折叠行计入物理行预算：点击命中行须与渲染布局一致。
+            panel.select_physical_body_line(page_size, visible_offset, usize::from(self.width));
         }
         let selection_after = self
             .agents_panel

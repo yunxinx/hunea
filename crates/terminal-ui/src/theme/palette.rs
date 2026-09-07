@@ -20,6 +20,8 @@ const DARK_BACKGROUND_SURFACE: Color = Color::Rgb(46, 46, 46);
 const LIGHT_BACKGROUND_SURFACE: Color = Color::Rgb(236, 236, 236);
 const DARK_BACKGROUND_SYSTEM_ERROR: Color = Color::Rgb(255, 153, 153);
 const LIGHT_BACKGROUND_SYSTEM_ERROR: Color = Color::Rgb(188, 74, 74);
+const DARK_BACKGROUND_SUCCESS: Color = Color::Rgb(74, 222, 128);
+const LIGHT_BACKGROUND_SUCCESS: Color = Color::Rgb(21, 128, 61);
 const PANEL_ACCENT: Color = Color::Blue;
 const COMMAND_ACCENT: Color = Color::Cyan;
 /// `ContextBudgetColorSlot` 定义 context budget 使用的稳定语义槽位。
@@ -53,7 +55,7 @@ pub enum TerminalColorCapability {
 /// `main` 用于主体信息，`muted` 用于弱化正文，`secondary` 用于辅助信息，
 /// `tertiary` 用于更弱的状态信息，`accent` 用于面板强调线，
 /// `command_accent` 用于斜杠菜单当前命令，`approval_rejected` 用于人为拒绝审批，
-/// `system_error` 用于运行时错误提示，
+/// `system_error` 用于运行时错误提示，`success` 用于正面完成状态，
 /// `quote` 用于 Markdown 引用块，`table_header` 用于 Markdown 表头，
 /// `surface` 用于弱化背景块。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +68,7 @@ pub struct TerminalPalette {
     pub command_accent: Color,
     pub approval_rejected: Color,
     pub system_error: Color,
+    pub success: Color,
     pub quote: Color,
     pub table_header: Color,
     pub surface: Option<Color>,
@@ -102,6 +105,7 @@ pub fn terminal_default_palette() -> TerminalPalette {
         command_accent: COMMAND_ACCENT,
         approval_rejected: Color::LightYellow,
         system_error: Color::LightRed,
+        success: Color::LightGreen,
         quote: Color::LightGreen,
         table_header: Color::Cyan,
         surface: None,
@@ -253,6 +257,11 @@ pub fn palette_from_background(
         } else {
             LIGHT_BACKGROUND_SYSTEM_ERROR
         },
+        success: if has_dark_background {
+            DARK_BACKGROUND_SUCCESS
+        } else {
+            LIGHT_BACKGROUND_SUCCESS
+        },
         quote: if has_dark_background {
             DARK_BACKGROUND_QUOTE
         } else {
@@ -387,6 +396,16 @@ mod tests {
         let palette = palette_from_background(true, Some(Color::Rgb(16, 36, 63)));
 
         assert_ne!(palette.approval_rejected, palette.system_error);
+    }
+
+    #[test]
+    fn palette_separates_success_from_error_and_rejected() {
+        let palette = palette_from_background(true, Some(Color::Rgb(16, 36, 63)));
+
+        assert_eq!(palette.success, Color::Rgb(74, 222, 128));
+        assert_ne!(palette.success, palette.system_error);
+        assert_ne!(palette.success, palette.approval_rejected);
+        assert_eq!(terminal_default_palette().success, Color::LightGreen);
     }
 
     #[test]

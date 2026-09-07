@@ -183,7 +183,8 @@ fn mouse_click_consumed_in_surface_mode_without_selection_change() {
 
 #[test]
 fn page_navigation_moves_selection_by_page() {
-    // 30 行、page size 20（高度 24 - chrome 4）：`l` 跳到第二页首行（offset 20）。
+    // 30 行、page size 16（高度 24 - chrome 4 - 折叠区预留 4）：
+    // `l` 跳到第二页首行（offset 16）。
     let rows = (0..30)
         .map(|index| {
             overview_row(
@@ -204,7 +205,7 @@ fn page_navigation_moves_selection_by_page() {
             .unwrap()
             .selected_row()
             .map(|r| r.agent_id),
-        Some(AgentId::new(120)),
+        Some(AgentId::new(116)),
         "page next should jump to the first row of the next page"
     );
     press_key(&mut model, KeyCode::Char('h'));

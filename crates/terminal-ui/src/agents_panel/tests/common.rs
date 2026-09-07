@@ -118,11 +118,12 @@ pub(super) fn view_snapshot(
     view_snapshot_with_permission(agent_id, observation_id, answer, None)
 }
 
-pub(super) fn view_snapshot_with_permission(
+/// 活动折叠区 fixture：transcript items 可注入（尾部条目驱动折叠区内容）。
+pub(super) fn view_snapshot_with_items(
     agent_id: u64,
     observation_id: u64,
     answer: Option<&str>,
-    permission: Option<AgentPermissionRequest>,
+    items: Vec<runtime_domain::agent::AgentTranscriptItem>,
 ) -> AgentViewSnapshot {
     let revision = AgentProjectionRevision::new(3);
     AgentViewSnapshot {
@@ -136,18 +137,7 @@ pub(super) fn view_snapshot_with_permission(
             agent_id: AgentId::new(agent_id),
             title: agent_title("research task"),
             status: AgentProjectionStatus::Working,
-            items: vec![
-                runtime_domain::agent::AgentTranscriptItem::User {
-                    content: "summarize the repo".to_string(),
-                },
-                runtime_domain::agent::AgentTranscriptItem::Tool {
-                    title: "QueryDatabase: users".to_string(),
-                    content: "3 rows returned".to_string(),
-                },
-                runtime_domain::agent::AgentTranscriptItem::Assistant {
-                    content: answer.unwrap_or("partial draft").to_string(),
-                },
-            ],
+            items,
         },
         preview: runtime_domain::agent::AgentPreviewSnapshot {
             generation: AgentRuntimeGeneration::new(FIXTURE_GENERATION),
@@ -158,9 +148,36 @@ pub(super) fn view_snapshot_with_permission(
             latest_activity: AgentActivitySummary::Thinking,
             elapsed_ms: Some(83_000),
             latest_committed_answer: answer.map(str::to_string),
-            permission,
+            permission: None,
         },
     }
+}
+
+pub(super) fn view_snapshot_with_permission(
+    agent_id: u64,
+    observation_id: u64,
+    answer: Option<&str>,
+    permission: Option<AgentPermissionRequest>,
+) -> AgentViewSnapshot {
+    let mut snapshot = view_snapshot_with_items(
+        agent_id,
+        observation_id,
+        answer,
+        vec![
+            runtime_domain::agent::AgentTranscriptItem::User {
+                content: "summarize the repo".to_string(),
+            },
+            runtime_domain::agent::AgentTranscriptItem::Tool {
+                title: "QueryDatabase: users".to_string(),
+                content: "3 rows returned".to_string(),
+            },
+            runtime_domain::agent::AgentTranscriptItem::Assistant {
+                content: answer.unwrap_or("partial draft").to_string(),
+            },
+        ],
+    );
+    snapshot.preview.permission = permission;
+    snapshot
 }
 
 /// 全局 pending 投影测试的 permission request fixture。

@@ -1,22 +1,22 @@
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Clear, Paragraph, Widget},
 };
 
-use runtime_domain::agent::AgentOverviewRow;
+use runtime_domain::agent::{AgentId, AgentOverviewRow};
 
 use crate::{
     Model,
     agents_panel::{
-        AGENTS_ELAPSED_COLUMN_WIDTH, AgentsPanelState, agent_activity_summary_text,
-        agent_status_label, format_agent_elapsed_ms, format_agent_token_usage,
-        format_agent_tool_uses, pad_agents_status_column,
+        AGENTS_STATUS_COLUMN_WIDTH, AgentsPanelActivityFold, AgentsPanelState,
+        agent_activity_summary_text, agent_status_dot_style, agent_status_dot_symbol,
+        agent_status_label, agents_panel_list_page_size, format_agent_elapsed_ms,
+        format_agent_token_usage, format_agent_tool_uses, pad_agents_status_column,
     },
     display_width::display_width,
-    fullscreen_list_chrome::{fullscreen_list_chrome_rects, fullscreen_list_page_size_for_height},
-    relative_age::left_pad_display_width,
+    fullscreen_list_chrome::fullscreen_list_chrome_rects,
     render_frame::RenderFrame,
     status_line::truncate_display_width_with_ellipsis,
     styled_text::render_line_with_full_width_background,
@@ -26,14 +26,36 @@ use crate::{
     },
 };
 
-pub(super) const AGENTS_ROW_LEFT_PADDING: &str = "  ";
-const AGENTS_ROW_RIGHT_PADDING: usize = 2;
+/// 选中行行首指示前缀；未选中行使用等宽空白前缀，保证列几何一致。
+/// 前缀宽度须与 `AGENTS_CURSOR_PREFIX_WIDTH` 相符（`▸` 为单宽符号）。
+pub(super) const AGENTS_CURSOR_PREFIX: &str = "▸ ";
+const AGENTS_CURSOR_PREFIX_BLANK: &str = "  ";
+const AGENTS_CURSOR_PREFIX_WIDTH: usize = 2;
+/// 状态点符号（`●` / `○`）占用的显示列宽。
+const AGENTS_STATUS_DOT_WIDTH: usize = 1;
+/// 行首固定前缀总宽：选中指示 + 状态点 + 点与状态文字的间隔。
+const AGENTS_ROW_PREFIX_WIDTH: usize =
+    AGENTS_CURSOR_PREFIX_WIDTH + AGENTS_STATUS_DOT_WIDTH + AGENTS_COLUMN_GAP;
+/// 行右端保留的空白列；metrics 序列右对齐锚定在 `width - AGENTS_ROW_RIGHT_PADDING`。
+pub(super) const AGENTS_ROW_RIGHT_PADDING: usize = 2;
 const AGENTS_COLUMN_GAP: usize = 1;
-const AGENTS_TITLE_MIN_WIDTH: usize = 12;
-const AGENTS_TITLE_MAX_WIDTH: usize = 32;
+const AGENTS_TITLE_MIN_WIDTH: usize = 16;
+const AGENTS_TITLE_MAX_WIDTH: usize = 40;
 const AGENTS_LATEST_MIN_WIDTH: usize = 8;
 /// latest 列低于此宽度时整列隐藏（连 ellipsis 都放不下即无语义）。
 const AGENTS_LATEST_MIN_VISIBLE_WIDTH: usize = 3;
+/// metrics 内部分隔符：`·` 单宽，两侧各一空格。
+const AGENTS_METRIC_SEPARATOR: &str = " · ";
+const AGENTS_METRIC_SEPARATOR_WIDTH: usize = 3;
+
+/// 活动折叠行前缀：缩进对齐主行 title 列起点，`↳ ` 之后接活动摘要。
+/// 折叠区仅在宽度不低于 `AGENTS_ACTIVITY_FOLD_MIN_WIDTH` 时渲染，该区间内
+/// 状态列恒为满宽，title 列起点因此是常量。
+pub(super) fn agents_activity_fold_prefix() -> String {
+    const INDENT_WIDTH: usize =
+        AGENTS_ROW_PREFIX_WIDTH + AGENTS_STATUS_COLUMN_WIDTH + AGENTS_COLUMN_GAP;
+    format!("{}↳ ", " ".repeat(INDENT_WIDTH))
+}
 
 impl Model {
     pub(crate) fn render_agents_panel_list(&mut self, frame: &mut RenderFrame<'_>, area: Rect) {
@@ -44,7 +66,7 @@ impl Model {
         let Some(chrome) = fullscreen_list_chrome_rects(area) else {
             return;
         };
-        let page_size = fullscreen_list_page_size_for_height(area.height);
+        let page_size = agents_panel_list_page_size(area.height);
         let width = usize::from(area.width);
 
         frame.render_widget(
@@ -148,77 +170,138 @@ impl Model {
                     continue;
                 };
                 let absolute_position = page_start + visible_position;
-                lines.push(self.agents_panel_row_line(
+                let is_cursor = state.is_selected_visible_position(absolute_position);
+                lines.push(agents_panel_row_line(
                     row,
                     width,
-                    state.is_selected_visible_position(absolute_position),
+                    is_cursor,
                     absolute_position.is_multiple_of(2),
+                    self.palette,
                 ));
+                if is_cursor {
+                    lines.extend(agents_panel_activity_fold_lines(
+                        state.selected_activity_fold(),
+                        row.agent_id,
+                        width,
+                        self.palette,
+                    ));
+                }
             }
         }
 
         lines.truncate(body_height);
         lines
     }
+}
 
-    /// 固定单行 row：status/title 恒显，latest 弹性，elapsed/tools/tokens 按剩余宽度让位。
-    fn agents_panel_row_line(
-        &self,
-        row: &AgentOverviewRow,
-        width: usize,
-        is_cursor: bool,
-        is_even: bool,
-    ) -> Line<'static> {
-        let layout = agents_panel_row_layout(row, width);
-        let palette = self.palette;
-        let row_style = agents_panel_row_style(palette, is_even);
-        let content_style = if is_cursor {
-            primary_text_style(palette).bold()
-        } else {
-            primary_text_style(palette)
-        };
-        // cursor 行整行反色：状态语义由文本承载，反色只承担焦点指示。
-        let cursor_style = content_style
-            .bg(Color::Reset)
-            .add_modifier(Modifier::REVERSED);
-        let status_style = if is_cursor {
-            cursor_style
-        } else {
-            secondary_text_style(palette)
-        };
-        let body_style = if is_cursor {
-            cursor_style
-        } else {
-            content_style
-        };
-        let metric_style = if is_cursor {
-            cursor_style
-        } else {
-            tertiary_text_style(palette)
-        };
+/// 固定单行 row：选中指示 + 状态点/文字 + title 主导列 + latest 弹性列 +
+/// 右对齐 metrics 紧凑序列。
+/// 选中只改变行首 `▸` 前缀与 title bold，不做整行反色，
+/// 各列保持自己的语义色与斑马纹背景。
+pub(super) fn agents_panel_row_line(
+    row: &AgentOverviewRow,
+    width: usize,
+    is_cursor: bool,
+    is_even: bool,
+    palette: TerminalPalette,
+) -> Line<'static> {
+    let layout = agents_panel_row_layout(row, width);
+    let row_style = agents_panel_row_style(palette, is_even);
+    let status_style = agent_status_dot_style(row.status, &palette);
+    let title_style = if is_cursor {
+        primary_text_style(palette).add_modifier(Modifier::BOLD)
+    } else {
+        primary_text_style(palette)
+    };
 
-        let mut spans = vec![
-            Span::raw(AGENTS_ROW_LEFT_PADDING),
-            Span::styled(layout.status, status_style),
-        ];
-        if !layout.title.is_empty() {
-            spans.push(Span::raw(" ".repeat(AGENTS_COLUMN_GAP)));
-            spans.push(Span::styled(layout.title, body_style));
-        }
-        if let Some(latest) = layout.latest {
-            spans.push(Span::raw(" ".repeat(AGENTS_COLUMN_GAP)));
-            spans.push(Span::styled(latest, body_style));
-        }
-        for metric in [layout.elapsed, layout.tools, layout.tokens]
-            .into_iter()
-            .flatten()
-        {
-            spans.push(Span::raw(" ".repeat(AGENTS_COLUMN_GAP)));
-            spans.push(Span::styled(metric, metric_style));
-        }
+    // metrics 右对齐锚点：先量好锚点前的内容宽度（含实际存在的列间隔），
+    // 剩余空隙全部前置填充。
+    let title_width = display_width(&layout.title);
+    let latest_width = layout.latest.as_deref().map_or(0, display_width);
+    // 与下方 span 构造保持一致：空列不占用间隔。
+    let title_gap = usize::from(!layout.title.is_empty()) * AGENTS_COLUMN_GAP;
+    let latest_gap = usize::from(layout.latest.is_some()) * AGENTS_COLUMN_GAP;
+    let content_width = AGENTS_ROW_PREFIX_WIDTH
+        + display_width(&layout.status)
+        + title_gap
+        + title_width
+        + latest_gap
+        + latest_width
+        + layout.metrics_width;
+    let metrics_filler = width
+        .saturating_sub(AGENTS_ROW_RIGHT_PADDING)
+        .saturating_sub(content_width);
 
-        Line::from(spans).style(row_style)
+    let cursor_prefix = if is_cursor {
+        AGENTS_CURSOR_PREFIX
+    } else {
+        AGENTS_CURSOR_PREFIX_BLANK
+    };
+    let mut spans = vec![
+        Span::raw(cursor_prefix),
+        Span::styled(agent_status_dot_symbol(row.status, &palette), status_style),
+        Span::raw(" ".repeat(AGENTS_COLUMN_GAP)),
+        Span::styled(layout.status, status_style),
+    ];
+    if !layout.title.is_empty() {
+        spans.push(Span::raw(" ".repeat(AGENTS_COLUMN_GAP)));
+        spans.push(Span::styled(layout.title, title_style));
     }
+    if let Some(latest) = layout.latest {
+        spans.push(Span::raw(" ".repeat(AGENTS_COLUMN_GAP)));
+        spans.push(Span::styled(latest, secondary_text_style(palette)));
+    }
+    if !layout.metrics.is_empty() {
+        if metrics_filler > 0 {
+            spans.push(Span::raw(" ".repeat(metrics_filler)));
+        }
+        for (index, metric) in layout.metrics.into_iter().enumerate() {
+            if index > 0 {
+                spans.push(Span::raw(AGENTS_METRIC_SEPARATOR));
+            }
+            spans.push(Span::styled(metric, tertiary_text_style(palette)));
+        }
+    }
+
+    Line::from(spans).style(row_style)
+}
+
+/// 选中行下方的活动折叠区行：最多 3 条最近活动 + `+N more`。
+///
+/// tertiary 色、不参与斑马纹（不携带主行背景）；缓存归属与行 agent 脱节、
+/// 宽度低于阈值或无条目时返回空。折叠区不改变主行的列布局。
+fn agents_panel_activity_fold_lines(
+    fold: &AgentsPanelActivityFold,
+    agent_id: AgentId,
+    width: usize,
+    palette: TerminalPalette,
+) -> Vec<Line<'static>> {
+    if fold.agent_id != Some(agent_id) || fold.visible_line_count(width) == 0 {
+        return Vec::new();
+    }
+    let style = tertiary_text_style(palette);
+    let prefix = agents_activity_fold_prefix();
+    let entry_width = width.saturating_sub(display_width(&prefix)).max(1);
+    let mut lines: Vec<Line<'static>> = fold
+        .entries
+        .iter()
+        .map(|entry| {
+            Line::styled(
+                format!(
+                    "{prefix}{}",
+                    truncate_display_width_with_ellipsis(entry, entry_width)
+                ),
+                style,
+            )
+        })
+        .collect();
+    if fold.more_count > 0 {
+        lines.push(Line::styled(
+            format!("{prefix}+{} more", fold.more_count),
+            style,
+        ));
+    }
+    lines
 }
 
 struct AgentsPanelListWidget<'a> {
@@ -234,88 +317,76 @@ impl Widget for AgentsPanelListWidget<'_> {
     }
 }
 
-/// 单行 row 的列布局结果。
-struct AgentsPanelRowLayout {
-    status: String,
-    title: String,
-    latest: Option<String>,
-    elapsed: Option<String>,
-    tools: Option<String>,
-    tokens: Option<String>,
+/// 单行 row 的列布局结果：各列文本 + 右对齐 metrics 紧凑序列。
+/// `metrics_width` 是序列总显示宽（含 ` · ` 分隔符），行组合时据此做右对齐锚定。
+pub(super) struct AgentsPanelRowLayout {
+    pub(super) status: String,
+    pub(super) title: String,
+    pub(super) latest: Option<String>,
+    /// 幸存 metric 标签，按 elapsed → tools → tokens 顺序排列。
+    pub(super) metrics: Vec<String>,
+    pub(super) metrics_width: usize,
 }
 
-/// metric 列的固定让位顺序（末尾优先级最低）。
-#[derive(Debug, Clone, Copy)]
-enum AgentsMetricKind {
-    Elapsed,
-    Tools,
-    Tokens,
-}
-
-/// 剩余宽度累加法：固定列（status）→ title（保底宽 + 截断）→ latest（弹性）→
-/// elapsed → tools → tokens；放不下即止，行高恒 1。
-fn agents_panel_row_layout(row: &AgentOverviewRow, width: usize) -> AgentsPanelRowLayout {
-    let left_padding = AGENTS_ROW_LEFT_PADDING.len();
-    let status_budget = width.saturating_sub(left_padding);
+/// 职责分档布局：固定前缀（选中指示 + 状态点 + 状态文字）→ title 主导弹性列
+/// → latest 弹性列 → metrics 从行右端预留（` · ` 紧凑连接、右对齐）。
+/// 收窄让位顺序 tokens → tools → elapsed；极窄回退仅保留前缀 + 状态 + 标题。
+pub(super) fn agents_panel_row_layout(
+    row: &AgentOverviewRow,
+    width: usize,
+) -> AgentsPanelRowLayout {
+    let status_budget = width.saturating_sub(AGENTS_ROW_PREFIX_WIDTH);
     let status = pad_agents_status_column(agent_status_label(row.status), status_budget);
     let status_width = display_width(&status);
+    // 固定前缀：行首指示 + 状态点 + 状态文字 + 与后续列的间隔。
+    let fixed_width = AGENTS_ROW_PREFIX_WIDTH + status_width + AGENTS_COLUMN_GAP;
     let title_text = row.title.as_str();
     let latest_text = agent_activity_summary_text(&row.latest_activity);
 
     // 只收集 row 数据里存在的 metric；让位时从末尾（优先级最低）开始丢弃。
-    let mut metrics: Vec<(AgentsMetricKind, String, usize)> = Vec::new();
+    let mut metrics: Vec<String> = Vec::new();
     if let Some(elapsed_ms) = row.elapsed_ms {
-        metrics.push((
-            AgentsMetricKind::Elapsed,
-            left_pad_display_width(
-                &format_agent_elapsed_ms(elapsed_ms),
-                AGENTS_ELAPSED_COLUMN_WIDTH,
-            ),
-            AGENTS_ELAPSED_COLUMN_WIDTH,
-        ));
+        metrics.push(format_agent_elapsed_ms(elapsed_ms));
     }
     if let Some(tool_uses) = row.tool_uses {
-        let label = format_agent_tool_uses(tool_uses);
-        let label_width = display_width(&label);
-        metrics.push((AgentsMetricKind::Tools, label, label_width));
+        metrics.push(format_agent_tool_uses(tool_uses));
     }
     if let Some(token_usage) = row.token_usage {
-        let label = format_agent_token_usage(token_usage);
-        let label_width = display_width(&label);
-        metrics.push((AgentsMetricKind::Tokens, label, label_width));
+        metrics.push(format_agent_token_usage(token_usage));
     }
 
-    let body_budget = width
-        .saturating_sub(left_padding + status_width + AGENTS_COLUMN_GAP + AGENTS_ROW_RIGHT_PADDING);
-
-    // 先按全列判断，放不下则 tokens → tools → elapsed 逐列让位。
-    loop {
-        let metrics_width: usize = metrics
-            .iter()
-            .map(|(_, _, label_width)| AGENTS_COLUMN_GAP + label_width)
-            .sum();
-        let mandatory =
-            AGENTS_TITLE_MIN_WIDTH + AGENTS_COLUMN_GAP + AGENTS_LATEST_MIN_WIDTH + metrics_width;
-        if body_budget >= mandatory || metrics.is_empty() {
-            break;
+    let usable_width = width.saturating_sub(AGENTS_ROW_RIGHT_PADDING);
+    // 全列放不下时按 tokens → tools → elapsed 逐列丢弃；
+    // 判定基准是 title/latest 的保底宽 + metrics 序列（含分隔与前置间隔）。
+    let metrics_width = loop {
+        let sequence_width = agents_metrics_sequence_width(&metrics);
+        let metrics_gap = usize::from(!metrics.is_empty()) * AGENTS_COLUMN_GAP;
+        let mandatory = fixed_width
+            + AGENTS_TITLE_MIN_WIDTH
+            + AGENTS_COLUMN_GAP
+            + AGENTS_LATEST_MIN_WIDTH
+            + metrics_gap
+            + sequence_width;
+        if metrics.is_empty() || usable_width >= mandatory {
+            break sequence_width;
         }
         metrics.pop();
-    }
-    let metrics_width: usize = metrics
-        .iter()
-        .map(|(_, _, label_width)| AGENTS_COLUMN_GAP + label_width)
-        .sum();
-    let rest = body_budget.saturating_sub(metrics_width);
+    };
+    let metrics_gap = usize::from(!metrics.is_empty()) * AGENTS_COLUMN_GAP;
+    // metrics 从右端预留后，title/latest 分享的弹性预算。
+    let rest = usable_width.saturating_sub(fixed_width + metrics_gap + metrics_width);
 
     let (title, latest) = if rest <= AGENTS_TITLE_MIN_WIDTH {
-        // 极窄：只保留 status/title，title 安全截断。
+        // 极窄回退：仅前缀 + 状态 + 标题，title 安全截断。
         (truncate_display_width_with_ellipsis(title_text, rest), None)
     } else {
+        let flexible = rest - AGENTS_COLUMN_GAP;
+        // title 主导：优先吃满弹性预算（受 max 上限约束），latest 只保底 min。
         let title_width = display_width(title_text)
             .min(AGENTS_TITLE_MAX_WIDTH)
-            .min(rest - AGENTS_COLUMN_GAP - AGENTS_LATEST_MIN_WIDTH)
+            .min(flexible.saturating_sub(AGENTS_LATEST_MIN_WIDTH))
             .max(AGENTS_TITLE_MIN_WIDTH);
-        let latest_width = rest - title_width - AGENTS_COLUMN_GAP;
+        let latest_width = flexible.saturating_sub(title_width);
         (
             truncate_display_width_with_ellipsis(title_text, title_width),
             (latest_width >= AGENTS_LATEST_MIN_VISIBLE_WIDTH)
@@ -323,22 +394,23 @@ fn agents_panel_row_layout(row: &AgentOverviewRow, width: usize) -> AgentsPanelR
         )
     };
 
-    let mut layout = AgentsPanelRowLayout {
+    AgentsPanelRowLayout {
         status,
         title,
         latest,
-        elapsed: None,
-        tools: None,
-        tokens: None,
-    };
-    for (kind, label, _) in metrics {
-        match kind {
-            AgentsMetricKind::Elapsed => layout.elapsed = Some(label),
-            AgentsMetricKind::Tools => layout.tools = Some(label),
-            AgentsMetricKind::Tokens => layout.tokens = Some(label),
-        }
+        metrics,
+        metrics_width,
     }
-    layout
+}
+
+/// metrics 紧凑序列的总显示宽：标签宽之和 + 相邻 ` · ` 分隔符。
+fn agents_metrics_sequence_width(metrics: &[String]) -> usize {
+    let labels_width: usize = metrics.iter().map(|label| display_width(label)).sum();
+    let separators_width = metrics
+        .len()
+        .saturating_sub(1)
+        .saturating_mul(AGENTS_METRIC_SEPARATOR_WIDTH);
+    labels_width + separators_width
 }
 
 /// 斑马纹偶数行使用 surface 背景，与 message history 列表一致。

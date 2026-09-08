@@ -25,8 +25,8 @@ independent subtasks in one batch; the call blocks until every child in the batc
 Do not dispatch for a single file read or a simple lookup — use read, list_dir, or grep \
 directly. Each objective must be self-contained: children cannot see this conversation, so \
 include the background, constraints, and the exact deliverable. Children inherit this \
-session's tool permissions, so their tool calls may require user approval. Children's \
-results are not shown to the user; restate them in your reply. To add instructions or ask \
+session's tool permissions, so their tool calls may require user approval. Each report \
+returns only to you: restate or quote it in your reply. To add instructions or ask \
 a question about a dispatched child later, use send_agent_message with its agent_id. If a \
 child's direction turns out wrong or its work is no longer needed, stop it with stop_agents \
 instead of waiting for it to finish.";
@@ -47,10 +47,10 @@ Wait semantics:
 - The call blocks until every child in the batch completes. Prefer one batch of parallel agents over several serial calls.
 
 Results:
-- Each child returns a final report summary. Results are not shown to the user: restate or quote them in your own reply.
+- Each child returns a final report summary. Only this conversation receives it: restate or quote the report in your own reply.
 
 Follow-ups:
-- To add instructions to a dispatched child or ask about its report, call send_agent_message with its agent_id (from this tool's result or the /agents panel).
+- To add instructions to a dispatched child or ask about its report, call send_agent_message with its agent_id (from a spawn_agents completion result or a send_agent_message receipt).
 
 Stopping:
 - If a child's direction is wrong or its work is no longer needed, call stop_agents with its agent_id instead of waiting for it to finish.
@@ -273,27 +273,18 @@ mod tests {
         assert!(guidelines.contains("stop_agents"));
         assert!(guidelines.contains("no longer needed"));
         assert!(guidelines.contains("does not need to be stopped"));
-        assert!(
-            definition
-                .description
-                .as_deref()
-                .expect("spawn_agents should keep a description")
-                .contains("self-contained")
-        );
-        assert!(
-            definition
-                .description
-                .as_deref()
-                .expect("spawn_agents should keep a description")
-                .contains("send_agent_message")
-        );
-        assert!(
-            definition
-                .description
-                .as_deref()
-                .expect("spawn_agents should keep a description")
-                .contains("stop_agents")
-        );
+        let description = definition
+            .description
+            .as_deref()
+            .expect("spawn_agents should keep a description");
+        assert!(description.contains("self-contained"));
+        assert!(description.contains("send_agent_message"));
+        assert!(description.contains("stop_agents"));
+        // 给模型的文本不引用用户界面：模型只需回执链即可正确使用。
+        for text in [description, guidelines] {
+            assert!(!text.contains("/agents"), "{text}");
+            assert!(!text.contains("panel"), "{text}");
+        }
         assert_eq!(
             definition.input_schema.as_ref().and_then(|schema| {
                 schema

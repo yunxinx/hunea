@@ -904,3 +904,135 @@ fn agent_outcome_replay_with_legacy_defaults_renders_without_group_identity() {
     assert!(text.contains("● Launched legacy task"));
     assert!(text.contains("● Cancelled legacy task"));
 }
+
+#[test]
+fn spawn_agents_activity_row_is_suppressed_in_favor_of_launch_fact() {
+    use runtime_domain::agent::AgentProjectionEvent;
+    use runtime_domain::session::RuntimeToolActivityUpdate;
+
+    let target = RuntimeTarget::provider("local", "qwen3");
+    let mut model = scrollable_model();
+    model.show_stream_activity_with_header("Working");
+
+    model.apply_runtime_event(RuntimeEvent::ToolActivityStarted {
+        target: target.clone(),
+        activity: RuntimeToolActivity {
+            activity_id: "call-spawn".to_string(),
+            title: "Spawn agents".to_string(),
+            kind: RuntimeToolKind::Other,
+            status: RuntimeToolActivityStatus::InProgress,
+            content: Vec::new(),
+            locations: Vec::new(),
+            raw_input: None,
+            raw_output: None,
+        },
+    });
+    // 起始行被抑制后，终态 update 不能重建 document 行。
+    model.apply_runtime_event(RuntimeEvent::ToolActivityUpdated {
+        target,
+        update: RuntimeToolActivityUpdate {
+            activity_id: "call-spawn".to_string(),
+            title: Some("Spawn agents".to_string()),
+            kind: Some(RuntimeToolKind::Other),
+            status: Some(RuntimeToolActivityStatus::Completed),
+            content: Some(Vec::new()),
+            locations: Some(Vec::new()),
+            raw_input: None,
+            raw_output: None,
+        },
+    });
+    model.apply_runtime_event(RuntimeEvent::AgentProjection(Box::new(
+        AgentProjectionEvent::AgentLaunchFact {
+            snapshot: agent_launch_snapshot_fixture(vec![agent_launch_child_fixture(
+                2,
+                "research task",
+            )]),
+        },
+    )));
+
+    let transcript = model.transcript_plain_items().join("\n");
+    assert!(
+        !transcript.contains("Spawn agents"),
+        "spawn activity row duplicates the launch fact: {transcript:?}"
+    );
+    assert!(transcript.contains("● Launched research task"));
+    // document 行抑制不影响进行中的 stream activity。
+    assert!(model.current_stream_activity_render_result().has_content);
+}
+
+#[test]
+fn send_and_stop_agent_activity_rows_stay_in_document_flow() {
+    let target = RuntimeTarget::provider("local", "qwen3");
+    let mut model = scrollable_model();
+
+    for (activity_id, title) in [
+        ("call-send", "Send agent message"),
+        ("call-stop", "Stop agents"),
+    ] {
+        model.apply_runtime_event(RuntimeEvent::ToolActivityStarted {
+            target: target.clone(),
+            activity: RuntimeToolActivity {
+                activity_id: activity_id.to_string(),
+                title: title.to_string(),
+                kind: RuntimeToolKind::Other,
+                status: RuntimeToolActivityStatus::InProgress,
+                content: Vec::new(),
+                locations: Vec::new(),
+                raw_input: None,
+                raw_output: None,
+            },
+        });
+    }
+
+    let transcript = model.transcript_plain_items().join("\n");
+    assert!(
+        transcript.contains("Send agent message"),
+        "send has no document fact row and must keep its activity row: {transcript:?}"
+    );
+    assert!(
+        transcript.contains("Stop agents"),
+        "stop has no document fact row and must keep its activity row: {transcript:?}"
+    );
+}
+
+#[test]
+fn session_resume_does_not_restore_suppressed_spawn_activity_row() {
+    let mut model = Model::new_with_options(
+        StartupBannerOptions::default(),
+        ModelOptions {
+            selected_model: Some(ModelSelection::new("local", "qwen2")),
+            ..ModelOptions::default()
+        },
+    );
+
+    model.apply_runtime_event(RuntimeEvent::SessionResumed {
+        payload: SessionResumePayload {
+            session_id: "session-1".to_string(),
+            transcript: vec![
+                TranscriptReplayItem::ToolActivity {
+                    activity: RuntimeToolActivity {
+                        activity_id: "call-spawn".to_string(),
+                        title: "Spawn agents".to_string(),
+                        kind: RuntimeToolKind::Other,
+                        status: RuntimeToolActivityStatus::Completed,
+                        content: Vec::new(),
+                        locations: Vec::new(),
+                        raw_input: None,
+                        raw_output: None,
+                    },
+                },
+                TranscriptReplayItem::AgentLaunch(agent_launch_snapshot_fixture(vec![
+                    agent_launch_child_fixture(2, "research task"),
+                ])),
+            ],
+            restored_model: None,
+        },
+    });
+
+    let transcript = model.transcript_plain_items().join("\n");
+    assert!(
+        !transcript.contains("Spawn agents"),
+        "resume must not resurrect the suppressed spawn activity row: {transcript:?}"
+    );
+    assert!(transcript.contains("● Launched research task"));
+}

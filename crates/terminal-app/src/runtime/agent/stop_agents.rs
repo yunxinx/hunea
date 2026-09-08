@@ -21,7 +21,19 @@ waiting on it (spawn_agents, send_agent_message) return a stopped result instead
 Stopping is idempotent: a child that already finished returns an already-settled note with its \
 existing outcome instead of an error, so there is no need to check its status first. An \
 unknown agent_id is rejected with the list of child agent ids currently available to you. \
-The agent_id must come from a spawn_agents result or the /agents panel.";
+The agent_id must come from a spawn_agents completion result or a send_agent_message \
+receipt.";
+const STOP_AGENTS_PROMPT_GUIDELINES: &str = "\
+When to stop:
+- A child's direction turned out wrong or its work is no longer needed: stop it instead of waiting for it to finish.
+- Stopping also releases calls waiting on that child: spawn_agents and send_agent_message return a stopped result instead of hanging.
+
+Idempotence:
+- A child that already finished returns an already-settled receipt with its existing outcome instead of an error; there is no need to check its status first.
+
+Scope:
+- The child and everything it spawned are stopped together.
+- agent_id comes from a spawn_agents completion result or a send_agent_message receipt; an unknown id returns the child agent ids currently available to you.";
 const STOP_AGENTS_INVALID_INPUT: &str = "stop_agents arguments are invalid";
 
 /// `stop_agents` 的 closed delivery failure；control-plane source message 不跨越
@@ -111,8 +123,8 @@ impl Tool for StopAgentsTool {
         ToolDefinition::new(STOP_AGENTS_TOOL_NAME)
             .with_label("Stop agents")
             .with_description(STOP_AGENTS_DESCRIPTION)
-            // 不设独立 prompt guidelines：停止时机由 spawn_agents 的派遣指引统一覆盖，
-            // 与 send_agent_message 保持同一政策。
+            // guidelines 是 description 的展开版，经 prompt assembly 注入 system prompt。
+            .with_prompt_guidelines(STOP_AGENTS_PROMPT_GUIDELINES)
             .with_activity_payload_policy(ToolActivityPayloadPolicy::MetadataOnly)
             // 停止的是模型自己创建的 child 资源，不扩大权限面；child 自身的工具
             // 权限仍由各自的 policy 触发。
@@ -232,8 +244,19 @@ mod tests {
         assert!(description.contains("agent_id"));
         assert!(description.contains("unknown agent_id"));
         assert!(description.contains("available to you"));
-        // 停止时机由 spawn_agents 的派遣指引覆盖；本工具不单独注入 guidelines。
-        assert!(definition.prompt_guidelines.is_none());
+        let guidelines = definition
+            .prompt_guidelines
+            .as_deref()
+            .expect("stop_agents should ship prompt guidelines");
+        assert!(guidelines.contains("no longer needed"));
+        assert!(guidelines.contains("instead of an error"));
+        assert!(guidelines.contains("everything it spawned"));
+        assert!(guidelines.contains("available to you"));
+        // 给模型的文本不引用用户界面：模型只需回执链即可正确使用。
+        for text in [description, guidelines] {
+            assert!(!text.contains("/agents"), "{text}");
+            assert!(!text.contains("panel"), "{text}");
+        }
         assert_eq!(
             definition
                 .input_schema

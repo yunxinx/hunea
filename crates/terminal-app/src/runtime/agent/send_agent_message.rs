@@ -23,7 +23,23 @@ Use it to add instructions or ask questions about that child's work: the child k
 conversation context, so refer to its earlier objective and report. If the child is still \
 running a task, the message runs after that task finishes. The call blocks until the child \
 completes the turn triggered by this message and returns that turn's report summary. \
-The agent_id must come from a spawn_agents result or the /agents panel.";
+The agent_id must come from a spawn_agents completion result or a send_agent_message \
+receipt.";
+const SEND_AGENT_MESSAGE_PROMPT_GUIDELINES: &str = "\
+When to use:
+- Add instructions or constraints after reviewing a dispatched child's report.
+- Ask a question about the child's work or request a refined deliverable.
+
+Message content:
+- The child sees the message, not this conversation's other tool results: keep it self-contained and refer to the child's own objective and report.
+- Put one coherent follow-up in a single message instead of several calls in a row.
+
+Wait semantics:
+- The call blocks until the child completes the turn triggered by this message and returns that turn's report summary.
+- If the child is still running an earlier task, the message runs after that task finishes.
+
+Addressing:
+- agent_id comes from a spawn_agents completion result or a send_agent_message receipt; an unknown id returns the child agent ids currently available to you.";
 const SEND_AGENT_MESSAGE_INVALID_INPUT: &str = "send_agent_message arguments are invalid";
 
 /// `send_agent_message` 的 closed delivery failure；control-plane source message 不跨越
@@ -137,6 +153,8 @@ impl Tool for SendAgentMessageTool {
         ToolDefinition::new(SEND_AGENT_MESSAGE_TOOL_NAME)
             .with_label("Send agent message")
             .with_description(SEND_AGENT_MESSAGE_DESCRIPTION)
+            // guidelines 是 description 的展开版，经 prompt assembly 注入 system prompt。
+            .with_prompt_guidelines(SEND_AGENT_MESSAGE_PROMPT_GUIDELINES)
             .with_activity_payload_policy(ToolActivityPayloadPolicy::MetadataOnly)
             // 消息触发的是 child 的下一 turn，不是本 session 的副作用；child 的实际
             // 工具调用各自走权限层。
@@ -262,6 +280,19 @@ mod tests {
         assert!(description.contains("follow-up message"));
         assert!(description.contains("report summary"));
         assert!(description.contains("agent_id"));
+        let guidelines = definition
+            .prompt_guidelines
+            .as_deref()
+            .expect("send_agent_message should ship prompt guidelines");
+        assert!(guidelines.contains("self-contained"));
+        assert!(guidelines.contains("blocks until the child completes the turn"));
+        assert!(guidelines.contains("after that task finishes"));
+        assert!(guidelines.contains("available to you"));
+        // 给模型的文本不引用用户界面：模型只需回执链即可正确使用。
+        for text in [description, guidelines] {
+            assert!(!text.contains("/agents"), "{text}");
+            assert!(!text.contains("panel"), "{text}");
+        }
         assert_eq!(
             definition
                 .input_schema

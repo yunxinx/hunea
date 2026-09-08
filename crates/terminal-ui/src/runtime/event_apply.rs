@@ -89,7 +89,9 @@ impl RuntimeEventApply for Model {
             }
             RuntimeEvent::ToolActivityStarted { activity, .. } => {
                 self.flush_runtime_response_buffer();
-                self.append_runtime_tool_activity_from_runtime(activity);
+                if !suppresses_agent_launch_activity_row(&activity.title) {
+                    self.append_runtime_tool_activity_from_runtime(activity);
+                }
                 self.record_runtime_tool_activity_started_for_final_body_divider();
                 self.set_stream_activity_thinking(false);
             }
@@ -666,7 +668,11 @@ fn append_transcript_replay_item(
             transcript.append_reasoning_message(content, reasoning_display_mode, None);
         }
         TranscriptReplayItem::ToolActivity { activity } => {
-            transcript.append_runtime_tool_activity(activity);
+            // live 路径抑制的 activity 行在 resume replay 中同样不进入 document 流，
+            // 保持会话恢复前后主文档流一致。
+            if !suppresses_agent_launch_activity_row(&activity.title) {
+                transcript.append_runtime_tool_activity(activity);
+            }
         }
         TranscriptReplayItem::TerminalSnapshot { snapshot } => {
             let _ = transcript.set_runtime_terminal_snapshot(snapshot);
@@ -840,6 +846,16 @@ fn normalize_error_description(description: &str) -> String {
     normalized_lines.join("\n")
 }
 
+/// `spawn_agents` 的 tool activity 行与紧随的 AgentLaunchFact document 行表达同一事实；
+/// 主文档流只保留 fact 行。该工具是 MetadataOnly，activity title 恒等于 definition label，
+/// 以 title 识别。抑制只作用于 document item 追加（live 与 replay），stream activity、
+/// final body divider、审批预览对 activity 事件的消费不受影响。
+const AGENT_LAUNCH_ACTIVITY_ROW_TITLE: &str = "Spawn agents";
+
+fn suppresses_agent_launch_activity_row(title: &str) -> bool {
+    title == AGENT_LAUNCH_ACTIVITY_ROW_TITLE
+}
+
 fn upsert_runtime_tool_activity(model: &mut Model, update: RuntimeToolActivityUpdate) {
     let activity_id = update.activity_id.clone();
     match model.runtime_tool_activity_item_index_from_runtime(&activity_id) {
@@ -847,6 +863,14 @@ fn upsert_runtime_tool_activity(model: &mut Model, update: RuntimeToolActivityUp
             model.update_runtime_tool_activity_from_runtime(item_index, update);
         }
         None => {
+            // 起始行被抑制的 activity，终态 update 也不能重建 document 行。
+            if update
+                .title
+                .as_deref()
+                .is_some_and(suppresses_agent_launch_activity_row)
+            {
+                return;
+            }
             model.append_runtime_tool_activity_from_runtime(runtime_tool_activity_from_update(
                 update,
             ));

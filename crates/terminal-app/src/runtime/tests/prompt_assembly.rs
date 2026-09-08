@@ -176,8 +176,8 @@ fn begin_prompt_assembly_edit_reads_latest_filesystem_state() {
 }
 
 #[test]
-fn spawn_agents_guidelines_enter_prompt_assembly_tool_guidelines_body() {
-    let root = temp_test_dir("spawn-agents-guidelines");
+fn agent_host_tool_guidelines_enter_prompt_assembly_tool_guidelines_body() {
+    let root = temp_test_dir("agent-host-tool-guidelines");
     let work_dir = root.join("repo");
     fs::create_dir_all(&work_dir).expect("work dir should exist");
 
@@ -196,7 +196,7 @@ fn spawn_agents_guidelines_enter_prompt_assembly_tool_guidelines_body() {
     });
 
     // begin edit 走真实 tool catalog definitions 解析 working copy，
-    // 断言 spawn_agents 守则进入 prelude 的 tool guidelines 装配输出。
+    // 断言三个 host-owned Agent 工具守则进入 prelude 的 tool guidelines 装配输出。
     let manager = coordinator
         .begin_prompt_assembly_edit()
         .expect("begin prompt assembly edit should resolve default assembly");
@@ -207,12 +207,14 @@ fn spawn_agents_guidelines_enter_prompt_assembly_tool_guidelines_body() {
         .iter()
         .find(|section| section.kind == PromptSourceKind::ToolGuidelines)
         .expect("tool guidelines section should exist in the default prelude");
-    assert!(
-        guidelines_section
-            .body
-            .contains("<tool name=\"spawn_agents\">"),
-        "spawn_agents guidelines should be assembled into the prelude"
-    );
+    for tool_name in ["spawn_agents", "send_agent_message", "stop_agents"] {
+        assert!(
+            guidelines_section
+                .body
+                .contains(&format!("<tool name=\"{tool_name}\">")),
+            "{tool_name} guidelines should be assembled into the prelude"
+        );
+    }
     assert!(
         guidelines_section.body.contains("self-contained"),
         "spawn_agents guidelines body should carry the objective rule"
@@ -227,6 +229,69 @@ fn spawn_agents_guidelines_enter_prompt_assembly_tool_guidelines_body() {
         guidelines_section.body.contains("stop_agents"),
         "spawn_agents guidelines body should carry the stop rule"
     );
+    assert!(
+        guidelines_section
+            .body
+            .contains("blocks until the child completes the turn"),
+        "send_agent_message guidelines body should carry the wait rule"
+    );
+    assert!(
+        guidelines_section.body.contains("instead of an error"),
+        "stop_agents guidelines body should carry the idempotence rule"
+    );
+    cleanup(&root);
+}
+
+/// 无 persisted state 时，host-owned Agent 工具在 `/prompt` Tools Tab 默认可见、
+/// 默认启用并携带 Guide 选择语义（selection 由 guidelines 派生）。
+#[test]
+fn agent_host_tools_default_visible_enabled_and_guide_selectable_in_tools_tab() {
+    let root = temp_test_dir("agent-host-tools-inventory");
+    let work_dir = root.join("repo");
+    fs::create_dir_all(&work_dir).expect("work dir should exist");
+
+    let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        session_store: Some(store),
+        session_header_template: Some(SessionHeader {
+            session_id: SessionId::new(),
+            work_dir: work_dir.clone(),
+            session_name: None,
+            initial_model: "qwen3".to_string(),
+            git_head: None,
+            cli_version: None,
+        }),
+        ..AppRuntimeOptions::default()
+    });
+
+    let manager = coordinator
+        .begin_prompt_assembly_edit()
+        .expect("begin prompt assembly edit should resolve default assembly");
+
+    for tool_name in ["spawn_agents", "send_agent_message", "stop_agents"] {
+        let candidate = manager
+            .candidates
+            .tools
+            .iter()
+            .find(|candidate| candidate.name == tool_name)
+            .unwrap_or_else(|| panic!("{tool_name} should appear in the tools inventory"));
+        assert!(
+            candidate.prompt_guidelines.is_some(),
+            "{tool_name} should expose its guidelines to the Tools Tab"
+        );
+        assert!(
+            candidate.tool_enabled,
+            "{tool_name} should default to enabled without persisted enablement"
+        );
+        assert!(
+            candidate.selection.can_select(),
+            "{tool_name} should offer the Guide option"
+        );
+        assert!(
+            candidate.selection.is_selected(),
+            "{tool_name} should default to selected without persisted selection"
+        );
+    }
     cleanup(&root);
 }
 

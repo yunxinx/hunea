@@ -368,8 +368,6 @@ impl Model {
             Some(ModalLayer::AgentsOverview) => {
                 if self.agents_panel_transcript_active() {
                     self.move_agents_panel_transcript_page(delta_lines.signum());
-                } else if self.agents_panel_preview_active() {
-                    self.move_agents_panel_preview_page(delta_lines.signum());
                 } else {
                     self.move_agents_panel_selection_by_delta(delta_lines.signum());
                 }

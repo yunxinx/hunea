@@ -5,7 +5,7 @@ mod list;
 mod list_render;
 mod pending_permission;
 mod permission;
-mod preview;
 mod render;
 mod stop_confirm;
+mod surface_entry;
 mod transcript;

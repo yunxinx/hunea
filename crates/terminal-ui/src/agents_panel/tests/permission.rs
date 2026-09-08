@@ -8,7 +8,7 @@ use runtime_domain::session::{
 
 use crate::{
     AppEffect, Model,
-    agents_panel::AgentsPanelPreviewPermissionChoice,
+    agents_panel::AgentsPanelPermissionChoice,
     test_helpers::{render_model_buffer, rendered_rows},
 };
 
@@ -17,8 +17,8 @@ use super::common::{
     ready_panel_model, view_snapshot, view_snapshot_with_permission,
 };
 
-/// 打开 preview 并载入带 permission head 的 snapshot。
-fn preview_model_with_permission(permission: AgentPermissionRequest) -> Model {
+/// 打开 transcript surface 并载入带 permission head 的 snapshot。
+fn surface_model_with_permission(permission: AgentPermissionRequest) -> Model {
     let mut model = ready_panel_model();
     let effect = press_key(&mut model, KeyCode::Char(' '));
     let AppEffect::ObserveAgentTranscript { request_id, .. } =
@@ -38,25 +38,20 @@ fn pending_permission() -> AgentPermissionRequest {
     permission_request(2, "req-perm", AgentPermissionState::Pending, 100)
 }
 
-fn surface_permission_choice(model: &Model) -> Option<AgentsPanelPreviewPermissionChoice> {
+fn surface_permission_choice(model: &Model) -> Option<AgentsPanelPermissionChoice> {
     model
         .agents_panel
         .as_ref()?
         .surface
         .as_ref()
-        .map(|surface| match surface {
-            crate::agents_panel::AgentsPanelSurface::Preview {
-                permission_choice, ..
-            } => permission_choice.clone(),
-            _ => AgentsPanelPreviewPermissionChoice::None,
-        })
+        .map(|surface| surface.permission_choice.clone())
 }
 
 // ---- 渲染形态 ----
 
 #[test]
 fn pending_permission_renders_request_and_full_option_set_horizontally() {
-    let mut model = preview_model_with_permission(pending_permission());
+    let mut model = surface_model_with_permission(pending_permission());
 
     let buffer = render_model_buffer(&mut model, 100, 24);
     let rows = rendered_rows(&buffer);
@@ -89,7 +84,7 @@ fn pending_permission_renders_request_and_full_option_set_horizontally() {
 fn narrow_budget_degrades_options_to_stable_vertical_lines() {
     // 长标签使横排预算必然不足：稳定降级为每 option 一行。
     let permission = long_label_permission();
-    let mut model = preview_model_with_permission(permission);
+    let mut model = surface_model_with_permission(permission);
 
     let buffer = render_model_buffer(&mut model, 100, 24);
     let rows = rendered_rows(&buffer);
@@ -117,7 +112,7 @@ fn narrow_budget_degrades_options_to_stable_vertical_lines() {
 
 #[test]
 fn submitted_head_locks_marker_on_submitted_option() {
-    let mut model = preview_model_with_permission(permission_request(
+    let mut model = surface_model_with_permission(permission_request(
         2,
         "req-perm",
         AgentPermissionState::Submitted,
@@ -136,9 +131,9 @@ fn submitted_head_locks_marker_on_submitted_option() {
         "projected Submitted without a local choice must not mark any option: {options_row}"
     );
 
-    // 本地锁定（Slice 3 Enter 之后）：marker 固定在已提交 option，不随按键移动。
+    // 本地锁定（Enter 提交之后）：marker 固定在已提交 option，不随按键移动。
     let choice = surface_permission_choice(&model).unwrap();
-    let AgentsPanelPreviewPermissionChoice::Submitted { .. } = choice else {
+    let AgentsPanelPermissionChoice::Submitted { .. } = choice else {
         panic!("expected submitted choice, got {choice:?}");
     };
 }
@@ -165,13 +160,13 @@ fn no_pending_renders_no_permission_block() {
 
 #[test]
 fn up_down_move_selection_cyclically_while_pending() {
-    let mut model = preview_model_with_permission(pending_permission());
+    let mut model = surface_model_with_permission(pending_permission());
 
     // Down：0 → 1。
     assert_eq!(press_key(&mut model, KeyCode::Down), None);
     assert_eq!(
         surface_permission_choice(&model),
-        Some(AgentsPanelPreviewPermissionChoice::Selecting {
+        Some(AgentsPanelPermissionChoice::Selecting {
             request_id: "req-perm".to_string(),
             selected: 1,
         })
@@ -181,7 +176,7 @@ fn up_down_move_selection_cyclically_while_pending() {
     assert_eq!(press_key(&mut model, KeyCode::Char('j')), None);
     assert_eq!(
         surface_permission_choice(&model),
-        Some(AgentsPanelPreviewPermissionChoice::Selecting {
+        Some(AgentsPanelPermissionChoice::Selecting {
             request_id: "req-perm".to_string(),
             selected: 0,
         })
@@ -191,7 +186,7 @@ fn up_down_move_selection_cyclically_while_pending() {
     assert_eq!(press_key(&mut model, KeyCode::Char('k')), None);
     assert_eq!(
         surface_permission_choice(&model),
-        Some(AgentsPanelPreviewPermissionChoice::Selecting {
+        Some(AgentsPanelPermissionChoice::Selecting {
             request_id: "req-perm".to_string(),
             selected: 1,
         })
@@ -200,11 +195,11 @@ fn up_down_move_selection_cyclically_while_pending() {
 
 #[test]
 fn pending_left_right_keep_page_navigation() {
-    let mut model = preview_model_with_permission(pending_permission());
+    let mut model = surface_model_with_permission(pending_permission());
 
     // Left/Right 仍翻页（不动 selection）：长正文制造可滚动区。
     // 每行约 80 列：宽 100（wrap 96）下逐词换行后仍各占一个显示行，
-    // 40 行正文必然超过 body 高度（21）。
+    // 40 行正文必然超过正文区高度；快照更新后 surface 贴底（offset 即底部）。
     let long_answer = (1..=40)
         .map(|index| format!("answer line {index} {}", "x".repeat(64)))
         .collect::<Vec<_>>()
@@ -225,13 +220,16 @@ fn pending_left_right_keep_page_navigation() {
     );
     assert_eq!(
         surface_permission_choice(&model),
-        Some(AgentsPanelPreviewPermissionChoice::Selecting {
+        Some(AgentsPanelPermissionChoice::Selecting {
             request_id: "req-perm".to_string(),
             selected: 0,
         }),
         "Left/Right must not move the option selection"
     );
 
+    // 从底部向上翻页：一次 Left 回退一页，再一次回到顶部。
+    assert_eq!(press_key(&mut model, KeyCode::Left), None);
+    assert!(current_scroll_offset(&model) < scroll_after_right);
     assert_eq!(press_key(&mut model, KeyCode::Left), None);
     assert_eq!(current_scroll_offset(&model), 0);
 }
@@ -244,7 +242,7 @@ fn no_pending_keeps_paging_keys_unchanged() {
         panic!("unexpected effect");
     };
     // 每行约 80 列：宽 100（wrap 96）下逐词换行后仍各占一个显示行，
-    // 40 行正文必然超过 body 高度（21）。
+    // 40 行正文必然超过正文区高度。
     let long_answer = (1..=40)
         .map(|index| format!("answer line {index} {}", "x".repeat(64)))
         .collect::<Vec<_>>()
@@ -255,10 +253,20 @@ fn no_pending_keeps_paging_keys_unchanged() {
         view_snapshot(2, 21, Some(long_answer.as_str())),
     );
 
-    // 无 pending：Up/Down 回落到翻页（R15 语义零变化）。
+    // 无 pending：Up/Down 回落到翻页（基础滚动语义零变化）。
+    // 快照到达后 surface 贴底：Down 停在底部，Up 逐页回退到顶部。
+    let bottom = current_scroll_offset(&model);
+    assert!(
+        bottom > 0,
+        "a long body must scroll past the content height"
+    );
     assert_eq!(press_key(&mut model, KeyCode::Down), None);
-    assert!(current_scroll_offset(&model) > 0);
+    assert_eq!(current_scroll_offset(&model), bottom);
     assert_eq!(press_key(&mut model, KeyCode::Up), None);
+    assert!(current_scroll_offset(&model) < bottom);
+    while current_scroll_offset(&model) > 0 {
+        assert_eq!(press_key(&mut model, KeyCode::Up), None);
+    }
     assert_eq!(current_scroll_offset(&model), 0);
 }
 
@@ -266,7 +274,7 @@ fn no_pending_keeps_paging_keys_unchanged() {
 
 #[test]
 fn same_request_view_update_keeps_selection() {
-    let mut model = preview_model_with_permission(pending_permission());
+    let mut model = surface_model_with_permission(pending_permission());
     press_key(&mut model, KeyCode::Down);
 
     // 无关快照更新（answer 变化、permission head 同 request）：selection 保持。
@@ -277,7 +285,7 @@ fn same_request_view_update_keeps_selection() {
 
     assert_eq!(
         surface_permission_choice(&model),
-        Some(AgentsPanelPreviewPermissionChoice::Selecting {
+        Some(AgentsPanelPermissionChoice::Selecting {
             request_id: "req-perm".to_string(),
             selected: 1,
         })
@@ -286,7 +294,7 @@ fn same_request_view_update_keeps_selection() {
 
 #[test]
 fn new_request_head_resets_selection() {
-    let mut model = preview_model_with_permission(pending_permission());
+    let mut model = surface_model_with_permission(pending_permission());
     press_key(&mut model, KeyCode::Down);
 
     // 收敛后推进到新 request：旧 choice 立即失效，selection 重置。
@@ -307,7 +315,7 @@ fn new_request_head_resets_selection() {
 
     assert_eq!(
         surface_permission_choice(&model),
-        Some(AgentsPanelPreviewPermissionChoice::Selecting {
+        Some(AgentsPanelPermissionChoice::Selecting {
             request_id: "req-next".to_string(),
             selected: 0,
         })
@@ -316,7 +324,7 @@ fn new_request_head_resets_selection() {
 
 #[test]
 fn head_convergence_removes_permission_block() {
-    let mut model = preview_model_with_permission(pending_permission());
+    let mut model = surface_model_with_permission(pending_permission());
 
     apply_view_updated(
         &mut model,
@@ -325,7 +333,7 @@ fn head_convergence_removes_permission_block() {
 
     assert_eq!(
         surface_permission_choice(&model),
-        Some(AgentsPanelPreviewPermissionChoice::None)
+        Some(AgentsPanelPermissionChoice::None)
     );
     let buffer = render_model_buffer(&mut model, 100, 24);
     assert!(
@@ -336,8 +344,8 @@ fn head_convergence_removes_permission_block() {
 }
 
 #[test]
-fn reopened_preview_initializes_choice_from_snapshot_head() {
-    let mut model = preview_model_with_permission(pending_permission());
+fn reopened_surface_initializes_choice_from_snapshot_head() {
+    let mut model = surface_model_with_permission(pending_permission());
     press_key(&mut model, KeyCode::Down);
     // 返回 list 后重新进入：record snapshot 复用，choice 按 head 重新初始化。
     press_key(&mut model, KeyCode::Char(' '));
@@ -346,7 +354,7 @@ fn reopened_preview_initializes_choice_from_snapshot_head() {
 
     assert_eq!(
         surface_permission_choice(&model),
-        Some(AgentsPanelPreviewPermissionChoice::Selecting {
+        Some(AgentsPanelPermissionChoice::Selecting {
             request_id: "req-perm".to_string(),
             selected: 0,
         })
@@ -388,7 +396,7 @@ fn footer_hint_adds_scroll_tier_when_overflow() {
         panic!("unexpected effect");
     };
     // 每行约 80 列：宽 100（wrap 96）下逐词换行后仍各占一个显示行，
-    // 40 行正文必然超过 body 高度（21）。
+    // 40 行正文必然超过正文区高度。
     let long_answer = (1..=40)
         .map(|index| format!("answer line {index} {}", "x".repeat(64)))
         .collect::<Vec<_>>()
@@ -410,7 +418,7 @@ fn footer_hint_adds_scroll_tier_when_overflow() {
 
 #[test]
 fn footer_hint_adds_choose_confirm_tier_when_pending() {
-    let mut model = preview_model_with_permission(pending_permission());
+    let mut model = surface_model_with_permission(pending_permission());
 
     let rows = rendered_rows(&render_model_buffer(&mut model, 100, 24));
     let footer = rows
@@ -425,7 +433,7 @@ fn footer_hint_adds_choose_confirm_tier_when_pending() {
 
 #[test]
 fn footer_hint_shows_submitted_tier_when_locked() {
-    let mut model = preview_model_with_permission(permission_request(
+    let mut model = surface_model_with_permission(permission_request(
         2,
         "req-perm",
         AgentPermissionState::Submitted,
@@ -448,12 +456,7 @@ fn current_scroll_offset(model: &Model) -> usize {
         .agents_panel
         .as_ref()
         .and_then(|panel| panel.surface.as_ref())
-        .map(|surface| match surface {
-            crate::agents_panel::AgentsPanelSurface::Preview { scroll_offset, .. } => {
-                *scroll_offset
-            }
-            _ => 0,
-        })
+        .map(|surface| surface.overlay.scroll_offset)
         .unwrap_or(0)
 }
 
@@ -494,7 +497,7 @@ fn long_label_permission() -> AgentPermissionRequest {
 fn enter_submits_selected_option_with_typed_target_identity() {
     let permission = pending_permission();
     let expected_target = permission.target.clone();
-    let mut model = preview_model_with_permission(permission);
+    let mut model = surface_model_with_permission(permission);
 
     // 选中第二个 option 后 Enter。
     press_key(&mut model, KeyCode::Down);
@@ -507,11 +510,11 @@ fn enter_submits_selected_option_with_typed_target_identity() {
         "response must carry the FIFO head's AgentPermissionTarget verbatim"
     );
 
-    // preview 保持打开，choice 立即进入不可重复提交的 submitted state。
-    assert!(model.agents_panel_preview_active());
+    // surface 保持打开，choice 立即进入不可重复提交的 submitted state。
+    assert!(model.agents_panel_transcript_active());
     assert_eq!(
         surface_permission_choice(&model),
-        Some(AgentsPanelPreviewPermissionChoice::Submitted {
+        Some(AgentsPanelPermissionChoice::Submitted {
             request_id: "req-perm".to_string(),
             option_id: Some("req-perm-deny".to_string()),
         })
@@ -520,7 +523,7 @@ fn enter_submits_selected_option_with_typed_target_identity() {
 
 #[test]
 fn repeated_enter_dispatches_nothing() {
-    let mut model = preview_model_with_permission(pending_permission());
+    let mut model = surface_model_with_permission(pending_permission());
 
     assert!(press_key(&mut model, KeyCode::Enter).is_some());
     assert_eq!(
@@ -532,7 +535,7 @@ fn repeated_enter_dispatches_nothing() {
 
 #[test]
 fn submitted_head_enter_dispatches_nothing() {
-    let mut model = preview_model_with_permission(permission_request(
+    let mut model = surface_model_with_permission(permission_request(
         2,
         "req-perm",
         AgentPermissionState::Submitted,
@@ -560,7 +563,7 @@ fn no_pending_enter_dispatches_nothing() {
 
 #[test]
 fn space_and_esc_return_without_dispatching_any_response() {
-    let mut model = preview_model_with_permission(pending_permission());
+    let mut model = surface_model_with_permission(pending_permission());
     // 全局 pending 投影同步置位：Space/Esc 只返回，pending 事实必须保留。
     super::common::apply_permission_update(
         &mut model,
@@ -571,24 +574,24 @@ fn space_and_esc_return_without_dispatching_any_response() {
 
     // Space 只返回 list，不派发任何 response（与 main 流 Esc=cancel 的关键差异）。
     assert_eq!(press_key(&mut model, KeyCode::Char(' ')), None);
-    assert!(!model.agents_panel_preview_active());
+    assert!(!model.agents_panel_transcript_active());
     assert!(
         model
             .agent_pending_permission_head_for_test(AgentId::new(2))
             .is_some(),
-        "pending request must be preserved after leaving the preview"
+        "pending request must be preserved after leaving the surface"
     );
 
     // 再次进入后 Esc 同样只返回。
     press_key(&mut model, KeyCode::Char(' '));
-    assert!(model.agents_panel_preview_active());
+    assert!(model.agents_panel_transcript_active());
     assert_eq!(press_key(&mut model, KeyCode::Esc), None);
-    assert!(!model.agents_panel_preview_active());
+    assert!(!model.agents_panel_transcript_active());
 }
 
 #[test]
 fn runner_dispatches_respond_agent_permission_command() {
-    let mut model = preview_model_with_permission(pending_permission());
+    let mut model = surface_model_with_permission(pending_permission());
     let effect = press_key(&mut model, KeyCode::Enter).expect("enter dispatches respond effect");
     let crate::AppEffect::RespondAgentPermission { target, option_id } = effect else {
         panic!("unexpected effect");
@@ -611,14 +614,14 @@ fn runner_dispatches_respond_agent_permission_command() {
 
 #[test]
 fn runtime_rejection_unlocks_local_submission_for_retry() {
-    let mut model = preview_model_with_permission(pending_permission());
+    let mut model = surface_model_with_permission(pending_permission());
     let effect = press_key(&mut model, KeyCode::Enter).expect("enter dispatches");
     let crate::AppEffect::RespondAgentPermission { target, .. } = effect else {
         panic!("unexpected effect");
     };
     assert_eq!(
         surface_permission_choice(&model),
-        Some(AgentsPanelPreviewPermissionChoice::Submitted {
+        Some(AgentsPanelPermissionChoice::Submitted {
             request_id: "req-perm".to_string(),
             option_id: Some("req-perm-allow".to_string()),
         })
@@ -640,7 +643,7 @@ fn runtime_rejection_unlocks_local_submission_for_retry() {
     );
     assert_eq!(
         surface_permission_choice(&model),
-        Some(AgentsPanelPreviewPermissionChoice::Selecting {
+        Some(AgentsPanelPermissionChoice::Selecting {
             request_id: "req-perm".to_string(),
             selected: 0,
         }),
@@ -650,7 +653,7 @@ fn runtime_rejection_unlocks_local_submission_for_retry() {
 
 #[test]
 fn submitted_projection_confirms_lock_and_keeps_submitted_marker() {
-    let mut model = preview_model_with_permission(pending_permission());
+    let mut model = surface_model_with_permission(pending_permission());
     press_key(&mut model, KeyCode::Down);
     assert!(press_key(&mut model, KeyCode::Enter).is_some());
 
@@ -672,7 +675,7 @@ fn submitted_projection_confirms_lock_and_keeps_submitted_marker() {
 
     assert_eq!(
         surface_permission_choice(&model),
-        Some(AgentsPanelPreviewPermissionChoice::Submitted {
+        Some(AgentsPanelPermissionChoice::Submitted {
             request_id: "req-perm".to_string(),
             option_id: Some("req-perm-deny".to_string()),
         })

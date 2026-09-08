@@ -3,8 +3,7 @@
 mod input;
 mod list_render;
 mod pending_permission;
-mod preview;
-mod preview_render;
+mod permission_choice;
 mod render;
 mod state;
 mod transcript;
@@ -15,8 +14,8 @@ mod tests;
 
 pub(crate) use pending_permission::{AgentPendingPermissionProjection, AgentsPanelPillNavigation};
 pub(crate) use state::{
-    AgentsPanelActivityFold, AgentsPanelAgentView, AgentsPanelPreviewPermissionChoice,
-    AgentsPanelState, AgentsPanelSurface, PendingAgentObservationStops,
+    AgentsPanelActivityFold, AgentsPanelAgentView, AgentsPanelPermissionChoice, AgentsPanelState,
+    AgentsPanelSurface, PendingAgentObservationStops,
 };
 
 use ratatui::style::Style;
@@ -30,8 +29,11 @@ use crate::theme::{
 /// 状态列固定显示宽度；8 态文本标签在此列内左对齐。
 /// 上限由最长标签 `Permission` 决定。
 pub(super) const AGENTS_STATUS_COLUMN_WIDTH: usize = 10;
-/// elapsed 列固定显示宽度（如 `1m23s` / `999h59m`），行内右对齐。
-pub(super) const AGENTS_ELAPSED_COLUMN_WIDTH: usize = 7;
+/// metrics 三列的固定显示宽度（列内右对齐、前置填充）；列间以单空格分隔。
+/// 宽度按各列的常规最大内容核定：`999h59m`、`99 tools`、`99.9K Tokens`。
+pub(super) const AGENTS_ELAPSED_COLUMN_WIDTH: usize = 8;
+pub(super) const AGENTS_TOOLS_COLUMN_WIDTH: usize = 8;
+pub(super) const AGENTS_TOKENS_COLUMN_WIDTH: usize = 12;
 
 /// status 的文本标签——状态语义由文本承载，不能只靠颜色表达。
 pub(super) fn agent_status_label(status: AgentProjectionStatus) -> &'static str {
@@ -102,7 +104,10 @@ pub(super) fn agent_status_is_running(status: AgentProjectionStatus) -> bool {
     )
 }
 
-/// latest activity 的 delivery-safe 单行文本。
+/// latest activity 的 delivery-safe 单行文本。`Idle` 不携带有效信息，
+/// latest 列与折叠区都不展示该文本（见 `AGENT_ACTIVITY_IDLE_TEXT`）。
+pub(super) const AGENT_ACTIVITY_IDLE_TEXT: &str = "idle";
+
 pub(super) fn agent_activity_summary_text(activity: &AgentActivitySummary) -> String {
     match activity {
         AgentActivitySummary::Preparing => "preparing".to_string(),
@@ -110,7 +115,7 @@ pub(super) fn agent_activity_summary_text(activity: &AgentActivitySummary) -> St
         AgentActivitySummary::Retrying { summary } => format!("retrying: {summary}"),
         AgentActivitySummary::UsingTool { title } => format!("tool: {title}"),
         AgentActivitySummary::WaitingPermission { summary } => format!("waiting: {summary}"),
-        AgentActivitySummary::Idle => "idle".to_string(),
+        AgentActivitySummary::Idle => AGENT_ACTIVITY_IDLE_TEXT.to_string(),
     }
 }
 
@@ -126,10 +131,14 @@ const AGENTS_ACTIVITY_FOLD_ENTRY_CACHE_WIDTH: usize = 200;
 
 /// 折叠区条目提取：transcript 尾部的 tool/assistant 条目转单行摘要。
 ///
-/// User 条目是发起指令而非 agent 活动，不进入折叠区。返回
-/// （最近 entries, 被折叠的更早条数）。
+/// User 条目是发起指令而非 agent 活动，不进入折叠区；摘要恰为 Idle 文案的条目
+/// 同样跳过（无价值信息）。返回（最近 entries, 被折叠的更早条数）。
 pub(super) fn agents_activity_fold_entries(items: &[AgentTranscriptItem]) -> (Vec<String>, usize) {
-    let eligible: Vec<String> = items.iter().filter_map(activity_fold_entry_text).collect();
+    let eligible: Vec<String> = items
+        .iter()
+        .filter_map(activity_fold_entry_text)
+        .filter(|entry| entry != AGENT_ACTIVITY_IDLE_TEXT)
+        .collect();
     let hidden = eligible
         .len()
         .saturating_sub(AGENTS_ACTIVITY_FOLD_ENTRY_COUNT);
@@ -156,14 +165,14 @@ fn activity_fold_entry_text(item: &AgentTranscriptItem) -> Option<String> {
     ))
 }
 
-/// list 页行预算：每行 1 行，另为选中行的活动折叠区恒定预留
+/// list 页行预算：每行 1 行，body 首行是列头行，另为选中行的活动折叠区恒定预留
 /// `AGENTS_ACTIVITY_FOLD_MAX_LINES` 行。
 ///
 /// 预留不随折叠区实际可见性变化——page 边界若随 selection/事件抖动，
 /// 翻页与鼠标行换算会在导航中错位；渲染与输入路径必须共用本函数。
 pub(super) fn agents_panel_list_page_size(height: u16) -> usize {
     crate::fullscreen_list_chrome::fullscreen_list_page_size_for_height(height)
-        .saturating_sub(AGENTS_ACTIVITY_FOLD_MAX_LINES)
+        .saturating_sub(1 + AGENTS_ACTIVITY_FOLD_MAX_LINES)
         .max(1)
 }
 
@@ -184,14 +193,21 @@ pub(super) fn format_agent_elapsed_ms(elapsed_ms: u64) -> String {
     }
 }
 
-/// token usage 的紧凑标签（`2k tok` / `1M tok`）。
+/// token usage 的列标签：完整单词 + K/M 缩放。两位以内 mantissa 保留一位小数
+/// （`8 Tokens` / `1.2K Tokens`），更高位退化为整数（`999K Tokens`），
+/// 保证标签宽度有稳定上界、列内单位对齐。
 pub(super) fn format_agent_token_usage(token_usage: usize) -> String {
     if token_usage < 1_000 {
-        format!("{token_usage} tok")
+        format!("{token_usage} Tokens")
+    } else if token_usage < 100_000 {
+        format!("{:.1}K Tokens", token_usage as f64 / 1_000.0)
     } else if token_usage < 1_000_000 {
-        format!("{}k tok", token_usage / 1_000)
+        format!("{}K Tokens", token_usage / 1_000)
+    } else if token_usage < 100_000_000 {
+        format!("{:.1}M Tokens", token_usage as f64 / 1_000_000.0)
     } else {
-        format!("{}M tok", token_usage / 1_000_000)
+        // 亿级以上封顶 999M，不再加宽标签。
+        format!("{}M Tokens", (token_usage / 1_000_000).min(999))
     }
 }
 

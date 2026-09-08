@@ -4,7 +4,8 @@ use runtime_domain::agent::{AgentId, AgentProjectionStatus, AgentRuntimeGenerati
 use crate::AppEffect;
 
 use super::common::{
-    apply_overview_delta, overview_row, press_key, ready_panel_model, ready_panel_model_with_rows,
+    apply_overview_delta, apply_overview_snapshot, overview_row, press_key, ready_panel_model,
+    ready_panel_model_with_rows, sample_rows,
 };
 
 #[test]
@@ -91,7 +92,7 @@ fn entering_surface_cancels_confirmation() {
 
     let effect = press_key(&mut model, KeyCode::Char(' '));
 
-    assert!(effect.is_some(), "Space still opens the preview surface");
+    assert!(effect.is_some(), "Space still opens the transcript surface");
     assert_eq!(model.agents_panel.as_ref().unwrap().stop_confirmation, None);
 }
 
@@ -136,11 +137,15 @@ fn delta_making_confirmed_agent_terminal_cancels_confirmation() {
 }
 
 #[test]
-fn x_while_loading_is_ignored() {
+fn x_while_loading_shows_unavailable_notice_and_stays_disarmed() {
+    // 复现真机"按 x 无效果"：面板打开后 overview snapshot 未到达（loading 态），
+    // stop 没有可寻址目标。此时按键不得被静默吞掉——footer 必须给出可见反馈。
     let mut model = crate::Model::new(crate::StartupBannerOptions::default());
     model.set_window(100, 24);
+    model.set_palette(crate::theme::default_palette(), true);
     model.open_agents_panel_loading();
 
+    assert_eq!(press_key(&mut model, KeyCode::Char('x')), None);
     assert_eq!(press_key(&mut model, KeyCode::Char('x')), None);
     assert!(
         model
@@ -149,6 +154,48 @@ fn x_while_loading_is_ignored() {
             .unwrap()
             .stop_confirmation
             .is_none()
+    );
+
+    let rows = crate::test_helpers::rendered_rows(&crate::test_helpers::render_model_buffer(
+        &mut model, 100, 24,
+    ));
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Agents state is loading")),
+        "x during loading must surface a visible notice: {rows:?}"
+    );
+}
+
+#[test]
+fn loading_notice_clears_once_snapshot_arrives() {
+    let mut model = crate::Model::new(crate::StartupBannerOptions::default());
+    model.set_window(100, 24);
+    model.set_palette(crate::theme::default_palette(), true);
+    let request_id = model.open_agents_panel_loading();
+    press_key(&mut model, KeyCode::Char('x'));
+
+    apply_overview_snapshot(&mut model, request_id, sample_rows());
+
+    let rows = crate::test_helpers::rendered_rows(&crate::test_helpers::render_model_buffer(
+        &mut model, 100, 24,
+    ));
+    assert!(
+        rows.iter()
+            .all(|row| !row.contains("Agents state is loading")),
+        "the loading notice must clear once the snapshot arrives: {rows:?}"
+    );
+    // snapshot 就绪后 x 恢复常规二次确认链路。
+    assert_eq!(press_key(&mut model, KeyCode::Char('x')), None);
+    assert_eq!(
+        model.agents_panel.as_ref().unwrap().stop_confirmation,
+        Some(AgentId::new(2))
+    );
+    assert_eq!(
+        press_key(&mut model, KeyCode::Char('x')),
+        Some(AppEffect::StopAgent {
+            agent_id: AgentId::new(2),
+            generation: AgentRuntimeGeneration::new(1),
+        })
     );
 }
 

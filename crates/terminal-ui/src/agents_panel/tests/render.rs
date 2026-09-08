@@ -21,11 +21,41 @@ fn wide_row_shows_all_columns_as_single_line() {
     assert!(row.contains("thinking"), "latest activity: {row}");
     assert!(row.contains("1m23s"), "elapsed: {row}");
     assert!(row.contains("3 tools"), "tool count: {row}");
-    assert!(row.contains("2k tok"), "token usage: {row}");
+    assert!(row.contains("2.0K Tokens"), "token usage: {row}");
     assert!(
         crate::display_width::display_width(row.trim_end()) <= 100,
         "row must not overflow the terminal width: {row}"
     );
+}
+
+#[test]
+fn column_header_renders_above_rows_and_hides_without_rows() {
+    let mut model = ready_panel_model();
+
+    let rows = rendered_rows(&render_model_buffer(&mut model, 100, 24));
+    let header = rows
+        .iter()
+        .find(|row| row.contains("Tokens"))
+        .expect("column header should render above the rows");
+    assert!(header.contains("Status"), "status label: {header}");
+    assert!(header.contains("Title") && header.contains("Latest"));
+    assert!(header.contains("Time") && header.contains("Tools"));
+    // 表头行在数据行之前。
+    let header_position = rows
+        .iter()
+        .position(|row| row.contains("Tokens"))
+        .expect("header position");
+    let row_position = rows
+        .iter()
+        .position(|row| row.contains("research task"))
+        .expect("row position");
+    assert!(header_position < row_position);
+
+    // 空列表没有列头：只剩空态提示。
+    let mut empty_model = ready_panel_model_with_rows(Vec::new());
+    let empty_rows = rendered_rows(&render_model_buffer(&mut empty_model, 100, 24));
+    assert!(empty_rows.iter().any(|row| row.contains("No child agents")));
+    assert!(empty_rows.iter().all(|row| !row.contains("Tokens")));
 }
 
 #[test]
@@ -48,8 +78,8 @@ fn every_row_is_a_single_physical_line() {
 fn moderate_width_hides_tokens_first() {
     let mut model = ready_panel_model();
 
-    // usable 58；全 metrics 需 fixed 15 + title 16 + latest 8 + 间隔 2 + metrics 24 = 65，
-    // 丢 tokens 后需 56 可容纳。
+    // usable 58；全 metrics 需 fixed 15 + title 16 + latest 8 + 间隔 2 + metrics
+    // 序列 30 + metrics_gap 1 = 71，丢 tokens 后需 58 恰好容纳。
     let buffer = render_model_buffer(&mut model, 60, 24);
     let rows = rendered_rows(&buffer);
     let row = rows
@@ -57,7 +87,7 @@ fn moderate_width_hides_tokens_first() {
         .find(|row| row.contains("research task"))
         .expect("row should render");
     assert!(
-        !row.contains("2k tok"),
+        !row.contains("2.0K Tokens"),
         "tokens should be hidden first: {row}"
     );
     assert!(row.contains("3 tools"), "tools should survive: {row}");
@@ -68,8 +98,8 @@ fn moderate_width_hides_tokens_first() {
 fn narrow_width_hides_tools_then_elapsed() {
     let mut model = ready_panel_model();
 
-    // usable 46；丢 tokens 后仍需 56，再丢 tools 后需 46 恰好容纳。
-    let buffer = render_model_buffer(&mut model, 48, 24);
+    // usable 50；丢 tokens 后仍需 58，再丢 tools 后需 49 恰好容纳。
+    let buffer = render_model_buffer(&mut model, 52, 24);
     let rows = rendered_rows(&buffer);
     let row = rows
         .iter()
@@ -79,7 +109,10 @@ fn narrow_width_hides_tools_then_elapsed() {
         !row.contains("3 tools"),
         "tools should hide before elapsed: {row}"
     );
-    assert!(!row.contains("2k tok"), "tokens should hide first: {row}");
+    assert!(
+        !row.contains("2.0K Tokens"),
+        "tokens should hide first: {row}"
+    );
     assert!(row.contains("1m23s"), "elapsed should survive: {row}");
 }
 
@@ -139,7 +172,7 @@ fn row_without_elapsed_keeps_metric_order_when_hiding() {
         .find(|row| row.contains("research task"))
         .expect("row should render");
     assert!(row.contains("3 tools"), "tools should render: {row}");
-    assert!(row.contains("2k tok"), "tokens should render: {row}");
+    assert!(row.contains("2.0K Tokens"), "tokens should render: {row}");
     assert!(
         !row.contains("1m23s"),
         "absent elapsed must not render: {row}"
@@ -199,16 +232,31 @@ fn loading_and_empty_and_error_states_render_hints() {
 }
 
 #[test]
-fn stop_confirmation_hint_renders_in_footer() {
+fn stop_confirmation_hint_renders_inline_in_the_selected_row() {
     let mut model = ready_panel_model();
     press_key(&mut model, KeyCode::Char('x'));
 
     let buffer = render_model_buffer(&mut model, 100, 24);
     let rows = rendered_rows(&buffer);
+    let selected = rows
+        .iter()
+        .find(|row| row.contains("research task"))
+        .expect("selected row should render");
+    assert!(
+        selected.contains("press x again to stop"),
+        "stop confirmation must render inline in the selected row: {selected}"
+    );
+    // 非选中行不携带提示。
+    let other = rows
+        .iter()
+        .find(|row| row.contains("write docs"))
+        .expect("other row should render");
+    assert!(!other.contains("press x again to stop"), "row: {other}");
+    // footer 不再承担 stop 确认提示。
     assert!(
         rows.iter()
-            .any(|row| row.contains("Press x again to stop research task")),
-        "stop confirmation must be visible in the panel footer: {rows:?}"
+            .all(|row| !row.contains("Press x again to stop")),
+        "footer must not carry the stop confirmation hint: {rows:?}"
     );
 }
 
@@ -260,32 +308,7 @@ fn delta_does_not_change_row_geometry() {
 }
 
 #[test]
-fn preview_header_renders_status_title_and_elapsed() {
-    let mut model = ready_panel_model();
-    let effect = press_key(&mut model, KeyCode::Char(' '));
-    let crate::AppEffect::ObserveAgentTranscript { request_id, .. } = effect.unwrap() else {
-        panic!("unexpected effect");
-    };
-    super::common::apply_view_snapshot_loaded(
-        &mut model,
-        request_id,
-        super::common::view_snapshot(2, 21, Some("committed answer body")),
-    );
-
-    let buffer = render_model_buffer(&mut model, 100, 24);
-    let rows = rendered_rows(&buffer);
-    assert!(
-        rows.iter().any(|row| row.contains("research task")),
-        "preview header should render the frozen title: {rows:?}"
-    );
-    assert!(
-        rows.iter().any(|row| row.contains("committed answer body")),
-        "preview body should render the committed answer: {rows:?}"
-    );
-}
-
-#[test]
-fn preview_header_hides_elapsed_before_truncating_title() {
+fn surface_title_hides_elapsed_before_truncating_title() {
     let mut model = ready_panel_model();
     let effect = press_key(&mut model, KeyCode::Char(' '));
     let crate::AppEffect::ObserveAgentTranscript { request_id, .. } = effect.unwrap() else {
@@ -297,7 +320,7 @@ fn preview_header_hides_elapsed_before_truncating_title() {
         super::common::view_snapshot(2, 21, None),
     );
 
-    // 窄宽下 elapsed 隐藏，title 仍在 header。
+    // 窄宽下 elapsed 隐藏，title 仍在标题行。
     let buffer = render_model_buffer(&mut model, 28, 24);
     let rows = rendered_rows(&buffer);
     let header = rows
@@ -306,6 +329,6 @@ fn preview_header_hides_elapsed_before_truncating_title() {
         .expect("header title should render");
     assert!(
         !header.contains("1m23s"),
-        "elapsed should hide on narrow preview: {header}"
+        "elapsed should hide on narrow surface: {header}"
     );
 }

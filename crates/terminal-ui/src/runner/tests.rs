@@ -2572,7 +2572,7 @@ fn runtime_event_drain_consumes_staged_agent_view_observe_without_input() {
     // overview snapshot 作为 runtime 事件到达。事件 drain 路径不经过
     // apply_effect_if_needed——其中暂存的 ObserveAgentTranscript 必须在同一次
     // drain 内补派发，否则事件泵在无动画/超时 deadline 时无限阻塞，
-    // preview 会卡在 loading 直到下一次按键。
+    // transcript surface 会卡在 loading 直到下一次按键。
     let mut model = ready_model();
     let mut runtime_coordinator = TestUiRuntimePort::default();
 
@@ -2581,7 +2581,7 @@ fn runtime_event_drain_consumes_staged_agent_view_observe_without_input() {
     let request_id = model
         .agents_panel_pending_overview_request_id_for_test()
         .expect("panel should be loading after the open effect");
-    model.agents_panel_pill_navigation = Some(AgentsPanelPillNavigation::OpenPreview {
+    model.agents_panel_pill_navigation = Some(AgentsPanelPillNavigation::OpenTranscript {
         agent_id: AgentId::new(2),
     });
 
@@ -2613,8 +2613,67 @@ fn runtime_event_drain_consumes_staged_agent_view_observe_without_input() {
         runtime_coordinator.commands
     );
     assert!(
-        model.agents_panel_preview_active(),
-        "pill navigation must have opened the preview surface"
+        model.agents_panel_transcript_active(),
+        "pill navigation must have opened the transcript surface"
+    );
+}
+
+#[test]
+fn stop_agent_key_chain_dispatches_runtime_command_with_snapshot_generation() {
+    // x stop 全链：panel 由 snapshot 建立的 generation 必须原样进入
+    // RuntimeCommand::StopAgent，与 runtime 侧 stop 的 generation 校验同源。
+    let mut model = ready_model();
+    let mut runtime_coordinator = TestUiRuntimePort::default();
+
+    run_open_agents_panel_effect(&mut model, &mut runtime_coordinator);
+    let request_id = model
+        .agents_panel_pending_overview_request_id_for_test()
+        .expect("panel should be loading after the open effect");
+    runtime_coordinator
+        .runtime_events
+        .push(RuntimeEvent::AgentProjection(Box::new(
+            AgentProjectionEvent::AgentsOverviewSnapshotLoaded {
+                request_id,
+                snapshot: AgentOverviewSnapshot {
+                    observation_id: AgentObservationId::new(11),
+                    generation: AgentRuntimeGeneration::new(1),
+                    revision: AgentProjectionRevision::new(1),
+                    rows: vec![agent_overview_row(2, "research task")],
+                },
+            },
+        )));
+    assert!(drain_runtime_coordinator_events(
+        &mut model,
+        &mut runtime_coordinator
+    ));
+
+    // 两次 x：第一次 arm 确认，第二次派发 StopAgent effect。
+    assert!(
+        model
+            .update(AppEvent::Key(KeyEvent::from(KeyCode::Char('x'))))
+            .is_none()
+    );
+    let Some(AppEffect::StopAgent {
+        agent_id,
+        generation,
+    }) = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('x'))))
+    else {
+        panic!("second x should dispatch the stop effect");
+    };
+    assert_eq!(agent_id, AgentId::new(2));
+    assert_eq!(generation, AgentRuntimeGeneration::new(1));
+
+    run_stop_agent_effect(&mut model, &mut runtime_coordinator, agent_id, generation);
+    assert!(
+        runtime_coordinator.commands.iter().any(|command| matches!(
+            command,
+            RuntimeCommand::StopAgent {
+                agent_id,
+                generation,
+            } if *agent_id == AgentId::new(2) && *generation == AgentRuntimeGeneration::new(1)
+        )),
+        "runtime stop command must carry the panel's snapshot generation: {:?}",
+        runtime_coordinator.commands
     );
 }
 

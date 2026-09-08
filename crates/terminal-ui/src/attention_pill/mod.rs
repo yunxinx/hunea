@@ -118,7 +118,7 @@ impl Model {
     }
 
     /// Agent approval pill 的点击路由：归属只来自全局 pending 投影
-    /// （单 Pending 直达 preview，多 Pending 预选最早 owner），不以当前 selection 推断。
+    /// （单 Pending 直达 transcript surface，多 Pending 预选最早 owner），不以当前 selection 推断。
     ///
     /// AgentsOverview 已开时不关不重开（避免 observer 注销/重建抖动），直接导航；
     /// 未开时先关其他全屏层，再设导航意图并经 `OpenAgentsPanel` 打开——意图在

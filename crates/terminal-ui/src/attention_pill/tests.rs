@@ -807,7 +807,7 @@ fn agent_pill_stacks_between_tool_approval_and_new_messages() {
 }
 
 #[test]
-fn single_pending_click_opens_panel_then_navigates_to_preview() {
+fn single_pending_click_opens_panel_then_navigates_to_transcript_surface() {
     let mut model = scrollable_model();
     apply_agent_permission_update(
         &mut model,
@@ -828,7 +828,7 @@ fn single_pending_click_opens_panel_then_navigates_to_preview() {
     assert_eq!(
         model.agents_panel_pill_navigation,
         Some(
-            crate::agents_panel::AgentsPanelPillNavigation::OpenPreview {
+            crate::agents_panel::AgentsPanelPillNavigation::OpenTranscript {
                 agent_id: AgentId::new(2)
             }
         )
@@ -838,7 +838,7 @@ fn single_pending_click_opens_panel_then_navigates_to_preview() {
         "pill must stay after click"
     );
 
-    // runner 打开 panel；snapshot 回包后意图消费：直达 preview。
+    // runner 打开 panel；snapshot 回包后意图消费：直达 transcript surface。
     let mut port = RecordingRuntimePort::default();
     open_panel_with_rows(
         &mut model,
@@ -847,8 +847,8 @@ fn single_pending_click_opens_panel_then_navigates_to_preview() {
     );
 
     assert!(
-        model.agents_panel_preview_active(),
-        "single pending must open preview"
+        model.agents_panel_transcript_active(),
+        "single pending must open the transcript surface"
     );
     assert_eq!(model.agents_panel_pill_navigation, None);
     // ObserveAgentTranscript 经 pending-flag 暂存，runner effect 循环消费派发。
@@ -899,7 +899,7 @@ fn multiple_pending_click_preselects_earliest_owner_on_overview() {
         })
     );
 
-    // 打开 + snapshot：预选最早 owner，停在 overview list（不开 preview）。
+    // 打开 + snapshot：预选最早 owner，停在 overview list（不进 surface）。
     let mut port = RecordingRuntimePort::default();
     open_panel_with_rows(
         &mut model,
@@ -911,7 +911,7 @@ fn multiple_pending_click_preselects_earliest_owner_on_overview() {
     );
 
     assert!(
-        !model.agents_panel_preview_active(),
+        !model.agents_panel_transcript_active(),
         "multi pending stays on list"
     );
     assert_eq!(
@@ -947,13 +947,13 @@ fn open_panel_click_navigates_in_place_without_rebuild() {
         )),
     );
 
-    // 单 pending + panel 已开：直接打开 preview surface，返回 observe effect。
+    // 单 pending + panel 已开：直接打开 transcript surface，返回 observe effect。
     let effect = click_agent_pill(&mut model);
     assert!(
         matches!(effect, Some(AppEffect::ObserveAgentTranscript { agent_id, .. }) if agent_id == AgentId::new(2)),
         "already-open panel must navigate directly: {effect:?}"
     );
-    assert!(model.agents_panel_preview_active());
+    assert!(model.agents_panel_transcript_active());
     assert_eq!(
         model.agents_panel_observation_id_for_test(),
         observation_before,
@@ -987,7 +987,7 @@ fn navigation_intent_fails_closed_when_target_missing_from_snapshot() {
         vec![waiting_permission_row(2, "other task")],
     );
 
-    assert!(!model.agents_panel_preview_active());
+    assert!(!model.agents_panel_transcript_active());
     assert_eq!(
         model.agents_panel_selected_agent_id_for_test(),
         Some(AgentId::new(2)),

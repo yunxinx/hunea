@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent};
-use runtime_domain::agent::AgentTranscriptItem;
+use runtime_domain::agent::{AgentId, AgentTranscriptItem};
 use runtime_domain::session::{
     RuntimeToolActivity, RuntimeToolActivityContent, RuntimeToolActivityStatus, RuntimeToolKind,
 };
@@ -15,40 +15,40 @@ use crate::{
     },
 };
 
-use super::AgentsPanelSurface;
-
 impl Model {
     pub(crate) fn agents_panel_transcript_active(&self) -> bool {
-        self.agents_panel.as_ref().is_some_and(|panel| {
-            matches!(panel.surface, Some(AgentsPanelSurface::Transcript { .. }))
-        })
+        self.agents_panel
+            .as_ref()
+            .is_some_and(|panel| panel.surface.is_some())
+    }
+
+    /// transcript surface 正文区高度：扣除标题行、分割线、page rule 与 footer，
+    /// 再扣除恒可见（不进滚动区）的 permission 区块。
+    ///
+    /// 输入侧（翻页、贴底跟随）与渲染侧共用本函数，保证滚动边界一致。
+    pub(super) fn agents_panel_surface_content_height(&self) -> usize {
+        let frame_height = usize::from(self.height.saturating_sub(4).max(1));
+        let block_height = self.agents_panel_permission_block_height();
+        frame_height.saturating_sub(block_height).max(1)
     }
 
     pub(crate) fn move_agents_panel_transcript_page(&mut self, direction: isize) {
-        let content_height = self.transcript_overlay_content_height();
+        let content_height = self.agents_panel_surface_content_height();
         if let Some(panel) = self.agents_panel.as_mut()
-            && let Some(AgentsPanelSurface::Transcript {
-                transcript,
-                overlay,
-                is_following_bottom,
-                ..
-            }) = panel.surface.as_mut()
+            && let Some(surface) = panel.surface.as_mut()
         {
-            overlay.scroll_offset = transcript_page_offset(
-                transcript,
+            surface.overlay.scroll_offset = transcript_page_offset(
+                &mut surface.transcript,
                 content_height,
-                overlay.scroll_offset,
+                surface.overlay.scroll_offset,
                 direction,
             );
-            *is_following_bottom = false;
+            surface.is_following_bottom = false;
         }
     }
 
     /// record 快照更新后刷新 transcript surface（仅当 surface 绑定同一 agent）。
-    pub(super) fn sync_agents_panel_transcript_surface(
-        &mut self,
-        agent_id: runtime_domain::agent::AgentId,
-    ) {
+    pub(super) fn sync_agents_panel_transcript_surface(&mut self, agent_id: AgentId) {
         let surface_bound = self
             .agents_panel
             .as_ref()
@@ -71,19 +71,14 @@ impl Model {
             return;
         };
         let transcript = self.transcript_from_agent_items(&items);
-        let content_height = self.transcript_overlay_content_height();
+        let content_height = self.agents_panel_surface_content_height();
         if let Some(panel) = self.agents_panel.as_mut()
-            && let Some(AgentsPanelSurface::Transcript {
-                transcript: surface_transcript,
-                overlay,
-                is_following_bottom,
-                ..
-            }) = panel.surface.as_mut()
+            && let Some(surface) = panel.surface.as_mut()
         {
-            **surface_transcript = transcript;
-            if *is_following_bottom {
-                overlay.scroll_offset =
-                    transcript_bottom_offset(surface_transcript, content_height);
+            *surface.transcript = transcript;
+            if surface.is_following_bottom {
+                surface.overlay.scroll_offset =
+                    transcript_bottom_offset(&mut surface.transcript, content_height);
             }
         }
     }
@@ -91,9 +86,9 @@ impl Model {
     /// 窗口宽度变化时同步 transcript surface 的换行缓存。
     pub(crate) fn sync_agents_panel_surface_width(&mut self, width: u16) {
         if let Some(panel) = self.agents_panel.as_mut()
-            && let Some(AgentsPanelSurface::Transcript { transcript, .. }) = panel.surface.as_mut()
+            && let Some(surface) = panel.surface.as_mut()
         {
-            transcript.set_width(width);
+            surface.transcript.set_width(width);
         }
     }
 
@@ -103,29 +98,49 @@ impl Model {
         palette: crate::theme::TerminalPalette,
     ) {
         if let Some(panel) = self.agents_panel.as_mut()
-            && let Some(AgentsPanelSurface::Transcript { transcript, .. }) = panel.surface.as_mut()
+            && let Some(surface) = panel.surface.as_mut()
         {
-            transcript.set_palette(palette);
+            surface.transcript.set_palette(palette);
         }
     }
 
-    /// transcript surface 的 Esc 只返回 overview；其余未绑定键吞掉防落 composer。
+    /// surface 的 Esc/Space 只返回 overview；permission Pending 时 Up/Down/j/k
+    /// 移动 option selection（Left/Right/h/l 保持翻页，不破坏滚动语义）、
+    /// Enter 提交；无 pending 时键位与基础形态完全一致。
     pub(super) fn handle_agents_panel_transcript_key(
         &mut self,
         key: KeyEvent,
     ) -> OverlayInputResult {
         match key.code {
-            KeyCode::Esc if key.modifiers.is_empty() => {
+            KeyCode::Esc | KeyCode::Char(' ') if key.modifiers.is_empty() => {
                 self.close_agents_panel_surface();
                 OverlayInputResult::Handled
             }
-            KeyCode::Left | KeyCode::Up | KeyCode::Char('h') if key.modifiers.is_empty() => {
+            KeyCode::Left | KeyCode::Char('h') if key.modifiers.is_empty() => {
                 self.move_agents_panel_transcript_page(-1);
                 OverlayInputResult::Handled
             }
-            KeyCode::Right | KeyCode::Down | KeyCode::Char('l') if key.modifiers.is_empty() => {
+            KeyCode::Right | KeyCode::Char('l') if key.modifiers.is_empty() => {
                 self.move_agents_panel_transcript_page(1);
                 OverlayInputResult::Handled
+            }
+            KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
+                if !self.move_agents_panel_permission_selection(-1) {
+                    self.move_agents_panel_transcript_page(-1);
+                }
+                OverlayInputResult::Handled
+            }
+            KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
+                if !self.move_agents_panel_permission_selection(1) {
+                    self.move_agents_panel_transcript_page(1);
+                }
+                OverlayInputResult::Handled
+            }
+            KeyCode::Enter if key.modifiers.is_empty() => {
+                match self.submit_agents_panel_permission() {
+                    Some(effect) => OverlayInputResult::Effect(effect),
+                    None => OverlayInputResult::Handled,
+                }
             }
             _ => OverlayInputResult::Handled,
         }

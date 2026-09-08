@@ -3,17 +3,15 @@ use runtime_domain::agent::{AgentId, AgentObservationRequestId};
 
 use crate::{
     AppEffect,
-    agents_panel::AgentsPanelSurface,
     runner::{NoopUiRuntimePort, run_observe_agent_transcript_effect},
     runtime::RuntimeEventApply,
 };
 
-use super::common::{
-    apply_view_snapshot_loaded, apply_view_updated, press_key, ready_panel_model, view_snapshot,
-};
+use super::common::{apply_view_snapshot_loaded, press_key, ready_panel_model, view_snapshot};
 
+/// `Space` 与 `Enter` 是同一 transcript surface 入口（quick preview 双轨已删除）。
 #[test]
-fn space_opens_preview_and_dispatches_observe() {
+fn space_opens_transcript_surface_and_dispatches_observe() {
     let mut model = ready_panel_model();
 
     let effect = press_key(&mut model, KeyCode::Char(' '));
@@ -26,7 +24,7 @@ fn space_opens_preview_and_dispatches_observe() {
         panic!("unexpected effect");
     };
     assert_eq!(agent_id, AgentId::new(2));
-    assert!(model.agents_panel_preview_active());
+    assert!(model.agents_panel_transcript_active());
     assert_eq!(
         model
             .agents_panel
@@ -39,76 +37,31 @@ fn space_opens_preview_and_dispatches_observe() {
 }
 
 #[test]
-fn view_snapshot_loads_preview_record() {
+fn space_and_enter_open_the_same_transcript_surface() {
     let mut model = ready_panel_model();
-    let effect = press_key(&mut model, KeyCode::Char(' '));
-    let AppEffect::ObserveAgentTranscript { request_id, .. } = effect.unwrap() else {
-        panic!("unexpected effect");
-    };
 
-    apply_view_snapshot_loaded(
-        &mut model,
-        request_id,
-        view_snapshot(2, 21, Some("committed answer")),
-    );
+    // Space 进入后返回，再 Enter 进入：同一 surface 语义（同 effect、同 active 态）。
+    let space_effect = press_key(&mut model, KeyCode::Char(' '));
+    assert!(matches!(
+        space_effect,
+        Some(AppEffect::ObserveAgentTranscript { .. })
+    ));
+    assert!(model.agents_panel_transcript_active());
+    assert_eq!(press_key(&mut model, KeyCode::Char(' ')), None);
+    assert!(!model.agents_panel_transcript_active());
 
-    let record = model
-        .agents_panel
-        .as_ref()
-        .unwrap()
-        .agent_view_for_agent(AgentId::new(2))
-        .unwrap();
-    assert!(record.pending_request_id.is_none());
-    assert_eq!(record.observation_id.map(|id| id.get()), Some(21));
-    assert!(record.snapshot.is_some());
-    assert!(record.error.is_none());
-
-    let lines = model.agents_panel_preview_display_lines().unwrap();
-    assert!(
-        lines.iter().any(|line| line.contains("committed answer")),
-        "preview body should render the committed answer: {lines:?}"
-    );
+    let enter_effect = press_key(&mut model, KeyCode::Enter);
+    assert!(matches!(
+        enter_effect,
+        Some(AppEffect::ObserveAgentTranscript { .. })
+    ));
+    assert!(model.agents_panel_transcript_active());
+    assert_eq!(press_key(&mut model, KeyCode::Esc), None);
+    assert!(!model.agents_panel_transcript_active());
 }
 
 #[test]
-fn preview_without_committed_answer_shows_neutral_fallback() {
-    let mut model = ready_panel_model();
-    let effect = press_key(&mut model, KeyCode::Char(' '));
-    let AppEffect::ObserveAgentTranscript { request_id, .. } = effect.unwrap() else {
-        panic!("unexpected effect");
-    };
-
-    apply_view_snapshot_loaded(&mut model, request_id, view_snapshot(2, 21, None));
-
-    let lines = model.agents_panel_preview_display_lines().unwrap();
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("No committed answer yet")),
-        "missing answer must render the neutral empty state: {lines:?}"
-    );
-    assert!(
-        lines.iter().any(|line| line.contains("Latest activity")),
-        "fallback should include the safe activity summary: {lines:?}"
-    );
-}
-
-#[test]
-fn preview_shows_loading_before_snapshot() {
-    let mut model = ready_panel_model();
-    press_key(&mut model, KeyCode::Char(' '));
-
-    let lines = model.agents_panel_preview_display_lines().unwrap();
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("Loading agent preview")),
-        "pending record must render a loading state: {lines:?}"
-    );
-}
-
-#[test]
-fn esc_and_space_return_to_list_restoring_selection() {
+fn space_and_esc_return_to_list_restoring_selection() {
     let mut model = ready_panel_model();
     press_key(&mut model, KeyCode::Char('j'));
     let effect = press_key(&mut model, KeyCode::Char(' '));
@@ -116,11 +69,11 @@ fn esc_and_space_return_to_list_restoring_selection() {
         panic!("unexpected effect");
     };
     apply_view_snapshot_loaded(&mut model, request_id, view_snapshot(3, 21, None));
-    assert!(model.agents_panel_preview_active());
+    assert!(model.agents_panel_transcript_active());
 
-    // Space 返回 list。
+    // Space 只返回 list，不派发任何 effect。
     assert_eq!(press_key(&mut model, KeyCode::Char(' ')), None);
-    assert!(!model.agents_panel_preview_active());
+    assert!(!model.agents_panel_transcript_active());
     assert_eq!(
         model
             .agents_panel
@@ -134,9 +87,9 @@ fn esc_and_space_return_to_list_restoring_selection() {
 
     // 再次进入后用 Esc 返回。
     press_key(&mut model, KeyCode::Char(' '));
-    assert!(model.agents_panel_preview_active());
+    assert!(model.agents_panel_transcript_active());
     assert_eq!(press_key(&mut model, KeyCode::Esc), None);
-    assert!(!model.agents_panel_preview_active());
+    assert!(!model.agents_panel_transcript_active());
 }
 
 #[test]
@@ -164,51 +117,7 @@ fn stale_view_snapshot_request_is_dropped() {
 }
 
 #[test]
-fn view_updated_refreshes_record_for_matching_observation() {
-    let mut model = ready_panel_model();
-    let effect = press_key(&mut model, KeyCode::Char(' '));
-    let AppEffect::ObserveAgentTranscript { request_id, .. } = effect.unwrap() else {
-        panic!("unexpected effect");
-    };
-    apply_view_snapshot_loaded(
-        &mut model,
-        request_id,
-        view_snapshot(2, 21, Some("first answer")),
-    );
-
-    apply_view_updated(&mut model, view_snapshot(2, 21, Some("second answer")));
-
-    let lines = model.agents_panel_preview_display_lines().unwrap();
-    assert!(
-        lines.iter().any(|line| line.contains("second answer")),
-        "AgentViewUpdated must refresh the preview body: {lines:?}"
-    );
-}
-
-#[test]
-fn view_updated_with_foreign_observation_is_dropped() {
-    let mut model = ready_panel_model();
-    let effect = press_key(&mut model, KeyCode::Char(' '));
-    let AppEffect::ObserveAgentTranscript { request_id, .. } = effect.unwrap() else {
-        panic!("unexpected effect");
-    };
-    apply_view_snapshot_loaded(
-        &mut model,
-        request_id,
-        view_snapshot(2, 21, Some("first answer")),
-    );
-
-    apply_view_updated(&mut model, view_snapshot(2, 99, Some("foreign answer")));
-
-    let lines = model.agents_panel_preview_display_lines().unwrap();
-    assert!(
-        lines.iter().any(|line| line.contains("first answer")),
-        "foreign observation updates must be dropped: {lines:?}"
-    );
-}
-
-#[test]
-fn reopened_preview_reuses_record_without_second_observer() {
+fn reopened_surface_reuses_record_without_second_observer() {
     let mut model = ready_panel_model();
     let effect = press_key(&mut model, KeyCode::Char(' '));
     let AppEffect::ObserveAgentTranscript { request_id, .. } = effect.unwrap() else {
@@ -218,18 +127,12 @@ fn reopened_preview_reuses_record_without_second_observer() {
     press_key(&mut model, KeyCode::Char(' '));
 
     // record 已有快照：再次打开 surface 复用 observation，不派发第二个 observer。
-    let second = press_key(&mut model, KeyCode::Char(' '));
+    let second = press_key(&mut model, KeyCode::Enter);
     assert_eq!(
         second, None,
         "reopening a surface with a cached snapshot must not dispatch ObserveAgentTranscript"
     );
-    assert!(model.agents_panel_preview_active());
-    let lines = model.agents_panel_preview_display_lines().unwrap();
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("No committed answer yet"))
-    );
+    assert!(model.agents_panel_transcript_active());
 }
 
 #[test]
@@ -280,26 +183,72 @@ fn noop_observe_transcript_error_surfaces_in_record() {
         .agent_view_for_agent(AgentId::new(2))
         .unwrap();
     assert_eq!(record.error.as_deref(), Some("Runtime is not available"));
-    let lines = model.agents_panel_preview_display_lines().unwrap();
+    let rows = crate::test_helpers::rendered_rows(&crate::test_helpers::render_model_buffer(
+        &mut model, 100, 24,
+    ));
     assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("Runtime is not available"))
+        rows.iter()
+            .any(|row| row.contains("Runtime is not available")),
+        "record error must render in the surface pending view: {rows:?}"
     );
 }
 
 #[test]
-fn preview_surface_swallow_unknown_keys() {
+fn transcript_surface_swallow_unknown_keys() {
     let mut model = ready_panel_model();
     press_key(&mut model, KeyCode::Char(' '));
 
     assert_eq!(press_key(&mut model, KeyCode::Char('z')), None);
     assert!(
-        model.agents_panel_preview_active(),
+        model.agents_panel_transcript_active(),
         "unknown keys must not close the surface"
     );
-    assert!(matches!(
-        model.agents_panel.as_ref().unwrap().surface,
-        Some(AgentsPanelSurface::Preview { .. })
+}
+
+#[test]
+fn surface_title_renders_rule_and_status_dot() {
+    let mut model = ready_panel_model();
+    let effect = press_key(&mut model, KeyCode::Char(' '));
+    let AppEffect::ObserveAgentTranscript { request_id, .. } = effect.unwrap() else {
+        panic!("unexpected effect");
+    };
+    apply_view_snapshot_loaded(
+        &mut model,
+        request_id,
+        view_snapshot(2, 21, Some("committed answer body")),
+    );
+
+    let rows = crate::test_helpers::rendered_rows(&crate::test_helpers::render_model_buffer(
+        &mut model, 100, 24,
     ));
+    // 标题行：状态点 + 状态文字 + 标题 + elapsed。
+    let title_row = rows
+        .iter()
+        .find(|row| row.contains("research task"))
+        .expect("surface title should render the frozen title: {rows:?}");
+    assert!(
+        title_row.contains("●") && title_row.contains("Working"),
+        "title line carries the status dot and label: {title_row}"
+    );
+    assert!(
+        title_row.contains("1m23s"),
+        "title line carries the elapsed label: {title_row}"
+    );
+    // 标题行与内容之间的项目统一分割线。
+    let rule_row = rows
+        .get(1)
+        .expect("the row right below the title is the subtle rule");
+    assert!(
+        rule_row.chars().all(|c| c == '╌'),
+        "a subtle rule must render below the title line: {rule_row}"
+    );
+    // 完整 transcript 内容经 Markdown 管线渲染。
+    assert!(
+        rows.iter().any(|row| row.contains("committed answer body")),
+        "transcript content should render the full items: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| row.contains("summarize the repo")),
+        "committed user item should be visible: {rows:?}"
+    );
 }

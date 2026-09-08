@@ -1,8 +1,6 @@
 use crossterm::event::{KeyCode, MouseButton};
 use runtime_domain::agent::{AgentId, AgentProjectionStatus};
 
-use crate::agents_panel::AgentsPanelSurface;
-
 use super::common::{apply_overview_delta, overview_row, press_key, ready_panel_model};
 
 #[test]
@@ -142,8 +140,8 @@ fn mouse_click_selects_visible_row_and_cancels_confirmation() {
             .is_some()
     );
 
-    // 点击 body 第二行（chrome 头部 2 行 + 偏移 1）。
-    let _ = model.handle_agents_panel_mouse_down(MouseButton::Left, 0, 3);
+    // 点击 body 第二行数据行（chrome 头部 2 行 + 列头 1 行 + 偏移 1）。
+    let _ = model.handle_agents_panel_mouse_down(MouseButton::Left, 0, 4);
 
     let panel = model.agents_panel.as_ref().unwrap();
     assert_eq!(
@@ -160,10 +158,7 @@ fn mouse_click_selects_visible_row_and_cancels_confirmation() {
 fn mouse_click_consumed_in_surface_mode_without_selection_change() {
     let mut model = ready_panel_model();
     let effect = press_key(&mut model, KeyCode::Char(' '));
-    assert!(matches!(
-        model.agents_panel.as_ref().unwrap().surface,
-        Some(AgentsPanelSurface::Preview { .. })
-    ));
+    assert!(model.agents_panel.as_ref().unwrap().surface.is_some());
     assert!(effect.is_some());
 
     let result = model.handle_agents_panel_mouse_down(MouseButton::Left, 0, 3);
@@ -183,8 +178,8 @@ fn mouse_click_consumed_in_surface_mode_without_selection_change() {
 
 #[test]
 fn page_navigation_moves_selection_by_page() {
-    // 30 行、page size 16（高度 24 - chrome 4 - 折叠区预留 4）：
-    // `l` 跳到第二页首行（offset 16）。
+    // 30 行、page size 15（高度 24 - chrome 4 - 列头 1 - 折叠区预留 4）：
+    // `l` 跳到第二页首行（offset 15）。
     let rows = (0..30)
         .map(|index| {
             overview_row(
@@ -205,7 +200,7 @@ fn page_navigation_moves_selection_by_page() {
             .unwrap()
             .selected_row()
             .map(|r| r.agent_id),
-        Some(AgentId::new(116)),
+        Some(AgentId::new(115)),
         "page next should jump to the first row of the next page"
     );
     press_key(&mut model, KeyCode::Char('h'));

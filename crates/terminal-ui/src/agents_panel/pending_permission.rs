@@ -3,8 +3,8 @@
 //! 数据源单一：只由 `AgentPermissionUpdated` 事件（observation-independent 投影）驱动，
 //! session reset/resume、runtime replacement（`RuntimeEvent::Stopped`）与 stale generation
 //! 守卫四条路径负责清空。它只服务 attention pill 的可见性与点击路由；
-//! preview 的 permission 区块继续读 observation snapshot（`snapshot.preview.permission`），
-//! 两面对同一 runtime FIFO、各自事件驱动，互不同步。
+//! transcript surface 的 permission 区块继续读 observation snapshot
+//!（`snapshot.preview.permission`），两面对同一 runtime FIFO、各自事件驱动，互不同步。
 
 use std::collections::BTreeMap;
 
@@ -26,7 +26,7 @@ pub(crate) struct AgentPendingPermissionProjection {
     pub(super) generation: Option<AgentRuntimeGeneration>,
     /// agent_id → 当前 FIFO head（Pending 或 Submitted）。
     ///
-    /// Submitted entry 保留（preview submitted 呈现对账用），但 pill 判定只统计 Pending。
+    /// Submitted entry 保留（surface submitted 呈现对账用），但 pill 判定只统计 Pending。
     pub(super) heads: BTreeMap<AgentId, AgentPermissionRequest>,
 }
 
@@ -67,8 +67,8 @@ impl AgentPendingPermissionProjection {
 /// 意图作废停在 list（fail closed，不猜"当前 selection"）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentsPanelPillNavigation {
-    /// 单 pending：直达该 agent 的 quick preview surface。
-    OpenPreview { agent_id: AgentId },
+    /// 单 pending：直达该 agent 的 transcript surface（含 permission 交互面）。
+    OpenTranscript { agent_id: AgentId },
     /// 多 pending：overview list 预选最早的 pending owner。
     Preselect { agent_id: AgentId },
 }
@@ -115,7 +115,7 @@ impl Model {
         pending
     }
 
-    /// pill 点击的路由目标：单 Pending 直达 preview，多 Pending 预选最早 owner。
+    /// pill 点击的路由目标：单 Pending 直达 transcript surface，多 Pending 预选最早 owner。
     ///
     /// 归属只来自 pending 投影（FIFO head 的 AgentId），不以 row position / 当前 Agent 推断。
     pub(crate) fn agents_panel_pill_navigation_target(&self) -> Option<AgentsPanelPillNavigation> {
@@ -124,7 +124,7 @@ impl Model {
             .into_iter();
         let (agent_id, _) = pending.next()?;
         if pending.next().is_none() {
-            Some(AgentsPanelPillNavigation::OpenPreview { agent_id })
+            Some(AgentsPanelPillNavigation::OpenTranscript { agent_id })
         } else {
             Some(AgentsPanelPillNavigation::Preselect { agent_id })
         }

@@ -170,7 +170,7 @@ fn pending_count_ignores_submitted_heads() {
         )),
     );
 
-    // Submitted head 保留在 map（preview 对账用），但不参与 pill 的 pending 判定。
+    // Submitted head 保留在 map（surface 对账用），但不参与 pill 的 pending 判定。
     assert_eq!(model.pending_agent_permission_count(), 1);
     assert!(
         model
@@ -180,7 +180,7 @@ fn pending_count_ignores_submitted_heads() {
 }
 
 #[test]
-fn single_pending_routes_to_preview_and_multiple_preselects_earliest() {
+fn single_pending_routes_to_surface_and_multiple_preselects_earliest() {
     let mut model = fresh_model();
     apply_permission_update(
         &mut model,
@@ -194,10 +194,10 @@ fn single_pending_routes_to_preview_and_multiple_preselects_earliest() {
         )),
     );
 
-    // 单 pending：直达该 agent 的 preview。
+    // 单 pending：直达该 agent 的 transcript surface。
     assert_eq!(
         model.agents_panel_pill_navigation_target(),
-        Some(AgentsPanelPillNavigation::OpenPreview {
+        Some(AgentsPanelPillNavigation::OpenTranscript {
             agent_id: AgentId::new(2)
         })
     );

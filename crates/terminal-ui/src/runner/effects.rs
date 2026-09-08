@@ -490,7 +490,7 @@ fn run_respond_runtime_permission_effect(
 /// child Agent permission 提交：target 从 FIFO head 原样携带，由 runtime 校验
 /// （generation / request / option 全链 closed 拒绝）。
 ///
-/// Err → Error toast + 主动 reconcile：runtime 拒绝后投影不会变化，preview 的
+/// Err → Error toast + 主动 reconcile：runtime 拒绝后投影不会变化，surface 的
 /// 本地 Submitted 锁定需要在 snapshot 仍 Pending 时解除，允许重试。
 pub(crate) fn run_respond_agent_permission_effect(
     model: &mut Model,
@@ -505,7 +505,7 @@ pub(crate) fn run_respond_agent_permission_effect(
         })
     {
         model.show_toast(ToastSeverity::Error, message);
-        model.sync_agents_panel_preview_permission(target.agent_id);
+        model.sync_agents_panel_permission(target.agent_id);
     }
 }
 

@@ -198,6 +198,11 @@ struct ChildAgentRecord {
     terminal_status: Option<AgentProjectionStatus>,
     pending_terminal_event: Option<AgentEvent>,
     started_at_ms: i64,
+    /// elapsed 累计值：计时暂停（等待 permission）或进入终态时定格的部分。
+    /// 不持久化——resume 恢复的 settled 投影没有计时起点，elapsed 显示 `None`。
+    elapsed_accumulated_ms: u64,
+    /// 计时运行区段起点；`None` 即计时暂停。
+    elapsed_running_since_ms: Option<i64>,
     tool_uses: usize,
     token_usage: usize,
 }
@@ -240,9 +245,44 @@ impl ChildAgentRecord {
             terminal_status: None,
             pending_terminal_event: None,
             started_at_ms: 0,
+            elapsed_accumulated_ms: 0,
+            elapsed_running_since_ms: None,
             tool_uses: 0,
             token_usage: 0,
         }
+    }
+
+    /// 暂停计时并运行区段并入累计值；已暂停时是幂等 no-op。
+    fn pause_elapsed_at(&mut self, now_ms: i64) {
+        if let Some(since) = self.elapsed_running_since_ms.take()
+            && now_ms > since
+        {
+            self.elapsed_accumulated_ms += u64::try_from(now_ms - since).unwrap_or(u64::MAX);
+        }
+    }
+
+    /// 恢复计时：从当前时刻重新起算运行区段；已在运行时是幂等 no-op。
+    fn resume_elapsed_at(&mut self, now_ms: i64) {
+        if self.elapsed_running_since_ms.is_none() {
+            self.elapsed_running_since_ms = Some(now_ms);
+        }
+    }
+
+    /// 重置计时（新 turn 重新起算）：累计清零、运行区段从当前时刻开始。
+    fn restart_elapsed_at(&mut self, now_ms: i64) {
+        self.elapsed_accumulated_ms = 0;
+        self.elapsed_running_since_ms = Some(now_ms);
+    }
+
+    /// elapsed 投影值：运行中为累计值 + 当前区段实时差，暂停/终态为定格累计值。
+    /// `started_at_ms` 为 0（test 注册或 resume 恢复的投影）时没有计时语义。
+    fn elapsed_ms_at(&self, now_ms: i64) -> Option<u64> {
+        (self.started_at_ms > 0).then(|| match self.elapsed_running_since_ms {
+            Some(since) if now_ms > since => {
+                self.elapsed_accumulated_ms + u64::try_from(now_ms - since).unwrap_or(u64::MAX)
+            }
+            _ => self.elapsed_accumulated_ms,
+        })
     }
 
     fn is_terminal(&self) -> bool {
@@ -887,7 +927,9 @@ impl AgentOrchestrator {
             record.current_turn_is_followup = true;
             record.status = AgentProjectionStatus::Pending;
             record.latest_activity = AgentActivitySummary::Preparing;
-            record.started_at_ms = runtime_domain::time::unix_timestamp_ms().unwrap_or(0);
+            let now_ms = runtime_domain::time::unix_timestamp_ms().unwrap_or(0);
+            record.started_at_ms = now_ms;
+            record.restart_elapsed_at(now_ms);
             record.transcript.push(AgentTranscriptItem::User {
                 content: message.as_str().to_string(),
             });
@@ -908,6 +950,7 @@ impl AgentOrchestrator {
                     &AgentEventKind::TurnFailed {
                         message: "Child Agent failed to start".to_string(),
                     },
+                    now_ms,
                 );
                 record.terminal_outcome_seen = true;
                 record.pending_terminal_event = Some(AgentEvent {
@@ -1015,7 +1058,8 @@ impl AgentOrchestrator {
             {
                 return;
             }
-            apply_child_projection(record, &event.kind);
+            let now_ms = runtime_domain::time::unix_timestamp_ms().unwrap_or(0);
+            apply_child_projection(record, &event.kind, now_ms);
             permission_changed = apply_child_permission_fact(agent_id, record, &event);
             apply_child_transcript_fact(record, &event.kind);
             if is_terminal {
@@ -1365,7 +1409,9 @@ impl AgentOrchestrator {
             let turn_id = record.turn_id;
             dispatches.push((child_id, turn_id, request));
             let mut record = record;
-            record.started_at_ms = runtime_domain::time::unix_timestamp_ms().unwrap_or(0);
+            let now_ms = runtime_domain::time::unix_timestamp_ms().unwrap_or(0);
+            record.started_at_ms = now_ms;
+            record.restart_elapsed_at(now_ms);
             self.insert_child_record(child_id, record);
         }
         for (child_id, turn_id, request) in dispatches {
@@ -1377,11 +1423,13 @@ impl AgentOrchestrator {
                 turn_id,
                 request: Box::new(request),
             }) {
+                let now_ms = runtime_domain::time::unix_timestamp_ms().unwrap_or(0);
                 apply_child_projection(
                     record,
                     &AgentEventKind::TurnFailed {
                         message: "Child Agent failed to start".to_string(),
                     },
+                    now_ms,
                 );
                 record.terminal_outcome_seen = true;
                 record.pending_terminal_event = Some(AgentEvent {
@@ -2099,6 +2147,17 @@ impl AgentOrchestrator {
         }
     }
 
+    /// 为 test-registered child 启动 elapsed 计时；生产路径在 launch/followup
+    /// 提交时由 `restart_elapsed_at` 完成。
+    #[cfg(test)]
+    pub(super) fn mark_child_elapsed_started_for_test(&mut self, agent_id: AgentId) {
+        let now_ms = runtime_domain::time::unix_timestamp_ms().unwrap_or(0);
+        if let Some(record) = self.children.get_mut(&agent_id) {
+            record.started_at_ms = now_ms;
+            record.restart_elapsed_at(now_ms);
+        }
+    }
+
     /// 为 test-registered child 标注 launch group；生产路径只有 `launch_batch` 会设置。
     #[cfg(test)]
     pub(super) fn mark_child_launch_group_for_test(
@@ -2230,6 +2289,8 @@ impl AgentOrchestrator {
                     // completion 读取同一取值，自然取消的既有摘要不被覆盖。
                     record.terminal_stopped_by_request = intent.stopped_by_request;
                     record.latest_activity = AgentActivitySummary::Idle;
+                    // 显式 stop 定格 terminal 的同时定格 elapsed（终态时刻值）。
+                    record.pause_elapsed_at(runtime_domain::time::unix_timestamp_ms().unwrap_or(0));
                     freeze_pending_outcome(*agent_id, record);
                     if intent.retain_terminal_projection {
                         record.pending_terminal_event =
@@ -2656,10 +2717,11 @@ fn safe_child_terminal_event(event: AgentEvent) -> AgentEvent {
     }
 }
 
-fn apply_child_projection(record: &mut ChildAgentRecord, kind: &AgentEventKind) {
+fn apply_child_projection(record: &mut ChildAgentRecord, kind: &AgentEventKind, now_ms: i64) {
     match kind {
         AgentEventKind::Thinking { is_thinking } => {
             record.status = AgentProjectionStatus::Working;
+            record.resume_elapsed_at(now_ms);
             record.latest_activity = if *is_thinking {
                 AgentActivitySummary::Thinking
             } else {
@@ -2672,14 +2734,17 @@ fn apply_child_projection(record: &mut ChildAgentRecord, kind: &AgentEventKind) 
         | AgentEventKind::SystemMessage { .. }
         | AgentEventKind::PreparationWarning { .. } => {
             record.status = AgentProjectionStatus::Working;
+            record.resume_elapsed_at(now_ms);
         }
         AgentEventKind::OutputTokenEstimate { total_tokens }
         | AgentEventKind::InputTokenEstimate { total_tokens } => {
             record.status = AgentProjectionStatus::Working;
+            record.resume_elapsed_at(now_ms);
             record.token_usage = record.token_usage.max(*total_tokens);
         }
         AgentEventKind::Retrying { .. } => {
             record.status = AgentProjectionStatus::Working;
+            record.resume_elapsed_at(now_ms);
             // Provider messages are control/provider content at this boundary. The overview only
             // receives a fixed safe activity label, never the raw retry diagnostic.
             record.latest_activity = AgentActivitySummary::Retrying {
@@ -2688,6 +2753,7 @@ fn apply_child_projection(record: &mut ChildAgentRecord, kind: &AgentEventKind) 
         }
         AgentEventKind::ToolActivityStarted { .. } => {
             record.status = AgentProjectionStatus::Working;
+            record.resume_elapsed_at(now_ms);
             record.tool_uses = record.tool_uses.saturating_add(1);
             record.latest_activity = AgentActivitySummary::UsingTool {
                 title: "Using tool".to_string(),
@@ -2695,9 +2761,13 @@ fn apply_child_projection(record: &mut ChildAgentRecord, kind: &AgentEventKind) 
         }
         AgentEventKind::ToolActivityUpdated { .. } => {
             record.status = AgentProjectionStatus::Working;
+            record.resume_elapsed_at(now_ms);
         }
         AgentEventKind::PermissionRequested { .. } => {
             record.status = AgentProjectionStatus::WaitingPermission;
+            // 等待人为审批期间不计入 elapsed：冻结在进入等待前的值，
+            // 恢复 Working 后从当前时刻继续累计。
+            record.pause_elapsed_at(now_ms);
             record.latest_activity = AgentActivitySummary::WaitingPermission {
                 summary: "Waiting for approval".to_string(),
             };
@@ -2705,23 +2775,28 @@ fn apply_child_projection(record: &mut ChildAgentRecord, kind: &AgentEventKind) 
         AgentEventKind::TurnFinished { response, .. } => {
             record.status = AgentProjectionStatus::Completed;
             record.terminal_status = Some(AgentProjectionStatus::Completed);
+            // 终态后 elapsed 定格为终态时刻的值，不再随时间推进。
+            record.pause_elapsed_at(now_ms);
             record.latest_activity = AgentActivitySummary::Idle;
             record.latest_committed_answer = Some(response.text_content());
         }
         AgentEventKind::TurnFailed { .. } => {
             record.status = AgentProjectionStatus::Failed;
             record.terminal_status = Some(AgentProjectionStatus::Failed);
+            record.pause_elapsed_at(now_ms);
             record.latest_activity = AgentActivitySummary::Idle;
         }
         AgentEventKind::TurnInterrupted => {
             record.status = AgentProjectionStatus::Cancelled;
             record.terminal_status = Some(AgentProjectionStatus::Cancelled);
+            record.pause_elapsed_at(now_ms);
             record.latest_activity = AgentActivitySummary::Idle;
         }
     }
 }
 
 /// child 的 delivery-safe overview row 投影；只读取 record 的安全字段。
+/// elapsed 在运行中为实时差，等待 permission 与终态为定格的累计值。
 fn overview_row_for_child(
     agent_id: &AgentId,
     record: &ChildAgentRecord,
@@ -2732,8 +2807,7 @@ fn overview_row_for_child(
         title: record.title.clone(),
         status: record.status,
         latest_activity: record.latest_activity.clone(),
-        elapsed_ms: (record.started_at_ms > 0 && now_ms >= record.started_at_ms)
-            .then_some((now_ms - record.started_at_ms) as u64),
+        elapsed_ms: record.elapsed_ms_at(now_ms),
         tool_uses: (record.tool_uses > 0).then_some(record.tool_uses),
         token_usage: (record.token_usage > 0).then_some(record.token_usage),
     }
@@ -2764,8 +2838,7 @@ fn agent_view_snapshot_for_child(
         title: record.title.clone(),
         status: record.status,
         latest_activity: record.latest_activity.clone(),
-        elapsed_ms: (record.started_at_ms > 0 && now_ms >= record.started_at_ms)
-            .then_some((now_ms - record.started_at_ms) as u64),
+        elapsed_ms: record.elapsed_ms_at(now_ms),
         latest_committed_answer: latest_committed_assistant_content(record).map(str::to_string),
         permission: record.pending_permissions.front().cloned(),
     };
@@ -3860,6 +3933,112 @@ mod tests {
         assert_eq!(shutdown_calls.load(Ordering::SeqCst), 1);
         assert!(!orchestrator.child_has_authority(agent_id));
         assert_eq!(orchestrator.child_count(), 0);
+    }
+
+    #[test]
+    fn child_elapsed_freezes_during_permission_wait_and_at_terminal() {
+        let agent_id = AgentId::new(2);
+        let turn_id = AgentTurnId::new(agent_id.get());
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let (runtime, events, _dispatched, _submitted) = ScriptedChildRuntime::new(Vec::new());
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        orchestrator.register_child_for_test(
+            agent_id,
+            AgentId::MAIN,
+            turn_id,
+            test_title("elapsed child"),
+            test_context("elapsed-child"),
+            Box::new(runtime),
+        );
+        orchestrator.mark_child_target_for_test(agent_id, target.clone());
+        orchestrator.mark_child_elapsed_started_for_test(agent_id);
+
+        let deliver = |orchestrator: &mut AgentOrchestrator, kind: AgentEventKind| {
+            events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(child_event(agent_id, turn_id, &target, kind));
+            orchestrator.drain_child_events();
+        };
+        let elapsed_of_overview_row = |orchestrator: &mut AgentOrchestrator, request: u64| {
+            orchestrator.observe_agents(AgentObservationRequestId::new(request));
+            orchestrator
+                .drain_projection_events()
+                .into_iter()
+                .find_map(|event| match event {
+                    AgentProjectionEvent::AgentsOverviewSnapshotLoaded { snapshot, .. } => snapshot
+                        .rows
+                        .iter()
+                        .find(|row| row.agent_id == agent_id)
+                        .map(|row| row.elapsed_ms),
+                    _ => None,
+                })
+                .flatten()
+                .expect("overview snapshot should deliver the child elapsed projection")
+        };
+
+        // 运行中：elapsed 随墙钟推进增长。
+        deliver(
+            &mut orchestrator,
+            AgentEventKind::Thinking { is_thinking: true },
+        );
+        let running_start = elapsed_of_overview_row(&mut orchestrator, 41);
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        let running_later = elapsed_of_overview_row(&mut orchestrator, 42);
+        assert!(
+            running_later > running_start,
+            "working child elapsed must advance: {running_start} -> {running_later}"
+        );
+
+        // WaitingPermission：等待审批期间不计入 elapsed——投影两次值相同。
+        deliver(
+            &mut orchestrator,
+            AgentEventKind::PermissionRequested {
+                request: permission_request("elapsed-perm-1"),
+            },
+        );
+        let waiting_start = elapsed_of_overview_row(&mut orchestrator, 43);
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        let waiting_later = elapsed_of_overview_row(&mut orchestrator, 44);
+        assert_eq!(
+            waiting_start, waiting_later,
+            "waiting-permission elapsed must freeze"
+        );
+
+        // 恢复 Working：从冻结值继续累计。
+        deliver(
+            &mut orchestrator,
+            AgentEventKind::Thinking { is_thinking: true },
+        );
+        let resumed_start = elapsed_of_overview_row(&mut orchestrator, 45);
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        let resumed_later = elapsed_of_overview_row(&mut orchestrator, 46);
+        assert!(
+            resumed_later > resumed_start,
+            "resumed child elapsed must accumulate again"
+        );
+        assert!(
+            resumed_later > waiting_later,
+            "resume must continue from the frozen base: {resumed_later} vs {waiting_later}"
+        );
+
+        // 终态：elapsed 定格为终态时刻的值，时间推进后不再增长。
+        deliver(
+            &mut orchestrator,
+            AgentEventKind::TurnFinished {
+                response: runtime_domain::session::ConversationResponse::assistant_text("done"),
+                metrics: None,
+                context_usage: None,
+            },
+        );
+        let terminal_start = elapsed_of_overview_row(&mut orchestrator, 47);
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        let terminal_later = elapsed_of_overview_row(&mut orchestrator, 48);
+        assert_eq!(
+            terminal_start, terminal_later,
+            "terminal child elapsed must stay frozen"
+        );
     }
 
     #[test]

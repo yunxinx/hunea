@@ -105,11 +105,9 @@ impl Model {
             ModalLayer::PromptOverlay if self.prompt_overlay_preview_active() => {
                 Some(TerminalMouseModePreference::NativeWithAlternateScroll)
             }
-            // preview/transcript surface 是文本滚动视图，交还终端保留原生选区；
+            // transcript surface 是文本滚动视图，交还终端保留原生选区；
             // list 模式需要行点选，捕获鼠标。
-            ModalLayer::AgentsOverview
-                if self.agents_panel_preview_active() || self.agents_panel_transcript_active() =>
-            {
+            ModalLayer::AgentsOverview if self.agents_panel_transcript_active() => {
                 Some(TerminalMouseModePreference::NativeWithAlternateScroll)
             }
             ModalLayer::EntryTree

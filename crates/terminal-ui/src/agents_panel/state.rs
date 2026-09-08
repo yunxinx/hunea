@@ -30,6 +30,9 @@ pub(crate) struct AgentsPanelState {
     pub(super) generation: Option<AgentRuntimeGeneration>,
     /// `x` 二次确认绑定的 AgentId；selection/generation 变化即取消。
     pub(super) stop_confirmation: Option<AgentId>,
+    /// loading 期按下 `x` 后置位：footer 呈现"状态未就绪"提示，按键不静默吞掉。
+    /// snapshot 或 error 到达即清除（此时 stop 的可用性由列表/错误行自述）。
+    pub(super) stop_unavailable_notice: bool,
     /// panel 打开期间访问过的 per-agent view observation 记录。
     ///
     /// Enter/Space 反复进出同一 agent 复用同一记录（不建第二个 observer）；
@@ -39,11 +42,14 @@ pub(crate) struct AgentsPanelState {
     pub(super) surface: Option<AgentsPanelSurface>,
     /// 选中 agent 的活动折叠区缓存（见 `AgentsPanelActivityFold`）。
     pub(super) activity_fold: AgentsPanelActivityFold,
+    /// 折叠区是否展开。仅"选中行上按 Tab"触发展开；任何 selection 变化重置，
+    /// 鼠标 hover / 快照更新不改变该状态。
+    pub(super) activity_fold_expanded: bool,
 }
 
 /// 选中 agent 的活动折叠区缓存：最近 delivery-safe 活动摘要 + 折叠计数。
 ///
-/// 数据取自已建立的 per-agent view observation snapshot（preview/transcript
+/// 数据取自已建立的 per-agent view observation snapshot（与 transcript surface
 /// 同源数据通路），不为折叠区派发新的 observation；选中 agent 无 snapshot 时
 /// 缓存为空，折叠区不渲染。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -59,10 +65,10 @@ pub(crate) struct AgentsPanelActivityFold {
 impl AgentsPanelActivityFold {
     /// 折叠区当前可渲染的行数（活动行 + 可选 `+N more` 行）。
     ///
-    /// 宽度低于阈值或无条目时为 0；渲染与鼠标物理行换算共用本判定，
-    /// 保证两处对"折叠区是否占行"的答案一致。
-    pub(super) fn visible_line_count(&self, width: usize) -> usize {
-        if width < AGENTS_ACTIVITY_FOLD_MIN_WIDTH || self.entries.is_empty() {
+    /// 展开态由调用方传入：未展开、宽度低于阈值或无条目时为 0；
+    /// 渲染与鼠标物理行换算共用本判定，保证两处对"折叠区是否占行"的答案一致。
+    pub(super) fn visible_line_count(&self, width: usize, expanded: bool) -> usize {
+        if !expanded || width < AGENTS_ACTIVITY_FOLD_MIN_WIDTH || self.entries.is_empty() {
             return 0;
         }
         self.entries.len() + usize::from(self.more_count > 0)
@@ -82,12 +88,12 @@ pub(crate) struct AgentsPanelAgentView {
     pub(super) error: Option<String>,
 }
 
-/// quick preview 的 permission 区块交互态。
+/// transcript surface 的 permission 区块交互态。
 ///
 /// 交互态与 head 的 request identity 绑定：`AgentViewUpdated` 到达时按 request_id
 /// 对比决定保持还是重置（无关快照更新不得重置用户的选择）。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum AgentsPanelPreviewPermissionChoice {
+pub(crate) enum AgentsPanelPermissionChoice {
     /// 无 pending head（或记录尚在 loading）：不渲染 permission 区块。
     None,
     /// FIFO head 处于 Pending：可见 selection，可移动、可提交。
@@ -95,7 +101,7 @@ pub(crate) enum AgentsPanelPreviewPermissionChoice {
     /// 已提交的不可重复提交态。
     ///
     /// `option_id` 已知（本地刚提交）时锁定显示该 option；`None` 表示只知道
-    /// runtime 投影 Submitted（重开 preview 等场景，投影不携带已选 option），
+    /// runtime 投影 Submitted（重开 surface 等场景，投影不携带已选 option），
     /// options 照常渲染但无 marker。
     Submitted {
         request_id: String,
@@ -103,24 +109,19 @@ pub(crate) enum AgentsPanelPreviewPermissionChoice {
     },
 }
 
-/// preview 与 transcript 共用同一 per-agent view observation（`AgentViewSnapshot`
-/// 聚合两份数据），因此两者都是层内子模式而非独立 ModalLayer。
+/// panel 层内的 transcript surface：完整 child transcript 视图 + permission 交互面。
 ///
-/// Transcript 体积大且两个 variant 尺寸悬殊，Box 化避免撑大整个 panel 状态。
+/// 与 per-agent view observation（`AgentViewSnapshot` 聚合 transcript 与 preview 两份
+/// 投影）一一对应，因此是层内子模式而非独立 ModalLayer；`None` 即 overview list。
+/// Transcript 体积大，Box 化避免撑大整个 panel 状态。
 #[derive(Debug, Clone)]
-pub(crate) enum AgentsPanelSurface {
-    Preview {
-        agent_id: AgentId,
-        scroll_offset: usize,
-        /// permission 区块交互态；渲染与提交共用（单一事实源在 surface 内）。
-        permission_choice: AgentsPanelPreviewPermissionChoice,
-    },
-    Transcript {
-        agent_id: AgentId,
-        transcript: Box<Transcript>,
-        overlay: TranscriptOverlayState,
-        is_following_bottom: bool,
-    },
+pub(crate) struct AgentsPanelSurface {
+    pub(super) agent_id: AgentId,
+    pub(super) transcript: Box<Transcript>,
+    pub(super) overlay: TranscriptOverlayState,
+    pub(super) is_following_bottom: bool,
+    /// permission 区块交互态；渲染与提交共用（单一事实源在 surface 内）。
+    pub(super) permission_choice: AgentsPanelPermissionChoice,
 }
 
 /// panel 关闭后待 runner 派发的 observation 注销集合。
@@ -159,67 +160,97 @@ impl AgentsPanelState {
             observation_id: None,
             generation: None,
             stop_confirmation: None,
+            stop_unavailable_notice: false,
             agent_views: Vec::new(),
             surface: None,
             activity_fold: AgentsPanelActivityFold::default(),
+            activity_fold_expanded: false,
         }
     }
 
     // —— overview list 委托 ——
 
+    /// selection 变化即折叠态重置：展开只由"选中该行时按下 Tab"触发，
+    /// 不是常驻状态——离开（哪怕稍后回来）后必须重新按 Tab。
+    fn reset_activity_fold_if_selection_changed(&mut self, previous: Option<AgentId>) {
+        let current = self.list.selected_row().map(|row| row.agent_id);
+        if current != previous {
+            self.activity_fold_expanded = false;
+        }
+    }
+
     pub(super) fn replace_rows(&mut self, rows: Vec<AgentOverviewRow>) {
+        let previous_selection = self.list.selected_row().map(|row| row.agent_id);
         self.list
             .replace_rows(rows, agents_row_matches, agents_row_id);
+        self.reset_activity_fold_if_selection_changed(previous_selection);
         self.refresh_selected_activity_fold();
     }
 
     /// delta upsert：stable AgentId 原位替换（新行追加），selection identity 不变。
+    /// 过滤视图变化导致 selected 行被移出时 selection 迁移，折叠态随之重置。
     pub(super) fn upsert_row(&mut self, row: AgentOverviewRow) {
+        let previous_selection = self.list.selected_row().map(|row| row.agent_id);
         self.list.upsert_row(row, agents_row_matches, agents_row_id);
+        self.reset_activity_fold_if_selection_changed(previous_selection);
         self.refresh_selected_activity_fold();
     }
 
     /// delta remove：被移除的 selected agent 由 `restore_selected_id_or_clamp` 迁移。
     pub(super) fn remove_row(&mut self, agent_id: AgentId) {
+        let previous_selection = self.list.selected_row().map(|row| row.agent_id);
         self.list
             .remove_row(agent_id, agents_row_matches, agents_row_id);
+        self.reset_activity_fold_if_selection_changed(previous_selection);
         // selection 迁移后旧缓存归属脱节，必须立即重建（可能清空）。
         self.refresh_selected_activity_fold();
     }
 
     pub(super) fn move_selection(&mut self, direction: ListNavigationDirection) {
+        let previous_selection = self.list.selected_row().map(|row| row.agent_id);
         self.list.move_selection(direction, agents_row_id);
+        self.reset_activity_fold_if_selection_changed(previous_selection);
         self.refresh_selected_activity_fold();
     }
 
     pub(super) fn move_page(&mut self, direction: ListNavigationDirection, page_size: usize) {
+        let previous_selection = self.list.selected_row().map(|row| row.agent_id);
         self.list.move_page(direction, page_size, agents_row_id);
+        self.reset_activity_fold_if_selection_changed(previous_selection);
         self.refresh_selected_activity_fold();
     }
 
     pub(super) fn push_search_character(&mut self, character: char) {
+        let previous_selection = self.list.selected_row().map(|row| row.agent_id);
         self.list
             .push_search_character(character, agents_row_matches, agents_row_id);
+        self.reset_activity_fold_if_selection_changed(previous_selection);
         self.refresh_selected_activity_fold();
     }
 
     pub(super) fn backspace_search(&mut self) {
+        let previous_selection = self.list.selected_row().map(|row| row.agent_id);
         self.list
             .backspace_search(agents_row_matches, agents_row_id);
+        self.reset_activity_fold_if_selection_changed(previous_selection);
         self.refresh_selected_activity_fold();
     }
 
     pub(super) fn clear_search(&mut self) -> bool {
+        let previous_selection = self.list.selected_row().map(|row| row.agent_id);
         let cleared = self.list.clear_search(agents_row_matches, agents_row_id);
         if cleared {
+            self.reset_activity_fold_if_selection_changed(previous_selection);
             self.refresh_selected_activity_fold();
         }
         cleared
     }
 
     pub(super) fn exit_search(&mut self) -> bool {
+        let previous_selection = self.list.selected_row().map(|row| row.agent_id);
         let exited = self.list.exit_search(agents_row_matches, agents_row_id);
         if exited {
+            self.reset_activity_fold_if_selection_changed(previous_selection);
             self.refresh_selected_activity_fold();
         }
         exited
@@ -246,10 +277,12 @@ impl AgentsPanelState {
     }
 
     pub(super) fn select_visible_row(&mut self, page_size: usize, visible_offset: usize) -> bool {
+        let previous_selection = self.list.selected_row().map(|row| row.agent_id);
         let selected = self
             .list
             .select_visible_row(page_size, visible_offset, agents_row_id);
         if selected {
+            self.reset_activity_fold_if_selection_changed(previous_selection);
             self.refresh_selected_activity_fold();
         }
         selected
@@ -265,7 +298,9 @@ impl AgentsPanelState {
         physical_offset: usize,
         width: usize,
     ) -> bool {
-        let fold_line_count = self.activity_fold.visible_line_count(width);
+        let fold_line_count = self
+            .activity_fold
+            .visible_line_count(width, self.activity_fold_expanded);
         let page_start = self.page_start(page_size);
         let filtered_count = self.filtered_count();
         let mut remaining = physical_offset;
@@ -290,8 +325,10 @@ impl AgentsPanelState {
 
     /// 按 AgentId 预选（pill 导航等显式定位）；目标不在 filtered 视图时保持原 selection。
     pub(super) fn select_agent(&mut self, agent_id: AgentId) -> bool {
+        let previous_selection = self.list.selected_row().map(|row| row.agent_id);
         let selected = self.list.select_id(agent_id, agents_row_id);
         if selected {
+            self.reset_activity_fold_if_selection_changed(previous_selection);
             self.refresh_selected_activity_fold();
         }
         selected
@@ -323,15 +360,6 @@ impl AgentsPanelState {
 
     pub(super) fn row(&self, row_index: usize) -> Option<&AgentOverviewRow> {
         self.list.rows().get(row_index)
-    }
-
-    /// 按 AgentId 查找 frozen title（stop 确认提示等展示用）。
-    pub(super) fn row_title(&self, agent_id: AgentId) -> Option<&str> {
-        self.list
-            .rows()
-            .iter()
-            .find(|row| row.agent_id == agent_id)
-            .map(|row| row.title.as_str())
     }
 
     pub(super) fn is_searching(&self) -> bool {
@@ -374,6 +402,11 @@ impl AgentsPanelState {
         &self.activity_fold
     }
 
+    /// Tab 切换折叠区展开态（列表态下的唯一展开入口）。
+    pub(super) fn toggle_activity_fold_expanded(&mut self) {
+        self.activity_fold_expanded = !self.activity_fold_expanded;
+    }
+
     /// 刷新选中 agent 的活动折叠区缓存。
     ///
     /// 缓存与 selection、per-agent view snapshot 双绑定：任一变化后必须调用。
@@ -403,13 +436,9 @@ impl AgentsPanelState {
         self.activity_fold = fold;
     }
 
-    /// 当前 surface 绑定的 AgentId（preview/transcript 共用）。
+    /// 当前 surface 绑定的 AgentId。
     pub(super) fn surface_agent_id(&self) -> Option<AgentId> {
-        match self.surface.as_ref() {
-            Some(AgentsPanelSurface::Preview { agent_id, .. })
-            | Some(AgentsPanelSurface::Transcript { agent_id, .. }) => Some(*agent_id),
-            None => None,
-        }
+        self.surface.as_ref().map(|surface| surface.agent_id)
     }
 
     /// stop 确认态是否仍然成立：确认目标仍是当前 selection 且仍可 stop。

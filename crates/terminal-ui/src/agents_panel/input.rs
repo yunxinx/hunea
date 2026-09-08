@@ -7,10 +7,10 @@ use runtime_domain::agent::{
 use crate::{
     AppEffect, Model,
     agents_panel::{
-        AgentsPanelAgentView, AgentsPanelPillNavigation, AgentsPanelPreviewPermissionChoice,
+        AgentsPanelAgentView, AgentsPanelPermissionChoice, AgentsPanelPillNavigation,
         AgentsPanelState, AgentsPanelSurface, PendingAgentObservationStops,
         agent_status_is_running, agents_panel_list_page_size, agents_panel_rejection_text,
-        preview::initial_preview_permission_choice,
+        permission_choice::initial_permission_choice,
     },
     fullscreen_list_chrome::fullscreen_list_body_visible_offset_for_row,
     list_selection::ListNavigationDirection,
@@ -65,6 +65,7 @@ impl Model {
         panel.pending_request_id = None;
         panel.is_loading = false;
         panel.error = None;
+        panel.stop_unavailable_notice = false;
         panel.replace_rows(snapshot.rows);
         self.agents_panel = Some(panel);
         // pill 导航意图消费：panel 打开是异步的，snapshot 投影建立后才能定位目标。
@@ -97,6 +98,7 @@ impl Model {
         panel.is_loading = false;
         panel.pending_request_id = None;
         panel.error = Some(message.to_string());
+        panel.stop_unavailable_notice = false;
         panel.replace_rows(Vec::new());
         self.agents_panel = Some(panel);
     }
@@ -186,7 +188,7 @@ impl Model {
                 panel.refresh_selected_activity_fold();
             }
             self.sync_agents_panel_transcript_surface(agent_id);
-            self.sync_agents_panel_preview_permission(agent_id);
+            self.sync_agents_panel_permission(agent_id);
             return;
         }
         // panel 已关闭（或记录被覆盖）后到达的回包：若请求在待注销列表中，
@@ -222,7 +224,7 @@ impl Model {
                 panel.refresh_selected_activity_fold();
             }
             self.sync_agents_panel_transcript_surface(agent_id);
-            self.sync_agents_panel_preview_permission(agent_id);
+            self.sync_agents_panel_permission(agent_id);
         }
     }
 
@@ -313,9 +315,6 @@ impl Model {
         if self.agents_panel.is_none() {
             return OverlayInputResult::Ignored;
         }
-        if self.agents_panel_preview_active() {
-            return self.handle_agents_panel_preview_key(key);
-        }
         if self.agents_panel_transcript_active() {
             return self.handle_agents_panel_transcript_key(key);
         }
@@ -400,7 +399,16 @@ impl Model {
                 }
                 OverlayInputResult::Handled
             }
-            KeyCode::Char(' ') if key.modifiers.is_empty() => self.open_agents_panel_preview(),
+            // Tab 切换选中行的活动折叠区；Space 与 Enter 同一 transcript surface 入口。
+            KeyCode::Tab if key.modifiers.is_empty() => {
+                if let Some(panel) = self.agents_panel.as_mut() {
+                    panel.toggle_activity_fold_expanded();
+                }
+                OverlayInputResult::Handled
+            }
+            KeyCode::Char(' ') if key.modifiers.is_empty() => {
+                self.open_agents_panel_transcript_surface()
+            }
             KeyCode::Enter => self.open_agents_panel_transcript_surface(),
             KeyCode::Char('x') if key.modifiers.is_empty() => self.handle_agents_panel_stop_key(),
             _ => OverlayInputResult::Handled,
@@ -410,10 +418,22 @@ impl Model {
     /// `x` 二次确认：仅对 selected running child 生效；第二次 `x` 且 selection 未变
     /// 才派发携带 identity+generation 的 `StopAgent`。
     fn handle_agents_panel_stop_key(&mut self) -> OverlayInputResult {
+        // loading 期 stop 无目标可寻址：置位 footer 提示给出可见反馈，不静默吞掉按键。
+        if self
+            .agents_panel
+            .as_ref()
+            .is_some_and(|panel| panel.is_loading)
+        {
+            if let Some(panel) = self.agents_panel.as_mut() {
+                panel.stop_unavailable_notice = true;
+            }
+            return OverlayInputResult::Handled;
+        }
         let Some(panel) = self.agents_panel.as_ref() else {
             return OverlayInputResult::Handled;
         };
-        if panel.is_loading || panel.error.is_some() {
+        // error 态的不可用由 body 的错误行自述，无需重复提示。
+        if panel.error.is_some() {
             return OverlayInputResult::Handled;
         }
         let Some(row) = panel.selected_row() else {
@@ -458,12 +478,13 @@ impl Model {
         panel.selected_row().map(|row| row.agent_id)
     }
 
-    /// `Space` 打开 quick preview 基础形态：只读、仅返回，无 cancel/interrupt/steer。
-    fn open_agents_panel_preview(&mut self) -> OverlayInputResult {
+    /// `Enter`/`Space` 进入 child transcript surface：完整 transcript 视图（Markdown
+    /// 管线渲染）+ permission 交互面；Space 与 Enter 是同一入口。
+    fn open_agents_panel_transcript_surface(&mut self) -> OverlayInputResult {
         let Some(agent_id) = self.agents_panel_selected_agent_id() else {
             return OverlayInputResult::Handled;
         };
-        match self.open_agents_panel_preview_for_agent(agent_id) {
+        match self.open_agents_panel_transcript_for_agent(agent_id) {
             Some(request_id) => OverlayInputResult::Effect(AppEffect::ObserveAgentTranscript {
                 request_id,
                 agent_id,
@@ -472,11 +493,12 @@ impl Model {
         }
     }
 
-    /// 为指定 agent 打开 quick preview surface（`Space` 与 Agent approval pill 导航共用）。
+    /// 为指定 agent 打开 transcript surface（`Space`/`Enter` 与 Agent approval pill
+    /// 导航共用）。
     ///
     /// permission 区块交互态按 record 当前 snapshot 初始化；snapshot 未就绪时由
     /// snapshot 应用路径的 reconcile 接管。返回需要派发的 observation 请求。
-    pub(crate) fn open_agents_panel_preview_for_agent(
+    pub(crate) fn open_agents_panel_transcript_for_agent(
         &mut self,
         agent_id: AgentId,
     ) -> Option<AgentObservationRequestId> {
@@ -486,21 +508,13 @@ impl Model {
             .as_ref()
             .and_then(|panel| panel.agent_view_for_agent(agent_id))
             .and_then(|record| record.snapshot.as_ref())
-            .map(|snapshot| {
-                initial_preview_permission_choice(snapshot.preview.permission.as_ref())
-            });
-        if let Some(panel) = self.agents_panel.as_mut() {
-            panel.surface = Some(AgentsPanelSurface::Preview {
-                agent_id,
-                scroll_offset: 0,
-                permission_choice: permission_choice
-                    .unwrap_or(AgentsPanelPreviewPermissionChoice::None),
-            });
-        }
+            .map(|snapshot| initial_permission_choice(snapshot.preview.permission.as_ref()))
+            .unwrap_or(AgentsPanelPermissionChoice::None);
+        self.install_agents_panel_transcript_surface(agent_id, permission_choice);
         dispatch_request_id
     }
 
-    /// 执行 pill 导航意图：预选目标 agent；`OpenPreview` 追加打开 preview surface。
+    /// 执行 pill 导航意图：预选目标 agent；`OpenTranscript` 追加打开 transcript surface。
     ///
     /// 目标 agent 不在当前投影时意图失效停在 list（fail closed，不猜临近行）；
     /// rows 尚未建立（loading）时意图保留，等 snapshot 应用点再消费。
@@ -511,7 +525,7 @@ impl Model {
         navigation: AgentsPanelPillNavigation,
     ) -> Option<AppEffect> {
         let agent_id = match navigation {
-            AgentsPanelPillNavigation::OpenPreview { agent_id }
+            AgentsPanelPillNavigation::OpenTranscript { agent_id }
             | AgentsPanelPillNavigation::Preselect { agent_id } => agent_id,
         };
         let panel_ready = self
@@ -541,8 +555,8 @@ impl Model {
         }
         match navigation {
             AgentsPanelPillNavigation::Preselect { .. } => None,
-            AgentsPanelPillNavigation::OpenPreview { agent_id } => self
-                .open_agents_panel_preview_for_agent(agent_id)
+            AgentsPanelPillNavigation::OpenTranscript { agent_id } => self
+                .open_agents_panel_transcript_for_agent(agent_id)
                 .map(|request_id| AppEffect::ObserveAgentTranscript {
                     request_id,
                     agent_id,
@@ -550,26 +564,13 @@ impl Model {
         }
     }
 
-    /// `Enter` 进入 child transcript surface：消费 committed delivery-safe items，
-    /// 渲染复用 transcript overlay 视图。
-    fn open_agents_panel_transcript_surface(&mut self) -> OverlayInputResult {
-        let Some(agent_id) = self.agents_panel_selected_agent_id() else {
-            return OverlayInputResult::Handled;
-        };
-        let dispatch_request_id = self.stage_agents_panel_agent_view(agent_id);
-        self.install_agents_panel_transcript_surface(agent_id);
-        match dispatch_request_id {
-            Some(request_id) => OverlayInputResult::Effect(AppEffect::ObserveAgentTranscript {
-                request_id,
-                agent_id,
-            }),
-            None => OverlayInputResult::Handled,
-        }
-    }
-
     /// 安装 transcript surface；record 已有快照时立即构建 transcript 并贴底，
     /// 未就绪时保持空 transcript，由渲染层呈现 loading。
-    fn install_agents_panel_transcript_surface(&mut self, agent_id: AgentId) {
+    fn install_agents_panel_transcript_surface(
+        &mut self,
+        agent_id: AgentId,
+        permission_choice: AgentsPanelPermissionChoice,
+    ) {
         let items = self
             .agents_panel
             .as_ref()
@@ -583,7 +584,7 @@ impl Model {
         let transcript = items.map(|items| self.transcript_from_agent_items(&items));
         let palette = self.palette;
         let working_dir = self.working_dir.clone();
-        let content_height = self.transcript_overlay_content_height();
+        let content_height = self.agents_panel_surface_content_height();
         if let Some(panel) = self.agents_panel.as_mut() {
             let mut surface_transcript = transcript
                 .map(Box::new)
@@ -591,11 +592,12 @@ impl Model {
             let mut overlay = TranscriptOverlayState::new();
             overlay.scroll_offset =
                 latest_transcript_bottom_offset(&mut surface_transcript, content_height);
-            panel.surface = Some(AgentsPanelSurface::Transcript {
+            panel.surface = Some(AgentsPanelSurface {
                 agent_id,
                 transcript: surface_transcript,
                 overlay,
                 is_following_bottom: true,
+                permission_choice,
             });
         }
     }
@@ -675,6 +677,10 @@ impl Model {
         else {
             return OverlayInputResult::Handled;
         };
+        // body 首行是列头行：不是可选目标，点击直接吞掉。
+        let Some(physical_offset) = visible_offset.checked_sub(1) else {
+            return OverlayInputResult::Handled;
+        };
         let page_size = agents_panel_list_page_size(self.height);
         let selection_before = self
             .agents_panel
@@ -683,7 +689,7 @@ impl Model {
             .map(|row| row.agent_id);
         if let Some(panel) = self.agents_panel.as_mut() {
             // 折叠行计入物理行预算：点击命中行须与渲染布局一致。
-            panel.select_physical_body_line(page_size, visible_offset, usize::from(self.width));
+            panel.select_physical_body_line(page_size, physical_offset, usize::from(self.width));
         }
         let selection_after = self
             .agents_panel

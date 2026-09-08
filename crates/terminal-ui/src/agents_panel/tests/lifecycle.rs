@@ -339,15 +339,15 @@ fn reopen_while_established_stages_previous_observation_stop() {
 #[test]
 fn runner_consumes_pending_stops_and_dispatches_stop_observing() {
     let mut model = ready_panel_model();
-    // 打开一个 preview surface 让 panel 同时持有 per-agent view observation。
+    // 打开一个 transcript surface 让 panel 同时持有 per-agent view observation。
     let effect = press_key(&mut model, crossterm::event::KeyCode::Char(' '));
     let AppEffect::ObserveAgentTranscript { request_id, .. } =
-        effect.expect("preview dispatches observe")
+        effect.expect("surface entry dispatches observe")
     else {
         panic!("unexpected effect");
     };
     apply_view_snapshot_loaded(&mut model, request_id, view_snapshot(2, 21, Some("answer")));
-    // Esc 先退 preview 回 list，再 Esc 关闭 panel。
+    // Esc 先退 surface 回 list，再 Esc 关闭 panel。
     press_key(&mut model, crossterm::event::KeyCode::Esc);
     press_key(&mut model, crossterm::event::KeyCode::Esc);
     assert!(!model.agents_panel_active());

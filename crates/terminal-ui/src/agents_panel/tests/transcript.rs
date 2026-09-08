@@ -1,7 +1,7 @@
 use crossterm::event::KeyCode;
 use runtime_domain::agent::{AgentId, AgentObservationId};
 
-use crate::{AppEffect, agents_panel::AgentsPanelSurface, runner::run_stop_agent_effect};
+use crate::{AppEffect, runner::run_stop_agent_effect};
 
 use super::common::{
     RecordingRuntimePort, apply_view_snapshot_loaded, apply_view_updated, press_key,
@@ -9,14 +9,12 @@ use super::common::{
 };
 
 fn surface_transcript_items(model: &mut crate::Model) -> Vec<String> {
-    match model
+    model
         .agents_panel
         .as_ref()
         .and_then(|panel| panel.surface.as_ref())
-    {
-        Some(AgentsPanelSurface::Transcript { transcript, .. }) => transcript.plain_items(),
-        _ => Vec::new(),
-    }
+        .map(|surface| surface.transcript.plain_items())
+        .unwrap_or_default()
 }
 
 #[test]

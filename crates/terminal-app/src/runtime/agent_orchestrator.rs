@@ -11,8 +11,8 @@ use crate::session_store_bridge::run_session_store_future;
 use runtime_domain::agent::{
     AgentActivitySummary, AgentChildCompletion, AgentChildMessage, AgentCommand,
     AgentCommandReceipt, AgentEvent, AgentEventKind, AgentGroupCompletion, AgentId,
-    AgentLaunchBatch, AgentLaunchChildSnapshot, AgentLaunchGroupId, AgentLaunchReceipt,
-    AgentObjectiveSummary, AgentObservationId, AgentObservationRejection,
+    AgentInstructions, AgentLaunchBatch, AgentLaunchChildSnapshot, AgentLaunchGroupId,
+    AgentLaunchReceipt, AgentObjectiveSummary, AgentObservationId, AgentObservationRejection,
     AgentObservationRequestId, AgentOutcome, AgentOutcomeSummary, AgentOverviewDelta,
     AgentOverviewDeltaKind, AgentOverviewRow, AgentOverviewSnapshot, AgentPermissionRequest,
     AgentPermissionState, AgentPermissionTarget, AgentPermissionUpdate, AgentPreviewSnapshot,
@@ -2599,17 +2599,38 @@ impl AgentOrchestrator {
     }
 }
 
+/// host 在 launch 边界恒注入的 child worker 身份指令。
+///
+/// sessionless child 没有 system prompt，报告与收尾语义只能由 provider request 内的
+/// 守则建立：最终 assistant 消息会被单独摘取交付，child 必须自知任务边界并如实汇报。
+pub(super) const CHILD_AGENT_IDENTITY_INSTRUCTIONS: &str = "You are a child agent dispatched for one specific task.
+
+- Complete exactly the task in the message above. Do not broaden its scope.
+- When the task is done, finish your turn. Do not ask for follow-up instructions or wait for further direction.
+- Your final message is your report to the dispatching agent. Make it self-contained: state conclusions, findings, and deliverables directly — it is extracted and read on its own, outside this conversation.
+- Report honestly. Mark unverified conclusions as unverified; if you cannot complete the task, say so and explain why instead of guessing.";
+
 fn child_turn_request(
     target: &RuntimeTarget,
     request: &runtime_domain::agent::AgentLaunchRequest,
 ) -> AgentTurnRequest {
     let RuntimeTarget::Provider(target) = target;
+    // caller instructions 在前、身份指令在后：身份指令是 host 恒注入的 child 语义，
+    // caller 指令只能补充，不能覆盖。
+    let caller_instructions = request.instructions().expose_for_request_assembly();
+    let instructions = if request.instructions().is_empty() {
+        AgentInstructions::new(CHILD_AGENT_IDENTITY_INSTRUCTIONS)
+    } else {
+        AgentInstructions::new(format!(
+            "{caller_instructions}\n\n{CHILD_AGENT_IDENTITY_INSTRUCTIONS}"
+        ))
+    };
     AgentTurnRequest::from_conversation_request(ConversationTurnRequest::new_user_text(
         target.provider_id.clone(),
         target.model_id.clone(),
         request.objective().as_str(),
     ))
-    .with_direct_instructions(request.instructions().clone())
+    .with_direct_instructions(instructions)
 }
 
 /// followup turn 的 user 消息即消息正文；不带 direct instructions——launch 的
@@ -4239,6 +4260,85 @@ mod tests {
 
     fn child_message(content: &str) -> AgentChildMessage {
         AgentChildMessage::new(content).expect("test message should construct")
+    }
+
+    fn launch_request(
+        objective: &str,
+        instructions: &str,
+    ) -> runtime_domain::agent::AgentLaunchRequest {
+        runtime_domain::agent::AgentLaunchRequest::new(
+            AgentObjective::new(objective).expect("test objective should construct"),
+            None,
+            AgentInstructions::new(instructions),
+        )
+        .expect("test launch request should construct")
+    }
+
+    #[test]
+    fn child_turn_request_appends_identity_instructions_after_caller_instructions() {
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let request = launch_request("write a haiku about ports", "prefer concise output");
+        let turn_request = child_turn_request(&target, &request);
+
+        let (provider_request, transcript_message, direct_instructions) = turn_request.into_parts();
+        let provider_text = provider_request.message_text();
+        // provider 文本形态固定为 objective + caller instructions + 身份指令。
+        assert!(provider_text.starts_with(
+            "write a haiku about ports\n\nprefer concise output\n\nYou are a child agent dispatched"
+        ));
+        assert!(provider_text.contains("report to the dispatching agent"));
+        assert!(provider_text.contains("self-contained"));
+        assert!(provider_text.contains("unverified"));
+        assert!(direct_instructions.is_some());
+        // transcript delivery 仍是纯 objective：身份指令不进入 transcript。
+        assert_eq!(transcript_message.content, "write a haiku about ports");
+    }
+
+    #[test]
+    fn child_turn_request_injects_identity_instructions_without_caller_instructions() {
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let request = launch_request("write a haiku about ports", "");
+        let turn_request = child_turn_request(&target, &request);
+
+        let (provider_request, _transcript_message, direct_instructions) =
+            turn_request.into_parts();
+        let provider_text = provider_request.message_text();
+        assert!(
+            provider_text
+                .starts_with("write a haiku about ports\n\nYou are a child agent dispatched")
+        );
+        assert!(!provider_text.contains("\n\n\n"));
+        assert!(direct_instructions.is_some());
+    }
+
+    #[test]
+    fn child_followup_turn_request_does_not_reinject_identity_instructions() {
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let turn_request = child_followup_turn_request(
+            &target,
+            &child_message("extend the research with citations"),
+        );
+
+        let (provider_request, _transcript_message, direct_instructions) =
+            turn_request.into_parts();
+
+        assert_eq!(
+            provider_request.message_text(),
+            "extend the research with citations"
+        );
+        assert!(direct_instructions.is_none());
+    }
+
+    #[test]
+    fn child_turn_request_debug_does_not_echo_instruction_bodies() {
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let request = launch_request("secret objective body", "SECRET_CALLER_INSTRUCTIONS");
+        let debug = format!("{:?}", child_turn_request(&target, &request));
+
+        assert!(debug.contains("has_direct_instructions: true"));
+        assert!(!debug.contains("SECRET_CALLER_INSTRUCTIONS"));
+        assert!(!debug.contains("secret objective body"));
+        assert!(!debug.contains("child agent dispatched"));
     }
 
     fn submitted_turn_texts(submitted: &ScriptedSubmittedTurns) -> Vec<String> {

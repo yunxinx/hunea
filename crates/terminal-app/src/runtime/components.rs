@@ -4996,12 +4996,19 @@ mod tests {
             "message to a settled child should start the follow-up turn immediately"
         );
 
-        // child 连续执行两个 provider turn：launch objective 与 followup 消息分别是
-        // 各自 turn 的最后一条 user 消息（transcript 连续）。
+        // child 连续执行两个 provider turn：launch turn 的最后一条 user 消息是
+        // objective + 身份指令（provider-visible）；followup turn 只有消息正文，
+        // 不重复注入身份指令（transcript 连续）。
         let child_turns = child_observations.turns();
         assert_eq!(child_turns.len(), 2);
         let user_texts = child_observations.last_user_texts();
-        assert_eq!(user_texts[0], "scout the workspace layout");
+        assert_eq!(
+            user_texts[0],
+            format!(
+                "scout the workspace layout\n\n{}",
+                crate::runtime::agent_orchestrator::CHILD_AGENT_IDENTITY_INSTRUCTIONS
+            )
+        );
         assert_eq!(user_texts[1], CHILD_FOLLOWUP_MESSAGE);
 
         // main 模型视图包含全部 host-owned 工具；child 视图全部不可见（嵌套封堵）。
@@ -5816,7 +5823,12 @@ mod tests {
     struct PermissionChildRuntime {
         events: Vec<AgentEvent>,
         is_shutdown: bool,
+        /// 记录每次 SubmitTurn 在 adapter 消费点（`into_parts` 之后）的 provider-visible
+        /// 文本，供全链断言 launch instructions 真正抵达 child provider request。
+        submitted_provider_texts: ChildProviderTextLog,
     }
+
+    type ChildProviderTextLog = Arc<Mutex<Vec<String>>>;
 
     impl AgentRuntime for PermissionChildRuntime {
         fn dispatch(
@@ -5832,7 +5844,15 @@ mod tests {
                     turn_id,
                     request,
                 } => {
-                    let target = request.target();
+                    // 与 native adapter 相同的消费点：`into_parts` 之后才是 provider-visible 文本。
+                    let (provider_request, _transcript_message, _direct_instructions) =
+                        (*request).into_parts();
+                    self.submitted_provider_texts
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(provider_request.message_text());
+                    let target = provider_request.target();
+                    let activity_label = provider_request.model_id().to_string();
                     self.events.push(AgentEvent {
                         agent_id,
                         turn_id,
@@ -5844,7 +5864,7 @@ mod tests {
                     Ok(AgentCommandReceipt::TurnStarted {
                         turn_id,
                         target,
-                        activity_label: request.activity_label().to_string(),
+                        activity_label,
                     })
                 }
                 AgentCommand::RespondPermission {
@@ -5998,6 +6018,7 @@ mod tests {
                 Ok(Box::new(PermissionChildRuntime {
                     events: Vec::new(),
                     is_shutdown: true,
+                    submitted_provider_texts: ChildProviderTextLog::default(),
                 }))
             },
         );
@@ -6454,6 +6475,8 @@ mod tests {
         const PRIVATE_SECOND_LINE: &str = "PRIVATE_SECOND_LINE";
         const PRIVATE_INSTRUCTIONS: &str = "PRIVATE_INSTRUCTIONS";
 
+        let submitted_child_provider_texts = ChildProviderTextLog::default();
+        let child_provider_texts = Arc::clone(&submitted_child_provider_texts);
         let SpawnChainFixture {
             mut components,
             store,
@@ -6461,10 +6484,11 @@ mod tests {
             scoped_tools,
             parent_turn_id,
             runtime_generation,
-        } = spawn_chain_fixture("/spawn-full-chain-session", || {
+        } = spawn_chain_fixture("/spawn-full-chain-session", move || {
             Box::new(PermissionChildRuntime {
                 events: Vec::new(),
                 is_shutdown: true,
+                submitted_provider_texts: Arc::clone(&child_provider_texts),
             })
         })
         .await;
@@ -6495,6 +6519,33 @@ mod tests {
             tokio::task::yield_now().await;
         }
         assert_eq!(components.child_agent_count_for_test(), 2);
+
+        // child provider request（adapter 消费点读取）：objective 全文 + caller
+        // instructions + host 身份指令；拼接顺序固定，两个 child 都收到身份指令。
+        let submitted_provider_texts = submitted_child_provider_texts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(submitted_provider_texts.len(), 2);
+        assert!(
+            submitted_provider_texts
+                .iter()
+                .all(|text| text.contains("You are a child agent dispatched"))
+        );
+        let instructed_child = submitted_provider_texts
+            .iter()
+            .find(|text| text.contains(PRIVATE_INSTRUCTIONS))
+            .expect("caller instructions should reach the child provider request");
+        assert!(
+            instructed_child.starts_with(&format!(
+                "summarize findings\n{PRIVATE_SECOND_LINE}\n\n{PRIVATE_INSTRUCTIONS}\n\n\
+                 You are a child agent dispatched"
+            )),
+            "unexpected provider text: {instructed_child}"
+        );
+        assert!(instructed_child.contains("self-contained"));
+        assert!(instructed_child.contains("unverified"));
+        assert!(!instructed_child.contains("\n\n\n"));
 
         // launch fact：grouped form、title 冻结、objective 只保留 delivery-safe 首行。
         let projection_events = components.drain_agent_projection_events();
@@ -6636,6 +6687,7 @@ mod tests {
             Box::new(PermissionChildRuntime {
                 events: Vec::new(),
                 is_shutdown: true,
+                submitted_provider_texts: ChildProviderTextLog::default(),
             })
         })
         .await;
@@ -6734,6 +6786,7 @@ mod tests {
             Box::new(PermissionChildRuntime {
                 events: Vec::new(),
                 is_shutdown: true,
+                submitted_provider_texts: ChildProviderTextLog::default(),
             })
         })
         .await;
@@ -7056,6 +7109,7 @@ mod tests {
             Box::new(PermissionChildRuntime {
                 events: Vec::new(),
                 is_shutdown: true,
+                submitted_provider_texts: ChildProviderTextLog::default(),
             })
         })
         .await;

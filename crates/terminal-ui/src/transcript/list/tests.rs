@@ -1065,11 +1065,10 @@ fn agent_fact_items_flow_through_render_pipeline_with_cached_blocks() {
             "  ├ first task",
             "  └ second task",
             "",
-            "● Completed research task",
-            "  └ Child Agent completed",
+            "● Finished research task",
         ]
     );
-    assert_eq!(result.line_count, 6);
+    assert_eq!(result.line_count, 5);
 
     // Agent fact 是 immutable item：无动态 marker，重复 render 必须整体命中缓存。
     let second = transcript.render(crate::frame_time::FrameRenderContext::capture());

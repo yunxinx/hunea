@@ -521,7 +521,9 @@ pub(super) fn run_interrupt_current_turn_effect(
         Ok(RuntimeCommandReceipt::Interrupted {
             target: Some(RuntimeTarget::Provider(_)),
         }) => {
-            model.finish_stream_activity_with_work_summary();
+            // 用户主动打断不是连续工作：不追加耗时分割线，"Chat interrupted"
+            // 系统消息由 Interrupted 事件路径独立交付。
+            model.clear_stream_activity();
         }
         Ok(RuntimeCommandReceipt::Interrupted { .. }) => {}
         Ok(_) => {}

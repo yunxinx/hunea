@@ -27,9 +27,10 @@ use runtime_domain::session::{
 
 use super::agent::{
     AgentChildRuntimeLeases, AgentChildRuntimeStaticGrants, AgentMessageDelivery,
-    AgentRuntimeActivationGrants, AgentRuntimeActivity, AgentRuntimePort, AgentSessionCapability,
-    AgentStopReceipt, ChildAgentFactory, SendAgentMessageFailure, SendAgentMessageRequest,
-    SpawnAgentsFailure, SpawnAgentsRequest, StopAgentsFailure, StopAgentsRequest,
+    AgentReportEnvelope, AgentRuntimeActivationGrants, AgentRuntimeActivity, AgentRuntimePort,
+    AgentSessionCapability, AgentStopReceipt, ChildAgentFactory, SendAgentMessageFailure,
+    SendAgentMessageRequest, SpawnAgentsFailure, SpawnAgentsRequest, StopAgentsFailure,
+    StopAgentsRequest,
 };
 use super::agent_capability_context::{
     AgentCapabilityContext, AgentChildCapabilityGrants, AgentContextOwner,
@@ -181,7 +182,6 @@ struct ChildAgentRecord {
     terminal_stopped_by_request: bool,
     status: AgentProjectionStatus,
     latest_activity: AgentActivitySummary,
-    latest_committed_answer: Option<String>,
     /// committed-only transcript projection；streaming partial 与 raw tool payload 永不进入。
     transcript: Vec<AgentTranscriptItem>,
     /// tool activity id -> transcript item index，用于把 Started/Updated 折叠到同一 item。
@@ -233,7 +233,6 @@ impl ChildAgentRecord {
             terminal_stopped_by_request: false,
             status: AgentProjectionStatus::Pending,
             latest_activity: AgentActivitySummary::Preparing,
-            latest_committed_answer: None,
             transcript: Vec::new(),
             transcript_tool_items: BTreeMap::new(),
             pending_permissions: VecDeque::new(),
@@ -858,6 +857,10 @@ impl AgentOrchestrator {
                 record.title.clone(),
                 outcome_for_status(record.terminal_status),
                 safe_outcome_summary(record),
+                child_report_envelope(
+                    record,
+                    runtime_domain::time::unix_timestamp_ms().unwrap_or(0),
+                ),
                 waiter.was_queued,
             )
         });
@@ -1585,24 +1588,31 @@ impl AgentOrchestrator {
             let Some(waiter) = self.group_waiters.remove(&group_id) else {
                 continue;
             };
+            let occurred_at_ms = runtime_domain::time::unix_timestamp_ms().unwrap_or(0);
             let children = child_ids
                 .into_iter()
                 .filter_map(|agent_id| {
-                    self.children
-                        .get(&agent_id)
-                        .map(|record| AgentChildCompletion {
+                    self.children.get(&agent_id).map(|record| {
+                        let envelope = child_report_envelope(record, occurred_at_ms);
+                        AgentChildCompletion {
                             agent_id,
                             title: record.title.clone(),
                             outcome: outcome_for_status(record.terminal_status),
                             summary: safe_outcome_summary(record),
-                        })
+                            report: envelope.report,
+                            tokens: envelope.tokens,
+                            tool_uses: envelope.tool_uses,
+                            duration_ms: envelope.duration_ms,
+                            truncated: envelope.truncated,
+                        }
+                    })
                 })
                 .collect::<Vec<_>>();
             let completion = AgentGroupCompletion {
                 group_id,
                 parent_agent_id,
                 children,
-                occurred_at_ms: runtime_domain::time::unix_timestamp_ms().unwrap_or(0),
+                occurred_at_ms,
             };
             let _ = waiter.response.send(Ok(completion));
         }
@@ -1811,6 +1821,8 @@ impl AgentOrchestrator {
     /// typed subtree stop：generation 校验后复用既有 descendants-first `stop_child`。
     ///
     /// main `Interrupt` 语义保持分离；`AgentId::MAIN` 一律 closed 拒绝。
+    /// settled/disposed 行的 stop 是删除请求：disposal 不保留 terminal 投影行，
+    /// registry 移除并发布 Remove delta；running 行保持 stop 的投影保留语义。
     pub(super) fn stop_agent(
         &mut self,
         agent_id: AgentId,
@@ -1822,8 +1834,24 @@ impl AgentOrchestrator {
         if agent_id == AgentId::MAIN || !self.children.contains_key(&agent_id) {
             return Err(AgentProductCommandRejection::UnknownAgent);
         }
-        self.stop_child(agent_id)
-            .map_err(|_| AgentProductCommandRejection::CleanupPending)
+        let deleting_settled_row = self.children.get(&agent_id).is_some_and(|record| {
+            matches!(
+                record.lifecycle,
+                ChildLifecycle::Settled | ChildLifecycle::Disposed
+            )
+        });
+        let result = if deleting_settled_row {
+            self.dispose_child_ids(
+                self.subtree_ids(agent_id),
+                ChildDisposalIntent {
+                    retain_terminal_projection: false,
+                    stopped_by_request: true,
+                },
+            )
+        } else {
+            self.stop_child(agent_id)
+        };
+        result.map_err(|_| AgentProductCommandRejection::CleanupPending)
     }
 
     /// 把某个 child 的最新投影发布给存活的 observation；permission 变化独立于 observation 交付。
@@ -2665,17 +2693,56 @@ fn safe_launch_error(error: &AgentRuntimeError) -> SpawnAgentsFailure {
     }
 }
 
-/// transcript 中最后一条 committed assistant 内容；streaming partial 永不进入，因此它是
-/// child 产出的唯一 committed 来源。
+/// transcript 中最近一条有非空正文的 committed assistant 内容；streaming partial 永不
+/// 进入，因此它是 child 产出的唯一 committed 来源。空正文收尾（纯 tool_use turn、
+/// reasoning-only 收尾）不代表报告，继续回溯更早的非空 item；全部为空时返回 `None`。
 fn latest_committed_assistant_content(record: &ChildAgentRecord) -> Option<&str> {
     record.transcript.iter().rev().find_map(|item| match item {
-        AgentTranscriptItem::Assistant { content } => Some(content.as_str()),
+        AgentTranscriptItem::Assistant { content } => {
+            (!content.trim().is_empty()).then_some(content.as_str())
+        }
         _ => None,
     })
 }
 
-/// child terminal outcome 的 delivery-safe 摘要：Completed 取最后一条 committed assistant
-/// 内容，Cancelled 按定格来源区分显式停止与自然取消，其余 status 只有固定占位文本。
+/// 父 Agent tool result 携带的完整报告字符上限；超出时截断并追加固定 note。
+const AGENT_REPORT_MAX_CHARS: usize = 16 * 1024;
+
+/// completion/delivery tool result 的报告信封取值。
+///
+/// `summary`（240 列单行）与完整报告是两个数据面：摘要服务 TUI 面板与 preview，
+/// 报告只进入父 Agent 可见的 tool result。reasoning-only 收尾没有可回传的正文，
+/// `report` 为 `None`，由 summary 保留空占位语义。
+fn child_report_envelope(record: &ChildAgentRecord, now_ms: i64) -> AgentReportEnvelope {
+    let (report, truncated) = match latest_committed_assistant_content(record) {
+        Some(content) => {
+            let char_count = content.chars().count();
+            if char_count <= AGENT_REPORT_MAX_CHARS {
+                (Some(content.to_string()), false)
+            } else {
+                let truncated_body: String = content.chars().take(AGENT_REPORT_MAX_CHARS).collect();
+                (
+                    Some(format!(
+                        "{truncated_body}\n\n[report truncated: full length {char_count} chars]"
+                    )),
+                    true,
+                )
+            }
+        }
+        None => (None, false),
+    };
+    AgentReportEnvelope {
+        report,
+        truncated,
+        tokens: (record.token_usage > 0).then_some(record.token_usage),
+        tool_uses: (record.tool_uses > 0).then_some(record.tool_uses),
+        duration_ms: record.elapsed_ms_at(now_ms),
+    }
+}
+
+/// child terminal outcome 的 delivery-safe 摘要：Completed 取最近一条有非空正文的
+/// committed assistant 内容，Cancelled 按定格来源区分显式停止与自然取消，其余 status
+/// 只有固定占位文本。
 fn safe_outcome_summary(record: &ChildAgentRecord) -> Option<AgentOutcomeSummary> {
     match record.terminal_status {
         Some(AgentProjectionStatus::Completed) => latest_committed_assistant_content(record)
@@ -2793,13 +2860,12 @@ fn apply_child_projection(record: &mut ChildAgentRecord, kind: &AgentEventKind, 
                 summary: "Waiting for approval".to_string(),
             };
         }
-        AgentEventKind::TurnFinished { response, .. } => {
+        AgentEventKind::TurnFinished { .. } => {
             record.status = AgentProjectionStatus::Completed;
             record.terminal_status = Some(AgentProjectionStatus::Completed);
             // 终态后 elapsed 定格为终态时刻的值，不再随时间推进。
             record.pause_elapsed_at(now_ms);
             record.latest_activity = AgentActivitySummary::Idle;
-            record.latest_committed_answer = Some(response.text_content());
         }
         AgentEventKind::TurnFailed { .. } => {
             record.status = AgentProjectionStatus::Failed;
@@ -3529,7 +3595,7 @@ mod tests {
         (orchestrator, agent_id)
     }
 
-    fn completed_group_summary(kind: AgentEventKind) -> Option<AgentOutcomeSummary> {
+    fn completed_group_child(kind: AgentEventKind) -> AgentChildCompletion {
         let (mut orchestrator, agent_id) = registered_child_with_terminal_event(kind);
         let (response_sender, response_receiver) = oneshot::channel();
         orchestrator.group_waiters.insert(
@@ -3549,7 +3615,7 @@ mod tests {
             .expect("group completion should succeed");
         assert_eq!(completion.children.len(), 1);
         assert_eq!(completion.children[0].agent_id, agent_id);
-        completion.children[0].summary.clone()
+        completion.children[0].clone()
     }
 
     fn finished_turn_event(answer_text: &str) -> AgentEventKind {
@@ -3562,24 +3628,203 @@ mod tests {
 
     #[test]
     fn group_completion_carries_child_committed_answer() {
-        let summary = completed_group_summary(finished_turn_event("  final researched   answer  "));
-        let summary = summary.expect("completed child with output should carry a summary");
+        let child = completed_group_child(finished_turn_event("  final researched   answer  "));
+        let summary = child
+            .summary
+            .expect("completed child with output should carry a summary");
         assert_eq!(summary.as_str(), "final researched answer");
     }
 
     #[test]
     fn group_completion_without_committed_answer_uses_placeholder() {
-        let summary = completed_group_summary(finished_turn_event(""));
-        let summary = summary.expect("completed child should still carry a summary");
+        let child = completed_group_child(finished_turn_event(""));
+        let summary = child
+            .summary
+            .expect("completed child should still carry a summary");
         assert_eq!(summary.as_str(), CHILD_COMPLETED_WITHOUT_REPORT_TEXT);
+        // 空正文收尾没有可回传的报告：信封显式标注为空，而不是复用占位摘要。
+        assert_eq!(child.report, None);
+        assert!(!child.truncated);
+    }
+
+    #[test]
+    fn group_completion_report_backtracks_past_empty_assistant_tail() {
+        // 真机场景：turn 以空正文 assistant item 收尾（报告在更早的非空 item）。
+        let agent_id = AgentId::new(2);
+        let turn_id = AgentTurnId::new(7);
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        orchestrator.register_child_for_test(
+            agent_id,
+            AgentId::MAIN,
+            turn_id,
+            test_title("backtracking child"),
+            test_context("backtracking-child"),
+            Box::new(StubMainRuntime::default()),
+        );
+        orchestrator.mark_child_target_for_test(agent_id, target.clone());
+        {
+            let record = orchestrator
+                .children
+                .get_mut(&agent_id)
+                .expect("registered child should have a record");
+            record.transcript.push(AgentTranscriptItem::Assistant {
+                content: "the actual committed report".to_string(),
+            });
+            record.transcript.push(AgentTranscriptItem::Tool {
+                title: "Read file".to_string(),
+                content: "tool output".to_string(),
+            });
+            record.transcript.push(AgentTranscriptItem::Assistant {
+                content: "   ".to_string(),
+            });
+            record.terminal_status = Some(AgentProjectionStatus::Completed);
+            // completion gate：terminal fact 已交付且 durable outcome 已落盘。
+            record.outcome_persisted = true;
+        }
+        let (response_sender, response_receiver) = oneshot::channel();
+        orchestrator.group_waiters.insert(
+            AgentLaunchGroupId::new(1),
+            GroupWaiter {
+                parent_agent_id: AgentId::MAIN,
+                child_ids: vec![agent_id],
+                response: response_sender,
+            },
+        );
+        orchestrator.try_complete_group_waiters();
+
+        let completion = response_receiver
+            .blocking_recv()
+            .expect("group waiter should settle from the prepared record")
+            .expect("group completion should succeed");
+        let child = &completion.children[0];
+        assert_eq!(
+            child.summary.as_ref().map(AgentOutcomeSummary::as_str),
+            Some("the actual committed report")
+        );
+        assert_eq!(child.report.as_deref(), Some("the actual committed report"));
+    }
+
+    #[test]
+    fn group_completion_report_and_summary_are_separate_layers() {
+        // 报告全文长于 240 显示列：summary 保持截断单行，report 携带全文。
+        let long_report = "long report body".repeat(40);
+        let child = completed_group_child(finished_turn_event(&long_report));
+        assert_eq!(child.report.as_deref(), Some(long_report.as_str()));
+        let summary = child
+            .summary
+            .expect("long report should still produce a summary");
+        assert!(summary.as_str().ends_with("..."));
+        assert!(summary.as_str().chars().count() < long_report.chars().count());
+    }
+
+    #[test]
+    fn group_completion_report_truncates_at_char_limit() {
+        let oversized_report = "x".repeat(AGENT_REPORT_MAX_CHARS + 100);
+        let child = completed_group_child(finished_turn_event(&oversized_report));
+        let report = child
+            .report
+            .expect("oversized report should still be carried in truncated form");
+        assert!(child.truncated);
+        assert!(report.chars().count() < oversized_report.chars().count());
+        let note = format!(
+            "[report truncated: full length {} chars]",
+            oversized_report.chars().count()
+        );
+        assert!(report.contains(&note));
+        // 截断保留正文主体：note 之前的内容仍达到字符上限。
+        let body: String = report.chars().take(AGENT_REPORT_MAX_CHARS).collect();
+        assert_eq!(body.chars().count(), AGENT_REPORT_MAX_CHARS);
+    }
+
+    #[test]
+    fn group_completion_envelope_carries_terminal_metrics() {
+        let agent_id = AgentId::new(2);
+        let turn_id = AgentTurnId::new(7);
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        orchestrator.register_child_for_test(
+            agent_id,
+            AgentId::MAIN,
+            turn_id,
+            test_title("metrics child"),
+            test_context("metrics-child"),
+            Box::new(StubMainRuntime {
+                events: vec![
+                    child_event(
+                        agent_id,
+                        turn_id,
+                        &target,
+                        AgentEventKind::ToolActivityStarted {
+                            activity: runtime_domain::session::RuntimeToolActivity {
+                                activity_id: "metrics-tool".to_string(),
+                                title: "Read file".to_string(),
+                                kind: runtime_domain::session::RuntimeToolKind::Read,
+                                status:
+                                    runtime_domain::session::RuntimeToolActivityStatus::InProgress,
+                                content: vec![
+                                    runtime_domain::session::RuntimeToolActivityContent::Text(
+                                        "safe content".to_string(),
+                                    ),
+                                ],
+                                locations: Vec::new(),
+                                raw_input: None,
+                                raw_output: None,
+                            },
+                        },
+                    ),
+                    child_event(
+                        agent_id,
+                        turn_id,
+                        &target,
+                        AgentEventKind::OutputTokenEstimate { total_tokens: 1200 },
+                    ),
+                    child_event(
+                        agent_id,
+                        turn_id,
+                        &target,
+                        finished_turn_event("metrics report"),
+                    ),
+                ],
+            }),
+        );
+        orchestrator.mark_child_target_for_test(agent_id, target.clone());
+        orchestrator.mark_child_elapsed_started_for_test(agent_id);
+        let (response_sender, response_receiver) = oneshot::channel();
+        orchestrator.group_waiters.insert(
+            AgentLaunchGroupId::new(1),
+            GroupWaiter {
+                parent_agent_id: AgentId::MAIN,
+                child_ids: vec![agent_id],
+                response: response_sender,
+            },
+        );
+
+        let _ = orchestrator.drain_child_events();
+
+        let completion = response_receiver
+            .blocking_recv()
+            .expect("group waiter should receive a completion")
+            .expect("group completion should succeed");
+        let child = &completion.children[0];
+        assert_eq!(child.tokens, Some(1200));
+        assert_eq!(child.tool_uses, Some(1));
+        assert!(
+            child.duration_ms.is_some(),
+            "started child should carry a terminal duration"
+        );
     }
 
     #[test]
     fn group_completion_failed_child_keeps_placeholder_summary() {
-        let summary = completed_group_summary(AgentEventKind::TurnFailed {
+        let child = completed_group_child(AgentEventKind::TurnFailed {
             message: "provider connection closed".to_string(),
         });
-        let summary = summary.expect("failed child should still carry a summary");
+        let summary = child
+            .summary
+            .expect("failed child should still carry a summary");
         assert_eq!(summary.as_str(), "Child Agent failed");
     }
 
@@ -5248,6 +5493,130 @@ mod tests {
                 outcome: AgentOutcome::Cancelled,
                 summary: AgentOutcomeSummary::new(CHILD_CANCELLED_TEXT).ok(),
             }
+        );
+    }
+
+    #[test]
+    fn stop_agent_deletes_settled_row_instead_of_retaining_projection() {
+        // launch-group settled 行在 stop 语义下保留投影；用户 stop 走删除：
+        // 完整清理 + registry 移除 + Remove delta。
+        let agent_id = AgentId::new(2);
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        orchestrator.register_child_for_test(
+            agent_id,
+            AgentId::MAIN,
+            AgentTurnId::new(agent_id.get()),
+            test_title("settled delete"),
+            test_context("settled-delete"),
+            Box::new(ShutdownCountingRuntime {
+                events: vec![child_event(
+                    agent_id,
+                    AgentTurnId::new(agent_id.get()),
+                    &target,
+                    AgentEventKind::TurnFinished {
+                        response: runtime_domain::session::ConversationResponse::assistant_text(
+                            "settled report",
+                        ),
+                        metrics: None,
+                        context_usage: None,
+                    },
+                )],
+                shutdown_calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        orchestrator.mark_child_launch_group_for_test(agent_id, AgentLaunchGroupId::new(1));
+        let _ = orchestrator.drain_child_events();
+        assert_eq!(
+            orchestrator.child_status(agent_id),
+            Some(AgentProjectionStatus::Completed)
+        );
+        // Remove delta 只发布给存活 observation；先建立 overview observation 再删除。
+        orchestrator.observe_agents(AgentObservationRequestId::new(1));
+        let _ = orchestrator.drain_projection_events();
+
+        orchestrator
+            .stop_agent(agent_id, AgentRuntimeGeneration::new(1))
+            .expect("settled delete should converge");
+
+        assert_eq!(
+            orchestrator.child_count(),
+            0,
+            "user stop on a settled row must remove the projection row"
+        );
+        let events = orchestrator.drain_projection_events();
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentProjectionEvent::AgentsOverviewUpdated { delta }
+                    if matches!(
+                        delta.kind,
+                        AgentOverviewDeltaKind::Remove { agent_id } if agent_id == AgentId::new(2)
+                    )
+            )),
+            "settled delete must publish an overview Remove delta: {events:?}"
+        );
+    }
+
+    #[test]
+    fn stop_agent_on_active_child_keeps_terminal_projection_row() {
+        // running 行语义保持 stop：terminal 投影按 launch-group 语义保留，不删除。
+        let agent_id = AgentId::new(2);
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        orchestrator.register_child_for_test(
+            agent_id,
+            AgentId::MAIN,
+            AgentTurnId::new(agent_id.get()),
+            test_title("active stop"),
+            test_context("active-stop"),
+            Box::new(StubMainRuntime::default()),
+        );
+        orchestrator.mark_child_launch_group_for_test(agent_id, AgentLaunchGroupId::new(1));
+
+        orchestrator
+            .stop_agent(agent_id, AgentRuntimeGeneration::new(1))
+            .expect("active stop should converge");
+
+        assert_eq!(orchestrator.child_count(), 1);
+        assert_eq!(
+            orchestrator.child_status(agent_id),
+            Some(AgentProjectionStatus::Cancelled)
+        );
+        assert!(!orchestrator.child_has_authority(agent_id));
+    }
+
+    #[test]
+    fn stop_agent_deletes_disposed_terminal_projection_row() {
+        // 第一段 stop 定格 Cancelled 并保留投影行（Disposed）；对同一行的第二次
+        // stop 是删除请求：行移除。
+        let agent_id = AgentId::new(2);
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        orchestrator.register_child_for_test(
+            agent_id,
+            AgentId::MAIN,
+            AgentTurnId::new(agent_id.get()),
+            test_title("disposed delete"),
+            test_context("disposed-delete"),
+            Box::new(StubMainRuntime::default()),
+        );
+        orchestrator.mark_child_launch_group_for_test(agent_id, AgentLaunchGroupId::new(1));
+
+        orchestrator
+            .stop_agent(agent_id, AgentRuntimeGeneration::new(1))
+            .expect("first stop should converge");
+        assert_eq!(orchestrator.child_count(), 1);
+
+        orchestrator
+            .stop_agent(agent_id, AgentRuntimeGeneration::new(1))
+            .expect("second stop should delete the disposed projection row");
+
+        assert_eq!(
+            orchestrator.child_count(),
+            0,
+            "stop on a disposed projection row must delete it"
         );
     }
 

@@ -5,7 +5,8 @@ use runtime_domain::agent::{
 
 use crate::{
     agents_panel::{
-        AGENTS_ACTIVITY_FOLD_MIN_WIDTH, agent_status_is_running, agents_activity_fold_entries,
+        AGENTS_ACTIVITY_FOLD_MIN_WIDTH, agent_status_is_running, agent_status_is_settled,
+        agents_activity_fold_entries,
     },
     fullscreen_search_list::FullscreenSearchListState,
     list_selection::ListNavigationDirection,
@@ -13,6 +14,23 @@ use crate::{
     transcript::Transcript,
     transcript_overlay::TranscriptOverlayState,
 };
+
+/// `x` 二次确认绑定的目标与动作语义：running 行是 stop（停止 subtree），
+/// settled 投影行是 delete（销毁并移除行）。动作类别与行状态类别脱节即取消，
+/// 防止一次 armed 的 stop 确认被静默转换为 delete。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentsPanelStopConfirmation {
+    Stop(AgentId),
+    Delete(AgentId),
+}
+
+impl AgentsPanelStopConfirmation {
+    pub(crate) fn agent_id(&self) -> AgentId {
+        match self {
+            Self::Stop(agent_id) | Self::Delete(agent_id) => *agent_id,
+        }
+    }
+}
 
 /// `/agents` panel 的全部 TUI 侧状态。
 ///
@@ -28,8 +46,8 @@ pub(crate) struct AgentsPanelState {
     /// 当前 overview observation 的 identity；不匹配的增量一律 fail closed。
     pub(super) observation_id: Option<AgentObservationId>,
     pub(super) generation: Option<AgentRuntimeGeneration>,
-    /// `x` 二次确认绑定的 AgentId；selection/generation 变化即取消。
-    pub(super) stop_confirmation: Option<AgentId>,
+    /// `x` 二次确认绑定的目标与动作；selection/generation 变化或动作类别失效即取消。
+    pub(super) stop_confirmation: Option<AgentsPanelStopConfirmation>,
     /// loading 期按下 `x` 后置位：footer 呈现"状态未就绪"提示，按键不静默吞掉。
     /// snapshot 或 error 到达即清除（此时 stop 的可用性由列表/错误行自述）。
     pub(super) stop_unavailable_notice: bool,
@@ -441,15 +459,23 @@ impl AgentsPanelState {
         self.surface.as_ref().map(|surface| surface.agent_id)
     }
 
-    /// stop 确认态是否仍然成立：确认目标仍是当前 selection 且仍可 stop。
+    /// stop 确认态是否仍然成立：确认目标仍是当前 selection，且行的状态类别与
+    /// armed 的动作语义一致（running ↔ Stop、settled ↔ Delete）。
     ///
     /// "selection 改变即取消"由此判定——delta remove 后 selection 按 clamp 规则迁移，
-    /// 迁移结果不指向被确认的 AgentId 时确认自动失效。
+    /// 迁移结果不指向被确认的 AgentId 时确认自动失效；running 确认后行自然进入
+    /// 终态也取消（armed 的是 stop，不得静默转为 delete）。
     pub(super) fn stop_confirmation_still_valid(&self) -> bool {
-        self.stop_confirmation.is_some_and(|confirmed| {
-            self.list
-                .selected_row()
-                .is_some_and(|row| row.agent_id == confirmed && agent_status_is_running(row.status))
+        self.stop_confirmation.is_some_and(|confirmation| {
+            self.list.selected_row().is_some_and(|row| {
+                row.agent_id == confirmation.agent_id()
+                    && match confirmation {
+                        AgentsPanelStopConfirmation::Stop(_) => agent_status_is_running(row.status),
+                        AgentsPanelStopConfirmation::Delete(_) => {
+                            agent_status_is_settled(row.status)
+                        }
+                    }
+            })
         })
     }
 }

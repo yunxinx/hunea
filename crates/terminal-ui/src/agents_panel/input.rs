@@ -8,8 +8,9 @@ use crate::{
     AppEffect, Model,
     agents_panel::{
         AgentsPanelAgentView, AgentsPanelPermissionChoice, AgentsPanelPillNavigation,
-        AgentsPanelState, AgentsPanelSurface, PendingAgentObservationStops,
-        agent_status_is_running, agents_panel_list_page_size, agents_panel_rejection_text,
+        AgentsPanelState, AgentsPanelStopConfirmation, AgentsPanelSurface,
+        PendingAgentObservationStops, agent_status_is_running, agent_status_is_settled,
+        agents_panel_list_page_size, agents_panel_rejection_text,
         permission_choice::initial_permission_choice,
     },
     fullscreen_list_chrome::fullscreen_list_body_visible_offset_for_row,
@@ -415,8 +416,9 @@ impl Model {
         }
     }
 
-    /// `x` 二次确认：仅对 selected running child 生效；第二次 `x` 且 selection 未变
-    /// 才派发携带 identity+generation 的 `StopAgent`。
+    /// `x` 二次确认：running 行是 stop（停止 subtree），settled 投影行是 delete
+    /// （销毁并移除行）；第二次 `x` 且 selection 与动作类别未变才派发携带
+    /// identity+generation 的 `StopAgent`。CleanupBlocked 行不可操作。
     fn handle_agents_panel_stop_key(&mut self) -> OverlayInputResult {
         // loading 期 stop 无目标可寻址：置位 footer 提示给出可见反馈，不静默吞掉按键。
         if self
@@ -439,21 +441,27 @@ impl Model {
         let Some(row) = panel.selected_row() else {
             return OverlayInputResult::Handled;
         };
-        if !agent_status_is_running(row.status) {
-            return OverlayInputResult::Handled;
-        }
         let agent_id = row.agent_id;
+        // 动作类别由行的当前状态决定；Stop/Delete 派发的是同一 runtime 命令，
+        // runtime 侧按行 lifecycle 区分停止与删除。
+        let confirmation = if agent_status_is_running(row.status) {
+            AgentsPanelStopConfirmation::Stop(agent_id)
+        } else if agent_status_is_settled(row.status) {
+            AgentsPanelStopConfirmation::Delete(agent_id)
+        } else {
+            return OverlayInputResult::Handled;
+        };
         let Some(generation) = panel.generation else {
             return OverlayInputResult::Handled;
         };
-        if panel.stop_confirmation == Some(agent_id) {
+        if panel.stop_confirmation == Some(confirmation) {
             self.clear_agents_panel_stop_confirmation();
             OverlayInputResult::Effect(AppEffect::StopAgent {
                 agent_id,
                 generation,
             })
         } else {
-            self.set_agents_panel_stop_confirmation(agent_id);
+            self.set_agents_panel_stop_confirmation(confirmation);
             OverlayInputResult::Handled
         }
     }
@@ -464,9 +472,9 @@ impl Model {
         }
     }
 
-    fn set_agents_panel_stop_confirmation(&mut self, agent_id: AgentId) {
+    fn set_agents_panel_stop_confirmation(&mut self, confirmation: AgentsPanelStopConfirmation) {
         if let Some(panel) = self.agents_panel.as_mut() {
-            panel.stop_confirmation = Some(agent_id);
+            panel.stop_confirmation = Some(confirmation);
         }
     }
 

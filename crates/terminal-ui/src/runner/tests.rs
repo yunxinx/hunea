@@ -2149,6 +2149,63 @@ fn interrupt_conversation_clears_runtime_without_immediate_notice() {
 }
 
 #[test]
+fn interrupt_effect_skips_work_duration_summary_even_after_long_activity() {
+    // 用户主动打断不是连续工作：即使 activity 累计超过 30s 也不追加耗时分割线；
+    // "Chat interrupted" 系统消息由 Interrupted 事件路径独立交付。
+    let target = RuntimeTarget::provider("local", "qwen3");
+    let mut runtime_coordinator = TestUiRuntimePort {
+        conversation_running: true,
+        ..TestUiRuntimePort::default()
+    };
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.transcript_mut().clear();
+    model.show_stream_activity("qwen3");
+    model.backdate_stream_activity_started_at_for_test(Duration::from_secs(38));
+
+    apply_effect_if_needed_for_test(
+        &mut model,
+        &mut runtime_coordinator,
+        Some(AppEffect::InterruptCurrentTurn),
+    );
+    model.apply_runtime_event(RuntimeEvent::Interrupted {
+        target: Some(target),
+    });
+
+    assert_eq!(
+        model.transcript_plain_items(),
+        vec!["■ Chat interrupted".to_string()]
+    );
+    assert!(!model.current_stream_activity_render_result().has_content);
+}
+
+#[test]
+fn natural_message_finish_still_appends_work_duration_summary() {
+    // 自然结束路径的耗时分割线不回归：超过 30s 的 activity 在 Finished 时追加。
+    let target = RuntimeTarget::provider("local", "qwen3");
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.set_window(32, 6);
+    model.transcript_mut().clear();
+    model.show_stream_activity("qwen3");
+    model.backdate_stream_activity_started_at_for_test(Duration::from_secs(38));
+
+    model.apply_runtime_event(RuntimeEvent::MessageFinished {
+        target: Some(target),
+        response: assistant_response("最终正文"),
+        finish_reason: None,
+        metrics: None,
+        context_usage: None,
+    });
+
+    let items = model.transcript_plain_items();
+    assert!(
+        items.iter().any(|item| item.starts_with("─ Worked for")),
+        "natural finish must keep the work duration divider: {items:?}"
+    );
+    assert!(items.iter().any(|item| item == "最终正文"));
+    assert!(!model.current_stream_activity_render_result().has_content);
+}
+
+#[test]
 fn interrupt_receipt_and_runtime_event_append_single_system_message() {
     let mut runtime_coordinator = TestUiRuntimePort {
         conversation_running: true,

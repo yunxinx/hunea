@@ -4028,6 +4028,11 @@ mod tests {
                 .as_str(),
             "child complete"
         );
+        // 父 Agent 层拿到的是完整报告，而不是 240 列单行摘要。
+        assert_eq!(
+            completion.children[0].report.as_deref(),
+            Some("child complete")
+        );
 
         shutdown_blocked.store(false, Ordering::SeqCst);
         components.shutdown().expect("runtime should shut down");
@@ -4643,6 +4648,12 @@ mod tests {
                 .as_str(),
             CHILD_REPORT_TEXT
         );
+        assert_eq!(
+            group_completion.children[0].report.as_deref(),
+            Some(CHILD_REPORT_TEXT),
+            "spawn tool result must carry the full committed report to the parent model"
+        );
+        assert!(!group_completion.children[0].truncated);
 
         // main 模型视图包含 spawn_agents；child 的 provider-visible schema 不包含——
         // 执行面与模型视图在同一 filtered registry 上收敛。
@@ -4970,6 +4981,10 @@ mod tests {
                 .as_str(),
             CHILD_REPORT_TEXT
         );
+        assert_eq!(
+            group_completion.children[0].report.as_deref(),
+            Some(CHILD_REPORT_TEXT)
+        );
 
         // send 回执：授权层放行（非 error），followup 报告摘要直达父模型。
         let (send_result_text, send_is_error) = parent_provider
@@ -4989,6 +5004,11 @@ mod tests {
         assert_eq!(
             delivery["summary"],
             serde_json::json!(CHILD_FOLLOWUP_REPORT_TEXT)
+        );
+        assert_eq!(
+            delivery["report"],
+            serde_json::json!(CHILD_FOLLOWUP_REPORT_TEXT),
+            "send receipt must carry the full follow-up report to the parent model"
         );
         assert_eq!(
             delivery["queued"],
@@ -5366,6 +5386,8 @@ mod tests {
                 .map(runtime_domain::agent::AgentOutcomeSummary::as_str),
             Some("Child Agent stopped")
         );
+        // 停止发生在 terminal 事实交付前：没有任何 committed 正文可回传。
+        assert_eq!(group_completion.children[0].report, None);
 
         // launch-group child 显式停止后保留 settled 投影行。
         assert_eq!(components.child_agent_count_for_test(), 1);
@@ -5720,6 +5742,10 @@ mod tests {
         assert_eq!(delivery["outcome"], serde_json::json!("completed"));
         assert_eq!(
             delivery["summary"],
+            serde_json::json!(QUEUED_CHILD_REFINED_ANSWER)
+        );
+        assert_eq!(
+            delivery["report"],
             serde_json::json!(QUEUED_CHILD_REFINED_ANSWER)
         );
         assert_eq!(
@@ -6639,6 +6665,17 @@ mod tests {
                 .iter()
                 .all(|child| child.outcome == AgentOutcome::Completed)
         );
+        // 信封字段：两个 child 的完整报告与终态 metrics 直达父模型。
+        for child in &completion.children {
+            assert_eq!(child.report.as_deref(), Some("child answer"));
+            assert!(!child.truncated);
+            assert_eq!(child.tool_uses, Some(1));
+            assert_eq!(child.tokens, None);
+            assert!(
+                child.duration_ms.is_some(),
+                "production-staged children should carry a terminal duration"
+            );
+        }
         assert!(!completion_text.contains(PRIVATE_SECOND_LINE));
         assert!(!completion_text.contains(PRIVATE_INSTRUCTIONS));
 

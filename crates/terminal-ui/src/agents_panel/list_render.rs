@@ -12,9 +12,10 @@ use crate::{
     agents_panel::{
         AGENTS_ELAPSED_COLUMN_WIDTH, AGENTS_STATUS_COLUMN_WIDTH, AGENTS_TOKENS_COLUMN_WIDTH,
         AGENTS_TOOLS_COLUMN_WIDTH, AgentsPanelActivityFold, AgentsPanelState,
-        agent_activity_summary_text, agent_status_dot_style, agent_status_dot_symbol,
-        agent_status_label, agents_panel_list_page_size, format_agent_elapsed_ms,
-        format_agent_token_usage, format_agent_tool_uses, pad_agents_status_column,
+        AgentsPanelStopConfirmation, agent_activity_summary_text, agent_status_dot_style,
+        agent_status_dot_symbol, agent_status_label, agents_panel_list_page_size,
+        format_agent_elapsed_ms, format_agent_token_usage, format_agent_tool_uses,
+        pad_agents_status_column,
     },
     display_width::display_width,
     fullscreen_list_chrome::fullscreen_list_chrome_rects,
@@ -28,17 +29,21 @@ use crate::{
 
 /// 行首选中 marker：`█`（command_accent）+ 1 gap；未选中用等宽空白保持列几何。
 const AGENTS_SELECTION_MARKER_WIDTH: usize = 2;
-/// 状态点符号（`●` / `○`）占用的显示列宽。
+/// 状态点符号（`●` / `○`）占用的显示列宽；状态点归入 status 列，不占 marker 前缀。
 const AGENTS_STATUS_DOT_WIDTH: usize = 1;
-/// 行首固定前缀总宽：选中 marker + 状态点 + 点与状态文字的间隔。
-const AGENTS_ROW_PREFIX_WIDTH: usize =
-    AGENTS_SELECTION_MARKER_WIDTH + AGENTS_STATUS_DOT_WIDTH + AGENTS_COLUMN_GAP;
+/// status 列内状态点前缀的总宽：dot 符号 + dot 与状态文字的间隔。
+/// 列头行同样预留该宽度（dot 位空白），列头 Status 与数据行状态文字纵向对齐。
+const AGENTS_STATUS_COLUMN_PREFIX_WIDTH: usize = AGENTS_STATUS_DOT_WIDTH + AGENTS_COLUMN_GAP;
+/// 行首固定前缀总宽：仅选中 marker；状态点与状态文字一起计入 status 列宽。
+const AGENTS_ROW_PREFIX_WIDTH: usize = AGENTS_SELECTION_MARKER_WIDTH;
 /// 行右端保留的空白列；metrics 列右对齐锚定在 `width - AGENTS_ROW_RIGHT_PADDING`。
 pub(super) const AGENTS_ROW_RIGHT_PADDING: usize = 2;
 const AGENTS_COLUMN_GAP: usize = 1;
-/// stop 二次确认的内联提示文案：占用选中行 latest 列槽位（Idle 行同样显示，
+/// `x` 二次确认的内联提示文案：占用选中行 latest 列槽位（Idle 行同样显示，
 /// 提示优先于活动文本），command_accent 着色。footer 不再承担该提示。
+/// stop 与 delete 的提示文案分开，确认态向用户声明本次动作语义。
 pub(super) const AGENTS_STOP_CONFIRM_HINT: &str = "· press x again to stop";
+pub(super) const AGENTS_DELETE_CONFIRM_HINT: &str = "· press x again to delete";
 /// metric 列之间的间隔：固定列宽下纵向对齐由列边界承载，不需要 `·` 分隔。
 const AGENTS_METRIC_COLUMN_GAP: usize = 1;
 const AGENTS_TITLE_MIN_WIDTH: usize = 16;
@@ -52,8 +57,10 @@ const AGENTS_LATEST_MIN_VISIBLE_WIDTH: usize = 3;
 /// 折叠区仅在宽度不低于 `AGENTS_ACTIVITY_FOLD_MIN_WIDTH` 时渲染，该区间内
 /// 状态列恒为满宽，title 列起点因此是常量。
 pub(super) fn agents_activity_fold_prefix(symbol: &str) -> String {
-    const INDENT_WIDTH: usize =
-        AGENTS_ROW_PREFIX_WIDTH + AGENTS_STATUS_COLUMN_WIDTH + AGENTS_COLUMN_GAP;
+    const INDENT_WIDTH: usize = AGENTS_ROW_PREFIX_WIDTH
+        + AGENTS_STATUS_COLUMN_PREFIX_WIDTH
+        + AGENTS_STATUS_COLUMN_WIDTH
+        + AGENTS_COLUMN_GAP;
     format!("{}{symbol} ", " ".repeat(INDENT_WIDTH))
 }
 
@@ -174,12 +181,19 @@ impl Model {
                 };
                 let absolute_position = page_start + visible_position;
                 let is_cursor = state.is_selected_visible_position(absolute_position);
-                let stop_hint = is_cursor && state.stop_confirmation == Some(row.agent_id);
+                let confirm_hint = is_cursor
+                    .then(|| match state.stop_confirmation {
+                        Some(confirmation) if confirmation.agent_id() == row.agent_id => {
+                            Some(agents_panel_confirm_hint_text(confirmation))
+                        }
+                        _ => None,
+                    })
+                    .flatten();
                 lines.push(agents_panel_row_line(
                     row,
                     width,
                     is_cursor,
-                    stop_hint,
+                    confirm_hint,
                     self.palette,
                 ));
                 if is_cursor {
@@ -199,19 +213,27 @@ impl Model {
     }
 }
 
-/// 固定单行 row：选中 marker + 状态点/文字 + title 主导列 + latest 弹性列 +
-/// 右对齐固定列宽 metrics。
+/// 确认态动作对应的内联提示文案。
+fn agents_panel_confirm_hint_text(confirmation: AgentsPanelStopConfirmation) -> &'static str {
+    match confirmation {
+        AgentsPanelStopConfirmation::Stop(_) => AGENTS_STOP_CONFIRM_HINT,
+        AgentsPanelStopConfirmation::Delete(_) => AGENTS_DELETE_CONFIRM_HINT,
+    }
+}
+
+/// 固定单行 row：选中 marker + status 列（状态点 + 状态文字）+ title 主导列 +
+/// latest 弹性列 + 右对齐固定列宽 metrics。
 /// 选中只改变行首 `█` marker 与 title bold；行不携带背景（无斑马纹），
-/// 各列保持自己的语义色。stop 确认激活时 latest 列被内联提示接管
+/// 各列保持自己的语义色。确认提示激活时 latest 列被内联提示接管
 /// （command_accent 着色），列几何不变。
 pub(super) fn agents_panel_row_line(
     row: &AgentOverviewRow,
     width: usize,
     is_cursor: bool,
-    stop_hint: bool,
+    confirm_hint: Option<&'static str>,
     palette: TerminalPalette,
 ) -> Line<'static> {
-    let layout = agents_panel_row_layout(row, width, stop_hint);
+    let layout = agents_panel_row_layout(row, width, confirm_hint);
     let status_style = agent_status_dot_style(row.status, &palette);
     let title_style = if is_cursor {
         primary_text_style(palette).add_modifier(Modifier::BOLD)
@@ -227,6 +249,7 @@ pub(super) fn agents_panel_row_line(
     let title_gap = usize::from(!layout.title.is_empty()) * AGENTS_COLUMN_GAP;
     let latest_gap = usize::from(layout.latest.is_some()) * AGENTS_COLUMN_GAP;
     let content_width = AGENTS_ROW_PREFIX_WIDTH
+        + AGENTS_STATUS_COLUMN_PREFIX_WIDTH
         + display_width(&layout.status)
         + title_gap
         + title_width
@@ -249,7 +272,7 @@ pub(super) fn agents_panel_row_line(
     }
     if let Some(latest) = layout.latest {
         spans.push(Span::raw(" ".repeat(AGENTS_COLUMN_GAP)));
-        let latest_style = if stop_hint {
+        let latest_style = if confirm_hint.is_some() {
             command_accent_text_style(palette)
         } else {
             secondary_text_style(palette)
@@ -281,19 +304,27 @@ fn agents_panel_selection_marker_span(is_cursor: bool, palette: TerminalPalette)
     }
 }
 
-/// 列头行：列名对齐行布局的列几何——状态列与行同宽左对齐、metrics 三列
-/// 固定列宽右对齐锚定行右端；title/latest 为弹性列，列名只标列起点。
+/// 列头行：列名对齐行布局的列几何——状态列（含 dot 位）与行同宽左对齐、
+/// metrics 三列固定列宽右对齐锚定行右端；title/latest 为弹性列，列名只标列起点。
 pub(super) fn agents_panel_column_header_line(
     width: usize,
     palette: TerminalPalette,
 ) -> Line<'static> {
     let width = width.max(1);
-    let status = pad_agents_status_column("Status", width.saturating_sub(AGENTS_ROW_PREFIX_WIDTH));
-    let fixed_width = AGENTS_ROW_PREFIX_WIDTH + display_width(&status) + AGENTS_COLUMN_GAP;
+    let status_budget =
+        width.saturating_sub(AGENTS_ROW_PREFIX_WIDTH + AGENTS_STATUS_COLUMN_PREFIX_WIDTH);
+    let status = pad_agents_status_column("Status", status_budget);
+    let fixed_width = AGENTS_ROW_PREFIX_WIDTH
+        + AGENTS_STATUS_COLUMN_PREFIX_WIDTH
+        + display_width(&status)
+        + AGENTS_COLUMN_GAP;
     let usable_width = width.saturating_sub(AGENTS_ROW_RIGHT_PADDING);
     let columns = agents_panel_metric_columns(
         Some(align_metric_to_column("Time", AGENTS_ELAPSED_COLUMN_WIDTH)),
-        Some(align_metric_to_column("Tools", AGENTS_TOOLS_COLUMN_WIDTH)),
+        Some(align_metric_to_column(
+            "Use Tools",
+            AGENTS_TOOLS_COLUMN_WIDTH,
+        )),
         Some(align_metric_to_column("Tokens", AGENTS_TOKENS_COLUMN_WIDTH)),
         usable_width,
         fixed_width,
@@ -301,8 +332,9 @@ pub(super) fn agents_panel_column_header_line(
 
     let style = table_header_text_style(palette);
     let status_width = display_width(&status);
+    // 列头不带状态点（无状态语义），但预留 dot 位让 Status 与行的状态文字对齐。
     let mut spans = vec![
-        Span::raw(" ".repeat(AGENTS_ROW_PREFIX_WIDTH)),
+        Span::raw(" ".repeat(AGENTS_ROW_PREFIX_WIDTH + AGENTS_STATUS_COLUMN_PREFIX_WIDTH)),
         Span::styled(status, style),
         Span::raw(" ".repeat(AGENTS_COLUMN_GAP)),
         Span::styled("Title".to_string(), style),
@@ -311,6 +343,7 @@ pub(super) fn agents_panel_column_header_line(
     ];
     if !columns.is_empty() {
         let leading_width = AGENTS_ROW_PREFIX_WIDTH
+            + AGENTS_STATUS_COLUMN_PREFIX_WIDTH
             + status_width
             + 2 * AGENTS_COLUMN_GAP
             + display_width("Title")
@@ -406,31 +439,33 @@ pub(super) struct AgentsPanelRowLayout {
     pub(super) metrics_width: usize,
 }
 
-/// 职责分档布局：固定前缀（选中 marker + 状态点 + 状态文字）→ title 主导弹性列
-/// → latest 弹性列 → metrics 固定列宽右对齐锚定行右端。
+/// 职责分档布局：固定前缀（选中 marker + status 列：状态点 + 状态文字）→
+/// title 主导弹性列 → latest 弹性列 → metrics 固定列宽右对齐锚定行右端。
 /// 收窄让位顺序 tokens → tools → elapsed；极窄回退仅保留前缀 + 状态 + 标题。
-/// `stop_hint` 激活时 latest 列槽位固定给内联提示（Idle 行同样显示，提示
+/// 确认提示激活时 latest 列槽位固定给内联提示（Idle 行同样显示，提示
 /// 优先于活动文本），截断规则与普通 latest 一致，列几何不受影响。
 pub(super) fn agents_panel_row_layout(
     row: &AgentOverviewRow,
     width: usize,
-    stop_hint: bool,
+    confirm_hint: Option<&str>,
 ) -> AgentsPanelRowLayout {
-    let status_budget = width.saturating_sub(AGENTS_ROW_PREFIX_WIDTH);
+    let status_budget =
+        width.saturating_sub(AGENTS_ROW_PREFIX_WIDTH + AGENTS_STATUS_COLUMN_PREFIX_WIDTH);
     let status = pad_agents_status_column(agent_status_label(row.status), status_budget);
     let status_width = display_width(&status);
-    // 固定前缀：行首 marker + 状态点 + 状态文字 + 与后续列的间隔。
-    let fixed_width = AGENTS_ROW_PREFIX_WIDTH + status_width + AGENTS_COLUMN_GAP;
+    // 固定前缀：行首 marker + status 列（dot + 间隔 + 状态文字）+ 与后续列的间隔。
+    let fixed_width = AGENTS_ROW_PREFIX_WIDTH
+        + AGENTS_STATUS_COLUMN_PREFIX_WIDTH
+        + status_width
+        + AGENTS_COLUMN_GAP;
     let title_text = row.title.as_str();
     // Idle 不携带有效信息：latest 列整列隐藏（行保留其余列），不渲染占位文本。
-    let latest_text = if stop_hint {
-        Some(AGENTS_STOP_CONFIRM_HINT.to_string())
-    } else {
-        match &row.latest_activity {
+    let latest_text = confirm_hint
+        .map(str::to_string)
+        .or_else(|| match &row.latest_activity {
             runtime_domain::agent::AgentActivitySummary::Idle => None,
             activity => Some(agent_activity_summary_text(activity)),
-        }
-    };
+        });
 
     let usable_width = width.saturating_sub(AGENTS_ROW_RIGHT_PADDING);
     let metrics = agents_panel_metric_columns(

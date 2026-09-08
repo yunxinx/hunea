@@ -2,6 +2,7 @@ use crossterm::event::KeyCode;
 use runtime_domain::agent::{AgentId, AgentProjectionStatus, AgentRuntimeGeneration};
 
 use crate::AppEffect;
+use crate::agents_panel::AgentsPanelStopConfirmation;
 
 use super::common::{
     apply_overview_delta, apply_overview_snapshot, overview_row, press_key, ready_panel_model,
@@ -16,7 +17,7 @@ fn first_x_arms_confirmation_second_x_dispatches_stop() {
     assert_eq!(first, None, "first x only arms the confirmation");
     assert_eq!(
         model.agents_panel.as_ref().unwrap().stop_confirmation,
-        Some(AgentId::new(2))
+        Some(AgentsPanelStopConfirmation::Stop(AgentId::new(2)))
     );
 
     let second = press_key(&mut model, KeyCode::Char('x'));
@@ -31,11 +32,73 @@ fn first_x_arms_confirmation_second_x_dispatches_stop() {
 }
 
 #[test]
-fn x_on_terminal_agent_never_arms() {
-    let mut model = ready_panel_model_with_rows(vec![super::common::overview_row(
+fn first_x_arms_delete_confirmation_on_settled_row_second_x_dispatches_stop() {
+    // settled 投影行的 x 是 delete 语义：同一 StopAgent 命令，runtime 侧行删除清理。
+    let mut model = ready_panel_model_with_rows(vec![overview_row(
         3,
         "write docs",
         AgentProjectionStatus::Completed,
+    )]);
+
+    let first = press_key(&mut model, KeyCode::Char('x'));
+    assert_eq!(first, None, "first x on a settled row arms the delete");
+    assert_eq!(
+        model.agents_panel.as_ref().unwrap().stop_confirmation,
+        Some(AgentsPanelStopConfirmation::Delete(AgentId::new(3)))
+    );
+
+    let second = press_key(&mut model, KeyCode::Char('x'));
+    assert_eq!(
+        second,
+        Some(AppEffect::StopAgent {
+            agent_id: AgentId::new(3),
+            generation: AgentRuntimeGeneration::new(1),
+        })
+    );
+    assert_eq!(model.agents_panel.as_ref().unwrap().stop_confirmation, None);
+}
+
+#[test]
+fn delete_confirmation_removes_the_row_projection() {
+    // 派发 delete 后 runtime 侧发布 Remove delta：投影行从面板移除。
+    let mut model = ready_panel_model_with_rows(vec![
+        overview_row(2, "research task", AgentProjectionStatus::Working),
+        overview_row(3, "write docs", AgentProjectionStatus::Completed),
+    ]);
+    // 选中 settled 行。
+    press_key(&mut model, KeyCode::Char('j'));
+    assert_eq!(
+        model.agents_panel_selected_agent_id_for_test(),
+        Some(AgentId::new(3))
+    );
+
+    press_key(&mut model, KeyCode::Char('x'));
+    press_key(&mut model, KeyCode::Char('x'));
+
+    apply_overview_delta(
+        &mut model,
+        runtime_domain::agent::AgentOverviewDeltaKind::Remove {
+            agent_id: AgentId::new(3),
+        },
+    );
+    let panel = model.agents_panel.as_ref().unwrap();
+    assert!(
+        !panel
+            .list
+            .rows()
+            .iter()
+            .any(|row| row.agent_id == AgentId::new(3)),
+        "the deleted agent's projection row must be removed"
+    );
+    assert_eq!(panel.filtered_count(), 1);
+}
+
+#[test]
+fn x_on_cleanup_blocked_row_is_inert() {
+    let mut model = ready_panel_model_with_rows(vec![overview_row(
+        3,
+        "blocked docs",
+        AgentProjectionStatus::CleanupBlocked,
     )]);
 
     assert_eq!(press_key(&mut model, KeyCode::Char('x')), None);
@@ -71,7 +134,7 @@ fn selection_move_cancels_confirmation() {
     assert_eq!(press_key(&mut model, KeyCode::Char('x')), None);
     assert_eq!(
         model.agents_panel.as_ref().unwrap().stop_confirmation,
-        Some(AgentId::new(3))
+        Some(AgentsPanelStopConfirmation::Stop(AgentId::new(3)))
     );
 }
 
@@ -132,7 +195,37 @@ fn delta_making_confirmed_agent_terminal_cancels_confirmation() {
     assert_eq!(
         model.agents_panel.as_ref().unwrap().stop_confirmation,
         None,
-        "a terminal delta on the confirmed agent must cancel the confirmation"
+        "a terminal delta on the confirmed agent must cancel the stop confirmation"
+    );
+}
+
+#[test]
+fn delta_making_confirmed_agent_running_cancels_delete_confirmation() {
+    // armed 的是 delete：行回到 running 也不得静默转为 stop 确认。
+    let mut model = ready_panel_model_with_rows(vec![overview_row(
+        3,
+        "write docs",
+        AgentProjectionStatus::Completed,
+    )]);
+    press_key(&mut model, KeyCode::Char('x'));
+    assert_eq!(
+        model.agents_panel.as_ref().unwrap().stop_confirmation,
+        Some(AgentsPanelStopConfirmation::Delete(AgentId::new(3)))
+    );
+
+    apply_overview_delta(
+        &mut model,
+        runtime_domain::agent::AgentOverviewDeltaKind::Upsert(overview_row(
+            3,
+            "write docs",
+            AgentProjectionStatus::Working,
+        )),
+    );
+
+    assert_eq!(
+        model.agents_panel.as_ref().unwrap().stop_confirmation,
+        None,
+        "a running delta on the delete-confirmed agent must cancel the confirmation"
     );
 }
 
@@ -188,7 +281,7 @@ fn loading_notice_clears_once_snapshot_arrives() {
     assert_eq!(press_key(&mut model, KeyCode::Char('x')), None);
     assert_eq!(
         model.agents_panel.as_ref().unwrap().stop_confirmation,
-        Some(AgentId::new(2))
+        Some(AgentsPanelStopConfirmation::Stop(AgentId::new(2)))
     );
     assert_eq!(
         press_key(&mut model, KeyCode::Char('x')),

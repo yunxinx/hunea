@@ -20,8 +20,8 @@ fn wide_row_shows_all_columns_as_single_line() {
     assert!(row.contains("Working"), "status label: {row}");
     assert!(row.contains("thinking"), "latest activity: {row}");
     assert!(row.contains("1m23s"), "elapsed: {row}");
-    assert!(row.contains("3 tools"), "tool count: {row}");
-    assert!(row.contains("2.0K Tokens"), "token usage: {row}");
+    assert!(row.contains(" 3 "), "tool count: {row}");
+    assert!(row.contains("2.0K"), "token usage: {row}");
     assert!(
         crate::display_width::display_width(row.trim_end()) <= 100,
         "row must not overflow the terminal width: {row}"
@@ -39,7 +39,7 @@ fn column_header_renders_above_rows_and_hides_without_rows() {
         .expect("column header should render above the rows");
     assert!(header.contains("Status"), "status label: {header}");
     assert!(header.contains("Title") && header.contains("Latest"));
-    assert!(header.contains("Time") && header.contains("Tools"));
+    assert!(header.contains("Time") && header.contains("Use Tools"));
     // 表头行在数据行之前。
     let header_position = rows
         .iter()
@@ -79,7 +79,7 @@ fn moderate_width_hides_tokens_first() {
     let mut model = ready_panel_model();
 
     // usable 58；全 metrics 需 fixed 15 + title 16 + latest 8 + 间隔 2 + metrics
-    // 序列 30 + metrics_gap 1 = 71，丢 tokens 后需 58 恰好容纳。
+    // 序列 23 + metrics_gap 1 = 64，丢 tokens 后需 56 恰好容纳。
     let buffer = render_model_buffer(&mut model, 60, 24);
     let rows = rendered_rows(&buffer);
     let row = rows
@@ -87,10 +87,10 @@ fn moderate_width_hides_tokens_first() {
         .find(|row| row.contains("research task"))
         .expect("row should render");
     assert!(
-        !row.contains("2.0K Tokens"),
+        !row.contains("2.0K"),
         "tokens should be hidden first: {row}"
     );
-    assert!(row.contains("3 tools"), "tools should survive: {row}");
+    assert!(row.contains(" 3 "), "tools should survive: {row}");
     assert!(row.contains("1m23s"), "elapsed should survive: {row}");
 }
 
@@ -98,7 +98,7 @@ fn moderate_width_hides_tokens_first() {
 fn narrow_width_hides_tools_then_elapsed() {
     let mut model = ready_panel_model();
 
-    // usable 50；丢 tokens 后仍需 58，再丢 tools 后需 49 恰好容纳。
+    // usable 50；丢 tokens 后仍需 56，再丢 tools 后需 49 恰好容纳。
     let buffer = render_model_buffer(&mut model, 52, 24);
     let rows = rendered_rows(&buffer);
     let row = rows
@@ -106,13 +106,10 @@ fn narrow_width_hides_tools_then_elapsed() {
         .find(|row| row.contains("research task"))
         .expect("row should render");
     assert!(
-        !row.contains("3 tools"),
+        !row.contains(" 3 "),
         "tools should hide before elapsed: {row}"
     );
-    assert!(
-        !row.contains("2.0K Tokens"),
-        "tokens should hide first: {row}"
-    );
+    assert!(!row.contains("2.0K"), "tokens should hide first: {row}");
     assert!(row.contains("1m23s"), "elapsed should survive: {row}");
 }
 
@@ -141,7 +138,7 @@ fn tighter_width_hides_elapsed() {
 fn extreme_narrow_keeps_status_and_title_only() {
     let mut model = ready_panel_model();
 
-    // 弹性预算 = 30 - 2 - 15 = 13 ≤ title min 16 → 极窄回退仅状态 + 标题。
+    // 弹性预算 = 28 - 15 = 13 ≤ title min 16 → 极窄回退仅状态 + 标题。
     let buffer = render_model_buffer(&mut model, 30, 24);
     let rows = rendered_rows(&buffer);
     let row = rows
@@ -171,8 +168,8 @@ fn row_without_elapsed_keeps_metric_order_when_hiding() {
         .iter()
         .find(|row| row.contains("research task"))
         .expect("row should render");
-    assert!(row.contains("3 tools"), "tools should render: {row}");
-    assert!(row.contains("2.0K Tokens"), "tokens should render: {row}");
+    assert!(row.contains(" 3 "), "tools should render: {row}");
+    assert!(row.contains("2.0K"), "tokens should render: {row}");
     assert!(
         !row.contains("1m23s"),
         "absent elapsed must not render: {row}"
@@ -257,6 +254,32 @@ fn stop_confirmation_hint_renders_inline_in_the_selected_row() {
         rows.iter()
             .all(|row| !row.contains("Press x again to stop")),
         "footer must not carry the stop confirmation hint: {rows:?}"
+    );
+}
+
+#[test]
+fn delete_confirmation_hint_distinguishes_from_stop_on_settled_row() {
+    use runtime_domain::agent::AgentProjectionStatus;
+
+    let mut model = ready_panel_model_with_rows(vec![overview_row(
+        3,
+        "write docs",
+        AgentProjectionStatus::Completed,
+    )]);
+    press_key(&mut model, KeyCode::Char('x'));
+
+    let rows = rendered_rows(&render_model_buffer(&mut model, 100, 24));
+    let selected = rows
+        .iter()
+        .find(|row| row.contains("write docs"))
+        .expect("settled row should render");
+    assert!(
+        selected.contains("press x again to delete"),
+        "settled row confirmation must declare the delete semantics: {selected}"
+    );
+    assert!(
+        !selected.contains("press x again to stop"),
+        "settled row must not show the stop hint: {selected}"
     );
 }
 

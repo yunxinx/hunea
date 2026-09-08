@@ -47,7 +47,7 @@ Wait semantics:
 - The call blocks until every child in the batch completes. Prefer one batch of parallel agents over several serial calls.
 
 Results:
-- Each child returns a final report summary. Only this conversation receives it: restate or quote the report in your own reply.
+- Each child returns its final report. Only this conversation receives it: restate or quote the report in your own reply.
 
 Follow-ups:
 - To add instructions to a dispatched child or ask about its report, call send_agent_message with its agent_id (from a spawn_agents completion result or a send_agent_message receipt).

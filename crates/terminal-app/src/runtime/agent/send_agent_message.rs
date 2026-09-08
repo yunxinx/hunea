@@ -22,7 +22,7 @@ Send a follow-up message to a child Agent you already dispatched and wait for it
 Use it to add instructions or ask questions about that child's work: the child keeps its \
 conversation context, so refer to its earlier objective and report. If the child is still \
 running a task, the message runs after that task finishes. The call blocks until the child \
-completes the turn triggered by this message and returns that turn's report summary. \
+completes the turn triggered by this message and returns that turn's full report. \
 The agent_id must come from a spawn_agents completion result or a send_agent_message \
 receipt.";
 const SEND_AGENT_MESSAGE_PROMPT_GUIDELINES: &str = "\
@@ -35,7 +35,7 @@ Message content:
 - Put one coherent follow-up in a single message instead of several calls in a row.
 
 Wait semantics:
-- The call blocks until the child completes the turn triggered by this message and returns that turn's report summary.
+- The call blocks until the child completes the turn triggered by this message and returns that turn's full report.
 - If the child is still running an earlier task, the message runs after that task finishes.
 
 Addressing:
@@ -96,14 +96,66 @@ impl SendAgentMessageFailure {
 ///
 /// 同步等待语义下不存在独立的“排队”回执；`queued` 保留“消息曾在运行中的任务后
 /// 排队”这一事实，供模型向用户转述时序。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+///
+/// `summary` 是 TUI 消费的单行摘要；`report` 是完整的 committed assistant 正文——
+/// 与 `AgentChildCompletion` 的信封字段同构。
+#[derive(Clone, PartialEq, Eq, Serialize)]
 pub(in crate::runtime) struct AgentMessageDelivery {
     agent_id: AgentId,
     title: AgentTitle,
     outcome: AgentOutcome,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     summary: Option<AgentOutcomeSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    report: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tokens: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_uses: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    truncated: bool,
     queued: bool,
+}
+
+/// completion/delivery tool result 共享的报告信封：完整 committed assistant 正文、
+/// 截断标记与终态 metrics。取值与 240 列单行 summary 分层——summary 服务 TUI/面板，
+/// 信封只面向父 Agent。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::runtime) struct AgentReportEnvelope {
+    /// 完整 committed assistant 正文；reasoning-only 收尾时为 `None`。
+    pub report: Option<String>,
+    /// `report` 超出字符上限被截断时为 `true`。
+    pub truncated: bool,
+    /// 终态定格的 token usage。
+    pub tokens: Option<usize>,
+    /// 终态定格的工具调用次数。
+    pub tool_uses: Option<usize>,
+    /// 终态定格的累计 elapsed（毫秒）。
+    pub duration_ms: Option<u64>,
+}
+
+impl std::fmt::Debug for AgentMessageDelivery {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AgentMessageDelivery")
+            .field("agent_id", &self.agent_id)
+            .field("title", &self.title)
+            .field("outcome", &self.outcome)
+            .field("summary", &self.summary)
+            // 报告正文只进入 tool result，不进入诊断输出。
+            .field(
+                "report_chars",
+                &self.report.as_ref().map(|report| report.chars().count()),
+            )
+            .field("tokens", &self.tokens)
+            .field("tool_uses", &self.tool_uses)
+            .field("duration_ms", &self.duration_ms)
+            .field("truncated", &self.truncated)
+            .field("queued", &self.queued)
+            .finish()
+    }
 }
 
 impl AgentMessageDelivery {
@@ -112,13 +164,26 @@ impl AgentMessageDelivery {
         title: AgentTitle,
         outcome: AgentOutcome,
         summary: Option<AgentOutcomeSummary>,
+        envelope: AgentReportEnvelope,
         queued: bool,
     ) -> Self {
+        let AgentReportEnvelope {
+            report,
+            truncated,
+            tokens,
+            tool_uses,
+            duration_ms,
+        } = envelope;
         Self {
             agent_id,
             title,
             outcome,
             summary,
+            report,
+            tokens,
+            tool_uses,
+            duration_ms,
+            truncated,
             queued,
         }
     }
@@ -278,7 +343,7 @@ mod tests {
             .as_deref()
             .expect("send_agent_message should keep a description");
         assert!(description.contains("follow-up message"));
-        assert!(description.contains("report summary"));
+        assert!(description.contains("full report"));
         assert!(description.contains("agent_id"));
         let guidelines = definition
             .prompt_guidelines
@@ -397,6 +462,13 @@ mod tests {
                     .expect("test title should resolve"),
                     AgentOutcome::Completed,
                     AgentOutcomeSummary::new("refined answer").ok(),
+                    AgentReportEnvelope {
+                        report: Some("the full refined report body".to_string()),
+                        truncated: false,
+                        tokens: Some(1200),
+                        tool_uses: Some(3),
+                        duration_ms: Some(45_000),
+                    },
                     true,
                 )))
                 .expect("tool should still await the response");
@@ -409,6 +481,14 @@ mod tests {
         assert_eq!(payload["agent_id"], serde_json::json!(2));
         assert_eq!(payload["outcome"], serde_json::json!("completed"));
         assert_eq!(payload["summary"], serde_json::json!("refined answer"));
+        assert_eq!(
+            payload["report"],
+            serde_json::json!("the full refined report body")
+        );
+        assert_eq!(payload["tokens"], serde_json::json!(1200));
+        assert_eq!(payload["tool_uses"], serde_json::json!(3));
+        assert_eq!(payload["duration_ms"], serde_json::json!(45_000));
+        assert!(payload.get("truncated").is_none());
         assert_eq!(payload["queued"], serde_json::json!(true));
     }
 

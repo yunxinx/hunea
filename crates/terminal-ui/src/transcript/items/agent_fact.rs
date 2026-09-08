@@ -182,29 +182,21 @@ fn launch_fact_lines(
     lines
 }
 
-/// terminal outcome 渲染为 `● Completed|Failed|Cancelled <title>`，
-/// 有 delivery-safe summary 时追加一行 `  └ ` 缩进的 secondary summary。
+/// terminal outcome 渲染为纯状态行 `● Finished|Failed|Stopped <title>`。
+///
+/// 报告正文不进入主文档流：完整报告回传父 Agent tool result，单行摘要由 `/agents`
+/// 面板与 preview 的 activity/latest 数据面承载（summary 字段保留在 durable fact 中）。
 fn outcome_fact_lines(
     snapshot: &AgentOutcomeSnapshot,
     width: usize,
     palette: TerminalPalette,
 ) -> Vec<Line<'static>> {
     let action = match snapshot.outcome {
-        AgentOutcome::Completed => "Completed",
+        AgentOutcome::Completed => "Finished",
         AgentOutcome::Failed => "Failed",
-        AgentOutcome::Cancelled => "Cancelled",
+        AgentOutcome::Cancelled => "Stopped",
     };
-    let mut lines = fact_header_lines(action, snapshot.title.as_str(), width, palette);
-    if let Some(summary) = &snapshot.summary {
-        lines.extend(indented_fact_lines(
-            summary.as_str(),
-            AGENT_FACT_LAST_BRANCH_PREFIX,
-            secondary_text_style(palette),
-            width,
-            palette,
-        ));
-    }
-    lines
+    fact_header_lines(action, snapshot.title.as_str(), width, palette)
 }
 
 /// header 行：marker（BOLD + settled 槽位）+ action（次级强调）+ title（主要扫描目标）。
@@ -455,25 +447,21 @@ mod tests {
     }
 
     #[test]
-    fn outcome_renders_three_states_with_delivery_safe_summary() {
+    fn outcome_renders_three_states_as_status_only_lines() {
         let palette = default_palette();
         for (outcome, action) in [
-            (AgentOutcome::Completed, "Completed"),
+            (AgentOutcome::Completed, "Finished"),
             (AgentOutcome::Failed, "Failed"),
-            (AgentOutcome::Cancelled, "Cancelled"),
+            (AgentOutcome::Cancelled, "Stopped"),
         ] {
             let item = AgentFactItem::outcome(outcome_snapshot(outcome));
             let lines = item.render_lines(80, palette);
 
+            // outcome 行只承载状态语义：durable fact 里的 summary 不再渲染。
             assert_eq!(
                 lines.iter().map(line_to_plain_text).collect::<Vec<_>>(),
-                vec![
-                    format!("● {action} research task"),
-                    "  └ Child Agent completed".to_string(),
-                ]
+                vec![format!("● {action} research task")]
             );
-            assert_eq!(lines[1].spans[0].style, tertiary_text_style(palette));
-            assert_eq!(lines[1].spans[1].style, secondary_text_style(palette));
         }
     }
 
@@ -488,12 +476,12 @@ mod tests {
 
         assert_eq!(
             lines.iter().map(line_to_plain_text).collect::<Vec<_>>(),
-            vec!["● Cancelled research task".to_string()]
+            vec!["● Stopped research task".to_string()]
         );
     }
 
     #[test]
-    fn branch_and_summary_lines_align_continuation_with_four_spaces() {
+    fn branch_lines_align_continuation_with_four_spaces() {
         let palette = default_palette();
         let item = AgentFactItem::launch(launch_snapshot(vec![
             launch_child(2, "a very long child task title that must wrap"),

@@ -544,13 +544,53 @@ fn default_turn_id() -> AgentTurnId {
 }
 
 /// 一个 child terminal outcome 的 delivery-safe completion projection。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// 该结构是父 Agent tool result 的数据面：`summary` 是 TUI/面板消费的 240 列单行
+/// 摘要，`report` 是完整的 committed assistant 正文（按字符上限截断并显式标注）——
+/// 两者独立取值，报告不再复用摘要。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentChildCompletion {
     pub agent_id: AgentId,
     pub title: AgentTitle,
     pub outcome: AgentOutcome,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<AgentOutcomeSummary>,
+    /// 完整 committed assistant 报告；reasoning-only 收尾（无任何非空正文 item）时为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<String>,
+    /// 终态定格的 token usage。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<usize>,
+    /// 终态定格的工具调用次数。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_uses: Option<usize>,
+    /// 终态定格的累计 elapsed（毫秒）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// `report` 超出字符上限被截断时为 `true`。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+}
+
+impl fmt::Debug for AgentChildCompletion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentChildCompletion")
+            .field("agent_id", &self.agent_id)
+            .field("title", &self.title)
+            .field("outcome", &self.outcome)
+            .field("summary", &self.summary)
+            // 报告正文只进入 tool result，不进入诊断输出。
+            .field(
+                "report_chars",
+                &self.report.as_ref().map(|report| report.chars().count()),
+            )
+            .field("tokens", &self.tokens)
+            .field("tool_uses", &self.tool_uses)
+            .field("duration_ms", &self.duration_ms)
+            .field("truncated", &self.truncated)
+            .finish()
+    }
 }
 
 /// 一次 launch group 的稳定 completion aggregate。
@@ -1046,6 +1086,45 @@ mod tests {
         assert_eq!(outcome.group_id, None);
         assert_eq!(outcome.parent_agent_id, None);
         assert_eq!(outcome.parent_turn_id, None);
+    }
+
+    #[test]
+    fn completion_without_envelope_fields_still_restores() {
+        // 旧会话/旧回执没有 report/metrics 字段：反序列化必须得到空信封而不是报错。
+        let old_completion = serde_json::json!({
+            "agent_id": 8,
+            "title": "write a haiku",
+            "outcome": "completed",
+            "summary": "committed report"
+        });
+        let completion: AgentChildCompletion =
+            serde_json::from_value(old_completion).expect("old completion should restore");
+        assert_eq!(completion.report, None);
+        assert_eq!(completion.tokens, None);
+        assert_eq!(completion.tool_uses, None);
+        assert_eq!(completion.duration_ms, None);
+        assert!(!completion.truncated);
+    }
+
+    #[test]
+    fn completion_debug_omits_report_body() {
+        let completion = AgentChildCompletion {
+            agent_id: AgentId::new(8),
+            title: AgentTitle::resolve(&objective("objective"), Some("title"))
+                .expect("title should resolve"),
+            outcome: AgentOutcome::Completed,
+            summary: AgentOutcomeSummary::new("secret summary").ok(),
+            report: Some("PRIVATE_REPORT_BODY".to_string()),
+            tokens: Some(1200),
+            tool_uses: Some(8),
+            duration_ms: Some(42_000),
+            truncated: false,
+        };
+        let debug = format!("{completion:?}");
+
+        assert!(!debug.contains("PRIVATE_REPORT_BODY"));
+        assert!(!debug.contains("secret summary"));
+        assert!(debug.contains("report_chars"));
     }
 
     #[test]

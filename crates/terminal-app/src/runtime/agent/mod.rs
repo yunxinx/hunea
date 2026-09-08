@@ -55,7 +55,8 @@ pub(super) use native::construct_native_child_agent_runtime;
 #[cfg(test)]
 pub(super) use replay::{ReplayAgentRuntime, ReplayFixture, ReplayLifecycleProbe};
 pub(super) use send_agent_message::{
-    AgentMessageDelivery, SendAgentMessageFailure, SendAgentMessageRequest, SendAgentMessageTool,
+    AgentMessageDelivery, AgentReportEnvelope, SendAgentMessageFailure, SendAgentMessageRequest,
+    SendAgentMessageTool,
 };
 pub(super) use spawn_agents::{SpawnAgentsFailure, SpawnAgentsRequest, SpawnAgentsTool};
 pub(super) use stop_agents::{

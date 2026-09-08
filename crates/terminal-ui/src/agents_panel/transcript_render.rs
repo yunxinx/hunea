@@ -32,6 +32,10 @@ use crate::{
 pub(super) const AGENTS_SURFACE_HORIZONTAL_PADDING: usize = 2;
 /// 标题行 title 的保底宽度；低于此值时 elapsed 让位。
 pub(super) const AGENTS_SURFACE_TITLE_MIN_WIDTH: usize = 8;
+/// 标题行 span 之间的 ` · ` 分隔符宽度。
+const AGENTS_SURFACE_SEPARATOR_WIDTH: usize = 3;
+/// 标题行 span 之间的紧凑分隔符。
+const AGENTS_SURFACE_SEPARATOR: &str = " · ";
 
 /// permission 区块的纯布局结果：渲染与正文高度/滚动钳制共用。
 pub(super) struct AgentsPanelPermissionBlock {
@@ -186,7 +190,8 @@ impl Model {
         }
     }
 
-    /// 标题行 + 分割线：状态点/文字（状态语义色）+ primary bold 标题 + elapsed。
+    /// 标题行 + 分割线：状态点/文字（状态语义色）+ primary bold 标题 + elapsed，
+    /// span 间以 ` · ` 紧凑分隔。
     fn render_agents_panel_surface_title(
         &self,
         frame: &mut RenderFrame<'_>,
@@ -195,6 +200,7 @@ impl Model {
         palette: TerminalPalette,
     ) {
         let status_style = crate::agents_panel::agent_status_dot_style(header.status, &palette);
+        let separator_style = tertiary_text_style(palette);
         let mut spans = vec![
             Span::raw(" ".repeat(AGENTS_SURFACE_HORIZONTAL_PADDING)),
             Span::styled(
@@ -205,14 +211,14 @@ impl Model {
             Span::styled(header.status_label.clone(), status_style),
         ];
         if !header.title.is_empty() {
-            spans.push(Span::raw(" "));
+            spans.push(Span::styled(AGENTS_SURFACE_SEPARATOR, separator_style));
             spans.push(Span::styled(
                 header.title.clone(),
                 primary_text_style(palette).bold(),
             ));
         }
         if let Some(elapsed) = &header.elapsed {
-            spans.push(Span::raw(" "));
+            spans.push(Span::styled(AGENTS_SURFACE_SEPARATOR, separator_style));
             spans.push(Span::styled(elapsed.clone(), tertiary_text_style(palette)));
         }
         frame.render_widget(
@@ -405,40 +411,38 @@ fn agents_panel_permission_block_height(
         .min(frame_height.saturating_sub(1))
 }
 
-/// 标题行单行布局：状态（固定列宽）+ title（弹性截断）+ elapsed（空间不足先隐藏）。
+/// 标题行单行布局：状态点 + 状态文字（紧凑无列宽填充）+ title（弹性截断）+
+/// elapsed（空间不足先隐藏）；span 间以 ` · ` 分隔。
 pub(super) fn agents_panel_surface_header(
     status: AgentProjectionStatus,
     title: &str,
     elapsed_ms: Option<u64>,
     width: usize,
 ) -> AgentsPanelSurfaceHeader {
-    use crate::agents_panel::{
-        AGENTS_ELAPSED_COLUMN_WIDTH, agent_status_label, format_agent_elapsed_ms,
-        pad_agents_status_column,
-    };
-    use crate::relative_age::left_pad_display_width;
+    use crate::agents_panel::{agent_status_label, format_agent_elapsed_ms};
 
-    let status_budget = width.saturating_sub(AGENTS_SURFACE_HORIZONTAL_PADDING);
-    let status_label = pad_agents_status_column(agent_status_label(status), status_budget);
+    let status_budget = width.saturating_sub(AGENTS_SURFACE_HORIZONTAL_PADDING + 1 + 1);
+    let status_label =
+        truncate_display_width_with_ellipsis(agent_status_label(status), status_budget.max(1));
     let status_width = display_width(&status_label);
-    let elapsed_label = elapsed_ms.map(|ms| {
-        left_pad_display_width(&format_agent_elapsed_ms(ms), AGENTS_ELAPSED_COLUMN_WIDTH)
-    });
+    let elapsed_label = elapsed_ms.map(format_agent_elapsed_ms);
     let title_budget = width
         .saturating_sub(
             AGENTS_SURFACE_HORIZONTAL_PADDING
                 + 1
-                + status_width
                 + 1
+                + status_width
+                + AGENTS_SURFACE_SEPARATOR_WIDTH
                 + AGENTS_SURFACE_HORIZONTAL_PADDING,
         )
         .max(1);
     // 宽度不足时先隐藏 elapsed，再对 title 做 display-width 安全截断。
     let elapsed_width = elapsed_label.as_deref().map_or(0, display_width);
     let show_elapsed = elapsed_label.is_some()
-        && title_budget > elapsed_width + 1 + AGENTS_SURFACE_TITLE_MIN_WIDTH;
+        && title_budget
+            > elapsed_width + AGENTS_SURFACE_SEPARATOR_WIDTH + AGENTS_SURFACE_TITLE_MIN_WIDTH;
     let title_width = if show_elapsed {
-        title_budget - elapsed_width - 1
+        title_budget - elapsed_width - AGENTS_SURFACE_SEPARATOR_WIDTH
     } else {
         title_budget
     };

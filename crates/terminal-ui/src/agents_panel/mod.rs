@@ -15,7 +15,7 @@ mod tests;
 pub(crate) use pending_permission::{AgentPendingPermissionProjection, AgentsPanelPillNavigation};
 pub(crate) use state::{
     AgentsPanelActivityFold, AgentsPanelAgentView, AgentsPanelPermissionChoice, AgentsPanelState,
-    AgentsPanelSurface, PendingAgentObservationStops,
+    AgentsPanelStopConfirmation, AgentsPanelSurface, PendingAgentObservationStops,
 };
 
 use ratatui::style::Style;
@@ -30,10 +30,10 @@ use crate::theme::{
 /// 上限由最长标签 `Permission` 决定。
 pub(super) const AGENTS_STATUS_COLUMN_WIDTH: usize = 10;
 /// metrics 三列的固定显示宽度（列内右对齐、前置填充）；列间以单空格分隔。
-/// 宽度按各列的常规最大内容核定：`999h59m`、`99 tools`、`99.9K Tokens`。
+/// 宽度按各列的常规最大内容核定：`999h59m`、`99999`、`99.9M`。
 pub(super) const AGENTS_ELAPSED_COLUMN_WIDTH: usize = 8;
-pub(super) const AGENTS_TOOLS_COLUMN_WIDTH: usize = 8;
-pub(super) const AGENTS_TOKENS_COLUMN_WIDTH: usize = 12;
+pub(super) const AGENTS_TOOLS_COLUMN_WIDTH: usize = 6;
+pub(super) const AGENTS_TOKENS_COLUMN_WIDTH: usize = 7;
 
 /// status 的文本标签——状态语义由文本承载，不能只靠颜色表达。
 pub(super) fn agent_status_label(status: AgentProjectionStatus) -> &'static str {
@@ -101,6 +101,17 @@ pub(super) fn agent_status_is_running(status: AgentProjectionStatus) -> bool {
             | AgentProjectionStatus::Working
             | AgentProjectionStatus::WaitingPermission
             | AgentProjectionStatus::Stopping
+    )
+}
+
+/// 是否为 settled 投影行（自然终态或显式停止定格）：`x` 对该类行是 delete 语义。
+/// CleanupBlocked 不算——清理未收敛的行不可操作。
+pub(super) fn agent_status_is_settled(status: AgentProjectionStatus) -> bool {
+    matches!(
+        status,
+        AgentProjectionStatus::Completed
+            | AgentProjectionStatus::Failed
+            | AgentProjectionStatus::Cancelled
     )
 }
 
@@ -193,31 +204,27 @@ pub(super) fn format_agent_elapsed_ms(elapsed_ms: u64) -> String {
     }
 }
 
-/// token usage 的列标签：完整单词 + K/M 缩放。两位以内 mantissa 保留一位小数
-/// （`8 Tokens` / `1.2K Tokens`），更高位退化为整数（`999K Tokens`），
-/// 保证标签宽度有稳定上界、列内单位对齐。
+/// token usage 的列标签：K/M 缩放，不带单位后缀（列头已表达语义）。
+/// 两位以内 mantissa 保留一位小数（`8` / `1.2K`），更高位退化为整数（`999K`），
+/// 保证标签宽度有稳定上界。
 pub(super) fn format_agent_token_usage(token_usage: usize) -> String {
     if token_usage < 1_000 {
-        format!("{token_usage} Tokens")
+        format!("{token_usage}")
     } else if token_usage < 100_000 {
-        format!("{:.1}K Tokens", token_usage as f64 / 1_000.0)
+        format!("{:.1}K", token_usage as f64 / 1_000.0)
     } else if token_usage < 1_000_000 {
-        format!("{}K Tokens", token_usage / 1_000)
+        format!("{}K", token_usage / 1_000)
     } else if token_usage < 100_000_000 {
-        format!("{:.1}M Tokens", token_usage as f64 / 1_000_000.0)
+        format!("{:.1}M", token_usage as f64 / 1_000_000.0)
     } else {
         // 亿级以上封顶 999M，不再加宽标签。
-        format!("{}M Tokens", (token_usage / 1_000_000).min(999))
+        format!("{}M", (token_usage / 1_000_000).min(999))
     }
 }
 
-/// tool 次数的紧凑标签。
+/// tool 次数的列标签：纯数字（列头已表达语义）。
 pub(super) fn format_agent_tool_uses(tool_uses: usize) -> String {
-    if tool_uses == 1 {
-        "1 tool".to_string()
-    } else {
-        format!("{tool_uses} tools")
-    }
+    tool_uses.to_string()
 }
 
 /// observation 拒绝的 closed 分类文案；不携带 raw 错误正文。

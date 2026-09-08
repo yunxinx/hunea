@@ -86,7 +86,7 @@ fn idle_activity_text_is_filtered_from_fold_and_latest_column() {
     // latest 列的 Idle 文本同样不渲染。
     let mut row = overview_row(2, "research task", AgentProjectionStatus::Working);
     row.latest_activity = runtime_domain::agent::AgentActivitySummary::Idle;
-    let layout = crate::agents_panel::list_render::agents_panel_row_layout(&row, 100, false);
+    let layout = crate::agents_panel::list_render::agents_panel_row_layout(&row, 100, None);
     assert!(
         layout.latest.is_none(),
         "Idle latest activity must hide the latest column"

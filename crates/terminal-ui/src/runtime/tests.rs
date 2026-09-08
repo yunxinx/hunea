@@ -665,8 +665,9 @@ fn agent_document_facts_append_semantic_transcript_items() {
     assert!(transcript.contains("● Launched 2 agents"));
     assert!(transcript.contains("  ├ first task"));
     assert!(transcript.contains("  └ second task"));
-    assert!(transcript.contains("● Completed research task"));
-    assert!(transcript.contains("  └ Child Agent completed"));
+    // outcome 行只承载状态语义，报告文本不再进入主文档流。
+    assert!(transcript.contains("● Finished research task"));
+    assert!(!transcript.contains("Child Agent completed"));
     // Agent 事实不降级成 error-styled system message。
     assert!(!transcript.contains('■'));
     // 追加事实后仍保持贴底跟随（非手动滚动）。
@@ -865,7 +866,8 @@ fn agent_document_facts_resume_replay_matches_live_items() {
     let transcript = resumed_model.transcript_plain_items().join("\n");
     assert!(transcript.contains("● Launched research task"));
     assert!(transcript.contains("● Failed research task"));
-    assert!(transcript.contains("  └ Child Agent completed"));
+    // 报告摘要不进入主文档流（resume 路径与 live 路径同构）。
+    assert!(!transcript.contains("Child Agent completed"));
 }
 
 #[test]
@@ -902,7 +904,7 @@ fn agent_outcome_replay_with_legacy_defaults_renders_without_group_identity() {
 
     let text = model.transcript_plain_items().join("\n");
     assert!(text.contains("● Launched legacy task"));
-    assert!(text.contains("● Cancelled legacy task"));
+    assert!(text.contains("● Stopped legacy task"));
 }
 
 #[test]

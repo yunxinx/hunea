@@ -221,7 +221,7 @@ fn surface_title_renders_rule_and_status_dot() {
     let rows = crate::test_helpers::rendered_rows(&crate::test_helpers::render_model_buffer(
         &mut model, 100, 24,
     ));
-    // 标题行：状态点 + 状态文字 + 标题 + elapsed。
+    // 标题行：状态点 + 状态文字 + 标题 + elapsed，` · ` 紧凑分隔。
     let title_row = rows
         .iter()
         .find(|row| row.contains("research task"))
@@ -229,6 +229,10 @@ fn surface_title_renders_rule_and_status_dot() {
     assert!(
         title_row.contains("●") && title_row.contains("Working"),
         "title line carries the status dot and label: {title_row}"
+    );
+    assert!(
+        title_row.contains(" · "),
+        "title line must compact segments with the `·` separator: {title_row}"
     );
     assert!(
         title_row.contains("1m23s"),

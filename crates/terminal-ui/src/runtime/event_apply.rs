@@ -1,4 +1,4 @@
-use runtime_domain::agent::AgentProjectionEvent;
+use runtime_domain::agent::{AgentOverviewDeltaKind, AgentProjectionEvent};
 use runtime_domain::prompt_assembly::{
     PromptAssemblyDiscoveredSkill, PromptAssemblyExtraPromptCandidate,
 };
@@ -315,6 +315,8 @@ impl RuntimeEventApply for Model {
                 // 旧 generation 的 pending permission 投影与导航意图一并失效。
                 self.clear_agent_pending_permissions();
                 self.agents_panel_pill_navigation = None;
+                // 旧 generation 的 settled 销毁唤醒不再有对应 child，一并清除。
+                self.agent_settled_expiry.clear();
                 if let Some(message) = message {
                     self.show_toast(ToastSeverity::Error, format!("Runtime stopped: {message}"));
                 }
@@ -340,6 +342,11 @@ impl RuntimeEventApply for Model {
                     }
                 }
                 AgentProjectionEvent::AgentsOverviewUpdated { delta } => {
+                    // Remove 到达即该 child 行已销毁：销毁唤醒登记随之清除，
+                    // 与 panel 存活无关（panel 关闭时 delta 应用是 no-op）。
+                    if let AgentOverviewDeltaKind::Remove { agent_id } = delta.kind {
+                        self.agent_settled_expiry.remove(agent_id);
+                    }
                     self.apply_agents_overview_delta(delta);
                 }
                 AgentProjectionEvent::AgentViewSnapshotLoaded {
@@ -406,6 +413,8 @@ impl Model {
         // 上一会话的 Agent pending 投影与导航意图不跨会话存活。
         self.clear_agent_pending_permissions();
         self.agents_panel_pill_navigation = None;
+        // 上一会话的 settled child 已随 session transition 清理，销毁唤醒一并作废。
+        self.agent_settled_expiry.clear();
         // 上下文占用描述的是切换前会话的历史;v1 不在 resume 路径恢复
         // 新会话的占用数据,因此切换后先隐藏,等待下一次请求完成再显示。
         self.set_last_context_usage(None);

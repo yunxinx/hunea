@@ -399,17 +399,18 @@ fn narrow_width_hides_the_whole_fold_region() {
 
 #[test]
 fn page_budget_reserves_lines_for_the_activity_fold() {
-    // 高度 24 - chrome 4 = 20 行 body；列头 1 行 + 折叠区恒定预留 4 行 → 每页 15 行。
-    assert_eq!(agents_panel_list_page_size(24), 15);
-    assert_eq!(agents_panel_list_page_size(12), 3);
-    // body 行数不足时保底 1 行。
+    // 高度 24 - chrome 4 = 20 行 body；列头 1 行 + 组头预留 3 行（三组各一行）
+    // + 折叠区恒定预留 4 行 → 每页 12 行。
+    assert_eq!(agents_panel_list_page_size(24), 12);
+    // body 8 行不足以容纳全部预留：保底 1 行（极矮终端接受截尾）。
+    assert_eq!(agents_panel_list_page_size(12), 1);
     assert_eq!(agents_panel_list_page_size(9), 1);
 }
 
 #[test]
 fn fold_lines_count_into_the_page_row_budget() {
-    // 40 行 agents、高度 24：page size 15。选中行 + 4 折叠行必须完整渲染在
-    // body 内（page 预算已为其预留），不得被 body 截尾。
+    // 40 行 agents、高度 24：page size 12（含组头预留）。选中行 + 4 折叠行
+    // 必须完整渲染在 body 内（page 预算已为其预留），不得被 body 截尾。
     let rows = (0..40)
         .map(|index| {
             overview_row(
@@ -443,16 +444,16 @@ fn fold_lines_count_into_the_page_row_budget() {
         4,
         "the full fold must fit inside the page body: {rendered:?}"
     );
-    // page rule 仍在（page 预算没有把 chrome 挤掉）。
-    assert!(rendered.iter().any(|row| row.contains("1/3")));
+    // page rule 仍在（page 预算没有把 chrome 挤掉）；40 行 / 每页 12 行 = 4 页。
+    assert!(rendered.iter().any(|row| row.contains("1/4")));
 }
 
 #[test]
 fn mouse_click_maps_physical_lines_with_fold_rows() {
     let mut model = ready_model_with_selected_fold();
 
-    // body 自终端第 2 行起，首行是列头；选中行占 5 个物理行（1 主行 + 4 折叠行）。
-    // 点击折叠行本身：归属选中行，selection 不变。
+    // body 自终端第 2 行起，首行是列头；组头 "Running (1)" 占 1 行，选中行占
+    // 5 个物理行（1 主行 + 4 折叠行）。点击折叠行本身：归属选中行，selection 不变。
     let _ = model.handle_agents_panel_mouse_down(MouseButton::Left, 0, 2 + 3);
     assert_eq!(
         model
@@ -465,8 +466,9 @@ fn mouse_click_maps_physical_lines_with_fold_rows() {
         "fold lines belong to the selected row itself"
     );
 
-    // 点击物理偏移 6（折叠区之后的下一行）应选中第二行 agent，而非跳过折叠行数。
-    let _ = model.handle_agents_panel_mouse_down(MouseButton::Left, 0, 2 + 6);
+    // 点击选中行 5 个物理行 + "Completed (1)" 组头之后的下一行（agent 3）：
+    // 组头行计入物理行预算，不可跳过。
+    let _ = model.handle_agents_panel_mouse_down(MouseButton::Left, 0, 2 + 8);
     assert_eq!(
         model
             .agents_panel
@@ -495,8 +497,9 @@ fn collapsed_fold_keeps_rows_single_line_for_mouse_mapping() {
     );
     press_key(&mut model, KeyCode::Esc);
 
-    // body 首行是列头（不可选）：物理偏移 0 是选中行自身，偏移 1 是下一数据行。
-    let _ = model.handle_agents_panel_mouse_down(MouseButton::Left, 0, 2 + 2);
+    // 未展开时折叠区不占物理行：点击选中行 + 两个组头之后的物理行
+    // （列头 + "Running (1)" + 选中行 + "Completed (1)"）命中下一数据行。
+    let _ = model.handle_agents_panel_mouse_down(MouseButton::Left, 0, 2 + 4);
     assert_eq!(
         model
             .agents_panel

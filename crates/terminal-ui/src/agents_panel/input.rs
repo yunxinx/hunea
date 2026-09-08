@@ -10,7 +10,7 @@ use crate::{
         AgentsPanelAgentView, AgentsPanelPermissionChoice, AgentsPanelPillNavigation,
         AgentsPanelState, AgentsPanelStopConfirmation, AgentsPanelSurface,
         PendingAgentObservationStops, agent_status_is_running, agent_status_is_settled,
-        agents_panel_list_page_size, agents_panel_rejection_text,
+        agents_panel_list_page_size, agents_panel_rejection_text, groups::agents_panel_now_unix_ms,
         permission_choice::initial_permission_choice,
     },
     fullscreen_list_chrome::fullscreen_list_body_visible_offset_for_row,
@@ -308,6 +308,8 @@ impl Model {
             return;
         };
         if let Some(panel) = self.agents_panel.as_mut() {
+            // 滚轮位移按显示顺序逐行移动：分组可能在上一帧之后迁移，先归一行序。
+            panel.refresh_display_order(agents_panel_now_unix_ms());
             panel.move_selection(direction);
         }
     }
@@ -323,6 +325,12 @@ impl Model {
     }
 
     fn handle_agents_panel_list_key(&mut self, key: KeyEvent) -> OverlayInputResult {
+        // 分组可能在上一帧之后迁移（Just finished → Completed）：按键触发的
+        // 导航/分页须按当前分组顺序计算，先归一行序（幂等，selection 不变）。
+        if let Some(panel) = self.agents_panel.as_mut() {
+            panel.refresh_display_order(agents_panel_now_unix_ms());
+        }
+
         // 确认态只对下一次 `x` 有效：任何其他按键（选区移动、进入 surface、搜索）
         // 都取消，防止跨 selection 生效。
         let is_plain_stop_key = key.code == KeyCode::Char('x') && key.modifiers.is_empty();
@@ -690,14 +698,24 @@ impl Model {
             return OverlayInputResult::Handled;
         };
         let page_size = agents_panel_list_page_size(self.height);
+        // 点击命中换算须与本帧渲染的分组布局一致：同一墙钟先归一行序再换算。
+        let now_ms = agents_panel_now_unix_ms();
+        if let Some(panel) = self.agents_panel.as_mut() {
+            panel.refresh_display_order(now_ms);
+        }
         let selection_before = self
             .agents_panel
             .as_ref()
             .and_then(|panel| panel.selected_row())
             .map(|row| row.agent_id);
         if let Some(panel) = self.agents_panel.as_mut() {
-            // 折叠行计入物理行预算：点击命中行须与渲染布局一致。
-            panel.select_physical_body_line(page_size, physical_offset, usize::from(self.width));
+            // 组头行与折叠行计入物理行预算：点击命中行须与渲染布局一致。
+            panel.select_physical_body_line(
+                page_size,
+                physical_offset,
+                usize::from(self.width),
+                now_ms,
+            );
         }
         let selection_after = self
             .agents_panel

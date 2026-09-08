@@ -12,10 +12,11 @@ use crate::{
     agents_panel::{
         AGENTS_ACTIVITY_FOLD_MIN_WIDTH, AGENTS_ELAPSED_COLUMN_WIDTH, AGENTS_STATUS_COLUMN_WIDTH,
         AGENTS_TOKENS_COLUMN_WIDTH, AGENTS_TOOLS_COLUMN_WIDTH, AgentsPanelActivityFold,
-        AgentsPanelState, AgentsPanelStopConfirmation, agent_activity_summary_text,
-        agent_status_dot_style, agent_status_dot_symbol, agent_status_is_running,
-        agent_status_is_settled, agent_status_label, agents_panel_list_page_size,
-        format_agent_token_usage, format_agent_tool_uses,
+        AgentsPanelPageBodyLine, AgentsPanelState, AgentsPanelStopConfirmation,
+        agent_activity_summary_text, agent_status_dot_style, agent_status_dot_symbol,
+        agent_status_is_running, agent_status_is_settled, agent_status_label,
+        agents_panel_list_page_size, format_agent_token_usage, format_agent_tool_uses,
+        groups::{AgentsRowGroupKind, agents_panel_now_unix_ms},
     },
     display_width::display_width,
     fullscreen_list_chrome::fullscreen_list_chrome_rects,
@@ -162,9 +163,15 @@ pub(super) fn agents_activity_fold_prefix(symbol: &str) -> String {
 
 impl Model {
     pub(crate) fn render_agents_panel_list(&mut self, frame: &mut RenderFrame<'_>, area: Rect) {
-        let Some(state) = self.agents_panel.as_ref() else {
+        if self.agents_panel.is_none() {
             return;
-        };
+        }
+        // 分组随墙钟迁移：渲染前先把行序归一到当前分组（selection 以 id 重锚），
+        // 分页与组头推导才与本帧的分组一致。
+        let now_ms = agents_panel_now_unix_ms();
+        if let Some(panel) = self.agents_panel.as_mut() {
+            panel.refresh_display_order(now_ms);
+        }
         frame.render_widget(Clear, area);
         let Some(chrome) = fullscreen_list_chrome_rects(area) else {
             return;
@@ -172,6 +179,9 @@ impl Model {
         let page_size = agents_panel_list_page_size(area.height);
         let width = usize::from(area.width);
 
+        let Some(state) = self.agents_panel.as_ref() else {
+            return;
+        };
         frame.render_widget(
             Paragraph::new(self.agents_panel_header_line(state, width)),
             chrome.header,
@@ -181,8 +191,13 @@ impl Model {
             chrome.header_rule,
         );
 
-        let lines =
-            self.agents_panel_body_lines(state, width, usize::from(chrome.body.height), page_size);
+        let lines = self.agents_panel_body_lines(
+            state,
+            width,
+            usize::from(chrome.body.height),
+            page_size,
+            now_ms,
+        );
         frame.render_widget(AgentsPanelListWidget { lines: &lines }, chrome.body);
 
         frame.render_widget(
@@ -237,6 +252,7 @@ impl Model {
         width: usize,
         body_height: usize,
         page_size: usize,
+        now_ms: i64,
     ) -> Vec<Line<'static>> {
         let width = width.max(1);
         let mut lines = Vec::new();
@@ -270,37 +286,49 @@ impl Model {
             // 列头行占据 body 首行（对齐 prompt overlay / branch picker 的表头惯例），
             // 与 header_rule 一起把标题区与数据区隔开。
             lines.push(agents_panel_column_header_line(width, self.palette));
-            let page_start = state.page_start(page_size);
-            for (visible_position, row_index) in state.page_indices(page_size).enumerate() {
-                let Some(row) = state.row(row_index) else {
-                    continue;
-                };
-                let absolute_position = page_start + visible_position;
-                let is_cursor = state.is_selected_visible_position(absolute_position);
-                let confirm_hint = is_cursor
-                    .then(|| match state.stop_confirmation {
-                        Some(confirmation) if confirmation.agent_id() == row.agent_id => {
-                            Some(agents_panel_confirm_hint_text(confirmation))
+            // 之后按组渲染：组头行 → 组内数据行 → 下一组；组头不可选，
+            // 计划与鼠标物理行换算共用 `page_body_line_plan`。
+            for line in state.page_body_line_plan(page_size, now_ms) {
+                match line {
+                    AgentsPanelPageBodyLine::GroupHeader { kind, row_count } => {
+                        lines.push(agents_panel_group_header_line(
+                            kind,
+                            row_count,
+                            width,
+                            self.palette,
+                        ));
+                    }
+                    AgentsPanelPageBodyLine::Row { position } => {
+                        let Some(row) = state.filtered_row_at(position) else {
+                            continue;
+                        };
+                        let is_cursor = state.is_selected_visible_position(position);
+                        let confirm_hint = is_cursor
+                            .then(|| match state.stop_confirmation {
+                                Some(confirmation) if confirmation.agent_id() == row.agent_id => {
+                                    Some(agents_panel_confirm_hint_text(confirmation))
+                                }
+                                _ => None,
+                            })
+                            .flatten();
+                        lines.push(agents_panel_row_line(
+                            row,
+                            width,
+                            is_cursor,
+                            confirm_hint,
+                            state.search_query(),
+                            self.palette,
+                        ));
+                        if is_cursor {
+                            lines.extend(agents_panel_activity_fold_lines(
+                                state.selected_activity_fold(),
+                                row.agent_id,
+                                width,
+                                state.activity_fold_expanded,
+                                self.palette,
+                            ));
                         }
-                        _ => None,
-                    })
-                    .flatten();
-                lines.push(agents_panel_row_line(
-                    row,
-                    width,
-                    is_cursor,
-                    confirm_hint,
-                    state.search_query(),
-                    self.palette,
-                ));
-                if is_cursor {
-                    lines.extend(agents_panel_activity_fold_lines(
-                        state.selected_activity_fold(),
-                        row.agent_id,
-                        width,
-                        state.activity_fold_expanded,
-                        self.palette,
-                    ));
+                    }
                 }
             }
         }
@@ -308,6 +336,32 @@ impl Model {
         lines.truncate(body_height);
         lines
     }
+}
+
+/// 组头行：组名 + 过滤视图内组行数（如 `Running (2)`）。
+///
+/// `table_header` 样式与列头一致，起点对齐列头的 status 列；整行文本不参与
+/// 列几何（无列对齐诉求），按行宽安全截断。组头行不可选，也不计入
+/// `N of M` 的可选行计数。
+pub(super) fn agents_panel_group_header_line(
+    kind: AgentsRowGroupKind,
+    row_count: usize,
+    width: usize,
+    palette: TerminalPalette,
+) -> Line<'static> {
+    let width = width.max(1);
+    let usable_width = width.saturating_sub(AGENTS_ROW_RIGHT_PADDING);
+    let text = format!(
+        "{}{} ({})",
+        " ".repeat(AGENTS_ROW_PREFIX_WIDTH),
+        kind.header_label(),
+        row_count
+    );
+    // style 落在 span 上（与列头行同构，便于 span 断言）。
+    Line::from(vec![Span::styled(
+        truncate_display_width_with_ellipsis(&text, usable_width),
+        table_header_text_style(palette),
+    )])
 }
 
 /// 确认态动作对应的内联提示文案。

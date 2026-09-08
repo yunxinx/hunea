@@ -60,7 +60,7 @@ mod state;
 pub use metrics::RequestMetrics;
 pub use options::{CommandMenuMode, EscRewindMode, KeyboardEnhancementPreference, ModelOptions};
 use runtime_response::{RuntimeResponseBuffer, StreamedRuntimeReasoning};
-use state::{DocumentRuntimeState, NoticeState, SelectionRuntimeState};
+use state::{AgentSettledExpiryState, DocumentRuntimeState, NoticeState, SelectionRuntimeState};
 pub(crate) use state::{PendingReasoningToggleClick, SelectedModelState};
 
 /// `Model` 表示交互式 TUI 应用的状态。
@@ -116,6 +116,9 @@ pub struct Model {
         runtime_domain::agent::AgentObservationRequestId,
         runtime_domain::agent::AgentId,
     )>,
+    /// settled child 自动销毁的唤醒登记（`AgentOutcomeFact` 驱动）；
+    /// 到点唤醒 loop 迭代，销毁由 runtime drain 的过期清扫执行。
+    pub(super) agent_settled_expiry: AgentSettledExpiryState,
     pub(super) prompt_assembly: PromptAssemblyManagerSnapshot,
     pub(super) prompt_overlay: Option<crate::prompt_overlay::PromptOverlayState>,
     pub(super) next_session_load_request_id: u64,
@@ -296,6 +299,7 @@ impl Model {
             pending_stop_observing_agents: None,
             pending_agent_view_stop_requests: Vec::new(),
             pending_agent_view_observe_requests: Vec::new(),
+            agent_settled_expiry: AgentSettledExpiryState::default(),
             prompt_assembly,
             prompt_overlay: None,
             next_session_load_request_id: 1,
@@ -475,6 +479,7 @@ impl Model {
             self.notice_state.history_scroll_indicator_deadline,
             self.selection_runtime.auto_scroll_deadline,
             self.toast_timeout_deadline(),
+            self.agent_settled_expiry.next_deadline(),
         ]
         .into_iter()
         .flatten()
@@ -722,6 +727,15 @@ impl Model {
             return Some(super::AppEvent::ToastNoticeTimeout {
                 token: self.toast_timeout_token(),
             });
+        }
+
+        // settled 销毁唤醒到点即消费登记：销毁本身由 loop 顶部的常规 runtime drain
+        // 执行（清扫在 orchestrator 内），这里必须清掉过期 deadline，否则清扫未
+        // 收敛（CleanupBlocked）时事件泵会以 0 超时空转。
+        if let Some(deadline) = self.agent_settled_expiry.next_deadline()
+            && now >= deadline
+        {
+            return Some(super::AppEvent::AgentSettledExpiryTimeout);
         }
 
         None

@@ -105,7 +105,7 @@ pub(in crate::runtime) struct AgentMessageDelivery {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tool_uses: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    duration_ms: Option<u64>,
+    duration: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     truncated: bool,
 }
@@ -123,8 +123,8 @@ pub(in crate::runtime) struct AgentReportEnvelope {
     pub tokens: Option<usize>,
     /// 终态定格的工具调用次数。
     pub tool_uses: Option<usize>,
-    /// 终态定格的累计 elapsed（毫秒）。
-    pub duration_ms: Option<u64>,
+    /// 终态定格的累计耗时（人类可读档位，如 `16s` / `2m 05s` / `1h 05m`）。
+    pub duration: Option<String>,
 }
 
 impl std::fmt::Debug for AgentMessageDelivery {
@@ -141,7 +141,7 @@ impl std::fmt::Debug for AgentMessageDelivery {
             )
             .field("tokens", &self.tokens)
             .field("tool_uses", &self.tool_uses)
-            .field("duration_ms", &self.duration_ms)
+            .field("duration", &self.duration)
             .field("truncated", &self.truncated)
             .finish()
     }
@@ -159,7 +159,7 @@ impl AgentMessageDelivery {
             truncated,
             tokens,
             tool_uses,
-            duration_ms,
+            duration,
         } = envelope;
         Self {
             agent_id,
@@ -168,7 +168,7 @@ impl AgentMessageDelivery {
             report,
             tokens,
             tool_uses,
-            duration_ms,
+            duration,
             truncated,
         }
     }
@@ -451,7 +451,7 @@ mod tests {
                         truncated: false,
                         tokens: Some(1200),
                         tool_uses: Some(3),
-                        duration_ms: Some(45_000),
+                        duration: Some("45s".to_string()),
                     },
                 )))
                 .expect("tool should still await the response");
@@ -471,7 +471,7 @@ mod tests {
                 "report": "the full refined report body",
                 "tokens": 1200,
                 "tool_uses": 3,
-                "duration_ms": 45_000,
+                "duration": "45s",
             }),
             "send receipt face should only carry the child envelope fields"
         );

@@ -6615,7 +6615,7 @@ mod tests {
             assert_eq!(child.tool_uses, Some(1));
             assert_eq!(child.tokens, None);
             assert!(
-                child.duration_ms.is_some(),
+                child.duration.is_some(),
                 "production-staged children should carry a terminal duration"
             );
         }

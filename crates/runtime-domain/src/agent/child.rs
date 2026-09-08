@@ -14,6 +14,11 @@ pub const AGENT_LAUNCH_BATCH_LIMIT: usize = 8;
 /// launch boundary 冻结的 Agent title 最大终端显示宽度。
 pub const AGENT_TITLE_MAX_DISPLAY_WIDTH: usize = 64;
 
+/// settled child 的自动销毁阈值（毫秒）：终态定格 20s 后由 runtime 的 drain 清扫走
+/// 完整 delete 路径（10s Just finished 过渡 + 10s Completed 滞留）。消费方
+/// （runtime 清扫与 UI 侧销毁唤醒 deadline）共用该值，保证唤醒与清扫窗口一致。
+pub const SETTLED_CHILD_AUTO_DESTROY_AFTER_MS: i64 = 20_000;
+
 const AGENT_OUTCOME_SUMMARY_MAX_DISPLAY_WIDTH: usize = 240;
 const AGENT_OBJECTIVE_SUMMARY_MAX_DISPLAY_WIDTH: usize = 240;
 const TRUNCATION_MARKER: &str = "...";
@@ -552,9 +557,9 @@ pub struct AgentChildCompletion {
     /// 终态定格的工具调用次数。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_uses: Option<usize>,
-    /// 终态定格的累计 elapsed（毫秒）。
+    /// 终态定格的累计耗时（人类可读档位，如 `16s` / `2m 05s` / `1h 05m`）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<u64>,
+    pub duration: Option<String>,
     /// `report` 超出字符上限被截断时为 `true`。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
@@ -574,7 +579,7 @@ impl fmt::Debug for AgentChildCompletion {
             )
             .field("tokens", &self.tokens)
             .field("tool_uses", &self.tool_uses)
-            .field("duration_ms", &self.duration_ms)
+            .field("duration", &self.duration)
             .field("truncated", &self.truncated)
             .finish()
     }
@@ -631,6 +636,8 @@ pub struct AgentOverviewRow {
     pub elapsed_ms: Option<u64>,
     pub tool_uses: Option<usize>,
     pub token_usage: Option<usize>,
+    /// 当前 terminal 周期的定格时刻（unix ms）；未进入终态时为 `None`。
+    pub settled_at_ms: Option<i64>,
 }
 
 /// 一个 Agent observer 首次收到的一致 overview snapshot。
@@ -1117,7 +1124,7 @@ mod tests {
         assert_eq!(completion.report, None);
         assert_eq!(completion.tokens, None);
         assert_eq!(completion.tool_uses, None);
-        assert_eq!(completion.duration_ms, None);
+        assert_eq!(completion.duration, None);
         assert!(!completion.truncated);
     }
 
@@ -1131,7 +1138,7 @@ mod tests {
             report: Some("PRIVATE_REPORT_BODY".to_string()),
             tokens: Some(1200),
             tool_uses: Some(8),
-            duration_ms: Some(42_000),
+            duration: Some("42s".to_string()),
             truncated: false,
         };
         let debug = format!("{completion:?}");

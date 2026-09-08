@@ -124,6 +124,41 @@ where
         self.apply_filter(matches_query, row_id);
     }
 
+    /// 按显示顺序重排行存储并重建过滤视图；selection 以 stable id 重锚。
+    ///
+    /// 行集合与过滤结果不变，只有顺序变化。分组一类的显示顺序会随墙钟迁移
+    /// （无事件驱动），调用方在读取顺序敏感状态（分页、标签、物理行换算）前
+    /// 调用本方法归一。排序会让既有 filtered 索引失效，故先捕获 selection id、
+    /// 排序后统一恢复。
+    pub(crate) fn reorder_rows(
+        &mut self,
+        order: impl FnMut(&Row, &Row) -> std::cmp::Ordering,
+        matches_query: impl Fn(&Row, &CaseInsensitiveQuery<'_>) -> bool,
+        row_id: impl Fn(&Row) -> Id,
+    ) {
+        let selected_id = self
+            .selected_id
+            .clone()
+            .or_else(|| self.selected_row().map(&row_id));
+        self.rows.sort_by(order);
+        self.rebuild_filtered_indices(matches_query);
+        self.restore_selected_id_or_clamp(selected_id, row_id);
+    }
+
+    /// 过滤视图的行引用，按当前过滤顺序排列。
+    pub(crate) fn filtered_rows(&self) -> Vec<&Row> {
+        self.filtered_indices
+            .iter()
+            .map(|&index| &self.rows[index])
+            .collect()
+    }
+
+    /// 过滤视图指定位置上的行。
+    pub(crate) fn filtered_row_at(&self, position: usize) -> Option<&Row> {
+        let row_index = *self.filtered_indices.get(position)?;
+        self.rows.get(row_index)
+    }
+
     fn rebuild_filtered_indices(
         &mut self,
         matches_query: impl Fn(&Row, &CaseInsensitiveQuery<'_>) -> bool,

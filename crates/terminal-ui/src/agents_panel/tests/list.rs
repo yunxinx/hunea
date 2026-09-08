@@ -140,8 +140,9 @@ fn mouse_click_selects_visible_row_and_cancels_confirmation() {
             .is_some()
     );
 
-    // 点击 body 第二行数据行（chrome 头部 2 行 + 列头 1 行 + 偏移 1）。
-    let _ = model.handle_agents_panel_mouse_down(MouseButton::Left, 0, 4);
+    // 点击 agent 3 的数据行：chrome 头部 2 行 + 列头 1 行 + "Running (1)" 组头
+    // 1 行 + agent 2 数据行 1 行 + "Completed (1)" 组头 1 行。
+    let _ = model.handle_agents_panel_mouse_down(MouseButton::Left, 0, 6);
 
     let panel = model.agents_panel.as_ref().unwrap();
     assert_eq!(
@@ -178,8 +179,8 @@ fn mouse_click_consumed_in_surface_mode_without_selection_change() {
 
 #[test]
 fn page_navigation_moves_selection_by_page() {
-    // 30 行、page size 15（高度 24 - chrome 4 - 列头 1 - 折叠区预留 4）：
-    // `l` 跳到第二页首行（offset 15）。
+    // 30 行、page size 12（高度 24 - chrome 4 - 列头 1 - 组头预留 3 - 折叠区
+    // 预留 4）：`l` 跳到第二页首行（offset 12）。
     let rows = (0..30)
         .map(|index| {
             overview_row(
@@ -200,7 +201,7 @@ fn page_navigation_moves_selection_by_page() {
             .unwrap()
             .selected_row()
             .map(|r| r.agent_id),
-        Some(AgentId::new(115)),
+        Some(AgentId::new(112)),
         "page next should jump to the first row of the next page"
     );
     press_key(&mut model, KeyCode::Char('h'));

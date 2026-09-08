@@ -7,6 +7,7 @@ use crate::{
     agents_panel::{
         AGENTS_ACTIVITY_FOLD_MIN_WIDTH, agent_status_is_running, agent_status_is_settled,
         agents_activity_fold_entries,
+        groups::{AgentsRowGroupKind, agents_panel_row_groups, agents_row_display_order},
     },
     fullscreen_search_list::FullscreenSearchListState,
     list_selection::ListNavigationDirection,
@@ -154,6 +155,21 @@ pub(crate) struct PendingAgentObservationStops {
     pub(crate) agent_views: Vec<(AgentObservationId, AgentRuntimeGeneration)>,
 }
 
+/// 当前页 body 内一个物理行的种类：组头行（不可选）或数据行。
+///
+/// 列头行（body 首行）与选中行下方的折叠区行不在此列——它们分别由渲染入口
+/// 固定在首位、由渲染/鼠标按选中行计入，语义与数据行的页换算不同。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentsPanelPageBodyLine {
+    /// 组头行；`row_count` 是该组在过滤视图中的总行数（组头计数语义）。
+    GroupHeader {
+        kind: AgentsRowGroupKind,
+        row_count: usize,
+    },
+    /// 数据行；`position` 是过滤视图中的显示位置（可选目标）。
+    Row { position: usize },
+}
+
 impl PendingAgentObservationStops {
     pub(crate) fn is_empty(&self) -> bool {
         self.overview.is_none() && self.agent_views.is_empty()
@@ -282,16 +298,67 @@ impl AgentsPanelState {
         self.list.page_start(page_size)
     }
 
-    pub(super) fn page_indices(&self, page_size: usize) -> impl Iterator<Item = usize> + '_ {
-        self.list.page_indices(page_size)
-    }
-
     pub(super) fn page_number(&self, page_size: usize) -> usize {
         self.list.page_number(page_size)
     }
 
     pub(super) fn page_count(&self, page_size: usize) -> usize {
         self.list.page_count(page_size)
+    }
+
+    // —— 分组显示顺序 ——
+
+    /// 把行存储归一到当前分组显示顺序（selection 以 stable id 重锚）。
+    ///
+    /// 分组随墙钟迁移（Just finished → Completed），没有事件驱动；渲染与输入
+    /// 在读取顺序敏感状态（分页、导航、物理行换算）前调用。归一只改顺序，
+    /// 不改行集合与选中行，幂等；折叠缓存与确认态都以 id 绑定，无需重置。
+    pub(super) fn refresh_display_order(&mut self, now_ms: i64) {
+        self.list.reorder_rows(
+            |a, b| agents_row_display_order(a, b, now_ms),
+            agents_row_matches,
+            agents_row_id,
+        );
+    }
+
+    /// 过滤视图指定显示位置上的行。
+    pub(super) fn filtered_row_at(&self, position: usize) -> Option<&AgentOverviewRow> {
+        self.list.filtered_row_at(position)
+    }
+
+    /// 当前页 body 的物理行序列：组头行 + 数据行。
+    ///
+    /// 组头行只在该组首行落入本页时出现（跨页续组不重复表头）；组头计数是
+    /// 该组在过滤视图中的总行数。页行预算已为组头恒定预留，行数不溢出。
+    /// 渲染与鼠标物理行换算共用本计划，两侧对"哪个物理行是什么"的答案一致。
+    pub(super) fn page_body_line_plan(
+        &self,
+        page_size: usize,
+        now_ms: i64,
+    ) -> Vec<AgentsPanelPageBodyLine> {
+        let page_start = self.page_start(page_size);
+        let page_end = page_start
+            .saturating_add(page_size)
+            .min(self.filtered_count());
+        let mut plan = Vec::new();
+        for group in agents_panel_row_groups(&self.list.filtered_rows(), now_ms) {
+            let header_starts_in_page = group
+                .row_indices
+                .first()
+                .is_some_and(|&first| page_start <= first && first < page_end);
+            if header_starts_in_page {
+                plan.push(AgentsPanelPageBodyLine::GroupHeader {
+                    kind: group.kind,
+                    row_count: group.row_indices.len(),
+                });
+            }
+            for &position in &group.row_indices {
+                if page_start <= position && position < page_end {
+                    plan.push(AgentsPanelPageBodyLine::Row { position });
+                }
+            }
+        }
+        plan
     }
 
     pub(super) fn select_visible_row(&mut self, page_size: usize, visible_offset: usize) -> bool {
@@ -306,34 +373,44 @@ impl AgentsPanelState {
         selected
     }
 
-    /// 按物理行偏移选行：把选中行折叠区计入物理行预算。
+    /// 按物理行偏移选行：组头行与选中行的折叠区都计入物理行预算。
     ///
-    /// 渲染把折叠行画在选中行下方；鼠标点击的物理行号需要同一换算才能命中
-    /// 正确行。折叠行不是独立可选目标——落在折叠区上的点击归属选中行本身。
+    /// 渲染把组头画在组首行前、折叠行画在选中行下方；鼠标点击的物理行号需要
+    /// 同一换算才能命中正确行。组头行与折叠行都不是独立可选目标——点击落在
+    /// 组头上直接吞掉，落在折叠区上归属选中行本身。
     pub(super) fn select_physical_body_line(
         &mut self,
         page_size: usize,
         physical_offset: usize,
         width: usize,
+        now_ms: i64,
     ) -> bool {
         let fold_line_count = self
             .activity_fold
             .visible_line_count(width, self.activity_fold_expanded);
         let page_start = self.page_start(page_size);
-        let filtered_count = self.filtered_count();
         let mut remaining = physical_offset;
         let mut logical_offset = None;
-        for position in page_start..page_start.saturating_add(page_size) {
-            if position >= filtered_count {
-                break;
+        for line in self.page_body_line_plan(page_size, now_ms) {
+            match line {
+                AgentsPanelPageBodyLine::GroupHeader { .. } => {
+                    // 组头不可选：命中组头的点击不改变 selection。
+                    if remaining == 0 {
+                        return false;
+                    }
+                    remaining -= 1;
+                }
+                AgentsPanelPageBodyLine::Row { position } => {
+                    let row_line_count =
+                        1 + usize::from(self.is_selected_visible_position(position))
+                            * fold_line_count;
+                    if remaining < row_line_count {
+                        logical_offset = Some(position - page_start);
+                        break;
+                    }
+                    remaining -= row_line_count;
+                }
             }
-            let row_line_count =
-                1 + usize::from(self.is_selected_visible_position(position)) * fold_line_count;
-            if remaining < row_line_count {
-                logical_offset = Some(position - page_start);
-                break;
-            }
-            remaining -= row_line_count;
         }
         let Some(logical_offset) = logical_offset else {
             return false;
@@ -374,10 +451,6 @@ impl AgentsPanelState {
 
     pub(super) fn selected_row(&self) -> Option<&AgentOverviewRow> {
         self.list.selected_row()
-    }
-
-    pub(super) fn row(&self, row_index: usize) -> Option<&AgentOverviewRow> {
-        self.list.rows().get(row_index)
     }
 
     pub(super) fn is_searching(&self) -> bool {

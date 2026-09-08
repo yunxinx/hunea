@@ -1,5 +1,6 @@
 //! `/agents` 全屏 overview panel：child Agent tree 的实时派生状态。
 
+mod groups;
 mod input;
 mod list_render;
 mod pending_permission;
@@ -14,8 +15,9 @@ mod tests;
 
 pub(crate) use pending_permission::{AgentPendingPermissionProjection, AgentsPanelPillNavigation};
 pub(crate) use state::{
-    AgentsPanelActivityFold, AgentsPanelAgentView, AgentsPanelPermissionChoice, AgentsPanelState,
-    AgentsPanelStopConfirmation, AgentsPanelSurface, PendingAgentObservationStops,
+    AgentsPanelActivityFold, AgentsPanelAgentView, AgentsPanelPageBodyLine,
+    AgentsPanelPermissionChoice, AgentsPanelState, AgentsPanelStopConfirmation, AgentsPanelSurface,
+    PendingAgentObservationStops,
 };
 
 use ratatui::style::Style;
@@ -195,14 +197,15 @@ fn strip_inline_markdown_emphasis(line: &str) -> String {
     line.replace("**", "").replace("__", "").replace('`', "")
 }
 
-/// list 页行预算：每行 1 行，body 首行是列头行，另为选中行的活动折叠区恒定预留
+/// list 页行预算：每行 1 行，body 首行是列头行，另为组头行（最多三组各一行，
+/// 见 `AGENTS_ROW_GROUP_KINDS`）与选中行的活动折叠区恒定预留
 /// `AGENTS_ACTIVITY_FOLD_MAX_LINES` 行。
 ///
-/// 预留不随折叠区实际可见性变化——page 边界若随 selection/事件抖动，
+/// 预留不随实际可见性变化——page 边界若随 selection/事件/分组迁移抖动，
 /// 翻页与鼠标行换算会在导航中错位；渲染与输入路径必须共用本函数。
 pub(super) fn agents_panel_list_page_size(height: u16) -> usize {
     crate::fullscreen_list_chrome::fullscreen_list_page_size_for_height(height)
-        .saturating_sub(1 + AGENTS_ACTIVITY_FOLD_MAX_LINES)
+        .saturating_sub(1 + groups::AGENTS_ROW_GROUP_KINDS.len() + AGENTS_ACTIVITY_FOLD_MAX_LINES)
         .max(1)
 }
 

@@ -1,5 +1,6 @@
 mod activity_fold;
 mod common;
+mod groups;
 mod lifecycle;
 mod list;
 mod list_render;

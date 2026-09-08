@@ -46,6 +46,7 @@ pub(super) fn overview_row(
         elapsed_ms: Some(83_000),
         tool_uses: Some(3),
         token_usage: Some(2_048),
+        settled_at_ms: None,
     }
 }
 

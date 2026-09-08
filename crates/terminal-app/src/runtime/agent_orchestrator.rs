@@ -18,7 +18,7 @@ use runtime_domain::agent::{
     AgentPermissionState, AgentPermissionTarget, AgentPermissionUpdate, AgentPreviewSnapshot,
     AgentProjectionEvent, AgentProjectionRevision, AgentProjectionStatus, AgentRuntimeError,
     AgentRuntimeGeneration, AgentTitle, AgentTranscriptItem, AgentTranscriptSnapshot, AgentTurnId,
-    AgentTurnRequest, AgentViewSnapshot,
+    AgentTurnRequest, AgentViewSnapshot, SETTLED_CHILD_AUTO_DESTROY_AFTER_MS,
 };
 use runtime_domain::session::RuntimeTarget;
 use runtime_domain::session::{
@@ -203,6 +203,8 @@ struct ChildAgentRecord {
     elapsed_accumulated_ms: u64,
     /// 计时运行区段起点；`None` 即计时暂停。
     elapsed_running_since_ms: Option<i64>,
+    /// 当前 terminal 周期的定格时刻；followup 新 turn 起算时清除。
+    settled_at_ms: Option<i64>,
     tool_uses: usize,
     token_usage: usize,
 }
@@ -246,6 +248,7 @@ impl ChildAgentRecord {
             started_at_ms: 0,
             elapsed_accumulated_ms: 0,
             elapsed_running_since_ms: None,
+            settled_at_ms: None,
             tool_uses: 0,
             token_usage: 0,
         }
@@ -267,10 +270,19 @@ impl ChildAgentRecord {
         }
     }
 
-    /// 重置计时（新 turn 重新起算）：累计清零、运行区段从当前时刻开始。
+    /// 重置计时（新 turn 重新起算）：累计清零、运行区段从当前时刻开始，并结束上一个
+    /// terminal 周期（settled 时刻随之失效）。
     fn restart_elapsed_at(&mut self, now_ms: i64) {
         self.elapsed_accumulated_ms = 0;
         self.elapsed_running_since_ms = Some(now_ms);
+        self.settled_at_ms = None;
+    }
+
+    /// terminal 定格：暂停 elapsed 计时并记录定格时刻。与等待 permission 的暂停不同，
+    /// 该定格只在终态处调用，写入的 `settled_at_ms` 归属当前 terminal 周期。
+    fn freeze_terminal_at(&mut self, now_ms: i64) {
+        self.pause_elapsed_at(now_ms);
+        self.settled_at_ms = Some(now_ms);
     }
 
     /// elapsed 投影值：运行中为累计值 + 当前区段实时差，暂停/终态为定格累计值。
@@ -332,6 +344,7 @@ pub(super) enum AgentProductCommandRejection {
     InvalidOption,
     AlreadySubmitted,
     CleanupPending,
+    ReportPending,
 }
 
 impl AgentProductCommandRejection {
@@ -343,6 +356,7 @@ impl AgentProductCommandRejection {
             Self::InvalidOption => "Invalid child Agent permission option",
             Self::AlreadySubmitted => "Child Agent permission response is already submitted",
             Self::CleanupPending => "Child Agent cleanup is pending",
+            Self::ReportPending => "Child Agent group report is pending",
         }
     }
 }
@@ -1009,6 +1023,9 @@ impl AgentOrchestrator {
         self.try_complete_group_waiters();
         // waiter/terminal 事实收敛后才允许 followup：followup 会重置 terminal 投影，
         // 先结算才能保证 group completion 不被推迟。
+        // 过期清扫夹在 waiter 结算与 followup 派发之间：已过期的 settled child 不再
+        // 作为 followup 宿主消费排队消息，其残留 waiter 随清理 fail closed。
+        self.evict_expired_settled_children();
         self.dispatch_queued_child_messages();
         accepted
     }
@@ -1583,7 +1600,7 @@ impl AgentOrchestrator {
                             report: envelope.report,
                             tokens: envelope.tokens,
                             tool_uses: envelope.tool_uses,
-                            duration_ms: envelope.duration_ms,
+                            duration: envelope.duration,
                             truncated: envelope.truncated,
                         }
                     })
@@ -1804,6 +1821,8 @@ impl AgentOrchestrator {
     /// main `Interrupt` 语义保持分离；`AgentId::MAIN` 一律 closed 拒绝。
     /// settled/disposed 行的 stop 是删除请求：disposal 不保留 terminal 投影行，
     /// registry 移除并发布 Remove delta；running 行保持 stop 的投影保留语义。
+    /// 所属 launch group 的 report 仍未交付时删除让位（`ReportPending`）——
+    /// completion 需要 registry 内的全部 staged 行，交付后该行恢复可删除。
     pub(super) fn stop_agent(
         &mut self,
         agent_id: AgentId,
@@ -1821,6 +1840,17 @@ impl AgentOrchestrator {
                 ChildLifecycle::Settled | ChildLifecycle::Disposed
             )
         });
+        // group completion 读取 registry 内全部 staged child 行：所属 launch group 的
+        // waiter 仍在等待时删除该行会让 completion 永远无法凑齐（等待方挂死）。
+        // 与过期清扫共用同一让位谓词，report 交付后该行恢复可删除。
+        if deleting_settled_row
+            && self
+                .children
+                .get(&agent_id)
+                .is_some_and(|record| self.launch_group_completion_pending(record))
+        {
+            return Err(AgentProductCommandRejection::ReportPending);
+        }
         let result = if deleting_settled_row {
             self.dispose_child_ids(
                 self.subtree_ids(agent_id),
@@ -2298,9 +2328,9 @@ impl AgentOrchestrator {
                     // completion 读取同一取值，自然取消的既有摘要不被覆盖。
                     record.terminal_stopped_by_request = intent.stopped_by_request;
                     record.latest_activity = AgentActivitySummary::Idle;
-                    // 显式 stop 定格 terminal 的同时定格 elapsed（终态时刻值）。
+                    // 显式 stop 定格 terminal 的同时定格 elapsed 与 settled 时刻。
                     let now_ms = runtime_domain::time::unix_timestamp_ms().unwrap_or(0);
-                    record.pause_elapsed_at(now_ms);
+                    record.freeze_terminal_at(now_ms);
                     freeze_pending_outcome(*agent_id, record, now_ms);
                     if intent.retain_terminal_projection {
                         record.pending_terminal_event =
@@ -2506,6 +2536,42 @@ impl AgentOrchestrator {
             .count()
     }
 
+    /// 该 child 所属 launch group 的 completion 是否仍在等待。group completion 读取
+    /// registry 内全部 staged child 行，等待期间任一成员行都不可销毁——删除会让
+    /// completion 永远无法凑齐（等待方挂死）。过期清扫与手动删除共用本谓词。
+    fn launch_group_completion_pending(&self, record: &ChildAgentRecord) -> bool {
+        record
+            .launch_group_id
+            .is_some_and(|group_id| self.group_waiters.contains_key(&group_id))
+    }
+
+    /// settled child 的过期清扫：终态定格超过 [`SETTLED_CHILD_AUTO_DESTROY_AFTER_MS`]
+    /// 的 child 走完整 delete 路径（`dispose_child_ids` + Remove delta，与用户删除
+    /// settled 投影行同路）。生命周期收敛语义下 waiter 以 `TargetUnavailable` 结算。
+    ///
+    /// 顺序约束：只在 group waiter 结算之后执行——所属 launch group 仍在等待的
+    /// child 先不清扫，待 waiter 结算后的下一次 drain 回收。幂等：CleanupBlocked
+    /// 的 owner 保留，由既有 settle pass 重试收敛。
+    fn evict_expired_settled_children(&mut self) {
+        let now_ms = runtime_domain::time::unix_timestamp_ms().unwrap_or(0);
+        let expired_ids = self
+            .children
+            .iter()
+            .filter(|(_, record)| {
+                matches!(record.lifecycle, ChildLifecycle::Settled)
+                    && record.settled_at_ms.is_some_and(|settled_at| {
+                        now_ms - settled_at >= SETTLED_CHILD_AUTO_DESTROY_AFTER_MS
+                    })
+                    && !self.launch_group_completion_pending(record)
+            })
+            .map(|(agent_id, _)| *agent_id)
+            .collect::<Vec<_>>();
+        if expired_ids.is_empty() {
+            return;
+        }
+        let _ = self.dispose_child_ids(expired_ids, ChildDisposalIntent::default());
+    }
+
     /// generation replacement 边界对 settled child 立即完整清理（连同 active 后代，
     /// 保持 descendants-first 顺序）；失败则拒绝切换，旧 generation 保持 authority。
     fn dispose_settled_children(&mut self) -> Result<(), AgentRuntimeError> {
@@ -2682,6 +2748,22 @@ fn latest_committed_assistant_content(record: &ChildAgentRecord) -> Option<&str>
 /// 父 Agent tool result 携带的完整报告字符上限；超出时截断并追加固定 note。
 const AGENT_REPORT_MAX_CHARS: usize = 16 * 1024;
 
+/// child completion/delivery 信封的耗时档位格式。
+///
+/// 不足一分钟只输出整秒（`16s`）；不足一小时输出分 + 两位秒（`2m 05s`）；一小时及
+/// 以上只保留时 + 两位分（`1h 05m`）。毫秒向下取整到秒；输出是固定档位文本，
+/// 不携带计时原始数值。
+fn format_child_duration(duration_ms: u64) -> String {
+    let total_secs = duration_ms / 1_000;
+    if total_secs < 60 {
+        format!("{total_secs}s")
+    } else if total_secs < 3_600 {
+        format!("{}m {:02}s", total_secs / 60, total_secs % 60)
+    } else {
+        format!("{}h {:02}m", total_secs / 3_600, total_secs % 3_600 / 60)
+    }
+}
+
 /// completion/delivery tool result 的报告信封取值。
 ///
 /// `summary`（240 列单行）与完整报告是两个数据面：摘要服务 TUI 面板与 preview，
@@ -2710,7 +2792,7 @@ fn child_report_envelope(record: &ChildAgentRecord, now_ms: i64) -> AgentReportE
         truncated,
         tokens: (record.token_usage > 0).then_some(record.token_usage),
         tool_uses: (record.tool_uses > 0).then_some(record.tool_uses),
-        duration_ms: record.elapsed_ms_at(now_ms),
+        duration: record.elapsed_ms_at(now_ms).map(format_child_duration),
     }
 }
 
@@ -2843,19 +2925,19 @@ fn apply_child_projection(record: &mut ChildAgentRecord, kind: &AgentEventKind, 
             record.status = AgentProjectionStatus::Completed;
             record.terminal_status = Some(AgentProjectionStatus::Completed);
             // 终态后 elapsed 定格为终态时刻的值，不再随时间推进。
-            record.pause_elapsed_at(now_ms);
+            record.freeze_terminal_at(now_ms);
             record.latest_activity = AgentActivitySummary::Idle;
         }
         AgentEventKind::TurnFailed { .. } => {
             record.status = AgentProjectionStatus::Failed;
             record.terminal_status = Some(AgentProjectionStatus::Failed);
-            record.pause_elapsed_at(now_ms);
+            record.freeze_terminal_at(now_ms);
             record.latest_activity = AgentActivitySummary::Idle;
         }
         AgentEventKind::TurnInterrupted => {
             record.status = AgentProjectionStatus::Cancelled;
             record.terminal_status = Some(AgentProjectionStatus::Cancelled);
-            record.pause_elapsed_at(now_ms);
+            record.freeze_terminal_at(now_ms);
             record.latest_activity = AgentActivitySummary::Idle;
         }
     }
@@ -2876,6 +2958,7 @@ fn overview_row_for_child(
         elapsed_ms: record.elapsed_ms_at(now_ms),
         tool_uses: (record.tool_uses > 0).then_some(record.tool_uses),
         token_usage: (record.token_usage > 0).then_some(record.token_usage),
+        settled_at_ms: record.settled_at_ms,
     }
 }
 
@@ -3732,6 +3815,436 @@ mod tests {
     }
 
     #[test]
+    fn format_child_duration_uses_tiered_human_readable_format() {
+        // 档位边界：秒档毫秒向下取整；分秒档秒两位补零；小时档丢弃秒。
+        for (duration_ms, expected) in [
+            (0, "0s"),
+            (16_140, "16s"),
+            (59_999, "59s"),
+            (60_000, "1m 00s"),
+            (125_000, "2m 05s"),
+            (3_599_999, "59m 59s"),
+            (3_600_000, "1h 00m"),
+            (3_900_000, "1h 05m"),
+            (125_000_000, "34h 43m"),
+        ] {
+            assert_eq!(
+                format_child_duration(duration_ms),
+                expected,
+                "duration {duration_ms}ms"
+            );
+        }
+    }
+
+    #[test]
+    fn overview_row_settled_at_ms_tracks_the_terminal_cycle() {
+        // Active 期间没有 terminal 定格。
+        let (mut orchestrator, agent_id) =
+            registered_child_with_terminal_event(AgentEventKind::Thinking { is_thinking: true });
+        let _ = orchestrator.drain_child_events();
+        orchestrator.observe_agents(AgentObservationRequestId::new(1));
+        let rows = loaded_overview_rows(orchestrator.drain_projection_events());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].agent_id, agent_id);
+        assert_eq!(rows[0].settled_at_ms, None);
+
+        // terminal 定格写入 settled 时刻，并透传到 overview 投影。
+        let agent_id = AgentId::new(2);
+        let turn_id = AgentTurnId::new(agent_id.get());
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        orchestrator.register_child_for_test(
+            agent_id,
+            AgentId::MAIN,
+            turn_id,
+            test_title("settled cycle child"),
+            test_context("settled-cycle-child"),
+            Box::new(StubMainRuntime {
+                events: vec![child_event(
+                    agent_id,
+                    turn_id,
+                    &target,
+                    finished_turn_event("first answer"),
+                )],
+            }),
+        );
+        orchestrator.mark_child_target_for_test(agent_id, target);
+        let _ = orchestrator.drain_child_events();
+        orchestrator.observe_agents(AgentObservationRequestId::new(1));
+        let rows = loaded_overview_rows(orchestrator.drain_projection_events());
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].settled_at_ms.is_some());
+
+        // followup turn 重新起算：settled 时刻随上一个 terminal 周期结束清除。
+        orchestrator
+            .send_child_message(agent_id, child_message("refine the answer"))
+            .expect("settled child should start the followup turn");
+        orchestrator.observe_agents(AgentObservationRequestId::new(2));
+        let rows = loaded_overview_rows(orchestrator.drain_projection_events());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].settled_at_ms, None);
+    }
+
+    #[test]
+    fn explicit_stop_freezes_settled_at_on_the_retained_projection() {
+        // launch-group child 的显式 stop 保留投影行：定格时刻随 Cancelled 一并写入。
+        let agent_id = AgentId::new(2);
+        let turn_id = AgentTurnId::new(agent_id.get());
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        orchestrator.register_child_for_test(
+            agent_id,
+            AgentId::MAIN,
+            turn_id,
+            test_title("stopped settled child"),
+            test_context("stopped-settled-child"),
+            Box::new(StubMainRuntime::default()),
+        );
+        orchestrator.mark_child_target_for_test(agent_id, target);
+        orchestrator.mark_child_launch_group_for_test(agent_id, AgentLaunchGroupId::new(1));
+
+        orchestrator
+            .stop_child(agent_id)
+            .expect("explicit stop should converge");
+
+        orchestrator.observe_agents(AgentObservationRequestId::new(1));
+        let rows = loaded_overview_rows(orchestrator.drain_projection_events());
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].settled_at_ms.is_some());
+    }
+
+    /// 把 test child 的 terminal 定格时刻回拨，模拟 settled 已超过自动销毁阈值。
+    fn backdate_child_settled_at(
+        orchestrator: &mut AgentOrchestrator,
+        agent_id: AgentId,
+        backdate_ms: i64,
+    ) {
+        let Some(record) = orchestrator.children.get_mut(&agent_id) else {
+            panic!("test child {agent_id:?} should be registered");
+        };
+        let settled_at = record
+            .settled_at_ms
+            .expect("settled child must carry a terminal freeze timestamp");
+        record.settled_at_ms = Some(settled_at - backdate_ms);
+    }
+
+    #[test]
+    fn expired_settled_children_are_auto_destroyed_on_drain() {
+        let agent_id = AgentId::new(2);
+        let turn_id = AgentTurnId::new(agent_id.get());
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let shutdown_calls = Arc::new(AtomicUsize::new(0));
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        orchestrator.register_child_for_test(
+            agent_id,
+            AgentId::MAIN,
+            turn_id,
+            test_title("auto destroy"),
+            test_context("auto-destroy"),
+            Box::new(ShutdownCountingRuntime {
+                events: vec![child_event(
+                    agent_id,
+                    turn_id,
+                    &target,
+                    finished_turn_event("done"),
+                )],
+                shutdown_calls: Arc::clone(&shutdown_calls),
+            }),
+        );
+        let _ = orchestrator.drain_child_events();
+        assert_eq!(
+            orchestrator.child_count(),
+            1,
+            "recently settled child must stay as the followup host"
+        );
+        // Remove delta 只发布给存活 observation；先建立 overview observation。
+        orchestrator.observe_agents(AgentObservationRequestId::new(1));
+        let _ = orchestrator.drain_projection_events();
+
+        backdate_child_settled_at(
+            &mut orchestrator,
+            agent_id,
+            SETTLED_CHILD_AUTO_DESTROY_AFTER_MS,
+        );
+        let _ = orchestrator.drain_child_events();
+
+        assert_eq!(
+            orchestrator.child_count(),
+            0,
+            "expired settled child must be auto destroyed through the delete path"
+        );
+        assert_eq!(
+            shutdown_calls.load(Ordering::SeqCst),
+            1,
+            "auto destroy must run the full runtime cleanup"
+        );
+        let events = orchestrator.drain_projection_events();
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentProjectionEvent::AgentsOverviewUpdated { delta }
+                    if matches!(
+                        delta.kind,
+                        AgentOverviewDeltaKind::Remove { agent_id } if agent_id == AgentId::new(2)
+                    )
+            )),
+            "auto destroy must publish an overview Remove delta: {events:?}"
+        );
+
+        // 幂等：child 已从 registry 移除，后续 drain 不再产生事件或重复 Remove。
+        assert!(orchestrator.drain_child_events().is_empty());
+        assert!(orchestrator.drain_projection_events().is_empty());
+    }
+
+    #[test]
+    fn recently_settled_children_survive_the_sweep() {
+        let (mut orchestrator, agent_id) =
+            registered_child_with_terminal_event(finished_turn_event("still warm"));
+        let _ = orchestrator.drain_child_events();
+        orchestrator.observe_agents(AgentObservationRequestId::new(1));
+        let _ = orchestrator.drain_projection_events();
+
+        // 阈值内：回拨一半窗口，避免 drain 间隔的毫秒漂移越过阈值造成 flake。
+        backdate_child_settled_at(
+            &mut orchestrator,
+            agent_id,
+            SETTLED_CHILD_AUTO_DESTROY_AFTER_MS / 2,
+        );
+        let _ = orchestrator.drain_child_events();
+
+        assert_eq!(orchestrator.child_count(), 1);
+        assert!(orchestrator.child_has_authority(agent_id));
+        let events = orchestrator.drain_projection_events();
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                AgentProjectionEvent::AgentsOverviewUpdated { delta }
+                    if matches!(delta.kind, AgentOverviewDeltaKind::Remove { .. })
+            )),
+            "within-threshold settled child must not be removed: {events:?}"
+        );
+    }
+
+    #[test]
+    fn followup_turn_resets_the_auto_destroy_window() {
+        let agent_id = AgentId::new(2);
+        let turn_id = AgentTurnId::new(agent_id.get());
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        orchestrator.register_child_for_test(
+            agent_id,
+            AgentId::MAIN,
+            turn_id,
+            test_title("followup window"),
+            test_context("followup-window"),
+            Box::new(ShutdownCountingRuntime {
+                events: vec![child_event(
+                    agent_id,
+                    turn_id,
+                    &target,
+                    finished_turn_event("first answer"),
+                )],
+                shutdown_calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        orchestrator.mark_child_target_for_test(agent_id, target);
+        let _ = orchestrator.drain_child_events();
+
+        // 名义上已过期，但 followup turn 开启了新的 terminal 周期。
+        backdate_child_settled_at(
+            &mut orchestrator,
+            agent_id,
+            SETTLED_CHILD_AUTO_DESTROY_AFTER_MS,
+        );
+        orchestrator
+            .send_child_message(agent_id, child_message("refine the answer"))
+            .expect("settled child should start the followup turn");
+
+        let _ = orchestrator.drain_child_events();
+
+        assert_eq!(
+            orchestrator.child_count(),
+            1,
+            "a child mid-followup must not be swept"
+        );
+        assert_eq!(
+            orchestrator.child_status(agent_id),
+            Some(AgentProjectionStatus::Pending),
+            "followup turn takes the child back to Active"
+        );
+    }
+
+    #[test]
+    fn expired_settled_child_drops_queued_messages_instead_of_followup() {
+        let caller_id = AgentId::new(2);
+        let target_id = AgentId::new(3);
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        let caller_context =
+            register_message_caller_child(&mut orchestrator, caller_id, AgentTurnId::new(20));
+        let (runtime, _staged, _dispatched, submitted_turns) =
+            ScriptedChildRuntime::new(vec![child_event(
+                target_id,
+                AgentTurnId::new(target_id.get()),
+                &target,
+                finished_turn_event("settled answer"),
+            )]);
+        orchestrator.register_child_for_test(
+            target_id,
+            caller_id,
+            AgentTurnId::new(target_id.get()),
+            test_title("expired queue"),
+            test_context("expired-queue"),
+            Box::new(runtime),
+        );
+        orchestrator.mark_child_target_for_test(target_id, target);
+        let _ = orchestrator.drain_child_events();
+
+        // durable outcome 未收敛（append 持续失败）时消息只能排队等待；这里直接
+        // 置回未持久化态模拟该路径，persist pass 因无 pending snapshot 而跳过。
+        {
+            let Some(record) = orchestrator.children.get_mut(&target_id) else {
+                panic!("target child should be registered");
+            };
+            record.outcome_persisted = false;
+        }
+        let mut receiver = child_caller_message_request(
+            &mut orchestrator,
+            caller_id,
+            &caller_context,
+            AgentTurnId::new(20),
+            target_id,
+            "late follow-up",
+        );
+        backdate_child_settled_at(
+            &mut orchestrator,
+            target_id,
+            SETTLED_CHILD_AUTO_DESTROY_AFTER_MS,
+        );
+
+        let _ = orchestrator.drain_child_events();
+
+        assert_eq!(
+            orchestrator.child_count(),
+            1,
+            "the non-child caller row must survive; only the expired target is destroyed"
+        );
+        let failure = receiver
+            .try_recv()
+            .expect("auto destroy must settle the pending message waiter")
+            .expect_err("queued message on an expired child must fail closed");
+        assert_eq!(failure, SendAgentMessageFailure::TargetUnavailable);
+        assert!(
+            submitted_turns
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "expired child must not consume the queued message as a followup turn"
+        );
+    }
+
+    #[test]
+    fn pending_group_waiter_defers_the_expired_settled_sweep() {
+        let settled_id = AgentId::new(2);
+        let running_id = AgentId::new(3);
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let group_id = AgentLaunchGroupId::new(1);
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        orchestrator.register_child_for_test(
+            settled_id,
+            AgentId::MAIN,
+            AgentTurnId::new(settled_id.get()),
+            test_title("settled sibling"),
+            test_context("settled-sibling"),
+            Box::new(ShutdownCountingRuntime {
+                events: vec![child_event(
+                    settled_id,
+                    AgentTurnId::new(settled_id.get()),
+                    &target,
+                    finished_turn_event("early answer"),
+                )],
+                shutdown_calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        orchestrator.mark_child_launch_group_for_test(settled_id, group_id);
+        let (running_runtime, staged_running, _dispatched, _submitted) =
+            ScriptedChildRuntime::new(Vec::new());
+        orchestrator.register_child_for_test(
+            running_id,
+            AgentId::MAIN,
+            AgentTurnId::new(running_id.get()),
+            test_title("running sibling"),
+            test_context("running-sibling"),
+            Box::new(running_runtime),
+        );
+        orchestrator.mark_child_launch_group_for_test(running_id, group_id);
+        let _ = orchestrator.drain_child_events();
+
+        let (response, response_receiver) = oneshot::channel();
+        orchestrator.group_waiters.insert(
+            group_id,
+            GroupWaiter {
+                parent_agent_id: AgentId::MAIN,
+                child_ids: vec![settled_id, running_id],
+                response,
+            },
+        );
+        orchestrator.observe_agents(AgentObservationRequestId::new(1));
+        let _ = orchestrator.drain_projection_events();
+        backdate_child_settled_at(
+            &mut orchestrator,
+            settled_id,
+            SETTLED_CHILD_AUTO_DESTROY_AFTER_MS,
+        );
+
+        // 兄弟 child 未终态：group completion 仍需要已 settled child 的 record，
+        // 过期清扫必须让位。
+        let _ = orchestrator.drain_child_events();
+        assert_eq!(
+            orchestrator.child_count(),
+            2,
+            "a settled child in a pending launch group must not be swept"
+        );
+
+        // 兄弟 child 终态：同一 drain 内 waiter 先结算，随后清扫回收过期 child。
+        staged_running
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(child_event(
+                running_id,
+                AgentTurnId::new(running_id.get()),
+                &target,
+                finished_turn_event("late answer"),
+            ));
+        let _ = orchestrator.drain_child_events();
+
+        let completion = response_receiver
+            .blocking_recv()
+            .expect("group waiter should settle when the last child turns terminal")
+            .expect("group completion should succeed");
+        assert_eq!(completion.children.len(), 2);
+        assert_eq!(orchestrator.child_count(), 1);
+        let events = orchestrator.drain_projection_events();
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentProjectionEvent::AgentsOverviewUpdated { delta }
+                    if matches!(
+                        delta.kind,
+                        AgentOverviewDeltaKind::Remove { agent_id } if agent_id == settled_id
+                    )
+            )),
+            "the expired child must be swept once the group waiter settles: {events:?}"
+        );
+    }
+
+    #[test]
     fn group_completion_without_committed_answer_uses_placeholder() {
         let child = completed_group_child(finished_turn_event(""));
         // 空正文收尾没有可回传的报告：信封显式标注为空，占位文本只进入 snapshot 摘要。
@@ -3921,7 +4434,7 @@ mod tests {
         assert_eq!(child.tokens, Some(1200));
         assert_eq!(child.tool_uses, Some(1));
         assert!(
-            child.duration_ms.is_some(),
+            child.duration.is_some(),
             "started child should carry a terminal duration"
         );
     }
@@ -4611,6 +5124,18 @@ mod tests {
                 _ => None,
             })
             .expect("view observation should deliver a snapshot")
+    }
+
+    fn loaded_overview_rows(events: Vec<AgentProjectionEvent>) -> Vec<AgentOverviewRow> {
+        events
+            .into_iter()
+            .find_map(|event| match event {
+                AgentProjectionEvent::AgentsOverviewSnapshotLoaded { snapshot, .. } => {
+                    Some(snapshot.rows)
+                }
+                _ => None,
+            })
+            .expect("overview observation should deliver a snapshot")
     }
 
     fn outcome_facts(
@@ -5653,6 +6178,99 @@ mod tests {
                     )
             )),
             "settled delete must publish an overview Remove delta: {events:?}"
+        );
+    }
+
+    #[test]
+    fn stop_agent_defers_settled_delete_while_the_group_report_is_pending() {
+        // launch-group 的 completion 读取 registry 内全部 staged child 行：waiter
+        // 未结算时删除任一 settled 成员会让 completion 永远无法凑齐。删除必须
+        // 让位，report 交付后恢复可用。
+        let settled_id = AgentId::new(2);
+        let running_id = AgentId::new(3);
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let group_id = AgentLaunchGroupId::new(1);
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        orchestrator.register_child_for_test(
+            settled_id,
+            AgentId::MAIN,
+            AgentTurnId::new(settled_id.get()),
+            test_title("settled sibling"),
+            test_context("settled-sibling"),
+            Box::new(ShutdownCountingRuntime {
+                events: vec![child_event(
+                    settled_id,
+                    AgentTurnId::new(settled_id.get()),
+                    &target,
+                    finished_turn_event("early answer"),
+                )],
+                shutdown_calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        orchestrator.mark_child_launch_group_for_test(settled_id, group_id);
+        let (running_runtime, staged_running, _dispatched, _submitted) =
+            ScriptedChildRuntime::new(Vec::new());
+        orchestrator.register_child_for_test(
+            running_id,
+            AgentId::MAIN,
+            AgentTurnId::new(running_id.get()),
+            test_title("running sibling"),
+            test_context("running-sibling"),
+            Box::new(running_runtime),
+        );
+        orchestrator.mark_child_launch_group_for_test(running_id, group_id);
+        let _ = orchestrator.drain_child_events();
+        assert_eq!(
+            orchestrator.child_status(settled_id),
+            Some(AgentProjectionStatus::Completed)
+        );
+
+        let (response, response_receiver) = oneshot::channel();
+        orchestrator.group_waiters.insert(
+            group_id,
+            GroupWaiter {
+                parent_agent_id: AgentId::MAIN,
+                child_ids: vec![settled_id, running_id],
+                response,
+            },
+        );
+
+        // waiter 仍在等待：settled 行的删除被拒绝，行与 waiter 都保留。
+        let rejection = orchestrator
+            .stop_agent(settled_id, AgentRuntimeGeneration::new(1))
+            .expect_err("delete must defer while the group report is pending");
+        assert_eq!(rejection, AgentProductCommandRejection::ReportPending);
+        assert_eq!(
+            orchestrator.child_count(),
+            2,
+            "the settled row must stay until the group report is delivered"
+        );
+
+        // 兄弟 child 终态：同一 drain 内 waiter 先结算，随后删除恢复可用。
+        staged_running
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(child_event(
+                running_id,
+                AgentTurnId::new(running_id.get()),
+                &target,
+                finished_turn_event("late answer"),
+            ));
+        let _ = orchestrator.drain_child_events();
+        let completion = response_receiver
+            .blocking_recv()
+            .expect("group waiter should settle when the last child turns terminal")
+            .expect("group completion should succeed");
+        assert_eq!(completion.children.len(), 2);
+
+        orchestrator
+            .stop_agent(settled_id, AgentRuntimeGeneration::new(1))
+            .expect("delete should converge once the group report is delivered");
+        assert_eq!(
+            orchestrator.child_count(),
+            1,
+            "only the running sibling row must remain after the deferred delete"
         );
     }
 

@@ -740,6 +740,7 @@ fn agent_projection_deltas_do_not_rewrite_appended_document_facts() {
                 elapsed_ms: Some(1200),
                 tool_uses: Some(3),
                 token_usage: Some(2048),
+                settled_at_ms: None,
             }),
         },
     };

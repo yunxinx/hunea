@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 use runtime_domain::model_catalog::ModelSelection;
@@ -148,4 +149,49 @@ pub(crate) struct NoticeState {
     pub(crate) external_editor_helper_token: usize,
     pub(crate) external_editor_helper_deadline: Option<Instant>,
     pub(crate) exit_confirmation_deadline: Option<Instant>,
+}
+
+/// `AgentSettledExpiryState` 收口 settled child 自动销毁的唤醒登记。
+///
+/// 登记由 `AgentOutcomeFact` 驱动（按 `occurred_at_ms` 换算剩余窗口）；到点只负责
+/// 唤醒 loop 迭代，销毁本身由 runtime drain 中的过期清扫执行，TUI 不直接派发删除。
+/// child 行移除（Remove delta）、会话切换或 runtime 失效时清除登记；到点即消费，
+/// 防止清扫未收敛（CleanupBlocked）时过期 deadline 让事件泵空转。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AgentSettledExpiryState {
+    deadlines: BTreeMap<runtime_domain::agent::AgentId, Instant>,
+}
+
+impl AgentSettledExpiryState {
+    pub(crate) fn register(&mut self, agent_id: runtime_domain::agent::AgentId, deadline: Instant) {
+        self.deadlines.insert(agent_id, deadline);
+    }
+
+    pub(crate) fn remove(&mut self, agent_id: runtime_domain::agent::AgentId) {
+        self.deadlines.remove(&agent_id);
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.deadlines.clear();
+    }
+
+    /// 最早到期的销毁唤醒时刻；空登记返回 `None`。
+    pub(crate) fn next_deadline(&self) -> Option<Instant> {
+        self.deadlines.values().copied().min()
+    }
+
+    /// 消费已到期的登记。唤醒发生后销毁由下一次 runtime drain 兜底，这里只清登记。
+    pub(crate) fn consume_expired(&mut self, now: Instant) {
+        self.deadlines.retain(|_, deadline| *deadline > now);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn deadline(&self, agent_id: runtime_domain::agent::AgentId) -> Option<Instant> {
+        self.deadlines.get(&agent_id).copied()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.deadlines.is_empty()
+    }
 }

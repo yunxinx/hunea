@@ -1,6 +1,8 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use runtime_domain::agent::{AgentLaunchSnapshot, AgentOutcomeSnapshot};
+use runtime_domain::agent::{
+    AgentLaunchSnapshot, AgentOutcomeSnapshot, SETTLED_CHILD_AUTO_DESTROY_AFTER_MS,
+};
 use runtime_domain::session::{
     RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityUpdate,
 };
@@ -360,15 +362,33 @@ impl Model {
     }
 
     /// `append_agent_outcome_fact_from_runtime` 追加一个 child terminal outcome 的 document 事实。
+    ///
+    /// 该事实同时是 settled 自动销毁窗口的起点：按 `occurred_at_ms` 换算剩余窗口登记
+    /// 唤醒 deadline，到点唤醒 loop 迭代后由常规 runtime drain 执行销毁。
     pub(crate) fn append_agent_outcome_fact_from_runtime(
         &mut self,
         snapshot: AgentOutcomeSnapshot,
     ) {
+        self.register_agent_settled_expiry(&snapshot);
         let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
         self.transcript_mut().append_agent_outcome_fact(snapshot);
         self.refresh_status_line_after_transcript_change();
         self.sync_transcript_render();
         self.sync_viewport_after_runtime_transcript_refresh(preserved_viewport_state);
+    }
+
+    /// 按 outcome fact 的定格时刻登记销毁唤醒；followup turn 的后续 outcome fact
+    /// 以新定格覆盖旧登记。
+    fn register_agent_settled_expiry(&mut self, snapshot: &AgentOutcomeSnapshot) {
+        let now_unix_ms = runtime_domain::time::unix_timestamp_ms().unwrap_or(0);
+        // 时钟偏差（occurred_at 晚于当前）按未流逝处理；fact 迟到超过窗口则立即唤醒。
+        let elapsed_ms = (now_unix_ms - snapshot.occurred_at_ms).max(0);
+        let remaining_ms = SETTLED_CHILD_AUTO_DESTROY_AFTER_MS.saturating_sub(elapsed_ms);
+        // remaining 恒在 [0, 阈值] 区间；转换失败（理论不可达）退化为立即唤醒。
+        let deadline =
+            Instant::now() + Duration::from_millis(u64::try_from(remaining_ms).unwrap_or(0));
+        self.agent_settled_expiry
+            .register(snapshot.agent_id, deadline);
     }
 
     pub(crate) fn reset_runtime_final_body_divider_state(&mut self) {

@@ -462,7 +462,7 @@ mod tests {
                         report: Some("scouted report body".to_string()),
                         tokens: Some(1200),
                         tool_uses: Some(3),
-                        duration_ms: Some(45_000),
+                        duration: Some("45s".to_string()),
                         truncated: true,
                     }],
                     occurred_at_ms: 123,
@@ -490,7 +490,7 @@ mod tests {
                 "report": "scouted report body",
                 "tokens": 1200,
                 "tool_uses": 3,
-                "duration_ms": 45_000,
+                "duration": "45s",
                 "truncated": true,
             }),
             "spawn result face should be exactly the 8-field child envelope"

@@ -2747,5 +2747,6 @@ fn agent_overview_row(agent_id: u64, title: &str) -> AgentOverviewRow {
         elapsed_ms: Some(1000),
         tool_uses: None,
         token_usage: None,
+        settled_at_ms: None,
     }
 }

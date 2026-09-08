@@ -3862,6 +3862,210 @@ fn stream_activity_line_can_hide_interrupt_hint() {
     assert!(!line.contains("interrupt"));
 }
 
+/// 构造带指定定格时刻的 child terminal outcome fact 事件。
+fn agent_outcome_fact_event(
+    agent_value: u64,
+    occurred_at_ms: i64,
+) -> runtime_domain::session::RuntimeEvent {
+    use runtime_domain::agent::{AgentProjectionEvent, AgentTitle};
+
+    let snapshot = runtime_domain::agent::AgentOutcomeSnapshot {
+        agent_id: runtime_domain::agent::AgentId::new(agent_value),
+        title: AgentTitle::resolve(
+            &runtime_domain::agent::AgentObjective::new("expiry objective")
+                .expect("objective should be valid"),
+            Some("expiry task"),
+        )
+        .expect("title should resolve"),
+        group_id: None,
+        parent_agent_id: None,
+        parent_turn_id: None,
+        outcome: runtime_domain::agent::AgentOutcome::Completed,
+        occurred_at_ms,
+        duration_ms: None,
+        summary: None,
+    };
+    runtime_domain::session::RuntimeEvent::AgentProjection(Box::new(
+        AgentProjectionEvent::AgentOutcomeFact { snapshot },
+    ))
+}
+
+/// 新建 model 并应用一次 outcome fact。
+fn apply_agent_outcome_fact(agent_value: u64, occurred_at_ms: i64) -> Model {
+    use crate::runtime::RuntimeEventApply;
+
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.apply_runtime_event(agent_outcome_fact_event(agent_value, occurred_at_ms));
+    model
+}
+
+#[test]
+fn agent_outcome_fact_registers_settled_expiry_from_occurred_at() {
+    use runtime_domain::agent::{AgentId, SETTLED_CHILD_AUTO_DESTROY_AFTER_MS};
+
+    // 窗口已流逝 5s：剩余约 15s。注册点会重新采样 unix 时钟，apply 期间的调度
+    // 漂移会让 elapsed 落在 [5s, 5s + drift]——下界按 drift 收缩，负载下不 flake。
+    let unix_before = runtime_domain::time::unix_timestamp_ms().expect("test clock is sane");
+    let before = Instant::now();
+    let model = apply_agent_outcome_fact(2, unix_before - 5_000);
+    let unix_after = runtime_domain::time::unix_timestamp_ms().expect("test clock is sane");
+    let after = Instant::now();
+    let drift_ms = (unix_after - unix_before).max(0) as u64;
+    let max_remaining_ms = (SETTLED_CHILD_AUTO_DESTROY_AFTER_MS - 5_000) as u64;
+    let deadline = model
+        .agent_settled_expiry
+        .deadline(AgentId::new(2))
+        .expect("outcome fact should register the expiry deadline");
+    assert!(
+        deadline >= before + Duration::from_millis(max_remaining_ms.saturating_sub(drift_ms))
+            && deadline <= after + Duration::from_millis(max_remaining_ms),
+        "deadline {deadline:?} must stay within the sampling window"
+    );
+    assert_eq!(model.next_timeout_deadline(), Some(deadline));
+
+    // occurred_at 晚于当前（时钟偏差）：按未流逝处理，登记完整窗口；
+    // 该分支 remaining 与注册采样点无关，可做精确夹逼。
+    let before = Instant::now();
+    let model = apply_agent_outcome_fact(3, unix_before + 60_000);
+    let after = Instant::now();
+    let full_window = Duration::from_millis(SETTLED_CHILD_AUTO_DESTROY_AFTER_MS as u64);
+    let deadline = model
+        .agent_settled_expiry
+        .deadline(AgentId::new(3))
+        .expect("clock-skewed outcome fact should still register the full window");
+    assert!(deadline >= before + full_window && deadline <= after + full_window);
+}
+
+#[test]
+fn agent_settled_expiry_wake_consumes_only_expired_deadlines() {
+    use runtime_domain::agent::AgentId;
+
+    // occurred_at 远早于当前（unix epoch 起点）：窗口耗尽，立即唤醒。
+    let mut model = apply_agent_outcome_fact(2, 0);
+    let expired = model
+        .agent_settled_expiry
+        .deadline(AgentId::new(2))
+        .expect("exhausted window should still register an immediate deadline");
+    assert!(expired <= Instant::now());
+    assert_eq!(
+        model.timeout_event(Instant::now()),
+        Some(AppEvent::AgentSettledExpiryTimeout)
+    );
+
+    // 消费只清除已到期登记：新登记的 child 不受影响。
+    use crate::runtime::RuntimeEventApply;
+    let now_unix_ms = runtime_domain::time::unix_timestamp_ms().expect("test clock is sane");
+    let before = Instant::now();
+    model.apply_runtime_event(agent_outcome_fact_event(3, now_unix_ms));
+    let after = Instant::now();
+    let effect = model.update(AppEvent::AgentSettledExpiryTimeout);
+    assert_eq!(effect, None);
+    assert!(
+        model
+            .agent_settled_expiry
+            .deadline(AgentId::new(2))
+            .is_none(),
+        "the expired registration must be consumed by the wake"
+    );
+    let retained = model
+        .agent_settled_expiry
+        .deadline(AgentId::new(3))
+        .expect("the fresh registration must survive the wake");
+    assert!(retained >= before && retained <= after + Duration::from_secs(20));
+    assert_eq!(model.next_timeout_deadline(), Some(retained));
+    assert_eq!(
+        model.timeout_event(Instant::now()),
+        None,
+        "no deadline is due after the wake consumed the expired one"
+    );
+}
+
+#[test]
+fn overview_remove_delta_clears_only_that_child_deadline() {
+    use crate::runtime::RuntimeEventApply;
+    use runtime_domain::agent::{
+        AgentId, AgentObservationId, AgentOverviewDelta, AgentOverviewDeltaKind,
+        AgentProjectionEvent, AgentProjectionRevision, AgentRuntimeGeneration,
+    };
+    use runtime_domain::session::RuntimeEvent;
+
+    let now_unix_ms = runtime_domain::time::unix_timestamp_ms().expect("test clock is sane");
+    let mut model = apply_agent_outcome_fact(2, now_unix_ms - 5_000);
+    model.apply_runtime_event(agent_outcome_fact_event(3, now_unix_ms));
+    assert!(
+        model
+            .agent_settled_expiry
+            .deadline(AgentId::new(2))
+            .is_some()
+    );
+    assert!(
+        model
+            .agent_settled_expiry
+            .deadline(AgentId::new(3))
+            .is_some()
+    );
+
+    // panel 关闭（无 observation 绑定）时 Remove delta 的 panel 应用是 no-op，
+    // 但销毁登记必须清除——登记生命周期独立于 panel。
+    model.apply_runtime_event(RuntimeEvent::AgentProjection(Box::new(
+        AgentProjectionEvent::AgentsOverviewUpdated {
+            delta: AgentOverviewDelta {
+                observation_id: AgentObservationId::new(1),
+                generation: AgentRuntimeGeneration::new(1),
+                revision: AgentProjectionRevision::new(2),
+                kind: AgentOverviewDeltaKind::Remove {
+                    agent_id: AgentId::new(2),
+                },
+            },
+        },
+    )));
+
+    assert!(
+        model
+            .agent_settled_expiry
+            .deadline(AgentId::new(2))
+            .is_none()
+    );
+    assert!(
+        model
+            .agent_settled_expiry
+            .deadline(AgentId::new(3))
+            .is_some()
+    );
+}
+
+#[test]
+fn session_resume_and_runtime_stop_clear_settled_expiry_deadlines() {
+    use crate::runtime::RuntimeEventApply;
+    use runtime_domain::session::{RuntimeEvent, RuntimeTarget};
+
+    let now_unix_ms = runtime_domain::time::unix_timestamp_ms().expect("test clock is sane");
+    let mut model = apply_agent_outcome_fact(2, now_unix_ms);
+    assert!(!model.agent_settled_expiry.is_empty());
+
+    model.apply_runtime_event(RuntimeEvent::SessionResumed {
+        payload: runtime_domain::session::SessionResumePayload {
+            session_id: "session-1".to_string(),
+            transcript: Vec::new(),
+            restored_model: None,
+        },
+    });
+    assert!(
+        model.agent_settled_expiry.is_empty(),
+        "session transition must drop the previous session's deadlines"
+    );
+
+    let mut model = apply_agent_outcome_fact(2, now_unix_ms);
+    model.apply_runtime_event(RuntimeEvent::Stopped {
+        target: RuntimeTarget::provider("local", "qwen3"),
+        message: None,
+    });
+    assert!(
+        model.agent_settled_expiry.is_empty(),
+        "runtime replacement must drop stale generation deadlines"
+    );
+}
+
 fn file_picker_model(root: &Path) -> Model {
     let mut model = Model::new_with_options(
         StartupBannerOptions::default(),

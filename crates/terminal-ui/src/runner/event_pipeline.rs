@@ -283,4 +283,55 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn expired_agent_settled_expiry_wakes_the_wait_plan_without_render() {
+        use crate::runtime::RuntimeEventApply;
+        use runtime_domain::agent::{AgentProjectionEvent, AgentTitle};
+        use runtime_domain::session::RuntimeEvent;
+
+        // occurred_at 远早于当前：销毁窗口已耗尽，登记立即到期的 deadline。
+        let snapshot = runtime_domain::agent::AgentOutcomeSnapshot {
+            agent_id: runtime_domain::agent::AgentId::new(2),
+            title: AgentTitle::resolve(
+                &runtime_domain::agent::AgentObjective::new("expiry objective")
+                    .expect("objective should be valid"),
+                Some("expiry task"),
+            )
+            .expect("title should resolve"),
+            group_id: None,
+            parent_agent_id: None,
+            parent_turn_id: None,
+            outcome: runtime_domain::agent::AgentOutcome::Completed,
+            occurred_at_ms: 0,
+            duration_ms: None,
+            summary: None,
+        };
+        let mut model = Model::new(StartupBannerOptions::default());
+        model.update(crate::AppEvent::StartupReadyTimeout);
+        model.apply_runtime_event(RuntimeEvent::AgentProjection(Box::new(
+            AgentProjectionEvent::AgentOutcomeFact { snapshot },
+        )));
+
+        // 到点唤醒以 0 超时进入 wait plan；销毁由 loop 顶部的常规 drain 执行，
+        // 唤醒本身不强制 render（drain 无变化时无需重绘）。
+        assert_eq!(
+            loop_wait_plan(&model, Instant::now()),
+            LoopWaitPlan::Wait {
+                duration: Duration::ZERO,
+                render_on_timeout: false,
+            }
+        );
+
+        // timeout_event 在到点后交付唤醒事件，消费登记防止空转。
+        assert_eq!(
+            model.timeout_event(Instant::now()),
+            Some(crate::AppEvent::AgentSettledExpiryTimeout)
+        );
+        assert_eq!(
+            model.update(crate::AppEvent::AgentSettledExpiryTimeout),
+            None
+        );
+        assert_eq!(loop_wait_plan(&model, Instant::now()), LoopWaitPlan::Block);
+    }
 }

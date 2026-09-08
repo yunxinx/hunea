@@ -158,6 +158,8 @@ pub enum AppEvent {
     ToastNoticeTimeout {
         token: usize,
     },
+    /// settled child 销毁唤醒到点；只消费登记，销毁由常规 runtime drain 执行。
+    AgentSettledExpiryTimeout,
     StartupReadyTimeout,
 }
 
@@ -312,6 +314,13 @@ impl Model {
             }
             AppEvent::ToastNoticeTimeout { token } => {
                 self.handle_toast_timeout(token);
+                None
+            }
+            AppEvent::AgentSettledExpiryTimeout => {
+                // 唤醒已送达：清除已到期登记，销毁由 loop 顶部的常规 runtime drain
+                // （orchestrator 过期清扫）完成。
+                self.agent_settled_expiry
+                    .consume_expired(std::time::Instant::now());
                 None
             }
             AppEvent::StartupReadyTimeout => {

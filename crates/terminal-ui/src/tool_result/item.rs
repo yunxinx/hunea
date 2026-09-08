@@ -19,9 +19,12 @@ use super::activity::{
     runtime_read_tool_activity_title_chunks, runtime_tool_activity_detail_blocks,
     runtime_tool_activity_diff_header_chunks, runtime_tool_activity_display_title,
     runtime_tool_activity_location_suffix, runtime_tool_activity_status_color,
-    runtime_write_tool_activity_title_chunks, style_for_color,
+    runtime_write_tool_activity_title_chunks,
 };
-use super::approval::{ParsedToolResultLine, looks_like_shell_command, style_core_result_line};
+use super::approval::{
+    ParsedToolResultLine, looks_like_shell_command, pretty_json_result_content,
+    style_core_result_line,
+};
 #[cfg(test)]
 use super::diff::DiffBudget;
 use super::diff::{
@@ -45,7 +48,7 @@ use crate::{
     display_width::display_width,
     runtime::tool_activity_preview::is_runtime_write_tool_activity,
     styled_text::{line_to_plain_text, lines_to_ansi_text, lines_to_plain_text},
-    theme::{TerminalPalette, secondary_text_style},
+    theme::{TerminalColorCapability, TerminalPalette, secondary_text_style, style_for_color},
     transcript::{
         ItemLineAnchor, TranscriptEstimateKind, TranscriptFastEstimate, TranscriptItemMetrics,
         markdown_highlight::{
@@ -703,6 +706,9 @@ impl ToolResultItem {
         palette: TerminalPalette,
     ) -> Vec<Line<'static>> {
         let width = usize::from(width.max(1));
+        if let Some(pretty) = pretty_json_result_content(content) {
+            return self.json_result_styled_lines(&pretty, width, palette);
+        }
         content
             .split('\n')
             .enumerate()
@@ -710,6 +716,56 @@ impl ToolResultItem {
                 self.wrap_logical_line(content_line, logical_line, width, palette)
             })
             .collect()
+    }
+
+    /// pretty JSON 结果的展示行：首逻辑行用结果 marker 前缀，后续逻辑行与折行
+    /// 共用 continuation 前缀；着色复用 syntect 的 json 语法。
+    fn json_result_styled_lines(
+        &self,
+        pretty: &str,
+        width: usize,
+        palette: TerminalPalette,
+    ) -> Vec<Line<'static>> {
+        let base_style = json_result_base_style(palette);
+        let highlighted = highlight_code_chunks(pretty, "json", base_style, palette)
+            .unwrap_or_else(|| {
+                // 高亮资产不可用（超限/语法缺失）时退回无样式 pretty 文本。
+                pretty
+                    .split('\n')
+                    .map(|line| {
+                        vec![HighlightChunk {
+                            text: line.to_string(),
+                            style: base_style,
+                        }]
+                    })
+                    .collect::<Vec<_>>()
+            });
+        let mut lines = Vec::new();
+        for (logical_line, chunks) in highlighted.iter().enumerate() {
+            let initial_prefix = if logical_line == 0 {
+                TOOL_RESULT_PREFIX
+            } else {
+                TOOL_RESULT_CONTINUATION_PREFIX
+            };
+            let prefix_width = display_width(initial_prefix);
+            let content_width = width.saturating_sub(prefix_width).max(1);
+            let mut wrapped = wrap_highlight_chunks(std::slice::from_ref(chunks), content_width);
+            if wrapped.is_empty() {
+                wrapped.push(Vec::new());
+            }
+            for (wrapped_index, content_spans) in wrapped.into_iter().enumerate() {
+                let prefix = if logical_line == 0 && wrapped_index == 0 {
+                    initial_prefix
+                } else {
+                    TOOL_RESULT_CONTINUATION_PREFIX
+                };
+                let mut spans = Vec::with_capacity(content_spans.len() + 1);
+                spans.push(self.prefix_span(prefix, palette));
+                spans.extend(content_spans);
+                lines.push(Line::from(spans));
+            }
+        }
+        lines
     }
 
     fn exploration_styled_lines_at(
@@ -1493,5 +1549,16 @@ fn grouped_exploration_title(
                 "Explored"
             }
         }
+    }
+}
+
+/// JSON 结果高亮的 base style：与 markdown 代码块同一降级策略——显式配色用
+/// `main` 前景兜底，终端默认配色下不强制前景色（`convert_syntect_style` 在该档
+/// 本就丢弃 syntect 前景，base 强加会破坏终端默认配色的语义）。
+fn json_result_base_style(palette: TerminalPalette) -> Style {
+    if palette.color_capability() == TerminalColorCapability::TerminalDefault {
+        Style::new()
+    } else {
+        Style::new().fg(palette.main)
     }
 }

@@ -18,6 +18,6 @@ pub(crate) use styles::{
 pub use styles::{
     accent_rule_line, accent_text_style, approval_rejected_text_style, command_accent_text_style,
     muted_text_style, panel_block, primary_text_style, quote_text_style, secondary_text_style,
-    success_text_style, surface_emphasis_style, surface_text_style, system_error_text_style,
-    table_header_text_style, tertiary_text_style,
+    style_for_color, success_text_style, surface_emphasis_style, surface_text_style,
+    system_error_text_style, table_header_text_style, tertiary_text_style,
 };

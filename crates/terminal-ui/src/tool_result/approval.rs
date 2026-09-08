@@ -81,6 +81,21 @@ fn strip_redundant_reject_title_verb(text: &str) -> &str {
         .unwrap_or(text)
 }
 
+/// 展示侧 JSON 检测：单行（无换行）、以 `{`/`[` 开头且整体可解析的结果重排为
+/// pretty 形态。
+///
+/// 只影响 TUI 呈现（紧凑单行 JSON 结果获得与代码块一致的观感），不改写 tool
+/// result 进入模型上下文的文本；检测不满足或解析失败返回 `None`，调用方按
+/// 原文本渲染。
+pub(super) fn pretty_json_result_content(content: &str) -> Option<String> {
+    let content = content.trim();
+    if content.contains('\n') || !content.starts_with(['{', '[']) {
+        return None;
+    }
+    let value = serde_json::from_str::<serde_json::Value>(content).ok()?;
+    serde_json::to_string_pretty(&value).ok()
+}
+
 pub(super) fn style_core_result_line(line: String) -> Vec<Span<'static>> {
     let Some((core, rest)) = split_first_word(&line) else {
         return vec![Span::raw(line)];

@@ -6,6 +6,7 @@ use runtime_domain::session::{
 
 use crate::{
     Model,
+    agents_panel::agents_panel_surface_frame_height,
     overlay_input_result::OverlayInputResult,
     sender::Sender,
     tool_result::ToolActivityRenderMode,
@@ -22,12 +23,13 @@ impl Model {
             .is_some_and(|panel| panel.surface.is_some())
     }
 
-    /// transcript surface 正文区高度：扣除标题行、分割线、page rule 与 footer，
-    /// 再扣除恒可见（不进滚动区）的 permission 区块。
+    /// transcript surface 正文区高度：扣除与全屏列表同构的 surface chrome
+    /// （`agents_panel_surface_frame_height`），再扣除恒可见（不进滚动区）的
+    /// permission 区块。
     ///
     /// 输入侧（翻页、贴底跟随）与渲染侧共用本函数，保证滚动边界一致。
     pub(super) fn agents_panel_surface_content_height(&self) -> usize {
-        let frame_height = usize::from(self.height.saturating_sub(4).max(1));
+        let frame_height = agents_panel_surface_frame_height(self.height);
         let block_height = self.agents_panel_permission_block_height();
         frame_height.saturating_sub(block_height).max(1)
     }

@@ -1041,6 +1041,7 @@ fn agent_fact_items_flow_through_render_pipeline_with_cached_blocks() {
         parent_turn_id: Some(AgentTurnId::new(9)),
         outcome: AgentOutcome::Completed,
         occurred_at_ms: 43,
+        duration_ms: None,
         summary: Some(
             AgentOutcomeSummary::new("Child Agent completed").expect("summary should resolve"),
         ),

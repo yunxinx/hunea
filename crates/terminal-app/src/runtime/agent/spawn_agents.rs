@@ -2,8 +2,8 @@
 
 use runtime_domain::{
     agent::{
-        AgentGroupCompletion, AgentInstructions, AgentLaunchBatch, AgentLaunchInputError,
-        AgentLaunchRequest, AgentObjective,
+        AgentGroupCompletion, AgentLaunchBatch, AgentLaunchInputError, AgentLaunchRequest,
+        AgentObjective,
     },
     event_notifier::RuntimeEventNotifier,
 };
@@ -26,10 +26,10 @@ Do not dispatch for a single file read or a simple lookup — use read, list_dir
 directly. Each objective must be self-contained: children cannot see this conversation, so \
 include the background, constraints, and the exact deliverable. Children inherit this \
 session's tool permissions, so their tool calls may require user approval. Each report \
-returns only to you: restate or quote it in your reply. To add instructions or ask \
-a question about a dispatched child later, use send_agent_message with its agent_id. If a \
-child's direction turns out wrong or its work is no longer needed, stop it with stop_agents \
-instead of waiting for it to finish.";
+returns only to you: restate or quote it in your reply. To ask a follow-up question about a \
+dispatched child later, use send_agent_message with its agent_id. If a child's direction \
+turns out wrong or its work is no longer needed, stop it with stop_agents instead of \
+waiting for it to finish.";
 const SPAWN_AGENTS_PROMPT_GUIDELINES: &str = "\
 When to dispatch:
 - Independent subtasks that can run in parallel: put them in one batch (up to 8 agents) instead of multiple serial calls.
@@ -41,7 +41,7 @@ When not to dispatch:
 
 Writing objectives:
 - Make each objective self-contained: include the background, constraints, and the exact deliverable.
-- Use display_title for a short human-readable label; put detailed requirements in the objective or instructions.
+- Use display_title for a short human-readable label; put detailed requirements in the objective.
 
 Wait semantics:
 - The call blocks until every child in the batch completes. Prefer one batch of parallel agents over several serial calls.
@@ -50,7 +50,7 @@ Results:
 - Each child returns its final report. Only this conversation receives it: restate or quote the report in your own reply.
 
 Follow-ups:
-- To add instructions to a dispatched child or ask about its report, call send_agent_message with its agent_id (from a spawn_agents completion result or a send_agent_message receipt).
+- To follow up on a dispatched child or ask about its report, call send_agent_message with its agent_id (from a spawn_agents completion result or a send_agent_message receipt).
 
 Stopping:
 - If a child's direction is wrong or its work is no longer needed, call stop_agents with its agent_id instead of waiting for it to finish.
@@ -130,8 +130,7 @@ impl Tool for SpawnAgentsTool {
                             "type": "object",
                             "properties": {
                                 "objective": { "type": "string" },
-                                "display_title": { "type": "string" },
-                                "instructions": { "type": "string" }
+                                "display_title": { "type": "string" }
                             },
                             "required": ["objective"],
                             "additionalProperties": false
@@ -194,8 +193,10 @@ impl Tool for SpawnAgentsTool {
                     .unwrap_or(Err(SpawnAgentsFailure::Unavailable)),
             };
             match result {
-                Ok(completion) => match serde_json::to_string(&completion) {
-                    Ok(completion) => ToolResult::success(call.call_id, completion),
+                // tool result 只序列化 children 数组：group 归属等 host 控制元数据与
+                // 240 列单行摘要对模型无用，报告与 metrics 信封直达父 Agent。
+                Ok(completion) => match serde_json::to_string(&completion.children) {
+                    Ok(children) => ToolResult::success(call.call_id, children),
                     Err(_) => ToolResult::error(
                         call.call_id,
                         SpawnAgentsFailure::CompletionUnavailable.delivery_message(),
@@ -227,7 +228,6 @@ struct SpawnAgentsArguments {
 struct SpawnAgentArgument {
     objective: String,
     display_title: Option<String>,
-    instructions: Option<String>,
 }
 
 fn parse_batch(arguments: serde_json::Value) -> Result<AgentLaunchBatch, AgentLaunchInputError> {
@@ -240,7 +240,6 @@ fn parse_batch(arguments: serde_json::Value) -> Result<AgentLaunchBatch, AgentLa
             AgentLaunchRequest::new(
                 AgentObjective::new(argument.objective)?,
                 argument.display_title.as_deref(),
-                AgentInstructions::new(argument.instructions.unwrap_or_default()),
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -295,6 +294,21 @@ mod tests {
             }),
             Some(8)
         );
+        // `instructions` 已从 caller 输入面删除：objective 承载全部任务输入。
+        let item_properties = definition
+            .input_schema
+            .as_ref()
+            .and_then(|schema| schema.get("properties"))
+            .and_then(|properties| properties.get("agents"))
+            .and_then(|agents| agents.get("items"))
+            .and_then(|items| items.get("properties"))
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            item_properties,
+            json!({"objective": {"type": "string"}, "display_title": {"type": "string"}}),
+            "spawn_agents item schema must only offer objective and display_title"
+        );
     }
 
     #[test]
@@ -309,6 +323,14 @@ mod tests {
                 "agents": [{"objective": "work", "secret": "leak"}]
             }))
             .is_err()
+        );
+        // 旧客户端传 instructions 必须被拒绝，而不是静默丢弃。
+        assert!(
+            parse_batch(json!({
+                "agents": [{"objective": "work", "instructions": "extra guidance"}]
+            }))
+            .is_err(),
+            "instructions is no longer a spawn_agents argument"
         );
     }
 
@@ -402,6 +424,76 @@ mod tests {
         assert_eq!(
             result.text_content(),
             SpawnAgentsFailure::RequestCancelled.delivery_message()
+        );
+    }
+
+    #[tokio::test]
+    async fn host_completion_serializes_the_flat_children_array() {
+        use runtime_domain::agent::{
+            AgentChildCompletion, AgentId, AgentLaunchGroupId, AgentOutcome, AgentTitle,
+        };
+
+        let (tool, mut receiver) = SpawnAgentsTool::channel(RuntimeEventNotifier::default());
+        let cancellation = CancellationToken::new();
+        let execution = tool.execute_with_context(
+            ToolCall::new(
+                "call",
+                SPAWN_AGENTS_TOOL_NAME,
+                json!({ "agents": [{ "objective": "scout the workspace layout" }] }),
+            ),
+            ToolExecutionContext::new(&cancellation).with_invocation_identity(test_identity()),
+        );
+        let host = async move {
+            let request = receiver.recv().await.expect("host request should arrive");
+            request
+                .response
+                .send(Ok(AgentGroupCompletion {
+                    group_id: AgentLaunchGroupId::new(7),
+                    parent_agent_id: AgentId::new(1),
+                    children: vec![AgentChildCompletion {
+                        agent_id: AgentId::new(2),
+                        title: AgentTitle::resolve(
+                            &AgentObjective::new("scout the workspace layout")
+                                .expect("test objective should be valid"),
+                            Some("workspace scout"),
+                        )
+                        .expect("test title should resolve"),
+                        outcome: AgentOutcome::Completed,
+                        report: Some("scouted report body".to_string()),
+                        tokens: Some(1200),
+                        tool_uses: Some(3),
+                        duration_ms: Some(45_000),
+                        truncated: true,
+                    }],
+                    occurred_at_ms: 123,
+                }))
+                .expect("tool should still await the response");
+        };
+        let (result, ()) = tokio::join!(execution, host);
+
+        assert!(!result.is_error());
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.text_content()).expect("spawn result should be JSON");
+        // tool result 是子结果数组本身：host 控制元数据（group_id/parent_agent_id/
+        // occurred_at_ms）与单行 summary 不进入模型可见面。
+        let children = payload
+            .as_array()
+            .unwrap_or_else(|| panic!("spawn result should be a flat array: {payload}"));
+        assert_eq!(children.len(), 1);
+        let child = &children[0];
+        assert_eq!(
+            child,
+            &json!({
+                "agent_id": 2,
+                "title": "workspace scout",
+                "outcome": "completed",
+                "report": "scouted report body",
+                "tokens": 1200,
+                "tool_uses": 3,
+                "duration_ms": 45_000,
+                "truncated": true,
+            }),
+            "spawn result face should be exactly the 8-field child envelope"
         );
     }
 }

@@ -6,7 +6,8 @@ use crate::agents_panel::{
     AGENTS_TOOLS_COLUMN_WIDTH, agent_status_dot_style, agent_status_dot_symbol, agent_status_label,
     format_agent_token_usage, format_agent_tool_uses, list_render::AGENTS_ROW_RIGHT_PADDING,
     list_render::AGENTS_STOP_CONFIRM_HINT, list_render::agents_panel_column_header_line,
-    list_render::agents_panel_row_layout, list_render::agents_panel_row_line,
+    list_render::agents_panel_row_geometry, list_render::agents_panel_row_layout,
+    list_render::agents_panel_row_line,
 };
 use crate::display_width::{display_width, line_display_width};
 use crate::theme::{default_palette, terminal_default_palette};
@@ -30,8 +31,8 @@ fn cursor_row_marks_selection_with_block_marker_and_bold_title_only() {
     let row = overview_row(2, "research task", AgentProjectionStatus::Working);
     let palette = default_palette();
 
-    let cursor_line = agents_panel_row_line(&row, 80, true, None, palette);
-    let plain_line = agents_panel_row_line(&row, 80, false, None, palette);
+    let cursor_line = agents_panel_row_line(&row, 80, true, None, "", palette);
+    let plain_line = agents_panel_row_line(&row, 80, false, None, "", palette);
 
     // 选中 marker 与未选中空白 marker 等宽，列几何不随选中变化。
     let cursor_marker = cursor_line.spans.first().expect("marker span");
@@ -46,7 +47,7 @@ fn cursor_row_marks_selection_with_block_marker_and_bold_title_only() {
         line_display_width(&plain_line)
     );
 
-    // 无斑马纹：行样式与所有 span 都不携带背景色。
+    // 无斑马纹：行样式与所有 span 都不携带背景色（搜索命中高亮另行测试）。
     for line in [&cursor_line, &plain_line] {
         assert!(line.style.bg.is_none());
         for span in &line.spans {
@@ -68,20 +69,23 @@ fn cursor_row_marks_selection_with_block_marker_and_bold_title_only() {
 fn status_dot_and_label_align_with_the_status_column_header() {
     let palette = default_palette();
     let row = overview_row(2, "research task", AgentProjectionStatus::Working);
-    let line = agents_panel_row_line(&row, 80, false, None, palette);
+    let line = agents_panel_row_line(&row, 80, false, None, "", palette);
     let header = agents_panel_column_header_line(80, palette);
 
     // 状态点归入 status 列：紧随 marker 前缀（marker 2 列）之后。
     assert_eq!(display_width_before(&line, "●"), 2);
-    // 状态文字与列头 Status 共用同一列起点（dot 位计入 status 列推导）。
+    // 列头 "Status" 与状态点共用 status 列起点（左对齐），状态文字在列内偏移 dot 位。
+    assert_eq!(line_label_column(&header, "Status"), 2);
     assert_eq!(display_width_before(&line, "Working"), 4);
-    assert_eq!(display_width_before(&header, "Status"), 4);
+    // title 列头与数据行 title 共用列起点。
+    assert_eq!(line_label_column(&header, "Title"), 15);
+    assert_eq!(display_width_before(&line, "research task"), 15);
 }
 
 #[test]
 fn status_column_renders_dot_symbol_with_label_text() {
     let row = overview_row(2, "research task", AgentProjectionStatus::Failed);
-    let line = agents_panel_row_line(&row, 80, false, None, default_palette());
+    let line = agents_panel_row_line(&row, 80, false, None, "", default_palette());
 
     let row_text: String = line
         .spans
@@ -209,14 +213,14 @@ fn long_content_row() -> runtime_domain::agent::AgentOverviewRow {
 fn wide_terminal_gives_title_the_dominant_share() {
     let row = long_content_row();
 
-    // usable 118；fixed 15 + metrics_gap 1 + metrics 23 → rest 79；
-    // title 拿 40（max 上限），latest 只拿剩余 38。
+    // usable 118；title_start 15 + metrics_gap 1 + metrics 25 → rest 77、flexible 76；
+    // title 拿 40（max 上限），latest 只拿剩余 36。
     let layout = agents_panel_row_layout(&row, 120, None);
     let title_width = display_width(&layout.title);
     let latest_width = layout.latest.as_deref().map_or(0, display_width);
     assert_eq!(title_width, 40, "title should reach its max allocation");
     assert_eq!(
-        latest_width, 38,
+        latest_width, 36,
         "latest should take the leftover elastic width"
     );
     assert!(
@@ -226,9 +230,9 @@ fn wide_terminal_gives_title_the_dominant_share() {
     assert_eq!(
         layout.metrics,
         vec![
-            "   1m23s".to_string(),
+            "    1m 23s".to_string(),
             "     3".to_string(),
-            "   2.0K".to_string()
+            "     2k".to_string()
         ],
         "wide terminal should keep every metric at its fixed column width"
     );
@@ -238,13 +242,12 @@ fn wide_terminal_gives_title_the_dominant_share() {
 fn metrics_yield_tokens_then_tools_then_elapsed() {
     let row = overview_row(2, "research task", AgentProjectionStatus::Working);
 
-    // fixed 15 + title 16 + latest 8 + 间隔 2 + metrics_gap 1：全 metrics 序列 23
-    // 需 usable 64（width 66），丢 tokens（15）需 56（width 58），丢 tools（8）
-    // 需 49（width 51）。
+    // 全 metrics 序列 25 需 usable 66（width 68），丢 tokens（17）需 58（width 60），
+    // 丢 tools（10）需 51（width 53）。
     for (width, expected) in [
-        (66, vec!["   1m23s", "     3", "   2.0K"]),
-        (58, vec!["   1m23s", "     3"]),
-        (51, vec!["   1m23s"]),
+        (68, vec!["    1m 23s", "     3", "     2k"]),
+        (60, vec!["    1m 23s", "     3"]),
+        (53, vec!["    1m 23s"]),
     ] {
         let layout = agents_panel_row_layout(&row, width, None);
         assert_eq!(
@@ -253,10 +256,10 @@ fn metrics_yield_tokens_then_tools_then_elapsed() {
             "width {width} metrics"
         );
     }
-    let layout = agents_panel_row_layout(&row, 50, None);
+    let layout = agents_panel_row_layout(&row, 52, None);
     assert!(
         layout.metrics.is_empty(),
-        "width 50 should drop every metric column"
+        "width 52 should drop every metric column"
     );
 }
 
@@ -266,7 +269,7 @@ fn metrics_sequence_is_right_aligned_to_the_row_edge() {
 
     // 有 metrics 的行：整行内容正好终止在 width - AGENTS_ROW_RIGHT_PADDING。
     for width in [120, 80, 74] {
-        let line = agents_panel_row_line(&row, width, false, None, default_palette());
+        let line = agents_panel_row_line(&row, width, false, None, "", default_palette());
         assert_eq!(
             line_display_width(&line),
             width - AGENTS_ROW_RIGHT_PADDING,
@@ -291,12 +294,12 @@ fn metric_columns_align_vertically_across_rows() {
     large.tool_uses = Some(99);
     large.token_usage = Some(2_048);
 
-    let small_line = agents_panel_row_line(&small, 100, false, None, palette);
-    let large_line = agents_panel_row_line(&large, 100, false, None, palette);
+    let small_line = agents_panel_row_line(&small, 100, false, None, "", palette);
+    let large_line = agents_panel_row_line(&large, 100, false, None, "", palette);
 
     // 同列固定宽度右对齐：tokens 列 span 的起点在两行中处于同一显示列。
     let small_prefix = display_width_before(&small_line, "8");
-    let large_prefix = display_width_before(&large_line, "2.0K");
+    let large_prefix = display_width_before(&large_line, "2k");
     assert_eq!(
         small_prefix, large_prefix,
         "tokens column must start at the same display column in both rows"
@@ -313,6 +316,100 @@ fn metric_columns_align_vertically_across_rows() {
     }
 }
 
+#[test]
+fn missing_metrics_keep_fixed_column_placeholders() {
+    let palette = default_palette();
+    let mut sparse = overview_row(2, "research task", AgentProjectionStatus::Working);
+    sparse.elapsed_ms = None;
+    sparse.tool_uses = None;
+    sparse.token_usage = None;
+    let full = overview_row(3, "research task", AgentProjectionStatus::Working);
+
+    // 缺失列渲染等宽空格占位：槽位集合与齐全行一致（新 agent 0 工具 0 token 是常态）。
+    let sparse_layout = agents_panel_row_layout(&sparse, 100, None);
+    let full_layout = agents_panel_row_layout(&full, 100, None);
+    assert_eq!(
+        sparse_layout.metrics,
+        vec![
+            " ".repeat(AGENTS_ELAPSED_COLUMN_WIDTH),
+            " ".repeat(AGENTS_TOOLS_COLUMN_WIDTH),
+            " ".repeat(AGENTS_TOKENS_COLUMN_WIDTH)
+        ],
+        "absent metrics must render blank column placeholders"
+    );
+    assert!(
+        full_layout
+            .metrics
+            .iter()
+            .all(|metric| !metric.trim().is_empty())
+    );
+
+    // 行 span 逐段等宽：占位行与齐全行的列边界完全一致，纵向对齐。
+    let sparse_line = agents_panel_row_line(&sparse, 100, false, None, "", palette);
+    let full_line = agents_panel_row_line(&full, 100, false, None, "", palette);
+    assert_eq!(sparse_line.spans.len(), full_line.spans.len());
+    for (sparse_span, full_span) in sparse_line.spans.iter().zip(&full_line.spans) {
+        assert_eq!(
+            display_width(sparse_span.content.as_ref()),
+            display_width(full_span.content.as_ref()),
+            "column boundaries must match between sparse and full rows"
+        );
+    }
+}
+
+#[test]
+fn row_geometry_derives_shared_column_slots() {
+    let geometry = agents_panel_row_geometry(100);
+
+    // 固定前缀：marker 2 列 + status 列（dot 1 + gap 1 + 文字 10）+ gap 1。
+    assert_eq!(geometry.status_start, 2);
+    assert_eq!(geometry.status_text_width, AGENTS_STATUS_COLUMN_WIDTH);
+    assert_eq!(geometry.title_start, 15);
+
+    // 全量 metrics 右端锚定 usable（100 - 2）：tokens 91..98、tools 84..90、
+    // elapsed 73..83，列间单空格。
+    let slots: Vec<(usize, usize)> = geometry
+        .metric_slots
+        .iter()
+        .flatten()
+        .map(|slot| (slot.start, slot.width))
+        .collect();
+    assert_eq!(
+        slots,
+        vec![
+            (73, AGENTS_ELAPSED_COLUMN_WIDTH),
+            (84, AGENTS_TOOLS_COLUMN_WIDTH),
+            (91, AGENTS_TOKENS_COLUMN_WIDTH),
+        ]
+    );
+
+    // 弹性预算 = usable - title 起点 - metrics 前间隔 - 序列总宽（25）。
+    assert_eq!(geometry.elastic_width, 57);
+}
+
+#[test]
+fn row_geometry_yields_metrics_tokens_tools_then_elapsed() {
+    // 全量需 usable ≥ 66（width 68）；逐列让位边界 60（保 tools）/ 53（保 elapsed）。
+    assert!(
+        agents_panel_row_geometry(68)
+            .metric_slots
+            .iter()
+            .all(Option::is_some)
+    );
+    let width_67 = agents_panel_row_geometry(67);
+    assert!(width_67.metric_slots[2].is_none());
+    assert!(width_67.metric_slots[0].is_some() && width_67.metric_slots[1].is_some());
+    let width_59 = agents_panel_row_geometry(59);
+    assert!(width_59.metric_slots[1].is_none() && width_59.metric_slots[2].is_none());
+    assert!(width_59.metric_slots[0].is_some());
+    assert!(
+        agents_panel_row_geometry(52)
+            .metric_slots
+            .iter()
+            .all(|slot| slot.is_none())
+    );
+}
+
 /// 计算 line 中首个包含 `needle` 的 span 之前的累计显示宽（列起点）。
 fn display_width_before(line: &ratatui::text::Line<'_>, needle: &str) -> usize {
     let mut width = 0;
@@ -325,19 +422,31 @@ fn display_width_before(line: &ratatui::text::Line<'_>, needle: &str) -> usize {
     panic!("row should contain {needle}");
 }
 
+/// 按文本位置取 line 中标签的显示列起点（span 边界与标签前填充无关）。
+fn line_label_column(line: &ratatui::text::Line<'_>, label: &str) -> usize {
+    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    let byte_index = text
+        .find(label)
+        .unwrap_or_else(|| panic!("line should contain {label}: {text}"));
+    display_width(&text[..byte_index])
+}
+
 #[test]
 fn column_header_line_aligns_labels_to_row_geometry() {
     let palette = default_palette();
 
-    // 宽屏：列名齐全，metrics 列名与行数据共用右端锚点。
+    // 宽屏：列名齐全，metrics 列名与行数据共用右端锚点与槽位起点。
     let header = agents_panel_column_header_line(100, palette);
     let header_text: String = header.spans.iter().map(|s| s.content.as_ref()).collect();
-    for label in ["Status", "Title", "Latest", "Time", "Use Tools", "Tokens"] {
+    for label in ["Status", "Title", "Time", "Tools", "Tokens"] {
         assert!(
             header_text.contains(label),
             "header missing {label}: {header_text}"
         );
     }
+    // latest 列不标列头（内容跟随 title 浮动）；tools 列名不再带 Use 前缀。
+    assert!(!header_text.contains("Latest"), "header: {header_text}");
+    assert!(!header_text.contains("Use"), "header: {header_text}");
     assert_eq!(
         line_display_width(&header),
         100 - AGENTS_ROW_RIGHT_PADDING,
@@ -351,30 +460,97 @@ fn column_header_line_aligns_labels_to_row_geometry() {
         "column labels must use the table header palette slot"
     );
 
-    // 收窄时列名与行数据共用同一让位顺序：丢 tokens 后表头只剩 Time/Use Tools。
+    // Time 列名与行内 elapsed 数值共用槽位（列内右对齐，右缘锚点一致）。
+    let row = overview_row(2, "research task", AgentProjectionStatus::Working);
+    let line = agents_panel_row_line(&row, 100, false, None, "", palette);
+    assert_eq!(
+        line_label_column(&line, "1m 23s") + display_width("1m 23s"),
+        line_label_column(&header, "Time") + display_width("Time"),
+        "Time header must share the elapsed column's right anchor"
+    );
+
+    // 收窄时列名与行数据共用同一让位顺序：丢 tokens 后表头只剩 Time/Tools。
     let narrow = agents_panel_column_header_line(61, palette);
     let narrow_text: String = narrow.spans.iter().map(|s| s.content.as_ref()).collect();
     assert!(
         !narrow_text.contains("Tokens"),
         "header tokens: {narrow_text}"
     );
-    assert!(narrow_text.contains("Time") && narrow_text.contains("Use Tools"));
+    assert!(narrow_text.contains("Time") && narrow_text.contains("Tools"));
+}
+
+#[test]
+fn column_header_line_ellipsizes_on_extreme_narrow_widths() {
+    let palette = default_palette();
+
+    // 无 metric 槽位的 header 文本恰好占满 usable（width 22）时不截断。
+    let boundary = agents_panel_column_header_line(22, palette);
+    assert_eq!(line_display_width(&boundary), 22 - AGENTS_ROW_RIGHT_PADDING);
+    assert!(
+        !boundary
+            .spans
+            .iter()
+            .any(|span| span.content.contains("...")),
+        "boundary header should not be truncated: {boundary:?}"
+    );
+
+    // 更窄时整体 ellipsis 截断：行宽不溢出，文本以省略号收尾。
+    for width in [21, 16, 8] {
+        let header = agents_panel_column_header_line(width, palette);
+        assert!(
+            line_display_width(&header) <= width - AGENTS_ROW_RIGHT_PADDING,
+            "width {width}: {header:?}"
+        );
+        let header_text: String = header.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            header_text.ends_with("..."),
+            "width {width} header should be ellipsized: {header_text:?}"
+        );
+    }
+}
+
+#[test]
+fn search_query_highlights_the_title_substring() {
+    let row = overview_row(2, "research task", AgentProjectionStatus::Working);
+    let palette = default_palette();
+
+    // 命中子串（大小写不敏感）以 surface 背景强调，命中范围只覆盖子串本身。
+    let line = agents_panel_row_line(&row, 100, false, None, "SEARCH", palette);
+    let highlighted: Vec<&ratatui::text::Span<'_>> = line
+        .spans
+        .iter()
+        .filter(|span| span.style.bg == palette.surface)
+        .collect();
+    assert_eq!(
+        highlighted.len(),
+        1,
+        "exactly the matched substring is highlighted"
+    );
+    assert_eq!(highlighted[0].content.as_ref(), "search");
+
+    // 空 query 不高亮：行不携带任何背景（无斑马纹契约保持）。
+    let plain = agents_panel_row_line(&row, 100, false, None, "", palette);
+    assert!(plain.spans.iter().all(|span| span.style.bg.is_none()));
 }
 
 #[test]
 fn token_usage_labels_drop_units_and_keep_bounded_width() {
+    // 小写 k/m 缩放；取整形态与 context budget / spinner 一致（tenths 四舍五入、
+    // `.0` 省略）；百万级进 m 档并封顶。
     for (usage, expected) in [
         (0, "0"),
         (8, "8"),
         (999, "999"),
-        (1_024, "1.0K"),
-        (2_048, "2.0K"),
-        (99_940, "99.9K"),
-        (123_456, "123K"),
-        (1_500_000, "1.5M"),
-        (99_940_000, "99.9M"),
-        (123_456_789, "123M"),
-        (u64::MAX as usize, "999M"),
+        (1_024, "1k"),
+        (2_048, "2k"),
+        (99_940, "99.9k"),
+        (123_456, "123.5k"),
+        (999_999, "1000k"),
+        (1_000_000, "1m"),
+        (1_500_000, "1.5m"),
+        (99_940_000, "99.9m"),
+        (123_456_789, "123.5m"),
+        (usize::MAX, "999.9m"),
     ] {
         assert_eq!(format_agent_token_usage(usage), expected.to_string());
     }
@@ -467,22 +643,23 @@ fn stop_confirm_hint_takes_the_latest_column_slot() {
     let row = overview_row(2, "research task", AgentProjectionStatus::Working);
     let palette = default_palette();
 
-    let plain = agents_panel_row_line(&row, 100, true, None, palette);
-    let hinted = agents_panel_row_line(&row, 100, true, Some(AGENTS_STOP_CONFIRM_HINT), palette);
+    let plain = agents_panel_row_line(&row, 100, true, None, "", palette);
+    let hinted =
+        agents_panel_row_line(&row, 100, true, Some(AGENTS_STOP_CONFIRM_HINT), "", palette);
 
     // 提示接管 latest 列槽位：列几何不变，行仍锚定同一右端。
     assert_eq!(line_display_width(&plain), line_display_width(&hinted));
     let hint_span = hinted
         .spans
         .iter()
-        .find(|span| span.content.contains("press x again"))
+        .find(|span| span.content.contains("Press x again"))
         .expect("hinted row should render the stop hint");
     assert_eq!(hint_span.style.fg, Some(palette.command_accent));
     assert!(
         plain
             .spans
             .iter()
-            .all(|span| !span.content.contains("press x again"))
+            .all(|span| !span.content.contains("Press x again"))
     );
 }
 
@@ -504,7 +681,7 @@ fn stop_confirm_hint_replaces_idle_latest_activity() {
 #[test]
 fn activity_fold_prefix_aligns_with_the_title_column_start() {
     let row = overview_row(2, "research task", AgentProjectionStatus::Working);
-    let line = agents_panel_row_line(&row, 100, true, None, default_palette());
+    let line = agents_panel_row_line(&row, 100, true, None, "", default_palette());
 
     // title span 前所有 span 的显示宽之和即 title 列起点。
     let title_column_start = line

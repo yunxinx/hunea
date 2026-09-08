@@ -4,7 +4,7 @@ use super::*;
 use crate::{StartupBannerOptions, theme::default_palette, transcript::TranscriptItem};
 use runtime_domain::session::{
     RuntimeEvent, RuntimeTarget, RuntimeToolActivity, RuntimeToolActivityContent,
-    RuntimeToolActivityStatus, RuntimeToolActivityUpdate, RuntimeToolKind,
+    RuntimeToolActivityStatus, RuntimeToolKind,
 };
 
 #[test]
@@ -639,13 +639,18 @@ fn host_tool_activity_started_event(title: &str) -> RuntimeEvent {
     }
 }
 
-/// host Agent 工具（spawn/send/stop）执行期同步阻塞等待 child runtime：
-/// 状态行切换为等待文案，不显示流式 header。
+/// host Agent 工具（spawn/send/stop）执行期与普通工具一致：状态行保持
+/// 流式 header，无等待分支。
 #[test]
-fn host_agent_tool_activity_switches_status_line_to_waiting_semantics() {
+fn host_agent_tool_activity_keeps_streaming_semantics() {
     use crate::runtime::RuntimeEventApply;
 
-    for title in ["Spawn agents", "Send agent message", "Stop agents"] {
+    for title in [
+        "Spawn agents",
+        "Send agent message",
+        "Stop agents",
+        "List Directory crates",
+    ] {
         let mut model = Model::new(StartupBannerOptions::default());
         model.set_window(70, 6);
         model.set_palette(default_palette(), true);
@@ -654,123 +659,12 @@ fn host_agent_tool_activity_switches_status_line_to_waiting_semantics() {
 
         model.apply_runtime_event(host_tool_activity_started_event(title));
 
-        let waiting = model
+        let plain = model
             .current_stream_activity_render_result_at(started_at + Duration::from_millis(400))
             .plain_line;
         assert!(
-            waiting.contains(CHILD_AGENTS_WAITING_HEADER),
-            "host tool {title} should switch the status line to waiting: {waiting}"
-        );
-        assert!(
-            !waiting.contains("qwen3"),
-            "waiting line must not show the streaming header: {waiting}"
-        );
-    }
-}
-
-/// 非 host 工具的 activity 不触发等待语义。
-#[test]
-fn non_host_tool_activity_keeps_streaming_semantics() {
-    use crate::runtime::RuntimeEventApply;
-
-    let mut model = Model::new(StartupBannerOptions::default());
-    model.set_window(70, 6);
-    model.set_palette(default_palette(), true);
-    model.show_stream_activity_with_header("qwen3");
-    let started_at = model.stream_activity.as_ref().unwrap().started_at;
-
-    model.apply_runtime_event(host_tool_activity_started_event("List Directory crates"));
-
-    let plain = model
-        .current_stream_activity_render_result_at(started_at + Duration::from_millis(400))
-        .plain_line;
-    assert!(
-        plain.contains("qwen3"),
-        "streaming header must stay: {plain}"
-    );
-    assert!(
-        !plain.contains(CHILD_AGENTS_WAITING_HEADER),
-        "non-host tools must not switch to waiting: {plain}"
-    );
-}
-
-/// 等待期状态行停用流式动画：span 样式不随时间推进，帧 deadline 退化为秒级刻度。
-#[test]
-fn waiting_semantics_suspend_stream_animation() {
-    use crate::runtime::RuntimeEventApply;
-
-    let mut model = Model::new(StartupBannerOptions::default());
-    model.set_window(70, 6);
-    model.set_palette(default_palette(), true);
-    model.show_stream_activity_with_header("qwen3");
-    let started_at = model.stream_activity.as_ref().unwrap().started_at;
-
-    model.apply_runtime_event(host_tool_activity_started_event("Spawn agents"));
-
-    let first = model
-        .current_stream_activity_render_result_at(started_at + Duration::from_millis(100))
-        .line
-        .expect("waiting line should render");
-    let second = model
-        .current_stream_activity_render_result_at(started_at + Duration::from_millis(900))
-        .line
-        .expect("waiting line should render");
-    assert_eq!(
-        first
-            .spans
-            .iter()
-            .map(|span| span.style)
-            .collect::<Vec<_>>(),
-        second
-            .spans
-            .iter()
-            .map(|span| span.style)
-            .collect::<Vec<_>>(),
-        "waiting spans must not animate"
-    );
-    assert_eq!(
-        model.stream_activity_next_frame_deadline_at(started_at + Duration::from_millis(70)),
-        Some(started_at + Duration::from_secs(1)),
-        "waiting must not keep the fast shimmer frames alive"
-    );
-}
-
-/// host 工具终态 update（成功或失败）后恢复正常流式语义：等待状态不残留。
-#[test]
-fn host_agent_tool_settling_restores_streaming_semantics() {
-    use crate::runtime::RuntimeEventApply;
-
-    for settle_status in [
-        RuntimeToolActivityStatus::Completed,
-        RuntimeToolActivityStatus::Failed,
-    ] {
-        let mut model = Model::new(StartupBannerOptions::default());
-        model.set_window(70, 6);
-        model.set_palette(default_palette(), true);
-        model.show_stream_activity_with_header("qwen3");
-        let started_at = model.stream_activity.as_ref().unwrap().started_at;
-
-        model.apply_runtime_event(host_tool_activity_started_event("Spawn agents"));
-        model.apply_runtime_event(RuntimeEvent::ToolActivityUpdated {
-            target: RuntimeTarget::provider("local", "qwen3"),
-            update: RuntimeToolActivityUpdate {
-                activity_id: "call-Spawn agents".to_string(),
-                title: Some("Spawn agents".to_string()),
-                status: Some(settle_status),
-                ..RuntimeToolActivityUpdate::default()
-            },
-        });
-
-        let restored = model
-            .current_stream_activity_render_result_at(started_at + Duration::from_millis(400))
-            .plain_line;
-        assert!(
-            restored.contains("qwen3"),
-            "settling the host tool ({settle_status:?}) must restore the streaming header: {restored}"
-        );
-        assert!(
-            !restored.contains(CHILD_AGENTS_WAITING_HEADER),
-            "waiting header must be cleared after the tool returns: {restored}"
+            plain.contains("qwen3"),
+            "tool {title} must keep the streaming header: {plain}"
         );
     }
 }

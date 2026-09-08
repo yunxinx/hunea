@@ -13,7 +13,7 @@ use crate::{
         runtime_display_path, runtime_write_tool_activity_target,
         should_collapse_runtime_write_tool_activity,
     },
-    theme::{TerminalPalette, secondary_text_style},
+    theme::{TerminalPalette, secondary_text_style, style_for_color},
     transcript::{TRANSCRIPT_DETAIL_HINT, markdown_highlight::HighlightChunk},
 };
 use runtime_domain::session::{
@@ -1181,14 +1181,6 @@ pub(super) fn runtime_tool_activity_status_color(
         RuntimeToolActivityStatus::InProgress => palette.accent,
         RuntimeToolActivityStatus::Completed => palette.quote,
         RuntimeToolActivityStatus::Failed => palette.system_error,
-    }
-}
-
-pub(super) fn style_for_color(color: Color) -> Style {
-    if color == Color::Reset {
-        Style::new()
-    } else {
-        Style::new().fg(color)
     }
 }
 

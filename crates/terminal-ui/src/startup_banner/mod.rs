@@ -8,7 +8,7 @@ use std::io::{self, Write};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Style},
+    style::Style,
     text::{Line, Span},
 };
 use unicode_segmentation::UnicodeSegmentation;
@@ -18,7 +18,7 @@ use runtime_domain::envinfo::short_work_dir;
 use crate::{
     display_width::{display_width, line_display_width},
     styled_text::{line_to_plain_text, lines_to_ansi_text},
-    theme::{TerminalPalette, detect_palette},
+    theme::{TerminalPalette, detect_palette, style_for_color},
     transcript::{display_tab_width, wrap_prompt_visual_lines},
 };
 
@@ -505,14 +505,6 @@ fn startup_banner_style_for_role(role: StartupBannerStyleRole, palette: Terminal
         StartupBannerStyleRole::Tertiary => style_for_color(palette.tertiary),
         StartupBannerStyleRole::CommandAccent => style_for_color(palette.command_accent),
         StartupBannerStyleRole::Reset => Style::new(),
-    }
-}
-
-fn style_for_color(color: Color) -> Style {
-    if color == Color::Reset {
-        Style::new()
-    } else {
-        Style::new().fg(color)
     }
 }
 

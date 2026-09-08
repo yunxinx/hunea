@@ -18,6 +18,29 @@ fn surface_transcript_items(model: &mut crate::Model) -> Vec<String> {
 }
 
 #[test]
+fn surface_frame_height_tracks_the_shared_list_chrome() {
+    use crate::agents_panel::agents_panel_surface_frame_height;
+    use crate::fullscreen_list_chrome::FULLSCREEN_LIST_CHROME_HEIGHT;
+
+    // surface chrome 与全屏列表同构（标题行承担 list header 角色）：正文框架高度
+    // 恒等于高度减去同一 chrome 预算。
+    assert_eq!(
+        agents_panel_surface_frame_height(24),
+        usize::from(24 - FULLSCREEN_LIST_CHROME_HEIGHT)
+    );
+    assert_eq!(
+        agents_panel_surface_frame_height(FULLSCREEN_LIST_CHROME_HEIGHT + 3),
+        3
+    );
+    // chrome 装不下时保底 1 行：正文区恒有可寻址高度。
+    assert_eq!(
+        agents_panel_surface_frame_height(FULLSCREEN_LIST_CHROME_HEIGHT),
+        1
+    );
+    assert_eq!(agents_panel_surface_frame_height(0), 1);
+}
+
+#[test]
 fn enter_opens_transcript_surface_and_dispatches_observe() {
     let mut model = ready_panel_model();
 

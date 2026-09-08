@@ -624,6 +624,7 @@ fn agent_outcome_snapshot_fixture(
         parent_turn_id: Some(runtime_domain::agent::AgentTurnId::new(9)),
         outcome,
         occurred_at_ms: 43,
+        duration_ms: None,
         summary: Some(
             AgentOutcomeSummary::new("Child Agent completed").expect("summary should resolve"),
         ),

@@ -386,14 +386,7 @@ struct GroupWaiter {
 
 /// `send_agent_message` 的同步等待回执：在消息触发的 turn terminal fact 交付点结算。
 struct MessageWaiter {
-    was_queued: bool,
     response: oneshot::Sender<Result<AgentMessageDelivery, SendAgentMessageFailure>>,
-}
-
-/// `send_child_message` 受理成功后等待结算所需的派发事实。
-struct MessageDispatch {
-    agent_id: AgentId,
-    was_queued: bool,
 }
 
 type StagedChild = (AgentId, ChildAgentRecord, AgentTurnRequest);
@@ -673,14 +666,11 @@ impl AgentOrchestrator {
             response,
         } = request;
         match self.deliver_child_message(identity, agent_id, message) {
-            Ok(dispatch) => {
+            Ok(target_id) => {
                 self.message_waiters
-                    .entry(dispatch.agent_id)
+                    .entry(target_id)
                     .or_default()
-                    .push_back(MessageWaiter {
-                        was_queued: dispatch.was_queued,
-                        response,
-                    });
+                    .push_back(MessageWaiter { response });
             }
             Err(failure) => {
                 let _ = response.send(Err(failure));
@@ -697,7 +687,7 @@ impl AgentOrchestrator {
         identity: tool_runtime::ToolInvocationIdentity,
         agent_id: AgentId,
         message: AgentChildMessage,
-    ) -> Result<MessageDispatch, SendAgentMessageFailure> {
+    ) -> Result<AgentId, SendAgentMessageFailure> {
         let caller = AgentId::new(identity.agent_id());
         if identity.runtime_generation() != self.generation.get()
             || caller.get() == 0
@@ -724,20 +714,14 @@ impl AgentOrchestrator {
                 available_agent_ids: self.addressable_message_targets(caller),
             });
         }
-        let receipt = match self.send_child_message(agent_id, message) {
-            Ok(receipt) => receipt,
-            // send_child_message 只产生 UnknownAgent/Disposed 两类 closed 拒绝，均折叠为
-            // “目标不可寻址”；available 列表帮助模型纠错，不透传 raw 错误。
-            Err(_) => {
-                return Err(SendAgentMessageFailure::NotFound {
-                    available_agent_ids: self.addressable_message_targets(caller),
-                });
+        // send_child_message 只产生 UnknownAgent/Disposed 两类 closed 拒绝，均折叠为
+        // “目标不可寻址”；available 列表帮助模型纠错，不透传 raw 错误。
+        self.send_child_message(agent_id, message).map_err(|_| {
+            SendAgentMessageFailure::NotFound {
+                available_agent_ids: self.addressable_message_targets(caller),
             }
-        };
-        Ok(MessageDispatch {
-            agent_id,
-            was_queued: matches!(receipt, AgentCommandReceipt::MessageQueued { .. }),
-        })
+        })?;
+        Ok(agent_id)
     }
 
     /// 消息目标必须是 caller 的 direct child 且 authority 仍可寻址。
@@ -856,12 +840,10 @@ impl AgentOrchestrator {
                 agent_id,
                 record.title.clone(),
                 outcome_for_status(record.terminal_status),
-                safe_outcome_summary(record),
                 child_report_envelope(
                     record,
                     runtime_domain::time::unix_timestamp_ms().unwrap_or(0),
                 ),
-                waiter.was_queued,
             )
         });
         let _ = match delivery {
@@ -964,7 +946,7 @@ impl AgentOrchestrator {
                         message: "Child Agent failed to start".to_string(),
                     },
                 });
-                freeze_pending_outcome(agent_id, record);
+                freeze_pending_outcome(agent_id, record, now_ms);
             }
         }
         self.projection_revision = self.projection_revision.saturating_add(1);
@@ -1068,7 +1050,7 @@ impl AgentOrchestrator {
             if is_terminal {
                 record.terminal_outcome_seen = true;
                 record.pending_terminal_event = Some(safe_child_terminal_event(event));
-                freeze_pending_outcome(agent_id, record);
+                freeze_pending_outcome(agent_id, record, now_ms);
             } else {
                 accepted.push(event);
             }
@@ -1443,7 +1425,7 @@ impl AgentOrchestrator {
                         message: "Child Agent failed to start".to_string(),
                     },
                 });
-                freeze_pending_outcome(child_id, record);
+                freeze_pending_outcome(child_id, record, now_ms);
             }
         }
 
@@ -1598,7 +1580,6 @@ impl AgentOrchestrator {
                             agent_id,
                             title: record.title.clone(),
                             outcome: outcome_for_status(record.terminal_status),
-                            summary: safe_outcome_summary(record),
                             report: envelope.report,
                             tokens: envelope.tokens,
                             tool_uses: envelope.tool_uses,
@@ -2318,8 +2299,9 @@ impl AgentOrchestrator {
                     record.terminal_stopped_by_request = intent.stopped_by_request;
                     record.latest_activity = AgentActivitySummary::Idle;
                     // 显式 stop 定格 terminal 的同时定格 elapsed（终态时刻值）。
-                    record.pause_elapsed_at(runtime_domain::time::unix_timestamp_ms().unwrap_or(0));
-                    freeze_pending_outcome(*agent_id, record);
+                    let now_ms = runtime_domain::time::unix_timestamp_ms().unwrap_or(0);
+                    record.pause_elapsed_at(now_ms);
+                    freeze_pending_outcome(*agent_id, record, now_ms);
                     if intent.retain_terminal_projection {
                         record.pending_terminal_event =
                             record.target.clone().map(|target| AgentEvent {
@@ -2643,22 +2625,14 @@ fn child_turn_request(
     request: &runtime_domain::agent::AgentLaunchRequest,
 ) -> AgentTurnRequest {
     let RuntimeTarget::Provider(target) = target;
-    // caller instructions 在前、身份指令在后：身份指令是 host 恒注入的 child 语义，
-    // caller 指令只能补充，不能覆盖。
-    let caller_instructions = request.instructions().expose_for_request_assembly();
-    let instructions = if request.instructions().is_empty() {
-        AgentInstructions::new(CHILD_AGENT_IDENTITY_INSTRUCTIONS)
-    } else {
-        AgentInstructions::new(format!(
-            "{caller_instructions}\n\n{CHILD_AGENT_IDENTITY_INSTRUCTIONS}"
-        ))
-    };
+    // 身份指令是 host 在 launch 边界恒注入的 child 语义，caller 没有覆盖通道；
+    // objective 是唯一的 caller 任务输入。
     AgentTurnRequest::from_conversation_request(ConversationTurnRequest::new_user_text(
         target.provider_id.clone(),
         target.model_id.clone(),
         request.objective().as_str(),
     ))
-    .with_direct_instructions(instructions)
+    .with_direct_instructions(AgentInstructions::new(CHILD_AGENT_IDENTITY_INSTRUCTIONS))
 }
 
 /// followup turn 的 user 消息即消息正文；不带 direct instructions——launch 的
@@ -2760,7 +2734,7 @@ fn safe_outcome_summary(record: &ChildAgentRecord) -> Option<AgentOutcomeSummary
     }
 }
 
-fn freeze_pending_outcome(agent_id: AgentId, record: &mut ChildAgentRecord) {
+fn freeze_pending_outcome(agent_id: AgentId, record: &mut ChildAgentRecord, now_ms: i64) {
     if record.pending_outcome.is_some() {
         return;
     }
@@ -2780,6 +2754,9 @@ fn freeze_pending_outcome(agent_id: AgentId, record: &mut ChildAgentRecord) {
         parent_turn_id: record.parent_turn_id,
         outcome: outcome_for_status(Some(terminal_status)),
         occurred_at_ms: runtime_domain::time::unix_timestamp_ms().unwrap_or(0),
+        // elapsed 已在 terminal 定格处暂停，这里读到的是定格累计值；无计时起点的
+        // 投影（resume 恢复）保持 None。
+        duration_ms: record.elapsed_ms_at(now_ms),
         summary: safe_outcome_summary(record),
     });
 }
@@ -2839,12 +2816,14 @@ fn apply_child_projection(record: &mut ChildAgentRecord, kind: &AgentEventKind, 
                 summary: "Retrying".to_string(),
             };
         }
-        AgentEventKind::ToolActivityStarted { .. } => {
+        AgentEventKind::ToolActivityStarted { activity } => {
             record.status = AgentProjectionStatus::Working;
             record.resume_elapsed_at(now_ms);
             record.tool_uses = record.tool_uses.saturating_add(1);
+            // overview 直接展示 definition-owned 的归一化 label（如
+            // "Read Cargo.toml"）；事件缺失 label 时退回固定占位。
             record.latest_activity = AgentActivitySummary::UsingTool {
-                title: "Using tool".to_string(),
+                title: tool_activity_display_title(&activity.title),
             };
         }
         AgentEventKind::ToolActivityUpdated { .. } => {
@@ -3033,6 +3012,17 @@ fn apply_child_transcript_fact(record: &mut ChildAgentRecord, kind: &AgentEventK
             });
         }
         _ => {}
+    }
+}
+
+/// tool activity label 的投影取值：label 交付面只取 trim 后的非空文本，
+/// 缺失时退回固定占位（不读取 raw_input/raw_output）。
+fn tool_activity_display_title(title: &str) -> String {
+    let title = title.trim();
+    if title.is_empty() {
+        "Using tool".to_string()
+    } else {
+        title.to_string()
     }
 }
 
@@ -3629,22 +3619,136 @@ mod tests {
     #[test]
     fn group_completion_carries_child_committed_answer() {
         let child = completed_group_child(finished_turn_event("  final researched   answer  "));
-        let summary = child
-            .summary
-            .expect("completed child with output should carry a summary");
-        assert_eq!(summary.as_str(), "final researched answer");
+        // 报告保留 committed 原文（尾部空白随 text_content 归一）；单行摘要只进入
+        // outcome snapshot，不在 completion 信封里。
+        assert_eq!(child.report.as_deref(), Some("  final researched   answer"));
+    }
+
+    #[test]
+    fn completed_outcome_snapshot_keeps_the_delivery_safe_summary() {
+        let (mut orchestrator, agent_id) = registered_child_with_terminal_event(
+            finished_turn_event("  final researched   answer  "),
+        );
+        let _ = orchestrator.drain_child_events();
+        let snapshot = outcome_facts(&orchestrator.drain_projection_events())
+            .into_iter()
+            .find(|snapshot| snapshot.agent_id == agent_id)
+            .expect("completed child should project an outcome fact");
+        assert_eq!(snapshot.outcome, AgentOutcome::Completed);
+        assert_eq!(
+            snapshot.summary.as_ref().map(AgentOutcomeSummary::as_str),
+            Some("final researched answer")
+        );
+    }
+
+    #[test]
+    fn tool_activity_started_projects_the_normalized_activity_title() {
+        // overview 的活动提示直接展示事件携带的归一化 label（如
+        // "Read Cargo.toml"）；事件缺失 label 时退回固定占位。
+        for (event_title, projected_title) in
+            [("Read Cargo.toml", "Read Cargo.toml"), ("  ", "Using tool")]
+        {
+            let agent_id = AgentId::new(2);
+            let turn_id = AgentTurnId::new(7);
+            let target = RuntimeTarget::provider("local", "qwen3");
+            let mut orchestrator =
+                AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+            orchestrator.register_child_for_test(
+                agent_id,
+                AgentId::MAIN,
+                turn_id,
+                test_title("working child"),
+                test_context("working-child"),
+                Box::new(StubMainRuntime {
+                    events: vec![child_event(
+                        agent_id,
+                        turn_id,
+                        &target,
+                        AgentEventKind::ToolActivityStarted {
+                            activity: runtime_domain::session::RuntimeToolActivity {
+                                activity_id: "tool-1".to_string(),
+                                title: event_title.to_string(),
+                                kind: runtime_domain::session::RuntimeToolKind::Read,
+                                status:
+                                    runtime_domain::session::RuntimeToolActivityStatus::InProgress,
+                                content: Vec::new(),
+                                locations: Vec::new(),
+                                raw_input: None,
+                                raw_output: None,
+                            },
+                        },
+                    )],
+                }),
+            );
+
+            let _ = orchestrator.drain_child_events();
+            orchestrator.observe_agents(AgentObservationRequestId::new(1));
+            let rows = orchestrator
+                .drain_projection_events()
+                .into_iter()
+                .find_map(|event| match event {
+                    AgentProjectionEvent::AgentsOverviewSnapshotLoaded { snapshot, .. } => {
+                        Some(snapshot.rows)
+                    }
+                    _ => None,
+                })
+                .expect("overview observation should deliver a snapshot");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0].latest_activity,
+                AgentActivitySummary::UsingTool {
+                    title: projected_title.to_string()
+                },
+                "event title {event_title:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn outcome_fact_carries_the_frozen_terminal_elapsed() {
+        // 有计时起点的 child：outcome fact 携带 terminal 定格的累计 elapsed；
+        // 无计时起点的投影（test 注册未标记计时）保持 None。
+        let (mut orchestrator, agent_id) =
+            registered_child_with_terminal_event(finished_turn_event("terminal answer"));
+        orchestrator.mark_child_elapsed_started_for_test(agent_id);
+        let _ = orchestrator.drain_child_events();
+        let timed = outcome_facts(&orchestrator.drain_projection_events())
+            .into_iter()
+            .find(|snapshot| snapshot.agent_id == agent_id)
+            .expect("timed child should project an outcome fact");
+        assert!(
+            timed.duration_ms.is_some(),
+            "timed child should carry the frozen elapsed"
+        );
+
+        let (mut orchestrator, agent_id) =
+            registered_child_with_terminal_event(finished_turn_event("untimed answer"));
+        let _ = orchestrator.drain_child_events();
+        let untimed = outcome_facts(&orchestrator.drain_projection_events())
+            .into_iter()
+            .find(|snapshot| snapshot.agent_id == agent_id)
+            .expect("untimed child should project an outcome fact");
+        assert_eq!(untimed.duration_ms, None);
     }
 
     #[test]
     fn group_completion_without_committed_answer_uses_placeholder() {
         let child = completed_group_child(finished_turn_event(""));
-        let summary = child
-            .summary
-            .expect("completed child should still carry a summary");
-        assert_eq!(summary.as_str(), CHILD_COMPLETED_WITHOUT_REPORT_TEXT);
-        // 空正文收尾没有可回传的报告：信封显式标注为空，而不是复用占位摘要。
+        // 空正文收尾没有可回传的报告：信封显式标注为空，占位文本只进入 snapshot 摘要。
         assert_eq!(child.report, None);
         assert!(!child.truncated);
+
+        let (mut orchestrator, agent_id) =
+            registered_child_with_terminal_event(finished_turn_event(""));
+        let _ = orchestrator.drain_child_events();
+        let snapshot = outcome_facts(&orchestrator.drain_projection_events())
+            .into_iter()
+            .find(|snapshot| snapshot.agent_id == agent_id)
+            .expect("completed child should project an outcome fact");
+        assert_eq!(
+            snapshot.summary.as_ref().map(AgentOutcomeSummary::as_str),
+            Some(CHILD_COMPLETED_WITHOUT_REPORT_TEXT)
+        );
     }
 
     #[test]
@@ -3699,20 +3803,25 @@ mod tests {
             .expect("group waiter should settle from the prepared record")
             .expect("group completion should succeed");
         let child = &completion.children[0];
-        assert_eq!(
-            child.summary.as_ref().map(AgentOutcomeSummary::as_str),
-            Some("the actual committed report")
-        );
         assert_eq!(child.report.as_deref(), Some("the actual committed report"));
     }
 
     #[test]
-    fn group_completion_report_and_summary_are_separate_layers() {
-        // 报告全文长于 240 显示列：summary 保持截断单行，report 携带全文。
+    fn group_completion_report_and_snapshot_summary_are_separate_layers() {
+        // 报告全文长于 240 显示列：completion report 携带全文，outcome snapshot 摘要
+        // 截断单行（摘要只服务 TUI 面）。
         let long_report = "long report body".repeat(40);
         let child = completed_group_child(finished_turn_event(&long_report));
         assert_eq!(child.report.as_deref(), Some(long_report.as_str()));
-        let summary = child
+
+        let (mut orchestrator, agent_id) =
+            registered_child_with_terminal_event(finished_turn_event(&long_report));
+        let _ = orchestrator.drain_child_events();
+        let snapshot = outcome_facts(&orchestrator.drain_projection_events())
+            .into_iter()
+            .find(|snapshot| snapshot.agent_id == agent_id)
+            .expect("completed child should project an outcome fact");
+        let summary = snapshot
             .summary
             .expect("long report should still produce a summary");
         assert!(summary.as_str().ends_with("..."));
@@ -3819,13 +3928,25 @@ mod tests {
 
     #[test]
     fn group_completion_failed_child_keeps_placeholder_summary() {
-        let child = completed_group_child(AgentEventKind::TurnFailed {
+        // raw failure 文案不进入任何交付面；失败占位只进入 outcome snapshot 摘要。
+        let failed_event = || AgentEventKind::TurnFailed {
             message: "provider connection closed".to_string(),
-        });
-        let summary = child
-            .summary
-            .expect("failed child should still carry a summary");
-        assert_eq!(summary.as_str(), "Child Agent failed");
+        };
+        let child = completed_group_child(failed_event());
+        assert_eq!(child.outcome, AgentOutcome::Failed);
+        assert_eq!(child.report, None);
+
+        let (mut orchestrator, agent_id) = registered_child_with_terminal_event(failed_event());
+        let _ = orchestrator.drain_child_events();
+        let snapshot = outcome_facts(&orchestrator.drain_projection_events())
+            .into_iter()
+            .find(|snapshot| snapshot.agent_id == agent_id)
+            .expect("failed child should project an outcome fact");
+        assert_eq!(snapshot.outcome, AgentOutcome::Failed);
+        assert_eq!(
+            snapshot.summary.as_ref().map(AgentOutcomeSummary::as_str),
+            Some("Child Agent failed")
+        );
     }
 
     #[test]
@@ -3868,13 +3989,14 @@ mod tests {
         assert_eq!(completion.children.len(), 1);
         assert_eq!(completion.children[0].agent_id, agent_id);
         assert_eq!(completion.children[0].outcome, AgentOutcome::Cancelled);
+        // 显式停止与自然取消的区分只进入 outcome snapshot 摘要（TUI 面）。
+        let snapshot = outcome_facts(&orchestrator.drain_projection_events())
+            .into_iter()
+            .find(|snapshot| snapshot.agent_id == agent_id)
+            .expect("stopped child should project an outcome fact");
         assert_eq!(
-            completion.children[0]
-                .summary
-                .as_ref()
-                .expect("stopped child should carry a summary")
-                .as_str(),
-            CHILD_STOPPED_BY_REQUEST_TEXT
+            snapshot.summary.as_ref().map(AgentOutcomeSummary::as_str),
+            Some(CHILD_STOPPED_BY_REQUEST_TEXT)
         );
     }
 
@@ -3901,13 +4023,13 @@ mod tests {
             .expect("group completion should succeed");
         assert_eq!(completion.children[0].agent_id, agent_id);
         assert_eq!(completion.children[0].outcome, AgentOutcome::Cancelled);
+        let snapshot = outcome_facts(&orchestrator.drain_projection_events())
+            .into_iter()
+            .find(|snapshot| snapshot.agent_id == agent_id)
+            .expect("interrupted child should project an outcome fact");
         assert_eq!(
-            completion.children[0]
-                .summary
-                .as_ref()
-                .expect("naturally cancelled child should carry a summary")
-                .as_str(),
-            CHILD_CANCELLED_TEXT
+            snapshot.summary.as_ref().map(AgentOutcomeSummary::as_str),
+            Some(CHILD_CANCELLED_TEXT)
         );
     }
 
@@ -4507,53 +4629,30 @@ mod tests {
         AgentChildMessage::new(content).expect("test message should construct")
     }
 
-    fn launch_request(
-        objective: &str,
-        instructions: &str,
-    ) -> runtime_domain::agent::AgentLaunchRequest {
+    fn launch_request(objective: &str) -> runtime_domain::agent::AgentLaunchRequest {
         runtime_domain::agent::AgentLaunchRequest::new(
             AgentObjective::new(objective).expect("test objective should construct"),
             None,
-            AgentInstructions::new(instructions),
         )
         .expect("test launch request should construct")
     }
 
     #[test]
-    fn child_turn_request_appends_identity_instructions_after_caller_instructions() {
+    fn child_turn_request_appends_identity_instructions_after_the_objective() {
         let target = RuntimeTarget::provider("local", "qwen3");
-        let request = launch_request("write a haiku about ports", "prefer concise output");
+        let request = launch_request("write a haiku about ports");
         let turn_request = child_turn_request(&target, &request);
 
         let (provider_request, transcript_message, direct_instructions) = turn_request.into_parts();
         let provider_text = provider_request.message_text();
-        // provider 文本形态固定为 objective + caller instructions + 身份指令。
-        assert!(provider_text.starts_with(
-            "write a haiku about ports\n\nprefer concise output\n\nYou are a child agent dispatched"
-        ));
-        assert!(provider_text.contains("report to the dispatching agent"));
-        assert!(provider_text.contains("self-contained"));
-        assert!(provider_text.contains("unverified"));
+        // provider 文本形态固定为 objective + 身份指令，两者之间空一行。
+        assert_eq!(
+            provider_text,
+            format!("write a haiku about ports\n\n{CHILD_AGENT_IDENTITY_INSTRUCTIONS}")
+        );
         assert!(direct_instructions.is_some());
         // transcript delivery 仍是纯 objective：身份指令不进入 transcript。
         assert_eq!(transcript_message.content, "write a haiku about ports");
-    }
-
-    #[test]
-    fn child_turn_request_injects_identity_instructions_without_caller_instructions() {
-        let target = RuntimeTarget::provider("local", "qwen3");
-        let request = launch_request("write a haiku about ports", "");
-        let turn_request = child_turn_request(&target, &request);
-
-        let (provider_request, _transcript_message, direct_instructions) =
-            turn_request.into_parts();
-        let provider_text = provider_request.message_text();
-        assert!(
-            provider_text
-                .starts_with("write a haiku about ports\n\nYou are a child agent dispatched")
-        );
-        assert!(!provider_text.contains("\n\n\n"));
-        assert!(direct_instructions.is_some());
     }
 
     #[test]
@@ -4575,13 +4674,12 @@ mod tests {
     }
 
     #[test]
-    fn child_turn_request_debug_does_not_echo_instruction_bodies() {
+    fn child_turn_request_debug_does_not_echo_objective_or_instruction_bodies() {
         let target = RuntimeTarget::provider("local", "qwen3");
-        let request = launch_request("secret objective body", "SECRET_CALLER_INSTRUCTIONS");
+        let request = launch_request("secret objective body");
         let debug = format!("{:?}", child_turn_request(&target, &request));
 
         assert!(debug.contains("has_direct_instructions: true"));
-        assert!(!debug.contains("SECRET_CALLER_INSTRUCTIONS"));
         assert!(!debug.contains("secret objective body"));
         assert!(!debug.contains("child agent dispatched"));
     }
@@ -5214,10 +5312,10 @@ mod tests {
             .try_recv()
             .expect("first waiter should settle on its follow-up turn")
             .expect("first delivery should succeed");
-        // 断言 tool boundary 实际交付的 JSON face。
+        // 断言 tool boundary 实际交付的 JSON face（与 spawn 的 child envelope 同构）。
         let payload = serde_json::to_value(&first_delivery).expect("delivery should serialize");
-        assert_eq!(payload["summary"], serde_json::json!("first refined"));
-        assert_eq!(payload["queued"], serde_json::json!(true));
+        assert_eq!(payload["outcome"], serde_json::json!("completed"));
+        assert_eq!(payload["report"], serde_json::json!("first refined"));
         assert!(
             second_receiver.try_recv().is_err(),
             "the second waiter must wait for its own follow-up turn"
@@ -5238,8 +5336,7 @@ mod tests {
             .expect("second waiter should settle after the second follow-up turn")
             .expect("second delivery should succeed");
         let payload = serde_json::to_value(&second_delivery).expect("delivery should serialize");
-        assert_eq!(payload["summary"], serde_json::json!("second refined"));
-        assert_eq!(payload["queued"], serde_json::json!(true));
+        assert_eq!(payload["report"], serde_json::json!("second refined"));
     }
 
     #[test]

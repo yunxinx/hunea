@@ -94,7 +94,8 @@ impl fmt::Debug for AgentObjective {
     }
 }
 
-/// `AgentInstructions` 保存只供 child request assembly 消费的 control-only instructions。
+/// `AgentInstructions` 保存 host 在 launch 边界注入的身份指令，只经
+/// `AgentTurnRequest` 的 direct instructions 通道进入 provider request assembly。
 #[derive(Clone, PartialEq, Eq)]
 pub struct AgentInstructions(String);
 
@@ -102,11 +103,6 @@ impl AgentInstructions {
     /// 创建 control-only instructions；空正文表示没有额外控制指令。
     pub fn new(content: impl Into<String>) -> Self {
         Self(content.into())
-    }
-
-    /// 只在 provider request assembly boundary 暴露 instructions 正文。
-    pub fn expose_for_request_assembly(&self) -> &str {
-        &self.0
     }
 
     /// 将 control-only instructions 追加到 provider-visible 文本，不产生 transcript 文本。
@@ -368,12 +364,14 @@ impl<'de> Deserialize<'de> for AgentObjectiveSummary {
     }
 }
 
-/// 一次 child Agent launch request；control 与 delivery 保持独立 ownership。
+/// 一次 child Agent launch request；objective 承载全部 caller 可控输入。
+///
+/// host 身份指令不在 request 内携带：launch 边界在 request assembly 处恒注入
+/// `AgentInstructions`，caller 没有覆盖通道。
 #[derive(Clone, PartialEq, Eq)]
 pub struct AgentLaunchRequest {
     objective: AgentObjective,
     title: AgentTitle,
-    instructions: AgentInstructions,
 }
 
 impl AgentLaunchRequest {
@@ -381,14 +379,9 @@ impl AgentLaunchRequest {
     pub fn new(
         objective: AgentObjective,
         display_title: Option<&str>,
-        instructions: AgentInstructions,
     ) -> Result<Self, AgentLaunchInputError> {
         let title = AgentTitle::resolve(&objective, display_title)?;
-        Ok(Self {
-            objective,
-            title,
-            instructions,
-        })
+        Ok(Self { objective, title })
     }
 
     /// 返回只供 child provider request assembly 消费的完整 objective。
@@ -400,11 +393,6 @@ impl AgentLaunchRequest {
     pub fn title(&self) -> &AgentTitle {
         &self.title
     }
-
-    /// 返回 control-only instructions wrapper。
-    pub fn instructions(&self) -> &AgentInstructions {
-        &self.instructions
-    }
 }
 
 impl fmt::Debug for AgentLaunchRequest {
@@ -413,7 +401,6 @@ impl fmt::Debug for AgentLaunchRequest {
             .debug_struct("AgentLaunchRequest")
             .field("objective", &self.objective)
             .field("title", &self.title)
-            .field("instructions", &self.instructions)
             .finish()
     }
 }
@@ -535,6 +522,9 @@ pub struct AgentOutcomeSnapshot {
     pub parent_turn_id: Option<AgentTurnId>,
     pub outcome: AgentOutcome,
     pub occurred_at_ms: i64,
+    /// terminal 定格的累计 elapsed（毫秒）；resume 恢复的投影没有计时起点。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<AgentOutcomeSummary>,
 }
@@ -545,16 +535,14 @@ fn default_turn_id() -> AgentTurnId {
 
 /// 一个 child terminal outcome 的 delivery-safe completion projection。
 ///
-/// 该结构是父 Agent tool result 的数据面：`summary` 是 TUI/面板消费的 240 列单行
-/// 摘要，`report` 是完整的 committed assistant 正文（按字符上限截断并显式标注）——
-/// 两者独立取值，报告不再复用摘要。
+/// 该结构是父 Agent tool result 的数据面：`report` 是完整的 committed assistant 正文
+/// （按字符上限截断并显式标注）。240 列单行摘要不进入该面——TUI/面板消费的是
+/// projection snapshot（`AgentOutcomeSnapshot::summary`），不是 completion。
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentChildCompletion {
     pub agent_id: AgentId,
     pub title: AgentTitle,
     pub outcome: AgentOutcome,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summary: Option<AgentOutcomeSummary>,
     /// 完整 committed assistant 报告；reasoning-only 收尾（无任何非空正文 item）时为 `None`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report: Option<String>,
@@ -579,7 +567,6 @@ impl fmt::Debug for AgentChildCompletion {
             .field("agent_id", &self.agent_id)
             .field("title", &self.title)
             .field("outcome", &self.outcome)
-            .field("summary", &self.summary)
             // 报告正文只进入 tool result，不进入诊断输出。
             .field(
                 "report_chars",
@@ -956,16 +943,12 @@ mod tests {
     }
 
     #[test]
-    fn launch_debug_omits_objective_title_and_instructions() {
-        let request = AgentLaunchRequest::new(
-            objective("delivery secret"),
-            Some("title secret"),
-            AgentInstructions::new("control secret"),
-        )
-        .expect("request should resolve");
+    fn launch_debug_omits_objective_and_title_bodies() {
+        let request = AgentLaunchRequest::new(objective("delivery secret"), Some("title secret"))
+            .expect("request should resolve");
         let debug = format!("{request:?}");
 
-        for secret in ["delivery secret", "title secret", "control secret"] {
+        for secret in ["delivery secret", "title secret"] {
             assert!(!debug.contains(secret), "leaked {secret}");
         }
     }
@@ -982,14 +965,45 @@ mod tests {
     }
 
     #[test]
+    fn outcome_snapshot_keeps_legacy_replay_compatibility() {
+        let title =
+            AgentTitle::resolve(&objective("写一首俳句"), None).expect("title should resolve");
+        let snapshot = AgentOutcomeSnapshot {
+            agent_id: AgentId::new(2),
+            title,
+            group_id: Some(AgentLaunchGroupId::new(7)),
+            parent_agent_id: Some(AgentId::MAIN),
+            parent_turn_id: Some(AgentTurnId::new(9)),
+            outcome: AgentOutcome::Completed,
+            occurred_at_ms: 43,
+            duration_ms: None,
+            summary: None,
+        };
+
+        // duration_ms 缺省可省略：旧 replay JSON 反序列化为 None，
+        // 新序列化 None 时同样不写该字段（wire 形态与旧格式一致）。
+        let json = serde_json::to_string(&snapshot).expect("snapshot should serialize");
+        assert!(!json.contains("duration_ms"));
+        assert_eq!(
+            serde_json::from_str::<AgentOutcomeSnapshot>(&json).unwrap(),
+            snapshot
+        );
+
+        let timed = AgentOutcomeSnapshot {
+            duration_ms: Some(125_000),
+            ..snapshot
+        };
+        let timed_json = serde_json::to_string(&timed).expect("timed snapshot should serialize");
+        assert_eq!(
+            serde_json::from_str::<AgentOutcomeSnapshot>(&timed_json).unwrap(),
+            timed
+        );
+    }
+
+    #[test]
     fn batch_enforces_explicit_host_limit_without_leaking_requests() {
         let request = || {
-            AgentLaunchRequest::new(
-                objective("objective"),
-                None,
-                AgentInstructions::new("instructions"),
-            )
-            .expect("request should resolve")
+            AgentLaunchRequest::new(objective("objective"), None).expect("request should resolve")
         };
 
         assert_eq!(
@@ -1090,7 +1104,8 @@ mod tests {
 
     #[test]
     fn completion_without_envelope_fields_still_restores() {
-        // 旧会话/旧回执没有 report/metrics 字段：反序列化必须得到空信封而不是报错。
+        // 旧会话/旧回执没有 report/metrics 字段：反序列化必须得到空信封而不是报错；
+        // 已删除的 legacy `summary` 键作为未知字段被容忍，不阻断恢复。
         let old_completion = serde_json::json!({
             "agent_id": 8,
             "title": "write a haiku",
@@ -1113,7 +1128,6 @@ mod tests {
             title: AgentTitle::resolve(&objective("objective"), Some("title"))
                 .expect("title should resolve"),
             outcome: AgentOutcome::Completed,
-            summary: AgentOutcomeSummary::new("secret summary").ok(),
             report: Some("PRIVATE_REPORT_BODY".to_string()),
             tokens: Some(1200),
             tool_uses: Some(8),
@@ -1123,7 +1137,6 @@ mod tests {
         let debug = format!("{completion:?}");
 
         assert!(!debug.contains("PRIVATE_REPORT_BODY"));
-        assert!(!debug.contains("secret summary"));
         assert!(debug.contains("report_chars"));
     }
 

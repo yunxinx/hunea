@@ -1,5 +1,5 @@
 use ratatui::{
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::Line,
     widgets::{Block, BorderType, Padding},
 };
@@ -76,6 +76,13 @@ pub fn surface_text_style(palette: TerminalPalette) -> Style {
 /// `surface_emphasis_style` 返回带弱化背景的强调正文样式。
 pub fn surface_emphasis_style(palette: TerminalPalette) -> Style {
     apply_surface(Style::new().bold(), palette)
+}
+
+/// `style_for_color` 把 palette 槽位色转为前景样式：`Color::Reset`（终端默认配色）
+/// 依赖终端默认前景，不显式设置 fg。调用点需要"语义槽位色 + 附加 modifier"的
+/// 组合样式时使用本 builder，不在调用点手拼 `Style::new().fg(...)`。
+pub fn style_for_color(color: Color) -> Style {
+    apply_foreground(Style::new(), color)
 }
 
 /// `surface_half_block_line` 用半块字符模拟半高 surface 装饰线。

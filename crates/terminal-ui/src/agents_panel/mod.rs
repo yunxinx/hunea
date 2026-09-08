@@ -30,8 +30,9 @@ use crate::theme::{
 /// 上限由最长标签 `Permission` 决定。
 pub(super) const AGENTS_STATUS_COLUMN_WIDTH: usize = 10;
 /// metrics 三列的固定显示宽度（列内右对齐、前置填充）；列间以单空格分隔。
-/// 宽度按各列的常规最大内容核定：`999h59m`、`99999`、`99.9M`。
-pub(super) const AGENTS_ELAPSED_COLUMN_WIDTH: usize = 8;
+/// elapsed 档宽覆盖共享 elapsed 格式的小时档（`9h 59m 59s`），更长的极端值由
+/// metric 超宽保留策略兜底；tools/tokens 按常规最大内容 `99999` / `99.9m` 核定。
+pub(super) const AGENTS_ELAPSED_COLUMN_WIDTH: usize = 10;
 pub(super) const AGENTS_TOOLS_COLUMN_WIDTH: usize = 6;
 pub(super) const AGENTS_TOKENS_COLUMN_WIDTH: usize = 7;
 
@@ -83,16 +84,6 @@ pub(super) fn agent_status_dot_symbol(
     }
 }
 
-/// status 列固定宽度填充：所有行的 status 标签占同一列宽，后续列纵向对齐。
-pub(super) fn pad_agents_status_column(label: &str, width_budget: usize) -> String {
-    use crate::display_width::display_width;
-
-    let column_width = AGENTS_STATUS_COLUMN_WIDTH.min(width_budget);
-    let label = crate::status_line::truncate_display_width(label, column_width);
-    let padding = column_width.saturating_sub(display_width(&label));
-    format!("{label}{}", " ".repeat(padding))
-}
-
 /// 是否仍在运行（未进入终态）：`x` stop 确认与状态点实/空心共用该判定。
 pub(super) fn agent_status_is_running(status: AgentProjectionStatus) -> bool {
     matches!(
@@ -115,19 +106,30 @@ pub(super) fn agent_status_is_settled(status: AgentProjectionStatus) -> bool {
     )
 }
 
-/// latest activity 的 delivery-safe 单行文本。`Idle` 不携带有效信息，
-/// latest 列与折叠区都不展示该文本（见 `AGENT_ACTIVITY_IDLE_TEXT`）。
-pub(super) const AGENT_ACTIVITY_IDLE_TEXT: &str = "idle";
-
+/// latest activity 的 delivery-safe 单行文本：直接展示投影携带的 label/summary，
+/// 不加合成前缀（主 UI 的活动行同样显示裸 title）。`Idle` 不携带有效信息，
+/// latest 列对其整列隐藏（`list_render` 预过滤），占位文本仅供枚举穷尽。
 pub(super) fn agent_activity_summary_text(activity: &AgentActivitySummary) -> String {
     match activity {
         AgentActivitySummary::Preparing => "preparing".to_string(),
         AgentActivitySummary::Thinking => "thinking".to_string(),
-        AgentActivitySummary::Retrying { summary } => format!("retrying: {summary}"),
-        AgentActivitySummary::UsingTool { title } => format!("tool: {title}"),
-        AgentActivitySummary::WaitingPermission { summary } => format!("waiting: {summary}"),
-        AgentActivitySummary::Idle => AGENT_ACTIVITY_IDLE_TEXT.to_string(),
+        AgentActivitySummary::Retrying { summary } => summary.clone(),
+        AgentActivitySummary::UsingTool { title } => normalized_tool_entry_title(title).to_string(),
+        AgentActivitySummary::WaitingPermission { summary } => summary.clone(),
+        AgentActivitySummary::Idle => "idle".to_string(),
     }
+}
+
+/// tool 条目 title 的展示归一化：剥 `Shell:` 一类传输前缀，与主 transcript 的
+/// `tool_result::activity::runtime_tool_activity_display_title` 同语义。transcript
+/// item 只携带 title 字符串（无完整 activity/kind 回退面），故在本模块内以字符串
+/// 等价实现。
+fn normalized_tool_entry_title(title: &str) -> &str {
+    let title = title.trim();
+    title
+        .strip_prefix("Shell:")
+        .map(str::trim_start)
+        .unwrap_or(title)
 }
 
 /// 活动折叠区展示的最近活动条数上限；更早条目折叠为 `+N more`。
@@ -142,38 +144,55 @@ const AGENTS_ACTIVITY_FOLD_ENTRY_CACHE_WIDTH: usize = 200;
 
 /// 折叠区条目提取：transcript 尾部的 tool/assistant 条目转单行摘要。
 ///
-/// User 条目是发起指令而非 agent 活动，不进入折叠区；摘要恰为 Idle 文案的条目
-/// 同样跳过（无价值信息）。返回（最近 entries, 被折叠的更早条数）。
+/// User 条目是发起指令而非 agent 活动，不进入折叠区。返回（最近 entries,
+/// 被折叠的更早条数）。
 pub(super) fn agents_activity_fold_entries(items: &[AgentTranscriptItem]) -> (Vec<String>, usize) {
-    let eligible: Vec<String> = items
-        .iter()
-        .filter_map(activity_fold_entry_text)
-        .filter(|entry| entry != AGENT_ACTIVITY_IDLE_TEXT)
-        .collect();
+    let eligible: Vec<String> = items.iter().filter_map(activity_fold_entry_text).collect();
     let hidden = eligible
         .len()
         .saturating_sub(AGENTS_ACTIVITY_FOLD_ENTRY_COUNT);
     (eligible[hidden..].to_vec(), hidden)
 }
 
-/// 单条活动的单行摘要：多行内容只取首个非空行，空内容条目整体跳过。
+/// 单条活动的单行摘要：tool 条目用剥传输前缀后的归一化 title（空 title 回退
+/// content 首行），assistant 条目取 plain-text 首行（剥行内 markdown 强调标记，
+/// 不泄漏 raw markdown）；多行内容只取首个非空行，空内容条目整体跳过。
 fn activity_fold_entry_text(item: &AgentTranscriptItem) -> Option<String> {
-    let source = match item {
+    let entry = match item {
         AgentTranscriptItem::Tool { title, content } => {
-            let title = title.trim();
-            if title.is_empty() { content } else { title }
+            let title = normalized_tool_entry_title(title);
+            if title.is_empty() {
+                first_non_empty_line(content)?.to_string()
+            } else {
+                title.to_string()
+            }
         }
-        AgentTranscriptItem::Assistant { content } => content,
+        AgentTranscriptItem::Assistant { content } => {
+            let line = first_non_empty_line(content)?;
+            let plain = strip_inline_markdown_emphasis(line);
+            if plain.is_empty() {
+                line.to_string()
+            } else {
+                plain
+            }
+        }
         AgentTranscriptItem::User { .. } => return None,
     };
-    let first_line = source
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())?;
     Some(crate::status_line::truncate_display_width_with_ellipsis(
-        first_line,
+        &entry,
         AGENTS_ACTIVITY_FOLD_ENTRY_CACHE_WIDTH,
     ))
+}
+
+/// 多行内容只取首个非空行（trim 后）。
+fn first_non_empty_line(text: &str) -> Option<&str> {
+    text.lines().map(str::trim).find(|line| !line.is_empty())
+}
+
+/// 行内 markdown 强调标记的朴素清理：只剥 `**`/`__`/`` ` ``，不引入 markdown
+/// 解析；单字符 `*`/`_` 保留（避免误伤 snake_case 词）。
+fn strip_inline_markdown_emphasis(line: &str) -> String {
+    line.replace("**", "").replace("__", "").replace('`', "")
 }
 
 /// list 页行预算：每行 1 行，body 首行是列头行，另为选中行的活动折叠区恒定预留
@@ -187,38 +206,38 @@ pub(super) fn agents_panel_list_page_size(height: u16) -> usize {
         .max(1)
 }
 
-/// elapsed 的紧凑标签；最长 `999h59m`，列内右对齐时不超过 7 列。
-pub(super) fn format_agent_elapsed_ms(elapsed_ms: u64) -> String {
-    let total_seconds = elapsed_ms / 1_000;
-    if total_seconds < 60 {
-        format!("{total_seconds}s")
-    } else if total_seconds < 3_600 {
-        let minutes = total_seconds / 60;
-        let seconds = total_seconds % 60;
-        format!("{minutes}m{seconds:02}s")
-    } else {
-        // 小时封顶 999，保证标签不超过 7 个显示列。
-        let hours = (total_seconds / 3_600).min(999);
-        let minutes = (total_seconds % 3_600) / 60;
-        format!("{hours}h{minutes:02}m")
-    }
+/// transcript surface 的正文框架高度：surface chrome 与全屏列表同构——标题行（承担
+/// list header 角色）+ 分割线 + page rule + footer，共用 `FULLSCREEN_LIST_CHROME_HEIGHT`
+/// 预算；permission 区块再从该高度内扣除。渲染与输入侧共用本函数，滚动边界才一致。
+pub(super) fn agents_panel_surface_frame_height(height: u16) -> usize {
+    usize::from(height.saturating_sub(crate::fullscreen_list_chrome::FULLSCREEN_LIST_CHROME_HEIGHT))
+        .max(1)
 }
 
-/// token usage 的列标签：K/M 缩放，不带单位后缀（列头已表达语义）。
-/// 两位以内 mantissa 保留一位小数（`8` / `1.2K`），更高位退化为整数（`999K`），
-/// 保证标签宽度有稳定上界。
+/// token usage 的列标签：k/m 小写缩放，取整形态与 context budget / spinner 的
+/// token 缩放一致（tenths 四舍五入、`.0` 省略）；百万级以上进 m 档，封顶
+/// `999.9m` 不再加宽标签。不带单位后缀（列头已表达语义）。
 pub(super) fn format_agent_token_usage(token_usage: usize) -> String {
     if token_usage < 1_000 {
-        format!("{token_usage}")
-    } else if token_usage < 100_000 {
-        format!("{:.1}K", token_usage as f64 / 1_000.0)
-    } else if token_usage < 1_000_000 {
-        format!("{}K", token_usage / 1_000)
-    } else if token_usage < 100_000_000 {
-        format!("{:.1}M", token_usage as f64 / 1_000_000.0)
+        return token_usage.to_string();
+    }
+    if token_usage < 1_000_000 {
+        let tenths = (token_usage.saturating_mul(10).saturating_add(500)) / 1_000;
+        return format_scaled_token_tenths(tenths, 'k');
+    }
+    // 封顶保证标签宽度有稳定上界，极端累计值不再加宽列。
+    let tenths = ((token_usage.saturating_mul(10).saturating_add(500_000)) / 1_000_000).min(9_999);
+    format_scaled_token_tenths(tenths, 'm')
+}
+
+/// tenths（十分位计数）转 `N` / `N.d` + 单位；`.0` 省略小数。
+fn format_scaled_token_tenths(tenths: usize, unit: char) -> String {
+    let whole = tenths / 10;
+    let fraction = tenths % 10;
+    if fraction == 0 {
+        format!("{whole}{unit}")
     } else {
-        // 亿级以上封顶 999M，不再加宽标签。
-        format!("{}M", (token_usage / 1_000_000).min(999))
+        format!("{whole}.{fraction}{unit}")
     }
 }
 

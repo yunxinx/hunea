@@ -127,6 +127,46 @@ fn entry_tree_space_preview_renders_assistant_tool_call_json_with_highlighting()
 }
 
 #[test]
+fn entry_tree_tool_result_preview_prettifies_compact_json_with_highlighting() {
+    let mut model = ready_model();
+    model.open_entry_tree_loading();
+    model.apply_entry_tree_payload(SessionTreePayload {
+        rows: vec![tree_row_with_preview_replay_items(
+            "tool-a",
+            SessionTreeRowKind::Tool,
+            "spawn_agents result",
+            vec![TranscriptReplayItem::ToolResult {
+                content: r#"[{"agent_id":2,"title":"workspace scout","outcome":"completed"}]"#
+                    .to_string(),
+            }],
+        )],
+        current_row_id: None,
+    });
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(' '))));
+    let buffer = render_model_buffer(&mut model, 80, 14);
+    let rows = rendered_rows(&buffer);
+
+    // Tool 行结果的紧凑单行 JSON 被展示侧 pretty 化：结构与 assistant 参数块同观感。
+    let key_row = rows
+        .iter()
+        .position(|row| row.contains("\"agent_id\"") && row.contains("2"))
+        .expect("pretty JSON tool result should be visible in the tool preview");
+    assert!(
+        rows[0].trim() == "● [",
+        "pretty JSON should open with the array bracket on the marker line: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| row.trim() == "]"),
+        "pretty JSON should close with the array bracket on its own line: {rows:?}"
+    );
+    assert!(
+        (0..buffer.area.width).any(|column| buffer[(column, key_row as u16)].fg != Color::Reset),
+        "pretty JSON tool result should carry syntax highlight colors: {rows:?}"
+    );
+}
+
+#[test]
 fn entry_tree_preview_render_does_not_change_scroll_offset() {
     let mut model = ready_model();
     model.set_window(60, 8);

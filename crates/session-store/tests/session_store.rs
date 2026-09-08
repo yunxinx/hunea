@@ -154,6 +154,7 @@ async fn agent_replay_facts_keep_order_and_do_not_change_session_meta() {
         parent_turn_id: Some(runtime_domain::agent::AgentTurnId::new(1)),
         outcome: AgentOutcome::Completed,
         occurred_at_ms: 20,
+        duration_ms: None,
         summary: Some(AgentOutcomeSummary::new("done").unwrap()),
     });
 

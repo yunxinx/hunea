@@ -13,8 +13,11 @@ use runtime_domain::session::RuntimePermissionOption;
 
 use crate::{
     Model,
-    agents_panel::{AgentsPanelPermissionChoice, agent_activity_summary_text},
+    agents_panel::{
+        AgentsPanelPermissionChoice, agent_activity_summary_text, agents_panel_surface_frame_height,
+    },
     display_width::display_width,
+    fullscreen_list_chrome::FULLSCREEN_LIST_CHROME_HEIGHT,
     render_frame::RenderFrame,
     status_line::truncate_display_width_with_ellipsis,
     styled_text::render_line_with_full_width_background,
@@ -83,8 +86,8 @@ impl Model {
         frame: &mut RenderFrame<'_>,
         area: Rect,
     ) {
-        if area.width == 0 || area.height < 5 {
-            // 标题 + 分割线 + 至少 1 行正文 + page rule + footer。
+        if area.width == 0 || area.height <= FULLSCREEN_LIST_CHROME_HEIGHT {
+            // surface chrome（标题 + 分割线 + page rule + footer）之外至少还要有 1 行正文。
             return;
         }
         frame.render_widget(Clear, area);
@@ -106,7 +109,7 @@ impl Model {
 
         // permission 区块恒可见（不进滚动区）：先预留其高度，正文只占剩余行。
         let permission_block = self.agents_panel_permission_block(area.width);
-        let frame_height = usize::from(area.height.saturating_sub(4).max(1));
+        let frame_height = agents_panel_surface_frame_height(area.height);
         let block_height =
             agents_panel_permission_block_height(permission_block.as_ref(), frame_height);
         let content_height = frame_height.saturating_sub(block_height).max(1);
@@ -277,7 +280,7 @@ impl Model {
 
     /// permission 区块按输入侧窗口高度预留的高度（正文至少保留 1 行；区块超高时截尾）。
     pub(super) fn agents_panel_permission_block_height(&self) -> usize {
-        let frame_height = usize::from(self.height.saturating_sub(4).max(1));
+        let frame_height = agents_panel_surface_frame_height(self.height);
         agents_panel_permission_block_height(
             self.agents_panel_permission_block(self.width).as_ref(),
             frame_height,
@@ -419,13 +422,15 @@ pub(super) fn agents_panel_surface_header(
     elapsed_ms: Option<u64>,
     width: usize,
 ) -> AgentsPanelSurfaceHeader {
-    use crate::agents_panel::{agent_status_label, format_agent_elapsed_ms};
+    use crate::agents_panel::agent_status_label;
 
     let status_budget = width.saturating_sub(AGENTS_SURFACE_HORIZONTAL_PADDING + 1 + 1);
     let status_label =
         truncate_display_width_with_ellipsis(agent_status_label(status), status_budget.max(1));
     let status_width = display_width(&status_label);
-    let elapsed_label = elapsed_ms.map(format_agent_elapsed_ms);
+    // elapsed 与主 UI 的 work-duration / spinner 共用同一紧凑格式。
+    let elapsed_label =
+        elapsed_ms.map(|ms| crate::stream_activity::format_elapsed_compact(ms / 1_000));
     let title_budget = width
         .saturating_sub(
             AGENTS_SURFACE_HORIZONTAL_PADDING

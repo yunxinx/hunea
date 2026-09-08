@@ -3,14 +3,15 @@ use std::{
     hash::{Hash, Hasher},
 };
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use runtime_domain::agent::{AgentLaunchSnapshot, AgentOutcome, AgentOutcomeSnapshot};
 
 use crate::{
     display_width::display_width,
+    stream_activity::{WORK_DURATION_SUMMARY_MIN_ELAPSED_SECS, format_elapsed_compact},
     styled_text::{line_plain_text_len, lines_to_ansi_text, lines_to_plain_text},
-    theme::{TerminalPalette, secondary_text_style, tertiary_text_style},
+    theme::{TerminalPalette, secondary_text_style, style_for_color, tertiary_text_style},
     transcript::{
         ItemLineAnchor, TranscriptEstimateKind, TranscriptFastEstimate, TranscriptItemMetrics,
         markdown_highlight::{HighlightChunk, wrap_highlight_chunks_soft},
@@ -160,7 +161,7 @@ fn launch_fact_lines(
 ) -> Vec<Line<'static>> {
     if snapshot.children.len() == 1 {
         let title = snapshot.children[0].title.as_str();
-        return fact_header_lines("Launched", title, width, palette);
+        return fact_header_lines("Launched", title, None, width, palette);
     }
 
     let mut lines = group_launch_header_lines(snapshot.children.len(), width, palette);
@@ -182,7 +183,8 @@ fn launch_fact_lines(
     lines
 }
 
-/// terminal outcome 渲染为纯状态行 `● Finished|Failed|Stopped <title>`。
+/// terminal outcome 渲染为纯状态行 `● Finished|Failed|Stopped <title>`，超过
+/// work-duration 阈值的任务追加 `· 2m 05s` 耗时（tertiary）。
 ///
 /// 报告正文不进入主文档流：完整报告回传父 Agent tool result，单行摘要由 `/agents`
 /// 面板与 preview 的 activity/latest 数据面承载（summary 字段保留在 durable fact 中）。
@@ -196,17 +198,33 @@ fn outcome_fact_lines(
         AgentOutcome::Failed => "Failed",
         AgentOutcome::Cancelled => "Stopped",
     };
-    fact_header_lines(action, snapshot.title.as_str(), width, palette)
+    fact_header_lines(
+        action,
+        snapshot.title.as_str(),
+        outcome_duration_suffix(snapshot).as_deref(),
+        width,
+        palette,
+    )
 }
 
-/// header 行：marker（BOLD + settled 槽位）+ action（次级强调）+ title（主要扫描目标）。
+/// 终态耗时后缀：阈值与格式复用 work-duration 分割线语言（`> 30s` 才显示，
+/// `format_elapsed_compact` 的 spaced 形态）；无计时语义的投影不显示。
+fn outcome_duration_suffix(snapshot: &AgentOutcomeSnapshot) -> Option<String> {
+    let elapsed_secs = snapshot.duration_ms? / 1_000;
+    (elapsed_secs > WORK_DURATION_SUMMARY_MIN_ELAPSED_SECS)
+        .then(|| format!(" · {}", format_elapsed_compact(elapsed_secs)))
+}
+
+/// header 行：marker（BOLD + settled 槽位）+ action（次级强调）+ title（主要扫描
+/// 目标）+ 可选耗时后缀（tertiary）。
 fn fact_header_lines(
     action: &str,
     title: &str,
+    duration_suffix: Option<&str>,
     width: usize,
     palette: TerminalPalette,
 ) -> Vec<Line<'static>> {
-    let chunks = vec![
+    let mut chunks = vec![
         HighlightChunk {
             text: AGENT_FACT_MARKER.to_string(),
             style: agent_fact_marker_style(palette),
@@ -220,6 +238,12 @@ fn fact_header_lines(
             style: agent_fact_title_style(palette),
         },
     ];
+    if let Some(suffix) = duration_suffix {
+        chunks.push(HighlightChunk {
+            text: suffix.to_string(),
+            style: tertiary_text_style(palette),
+        });
+    }
     wrapped_chunk_lines(&[chunks], width)
 }
 
@@ -291,27 +315,17 @@ fn wrapped_chunk_lines(chunks: &[Vec<HighlightChunk>], width: usize) -> Vec<Line
 /// 已定局事实，与"活动进行中"的 `palette.main` 语义区分；失败语义由 action 词承载，
 /// 不使用 `system_error` 红，避免与 error-styled SystemMessageItem 混淆。
 fn agent_fact_marker_style(palette: TerminalPalette) -> Style {
-    style_for_foreground(palette.quote).add_modifier(Modifier::BOLD)
+    style_for_color(palette.quote).add_modifier(Modifier::BOLD)
 }
 
 /// title 是主要扫描目标：BOLD 复用 tool result title 的字体，颜色用 primary 槽位。
 fn agent_fact_title_style(palette: TerminalPalette) -> Style {
-    style_for_foreground(palette.main).add_modifier(Modifier::BOLD)
+    style_for_color(palette.main).add_modifier(Modifier::BOLD)
 }
 
 /// group 子行 title 用 primary 色（不 BOLD——BOLD 留给 header 行的单一扫描锚点）。
 fn agent_fact_child_title_style(palette: TerminalPalette) -> Style {
-    style_for_foreground(palette.main)
-}
-
-/// 与 `tool_result::activity::style_for_color` 同语义的本地实现：`Color::Reset` 依赖
-/// 终端默认前景（terminal_default_palette 场景），不显式设置 fg。
-fn style_for_foreground(color: Color) -> Style {
-    if color == Color::Reset {
-        Style::new()
-    } else {
-        Style::new().fg(color)
-    }
+    style_for_color(palette.main)
 }
 
 /// cache key 覆盖 snapshot 全部语义字段：内容不同的 fact 不得共享渲染缓存。
@@ -340,6 +354,7 @@ fn agent_outcome_fact_render_cache_key(snapshot: &AgentOutcomeSnapshot) -> u64 {
     snapshot.parent_turn_id.hash(&mut hasher);
     snapshot.outcome.hash(&mut hasher);
     snapshot.occurred_at_ms.hash(&mut hasher);
+    snapshot.duration_ms.hash(&mut hasher);
     snapshot.summary.hash(&mut hasher);
     hasher.finish()
 }
@@ -398,6 +413,7 @@ mod tests {
             parent_turn_id: Some(AgentTurnId::new(9)),
             outcome,
             occurred_at_ms: 43,
+            duration_ms: None,
             summary: Some(
                 AgentOutcomeSummary::new("Child Agent completed").expect("summary should resolve"),
             ),
@@ -481,6 +497,38 @@ mod tests {
     }
 
     #[test]
+    fn outcome_appends_duration_only_beyond_the_work_summary_threshold() {
+        let palette = default_palette();
+        for (duration_ms, expected) in [
+            (None, "● Finished research task"),
+            (Some(0), "● Finished research task"),
+            (Some(30_000), "● Finished research task"),
+            (Some(125_000), "● Finished research task · 2m 05s"),
+            (Some(3_723_000), "● Finished research task · 1h 02m 03s"),
+        ] {
+            let snapshot = AgentOutcomeSnapshot {
+                duration_ms,
+                ..outcome_snapshot(AgentOutcome::Completed)
+            };
+            let lines = AgentFactItem::outcome(snapshot).render_lines(80, palette);
+            assert_eq!(
+                lines.iter().map(line_to_plain_text).collect::<Vec<_>>(),
+                vec![expected.to_string()],
+                "duration {duration_ms:?}"
+            );
+        }
+
+        // 耗时后缀是 tertiary；阈值以上才追加该 span。
+        let snapshot = AgentOutcomeSnapshot {
+            duration_ms: Some(125_000),
+            ..outcome_snapshot(AgentOutcome::Completed)
+        };
+        let lines = AgentFactItem::outcome(snapshot).render_lines(80, palette);
+        assert_eq!(lines[0].spans.len(), 4);
+        assert_eq!(lines[0].spans[3].style, tertiary_text_style(palette));
+    }
+
+    #[test]
     fn branch_lines_align_continuation_with_four_spaces() {
         let palette = default_palette();
         let item = AgentFactItem::launch(launch_snapshot(vec![
@@ -542,6 +590,15 @@ mod tests {
         assert_ne!(
             outcome.render_cache_key(),
             AgentFactItem::outcome(outcome_snapshot(AgentOutcome::Failed)).render_cache_key(),
+        );
+        // duration 影响渲染内容（耗时后缀），必须进入 cache key。
+        let timed = AgentOutcomeSnapshot {
+            duration_ms: Some(125_000),
+            ..outcome_snapshot(AgentOutcome::Completed)
+        };
+        assert_ne!(
+            outcome.render_cache_key(),
+            AgentFactItem::outcome(timed).render_cache_key(),
         );
     }
 

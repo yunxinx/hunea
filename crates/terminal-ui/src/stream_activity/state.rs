@@ -5,7 +5,8 @@ pub(super) const STREAM_ACTIVITY_ELAPSED_TICK_INTERVAL: Duration = Duration::fro
 pub(super) const STREAM_ACTIVITY_TOKEN_TICK_INTERVAL: Duration = Duration::from_millis(33);
 const TOKEN_TWEEN_DURATION: Duration = Duration::from_millis(120);
 const TOKEN_STALE_THRESHOLD: Duration = Duration::from_millis(360);
-pub(super) const WORK_DURATION_SUMMARY_MIN_ELAPSED_SECS: u64 = 30;
+/// work-duration 摘要的最小耗时阈值（秒）：outcome 行耗时与分割线共用同一档位。
+pub(crate) const WORK_DURATION_SUMMARY_MIN_ELAPSED_SECS: u64 = 30;
 
 /// `StreamActivityState` 保存一次模型 turn 运行中显示在输入框上方的状态。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,9 +18,6 @@ pub(crate) struct StreamActivityState {
     pub(super) output_tokens: Option<ActivityTokenProgress>,
     pub(super) is_thinking: bool,
     pub(super) paused_at: Option<Instant>,
-    /// host Agent 工具执行期（同步等待 child runtime）的等待语义：
-    /// 状态行显示等待文案，不跑流式转圈动画。
-    pub(super) is_waiting_for_child_agents: bool,
 }
 
 /// `StreamActivityFrameKey` 同时描述 activity 内容状态与当前动画帧。
@@ -48,16 +46,6 @@ pub(super) enum ActivityTokenDirection {
 impl StreamActivityState {
     pub(super) fn display_header(&self) -> &str {
         self.retry_header.as_deref().unwrap_or(&self.header)
-    }
-
-    /// 状态行实际展示的 header 文案：等待 child runtime 期间用等待文案
-    /// 替代流式 header（原 header 保留，等待结束后恢复）。
-    pub(super) fn status_line_header(&self) -> &str {
-        if self.is_waiting_for_child_agents {
-            super::CHILD_AGENTS_WAITING_HEADER
-        } else {
-            self.display_header()
-        }
     }
 
     pub(super) fn has_retry_header(&self) -> bool {
@@ -178,10 +166,6 @@ impl StreamActivityState {
     }
 
     pub(super) fn frame_index_at(&self, now: Instant) -> usize {
-        if self.is_waiting_for_child_agents {
-            // 等待期无 shimmer/呼吸动画：帧键只随秒级 elapsed 变化。
-            return self.elapsed_at(now).as_secs() as usize;
-        }
         let interval_ms = self.frame_interval_at(now).as_millis().max(1);
         let tick = self.elapsed_at(now).as_millis() / interval_ms;
         let token_display = self.output_tokens_display_at(now);
@@ -210,10 +194,6 @@ impl StreamActivityState {
     }
 
     pub(super) fn frame_interval_at(&self, now: Instant) -> Duration {
-        if self.is_waiting_for_child_agents {
-            // 等待期无快帧：elapsed 的秒级刻度已足够驱动状态行。
-            return STREAM_ACTIVITY_ELAPSED_TICK_INTERVAL;
-        }
         if self
             .output_tokens
             .as_ref()

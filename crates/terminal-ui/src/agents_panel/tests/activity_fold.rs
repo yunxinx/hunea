@@ -45,13 +45,14 @@ fn fold_entries_take_latest_tool_and_assistant_items() {
     assert_eq!(entries, vec!["step 3", "step 4", "step 5"]);
     assert_eq!(hidden, 3, "earlier entries fold into the more counter");
 
-    // User 条目是发起指令不算活动；多行内容取首个非空行。
+    // User 条目是发起指令不算活动；多行内容取首个非空行，assistant 首行剥
+    // 行内 markdown 强调标记（不泄漏 raw markdown）。
     let items = vec![
         AgentTranscriptItem::User {
             content: "run it".to_string(),
         },
         AgentTranscriptItem::Assistant {
-            content: "\n  first answer line\nsecond line".to_string(),
+            content: "\n  **first** `answer` __line__\nsecond line".to_string(),
         },
     ];
     let (entries, hidden) = agents_activity_fold_entries(&items);
@@ -68,8 +69,35 @@ fn fold_entries_take_latest_tool_and_assistant_items() {
 }
 
 #[test]
-fn idle_activity_text_is_filtered_from_fold_and_latest_column() {
-    // 摘要恰为 Idle 文案的条目不进入折叠区（无价值信息）。
+fn fold_tool_entries_strip_the_shell_transport_prefix() {
+    // `Shell:` 传输前缀与主 transcript 的活动行归一化同语义：折叠区只显示命令。
+    let items = vec![
+        AgentTranscriptItem::Tool {
+            title: "Shell: cargo check".to_string(),
+            content: String::new(),
+        },
+        AgentTranscriptItem::Tool {
+            title: "Read Cargo.toml".to_string(),
+            content: String::new(),
+        },
+        // 空回退：title 剥前缀后为空时取 content 首行。
+        AgentTranscriptItem::Tool {
+            title: "Shell:".to_string(),
+            content: "compilation output".to_string(),
+        },
+    ];
+    let (entries, hidden) = agents_activity_fold_entries(&items);
+    assert_eq!(
+        entries,
+        vec!["cargo check", "Read Cargo.toml", "compilation output"]
+    );
+    assert_eq!(hidden, 0);
+}
+
+#[test]
+fn latest_column_hides_idle_but_fold_keeps_real_assistant_content() {
+    // 折叠区条目来自 committed transcript 内容，没有按文本巧合过滤：assistant
+    // 正文恰为 "idle" 也是真实产出，照常展示。
     let items = vec![
         AgentTranscriptItem::Assistant {
             content: "idle".to_string(),
@@ -80,10 +108,10 @@ fn idle_activity_text_is_filtered_from_fold_and_latest_column() {
         },
     ];
     let (entries, hidden) = agents_activity_fold_entries(&items);
-    assert_eq!(entries, vec!["step 1"]);
+    assert_eq!(entries, vec!["idle", "step 1"]);
     assert_eq!(hidden, 0);
 
-    // latest 列的 Idle 文本同样不渲染。
+    // latest 列的 Idle 活动仍整列隐藏（无价值信息）。
     let mut row = overview_row(2, "research task", AgentProjectionStatus::Working);
     row.latest_activity = runtime_domain::agent::AgentActivitySummary::Idle;
     let layout = crate::agents_panel::list_render::agents_panel_row_layout(&row, 100, None);
@@ -291,6 +319,39 @@ fn selected_row_renders_activity_fold_lines() {
         "only the last fold row uses ↳: {rows:?}"
     );
     assert!(arrow_rows[0].contains("+3 more"));
+}
+
+#[test]
+fn more_line_count_segment_uses_command_accent() {
+    let mut model = ready_model_with_selected_fold();
+
+    let buffer = render_model_buffer(&mut model, 100, 24);
+    let palette = crate::theme::default_palette();
+    // `+N more` 计数段用 command_accent 强调；折叠前缀（缩进 + `↳`）保持 tertiary。
+    let more_row_y = (0..buffer.area.height)
+        .find(|&y| {
+            let row_text: String = (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol().to_string())
+                .collect();
+            row_text.contains("+3 more")
+        })
+        .expect("the more line should render");
+    let plus_x = (0..buffer.area.width)
+        .find(|&x| buffer[(x, more_row_y)].symbol() == "+")
+        .expect("the count segment should start with +");
+    assert_eq!(
+        buffer[(plus_x, more_row_y)].fg,
+        palette.command_accent,
+        "the +N more count must use the command accent slot"
+    );
+    let arrow_x = (0..buffer.area.width)
+        .find(|&x| buffer[(x, more_row_y)].symbol() == "↳")
+        .expect("the fold prefix arrow should render");
+    assert_eq!(
+        buffer[(arrow_x, more_row_y)].fg,
+        palette.tertiary,
+        "the fold prefix must stay tertiary"
+    );
 }
 
 #[test]

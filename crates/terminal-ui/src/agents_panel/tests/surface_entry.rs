@@ -235,7 +235,7 @@ fn surface_title_renders_rule_and_status_dot() {
         "title line must compact segments with the `·` separator: {title_row}"
     );
     assert!(
-        title_row.contains("1m23s"),
+        title_row.contains("1m 23s"),
         "title line carries the elapsed label: {title_row}"
     );
     // 标题行与内容之间的项目统一分割线。

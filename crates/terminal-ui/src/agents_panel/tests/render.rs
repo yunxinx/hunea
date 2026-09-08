@@ -19,9 +19,9 @@ fn wide_row_shows_all_columns_as_single_line() {
     // status、title、latest、elapsed、tools、tokens 全列可见。
     assert!(row.contains("Working"), "status label: {row}");
     assert!(row.contains("thinking"), "latest activity: {row}");
-    assert!(row.contains("1m23s"), "elapsed: {row}");
+    assert!(row.contains("1m 23s"), "elapsed: {row}");
     assert!(row.contains(" 3 "), "tool count: {row}");
-    assert!(row.contains("2.0K"), "token usage: {row}");
+    assert!(row.contains("2k"), "token usage: {row}");
     assert!(
         crate::display_width::display_width(row.trim_end()) <= 100,
         "row must not overflow the terminal width: {row}"
@@ -38,8 +38,10 @@ fn column_header_renders_above_rows_and_hides_without_rows() {
         .find(|row| row.contains("Tokens"))
         .expect("column header should render above the rows");
     assert!(header.contains("Status"), "status label: {header}");
-    assert!(header.contains("Title") && header.contains("Latest"));
-    assert!(header.contains("Time") && header.contains("Use Tools"));
+    // latest 列不标列头；tools 列名恢复为不带 Use 前缀。
+    assert!(header.contains("Title") && !header.contains("Latest"));
+    assert!(header.contains("Time") && header.contains("Tools"));
+    assert!(!header.contains("Use"), "header: {header}");
     // 表头行在数据行之前。
     let header_position = rows
         .iter()
@@ -78,28 +80,24 @@ fn every_row_is_a_single_physical_line() {
 fn moderate_width_hides_tokens_first() {
     let mut model = ready_panel_model();
 
-    // usable 58；全 metrics 需 fixed 15 + title 16 + latest 8 + 间隔 2 + metrics
-    // 序列 23 + metrics_gap 1 = 64，丢 tokens 后需 56 恰好容纳。
+    // usable 58；全 metrics 需 66，丢 tokens 后需 58 恰好容纳。
     let buffer = render_model_buffer(&mut model, 60, 24);
     let rows = rendered_rows(&buffer);
     let row = rows
         .iter()
         .find(|row| row.contains("research task"))
         .expect("row should render");
-    assert!(
-        !row.contains("2.0K"),
-        "tokens should be hidden first: {row}"
-    );
+    assert!(!row.contains("2k"), "tokens should be hidden first: {row}");
     assert!(row.contains(" 3 "), "tools should survive: {row}");
-    assert!(row.contains("1m23s"), "elapsed should survive: {row}");
+    assert!(row.contains("1m 23s"), "elapsed should survive: {row}");
 }
 
 #[test]
 fn narrow_width_hides_tools_then_elapsed() {
     let mut model = ready_panel_model();
 
-    // usable 50；丢 tokens 后仍需 56，再丢 tools 后需 49 恰好容纳。
-    let buffer = render_model_buffer(&mut model, 52, 24);
+    // usable 52；丢 tokens 后需 58，再丢 tools 后需 51 恰好容纳。
+    let buffer = render_model_buffer(&mut model, 54, 24);
     let rows = rendered_rows(&buffer);
     let row = rows
         .iter()
@@ -109,8 +107,8 @@ fn narrow_width_hides_tools_then_elapsed() {
         !row.contains(" 3 "),
         "tools should hide before elapsed: {row}"
     );
-    assert!(!row.contains("2.0K"), "tokens should hide first: {row}");
-    assert!(row.contains("1m23s"), "elapsed should survive: {row}");
+    assert!(!row.contains("2k"), "tokens should hide first: {row}");
+    assert!(row.contains("1m 23s"), "elapsed should survive: {row}");
 }
 
 #[test]
@@ -125,7 +123,7 @@ fn tighter_width_hides_elapsed() {
         .find(|row| row.contains("research task"))
         .expect("row should render");
     assert!(
-        !row.contains("1m23s"),
+        !row.contains("1m 23s"),
         "elapsed should hide after tools/tokens: {row}"
     );
     assert!(
@@ -146,13 +144,13 @@ fn extreme_narrow_keeps_status_and_title_only() {
         .find(|row| row.contains("research"))
         .expect("row should render the truncated title");
     assert!(!row.contains("thinking"), "latest should be hidden: {row}");
-    assert!(!row.contains("1m23s"), "elapsed should be hidden: {row}");
+    assert!(!row.contains("1m 23s"), "elapsed should be hidden: {row}");
     assert!(row.contains("Working"), "status must always render: {row}");
 }
 
 #[test]
-fn row_without_elapsed_keeps_metric_order_when_hiding() {
-    // 缺失 elapsed 的行：metric 顺序与让位仍按 tools → tokens 正确归属。
+fn row_without_elapsed_renders_a_blank_column_placeholder() {
+    // 缺失 elapsed 的行：该列渲染等宽空格占位，tools/tokens 列位与齐全行一致。
     let mut row = overview_row(
         2,
         "research task",
@@ -161,7 +159,7 @@ fn row_without_elapsed_keeps_metric_order_when_hiding() {
     row.elapsed_ms = None;
     let mut model = ready_panel_model_with_rows(vec![row]);
 
-    // 宽屏：tools 与 tokens 直接跟随 latest。
+    // 宽屏：tools 与 tokens 正常渲染，elapsed 槽位是空白而非收缩。
     let buffer = render_model_buffer(&mut model, 100, 24);
     let rows = rendered_rows(&buffer);
     let row = rows
@@ -169,10 +167,10 @@ fn row_without_elapsed_keeps_metric_order_when_hiding() {
         .find(|row| row.contains("research task"))
         .expect("row should render");
     assert!(row.contains(" 3 "), "tools should render: {row}");
-    assert!(row.contains("2.0K"), "tokens should render: {row}");
+    assert!(row.contains("2k"), "tokens should render: {row}");
     assert!(
-        !row.contains("1m23s"),
-        "absent elapsed must not render: {row}"
+        !row.contains("1m 23s"),
+        "absent elapsed must render as a blank placeholder: {row}"
     );
 }
 
@@ -240,7 +238,7 @@ fn stop_confirmation_hint_renders_inline_in_the_selected_row() {
         .find(|row| row.contains("research task"))
         .expect("selected row should render");
     assert!(
-        selected.contains("press x again to stop"),
+        selected.contains("Press x again to stop"),
         "stop confirmation must render inline in the selected row: {selected}"
     );
     // 非选中行不携带提示。
@@ -248,12 +246,15 @@ fn stop_confirmation_hint_renders_inline_in_the_selected_row() {
         .iter()
         .find(|row| row.contains("write docs"))
         .expect("other row should render");
-    assert!(!other.contains("press x again to stop"), "row: {other}");
-    // footer 不再承担 stop 确认提示。
+    assert!(!other.contains("Press x again to stop"), "row: {other}");
+    // footer 不承担确认提示：只保留常规按键提示。
+    let footer = rows
+        .iter()
+        .find(|row| row.contains("Esc close"))
+        .expect("footer should render");
     assert!(
-        rows.iter()
-            .all(|row| !row.contains("Press x again to stop")),
-        "footer must not carry the stop confirmation hint: {rows:?}"
+        !footer.contains("again to stop") && !footer.contains("again to delete"),
+        "footer must not carry the stop confirmation hint: {footer}"
     );
 }
 
@@ -274,11 +275,11 @@ fn delete_confirmation_hint_distinguishes_from_stop_on_settled_row() {
         .find(|row| row.contains("write docs"))
         .expect("settled row should render");
     assert!(
-        selected.contains("press x again to delete"),
+        selected.contains("Press x again to delete"),
         "settled row confirmation must declare the delete semantics: {selected}"
     );
     assert!(
-        !selected.contains("press x again to stop"),
+        !selected.contains("Press x again to stop"),
         "settled row must not show the stop hint: {selected}"
     );
 }
@@ -298,6 +299,51 @@ fn footer_hint_uses_two_tiers() {
         narrow
             .iter()
             .any(|row| row.contains("Enter transcript") && !row.contains("←/→/h/l page"))
+    );
+}
+
+#[test]
+fn footer_x_action_follows_the_selected_row_state() {
+    let mut model = ready_panel_model();
+
+    // 选中 running 行：x 是 stop。
+    let running_footer = rendered_rows(&render_model_buffer(&mut model, 100, 24))
+        .into_iter()
+        .find(|row| row.contains("Esc close"))
+        .expect("footer should render");
+    assert!(
+        running_footer.contains("x stop"),
+        "footer: {running_footer}"
+    );
+    assert!(
+        !running_footer.contains("x delete"),
+        "footer: {running_footer}"
+    );
+
+    // 选中 settled 投影行：x 是 delete。
+    press_key(&mut model, KeyCode::Char('j'));
+    let settled_footer = rendered_rows(&render_model_buffer(&mut model, 100, 24))
+        .into_iter()
+        .find(|row| row.contains("Esc close"))
+        .expect("footer should render");
+    assert!(
+        settled_footer.contains("x delete"),
+        "footer: {settled_footer}"
+    );
+    assert!(
+        !settled_footer.contains("x stop"),
+        "footer: {settled_footer}"
+    );
+
+    // 空列表无可寻址目标：footer 不预告 x 动作。
+    let mut empty = ready_panel_model_with_rows(Vec::new());
+    let empty_footer = rendered_rows(&render_model_buffer(&mut empty, 100, 24))
+        .into_iter()
+        .find(|row| row.contains("Esc close"))
+        .expect("footer should render");
+    assert!(
+        !empty_footer.contains("x stop") && !empty_footer.contains("x delete"),
+        "footer: {empty_footer}"
     );
 }
 
@@ -351,7 +397,7 @@ fn surface_title_hides_elapsed_before_truncating_title() {
         .find(|row| row.contains("research"))
         .expect("header title should render");
     assert!(
-        !header.contains("1m23s"),
+        !header.contains("1m 23s"),
         "elapsed should hide on narrow surface: {header}"
     );
 }

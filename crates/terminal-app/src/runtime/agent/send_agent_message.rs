@@ -1,8 +1,7 @@
 //! Host-owned `send_agent_message` tool boundary。
 
 use runtime_domain::agent::{
-    AgentChildMessage, AgentId, AgentLaunchInputError, AgentOutcome, AgentOutcomeSummary,
-    AgentTitle,
+    AgentChildMessage, AgentId, AgentLaunchInputError, AgentOutcome, AgentTitle,
 };
 use runtime_domain::event_notifier::RuntimeEventNotifier;
 use serde::{Deserialize, Serialize};
@@ -92,20 +91,13 @@ impl SendAgentMessageFailure {
 }
 
 /// `send_agent_message` 成功路径的 typed 回执：消息触发的 turn 已 terminal 且 outcome
-/// 已持久化；summary 与 group completion 共用同一 delivery-safe 取值。
-///
-/// 同步等待语义下不存在独立的“排队”回执；`queued` 保留“消息曾在运行中的任务后
-/// 排队”这一事实，供模型向用户转述时序。
-///
-/// `summary` 是 TUI 消费的单行摘要；`report` 是完整的 committed assistant 正文——
-/// 与 `AgentChildCompletion` 的信封字段同构。
+/// 已持久化。字段面与 `AgentChildCompletion` 同构——`report` 携带完整 committed
+/// assistant 正文，单行摘要只服务 TUI projection，不进入模型可见面。
 #[derive(Clone, PartialEq, Eq, Serialize)]
 pub(in crate::runtime) struct AgentMessageDelivery {
     agent_id: AgentId,
     title: AgentTitle,
     outcome: AgentOutcome,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    summary: Option<AgentOutcomeSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     report: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -116,7 +108,6 @@ pub(in crate::runtime) struct AgentMessageDelivery {
     duration_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     truncated: bool,
-    queued: bool,
 }
 
 /// completion/delivery tool result 共享的报告信封：完整 committed assistant 正文、
@@ -143,7 +134,6 @@ impl std::fmt::Debug for AgentMessageDelivery {
             .field("agent_id", &self.agent_id)
             .field("title", &self.title)
             .field("outcome", &self.outcome)
-            .field("summary", &self.summary)
             // 报告正文只进入 tool result，不进入诊断输出。
             .field(
                 "report_chars",
@@ -153,7 +143,6 @@ impl std::fmt::Debug for AgentMessageDelivery {
             .field("tool_uses", &self.tool_uses)
             .field("duration_ms", &self.duration_ms)
             .field("truncated", &self.truncated)
-            .field("queued", &self.queued)
             .finish()
     }
 }
@@ -163,9 +152,7 @@ impl AgentMessageDelivery {
         agent_id: AgentId,
         title: AgentTitle,
         outcome: AgentOutcome,
-        summary: Option<AgentOutcomeSummary>,
         envelope: AgentReportEnvelope,
-        queued: bool,
     ) -> Self {
         let AgentReportEnvelope {
             report,
@@ -178,13 +165,11 @@ impl AgentMessageDelivery {
             agent_id,
             title,
             outcome,
-            summary,
             report,
             tokens,
             tool_uses,
             duration_ms,
             truncated,
-            queued,
         }
     }
 }
@@ -461,7 +446,6 @@ mod tests {
                     )
                     .expect("test title should resolve"),
                     AgentOutcome::Completed,
-                    AgentOutcomeSummary::new("refined answer").ok(),
                     AgentReportEnvelope {
                         report: Some("the full refined report body".to_string()),
                         truncated: false,
@@ -469,7 +453,6 @@ mod tests {
                         tool_uses: Some(3),
                         duration_ms: Some(45_000),
                     },
-                    true,
                 )))
                 .expect("tool should still await the response");
         };
@@ -478,18 +461,20 @@ mod tests {
         assert!(!result.is_error());
         let payload: serde_json::Value =
             serde_json::from_str(&result.text_content()).expect("delivery should be JSON");
-        assert_eq!(payload["agent_id"], serde_json::json!(2));
-        assert_eq!(payload["outcome"], serde_json::json!("completed"));
-        assert_eq!(payload["summary"], serde_json::json!("refined answer"));
+        // 字段面与 spawn 的 child envelope 同构：无 summary/queued 等冗余键。
         assert_eq!(
-            payload["report"],
-            serde_json::json!("the full refined report body")
+            payload,
+            serde_json::json!({
+                "agent_id": 2,
+                "title": "workspace scout",
+                "outcome": "completed",
+                "report": "the full refined report body",
+                "tokens": 1200,
+                "tool_uses": 3,
+                "duration_ms": 45_000,
+            }),
+            "send receipt face should only carry the child envelope fields"
         );
-        assert_eq!(payload["tokens"], serde_json::json!(1200));
-        assert_eq!(payload["tool_uses"], serde_json::json!(3));
-        assert_eq!(payload["duration_ms"], serde_json::json!(45_000));
-        assert!(payload.get("truncated").is_none());
-        assert_eq!(payload["queued"], serde_json::json!(true));
     }
 
     #[tokio::test]

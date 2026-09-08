@@ -11,7 +11,10 @@ use self::{
     render::render_activity_content,
     state::{STREAM_ACTIVITY_ELAPSED_TICK_INTERVAL, should_append_work_duration_summary},
 };
-pub(crate) use state::{StreamActivityFrameKey, StreamActivityState, format_elapsed_compact};
+pub(crate) use state::{
+    StreamActivityFrameKey, StreamActivityState, WORK_DURATION_SUMMARY_MIN_ELAPSED_SECS,
+    format_elapsed_compact,
+};
 
 use super::{
     Model, display_width::display_width, frame_time::next_animation_frame_deadline,
@@ -20,9 +23,6 @@ use super::{
 };
 
 const STREAM_ACTIVITY_GLYPH: &str = "•";
-/// host Agent 工具执行期的状态行等待文案：主 turn 同步阻塞等待 child runtime
-/// 时替代流式 header，不显示流式转圈语义。
-pub(crate) const CHILD_AGENTS_WAITING_HEADER: &str = "Waiting for child agents";
 
 impl Model {
     pub(crate) fn show_stream_activity(&mut self, text: impl Into<String>) {
@@ -49,7 +49,6 @@ impl Model {
             output_tokens: None,
             is_thinking: false,
             paused_at: None,
-            is_waiting_for_child_agents: false,
         });
         self.reset_chat_interrupt_esc_count();
         self.bump_stream_activity_revision();
@@ -78,7 +77,6 @@ impl Model {
                 output_tokens: None,
                 is_thinking: false,
                 paused_at: Some(now),
-                is_waiting_for_child_agents: false,
             });
             self.reset_chat_interrupt_esc_count();
             self.bump_stream_activity_revision();
@@ -251,24 +249,6 @@ impl Model {
         }
         activity.is_thinking = is_thinking;
         self.bump_stream_activity_revision();
-        if self.document_pinned_to_bottom() {
-            self.sync_document_viewport_to_bottom();
-        }
-    }
-
-    /// host Agent 工具执行期的状态行语义切换：等待 child runtime 时不显示
-    /// 流式转圈语义（shimmer/呼吸动画停用，文案切到等待 header），
-    /// 工具返回后恢复。无进行中的 activity 时无操作。
-    pub(crate) fn set_stream_activity_waiting_for_child_agents(&mut self, is_waiting: bool) {
-        let Some(activity) = self.stream_activity.as_mut() else {
-            return;
-        };
-        if activity.is_waiting_for_child_agents == is_waiting {
-            return;
-        }
-        activity.is_waiting_for_child_agents = is_waiting;
-        self.bump_stream_activity_revision();
-        self.sync_composer_height();
         if self.document_pinned_to_bottom() {
             self.sync_document_viewport_to_bottom();
         }

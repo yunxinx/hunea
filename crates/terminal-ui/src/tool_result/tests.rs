@@ -133,6 +133,101 @@ fn terminal_default_shell_result_does_not_emit_syntect_rgb_foregrounds() {
 }
 
 #[test]
+fn compact_json_tool_result_prettifies_with_syntax_highlighting() {
+    let palette = default_palette();
+    let item = ToolResultItem::new(
+        r#"[{"agent_id":2,"title":"workspace scout","outcome":"completed"}]"#,
+        ToolResultKind::Ran,
+    );
+    let lines = item.render_lines(80, palette);
+
+    // pretty 重排：紧凑单行 JSON 变成多行结构化展示，首行保留结果 marker。
+    assert!(
+        lines.len() > 4,
+        "pretty JSON should span multiple lines: {lines:?}"
+    );
+    assert_eq!(line_to_plain_text(&lines[0]), "● [");
+    assert!(
+        lines
+            .iter()
+            .any(|line| line_to_plain_text(line).contains("\"agent_id\": 2")),
+        "pretty JSON should render structured keys: {lines:?}"
+    );
+    assert_eq!(line_to_plain_text(&lines[lines.len() - 1]), "  ]");
+    // syntect 着色：内容 span 的前景色区别于 base style 与无样式文本。
+    assert!(
+        lines.iter().any(|line| {
+            line.spans.iter().skip(1).any(|span| {
+                span.style
+                    .fg
+                    .is_some_and(|fg| fg != ratatui::style::Color::Reset && fg != palette.main)
+            })
+        }),
+        "pretty JSON should carry syntax highlight colors: {lines:?}"
+    );
+}
+
+#[test]
+fn terminal_default_json_result_prettifies_without_foreground_colors() {
+    let item = ToolResultItem::new(r#"{"ok":true}"#, ToolResultKind::Ran);
+    let lines = item.render_lines(80, terminal_default_palette());
+
+    assert_eq!(line_to_plain_text(&lines[0]), "● {");
+    assert!(
+        lines.len() >= 3,
+        "pretty layout should survive palette degradation"
+    );
+    assert!(
+        lines.iter().all(|line| line
+            .spans
+            .iter()
+            .skip(1)
+            .all(|span| span.style.fg.is_none())),
+        "terminal default palette must not force syntect foreground colors: {lines:?}"
+    );
+}
+
+#[test]
+fn non_json_tool_results_keep_the_plain_rendering() {
+    let palette = default_palette();
+    // read/bash 式纯文本结果不触发 JSON 检测。
+    let plain = ToolResultItem::new("file body without any json structure", ToolResultKind::Ran);
+    let lines = plain.render_lines(80, palette);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(
+        line_to_plain_text(&lines[0]),
+        "● file body without any json structure"
+    );
+    assert!(
+        lines[0]
+            .spans
+            .iter()
+            .skip(1)
+            .all(|span| span.style.fg.is_none())
+    );
+
+    // 多行内容（含换行）不检测：按逻辑行原样渲染（continuation 前缀 + 原文缩进）。
+    let multi_line = ToolResultItem::new("{\n  \"already\": \"pretty\"\n}", ToolResultKind::Ran);
+    let lines = multi_line.render_lines(80, palette);
+    assert_eq!(line_to_plain_text(&lines[0]), "● {");
+    assert_eq!(line_to_plain_text(&lines[1]), "    \"already\": \"pretty\"");
+    assert_eq!(line_to_plain_text(&lines[2]), "  }");
+
+    // 首字符 `{` 但整体非法 JSON：原样渲染。
+    let broken = ToolResultItem::new("{ not valid json", ToolResultKind::Ran);
+    let lines = broken.render_lines(80, palette);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(line_to_plain_text(&lines[0]), "● { not valid json");
+    assert!(
+        lines[0]
+            .spans
+            .iter()
+            .skip(1)
+            .all(|span| span.style.fg.is_none())
+    );
+}
+
+#[test]
 fn runtime_tool_activity_header_uses_title_only_and_strips_shell_prefix() {
     let palette = default_palette();
     let item = ToolResultItem::from_runtime_tool_activity(

@@ -2733,7 +2733,7 @@ mod tests {
         ExtensionRequestFuture, ExtensionRequestTransport, ExtensionTransportError,
     };
     use runtime_domain::agent::{
-        AgentCommand, AgentCommandReceipt, AgentEvent, AgentEventKind, AgentGroupCompletion,
+        AgentChildCompletion, AgentCommand, AgentCommandReceipt, AgentEvent, AgentEventKind,
         AgentId, AgentOutcome, AgentProjectionEvent, AgentRuntime, AgentRuntimeError, AgentTurnId,
         AgentTurnRequest,
     };
@@ -4015,24 +4015,13 @@ mod tests {
             .expect("group completion must settle without a further drain round")
             .expect("spawn tool task should not panic");
         assert_eq!(tool_result.outcome(), ToolResultOutcome::Success);
-        let completion: AgentGroupCompletion = serde_json::from_str(&tool_result.text_content())
-            .expect("spawn tool should return typed group completion JSON");
-        assert_eq!(completion.children.len(), 1);
-        assert_eq!(completion.children[0].agent_id, child_id);
-        assert_eq!(completion.children[0].outcome, AgentOutcome::Completed);
-        assert_eq!(
-            completion.children[0]
-                .summary
-                .as_ref()
-                .expect("completed child should carry a summary")
-                .as_str(),
-            "child complete"
-        );
+        let children: Vec<AgentChildCompletion> = serde_json::from_str(&tool_result.text_content())
+            .expect("spawn tool result should be the flat children array");
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].agent_id, child_id);
+        assert_eq!(children[0].outcome, AgentOutcome::Completed);
         // 父 Agent 层拿到的是完整报告，而不是 240 列单行摘要。
-        assert_eq!(
-            completion.children[0].report.as_deref(),
-            Some("child complete")
-        );
+        assert_eq!(children[0].report.as_deref(), Some("child complete"));
 
         shutdown_blocked.store(false, Ordering::SeqCst);
         components.shutdown().expect("runtime should shut down");
@@ -4096,18 +4085,26 @@ mod tests {
             .await
             .expect("spawn tool should settle after the explicit stop");
         assert_eq!(tool_result.outcome(), ToolResultOutcome::Success);
-        let completion: AgentGroupCompletion = serde_json::from_str(&tool_result.text_content())
-            .expect("spawn tool result should carry typed group completion JSON");
-        assert_eq!(completion.children.len(), 1);
-        assert_eq!(completion.children[0].agent_id, child_id);
-        assert_eq!(completion.children[0].outcome, AgentOutcome::Cancelled);
+        let children: Vec<AgentChildCompletion> = serde_json::from_str(&tool_result.text_content())
+            .expect("spawn tool result should be the flat children array");
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].agent_id, child_id);
+        assert_eq!(children[0].outcome, AgentOutcome::Cancelled);
+        // 显式停止的固定摘要进入 outcome snapshot（TUI 面）；停止先于任何 committed
+        // 正文，回执没有可回传的报告。
+        let projected_outcome =
+            projected_outcome_facts(&components.drain_agent_projection_events())
+                .into_iter()
+                .find(|snapshot| snapshot.agent_id == child_id)
+                .expect("stopped child should project an outcome fact");
         assert_eq!(
-            completion.children[0]
+            projected_outcome
                 .summary
                 .as_ref()
                 .map(runtime_domain::agent::AgentOutcomeSummary::as_str),
             Some("Child Agent stopped")
         );
+        assert_eq!(children[0].report, None);
 
         components.shutdown().expect("runtime should shut down");
     }
@@ -4167,7 +4164,6 @@ mod tests {
     #[tokio::test]
     async fn scoped_spawn_agents_commits_redacted_launch_and_outcome_in_order() {
         const PRIVATE_SECOND_LINE: &str = "PRIVATE_SECOND_LINE";
-        const PRIVATE_INSTRUCTIONS: &str = "PRIVATE_INSTRUCTIONS";
 
         let store = Arc::new(session_store::InMemorySessionStore::new());
         let mut header = session_store::SessionHeader {
@@ -4239,8 +4235,7 @@ mod tests {
                         serde_json::json!({
                             "agents": [{
                                 "objective": format!("first delivery line\n{PRIVATE_SECOND_LINE}"),
-                                "display_title": "child title",
-                                "instructions": PRIVATE_INSTRUCTIONS
+                                "display_title": "child title"
                             }]
                         }),
                     ),
@@ -4292,13 +4287,12 @@ mod tests {
             .expect("spawn tool task should finish after group completion");
         assert_eq!(tool_result.outcome(), ToolResultOutcome::Success);
         let completion_text = tool_result.text_content();
-        let completion: AgentGroupCompletion = serde_json::from_str(&completion_text)
-            .expect("spawn tool should return typed group completion JSON");
-        assert_eq!(completion.parent_agent_id, AgentId::MAIN);
-        assert_eq!(completion.children.len(), 1);
-        assert_eq!(completion.children[0].outcome, AgentOutcome::Completed);
+        let children: Vec<AgentChildCompletion> = serde_json::from_str(&completion_text)
+            .expect("spawn tool result should be the flat children array");
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].outcome, AgentOutcome::Completed);
+        // tool result 不携带 objective 第二行（delivery-safe 摘要只取首行）。
         assert!(!completion_text.contains(PRIVATE_SECOND_LINE));
-        assert!(!completion_text.contains(PRIVATE_INSTRUCTIONS));
 
         let restored = store
             .load_session(&session_id, None)
@@ -4329,7 +4323,6 @@ mod tests {
         let replay_json = serde_json::to_string(&restored.transcript)
             .expect("replay projection should remain serializable");
         assert!(!replay_json.contains(PRIVATE_SECOND_LINE));
-        assert!(!replay_json.contains(PRIVATE_INSTRUCTIONS));
 
         components.shutdown().expect("runtime should shut down");
     }
@@ -4632,28 +4625,16 @@ mod tests {
         assert!(!tool_result_text.contains("Tool permission denied"));
 
         // completion payload 携带 child 的 committed final answer。
-        let group_completion: AgentGroupCompletion = serde_json::from_str(&tool_result_text)
-            .expect("spawn tool result should carry typed group completion JSON");
-        assert_eq!(group_completion.parent_agent_id, AgentId::MAIN);
-        assert_eq!(group_completion.children.len(), 1);
+        let children: Vec<AgentChildCompletion> = serde_json::from_str(&tool_result_text)
+            .expect("spawn tool result should be the flat children array");
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].outcome, AgentOutcome::Completed);
         assert_eq!(
-            group_completion.children[0].outcome,
-            AgentOutcome::Completed
-        );
-        assert_eq!(
-            group_completion.children[0]
-                .summary
-                .as_ref()
-                .expect("completed child with output should carry a summary")
-                .as_str(),
-            CHILD_REPORT_TEXT
-        );
-        assert_eq!(
-            group_completion.children[0].report.as_deref(),
+            children[0].report.as_deref(),
             Some(CHILD_REPORT_TEXT),
             "spawn tool result must carry the full committed report to the parent model"
         );
-        assert!(!group_completion.children[0].truncated);
+        assert!(!children[0].truncated);
 
         // main 模型视图包含 spawn_agents；child 的 provider-visible schema 不包含——
         // 执行面与模型视图在同一 filtered registry 上收敛。
@@ -4763,12 +4744,11 @@ mod tests {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner) =
                         Some(tool_results[0].clone());
-                    let completion: AgentGroupCompletion = serde_json::from_str(&tool_results[0].0)
-                        .map_err(|_| {
+                    let children: Vec<AgentChildCompletion> =
+                        serde_json::from_str(&tool_results[0].0).map_err(|_| {
                             ProviderError::Protocol("spawn result is not JSON".to_string())
                         })?;
-                    let child_agent_id = completion
-                        .children
+                    let child_agent_id = children
                         .first()
                         .expect("spawn completion should carry the child")
                         .agent_id
@@ -4962,7 +4942,7 @@ mod tests {
                 Err(_) => panic!("tool loop did not finish within the pump deadline"),
             };
 
-        // spawn 回执：child 完成 launch turn，摘要为 committed final answer。
+        // spawn 回执：child 完成 launch turn，回传 committed final answer 全文。
         let (spawn_result_text, spawn_is_error) = parent_provider
             .spawn_tool_result
             .lock()
@@ -4970,23 +4950,16 @@ mod tests {
             .clone()
             .expect("provider should receive the spawn tool result");
         assert!(!spawn_is_error);
-        let group_completion: AgentGroupCompletion = serde_json::from_str(&spawn_result_text)
-            .expect("spawn tool result should carry typed group completion JSON");
-        let child_id = group_completion.children[0].agent_id;
+        let children: Vec<AgentChildCompletion> = serde_json::from_str(&spawn_result_text)
+            .expect("spawn tool result should be the flat children array");
+        let child_id = children[0].agent_id;
         assert_eq!(
-            group_completion.children[0]
-                .summary
-                .as_ref()
-                .expect("spawned child should carry a summary")
-                .as_str(),
-            CHILD_REPORT_TEXT
-        );
-        assert_eq!(
-            group_completion.children[0].report.as_deref(),
-            Some(CHILD_REPORT_TEXT)
+            children[0].report.as_deref(),
+            Some(CHILD_REPORT_TEXT),
+            "spawn result must carry the committed report body"
         );
 
-        // send 回执：授权层放行（非 error），followup 报告摘要直达父模型。
+        // send 回执：授权层放行（非 error），followup 报告直达父模型。
         let (send_result_text, send_is_error) = parent_provider
             .send_tool_result
             .lock()
@@ -5002,18 +4975,9 @@ mod tests {
         assert_eq!(delivery["agent_id"], serde_json::json!(child_id.get()));
         assert_eq!(delivery["outcome"], serde_json::json!("completed"));
         assert_eq!(
-            delivery["summary"],
-            serde_json::json!(CHILD_FOLLOWUP_REPORT_TEXT)
-        );
-        assert_eq!(
             delivery["report"],
             serde_json::json!(CHILD_FOLLOWUP_REPORT_TEXT),
             "send receipt must carry the full follow-up report to the parent model"
-        );
-        assert_eq!(
-            delivery["queued"],
-            serde_json::json!(false),
-            "message to a settled child should start the follow-up turn immediately"
         );
 
         // child 连续执行两个 provider turn：launch turn 的最后一条 user 消息是
@@ -5363,7 +5327,7 @@ mod tests {
         assert_eq!(receipt["agent_id"], serde_json::json!(child_id.get()));
         assert_eq!(receipt["title"], serde_json::json!("workspace scout"));
 
-        // spawn 回执：显式停止分类（cancelled + 固定 summary），不是自然失败。
+        // spawn 回执：显式停止分类（cancelled），不是自然失败。
         let (spawn_result_text, spawn_is_error) = spawn_provider
             .spawn_tool_result
             .lock()
@@ -5371,23 +5335,13 @@ mod tests {
             .clone()
             .expect("provider should receive the spawn tool result");
         assert!(!spawn_is_error);
-        let group_completion: AgentGroupCompletion = serde_json::from_str(&spawn_result_text)
-            .expect("spawn tool result should carry typed group completion JSON");
-        assert_eq!(group_completion.children.len(), 1);
-        assert_eq!(group_completion.children[0].agent_id, child_id);
-        assert_eq!(
-            group_completion.children[0].outcome,
-            AgentOutcome::Cancelled
-        );
-        assert_eq!(
-            group_completion.children[0]
-                .summary
-                .as_ref()
-                .map(runtime_domain::agent::AgentOutcomeSummary::as_str),
-            Some("Child Agent stopped")
-        );
+        let children: Vec<AgentChildCompletion> = serde_json::from_str(&spawn_result_text)
+            .expect("spawn tool result should be the flat children array");
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].agent_id, child_id);
+        assert_eq!(children[0].outcome, AgentOutcome::Cancelled);
         // 停止发生在 terminal 事实交付前：没有任何 committed 正文可回传。
-        assert_eq!(group_completion.children[0].report, None);
+        assert_eq!(children[0].report, None);
 
         // launch-group child 显式停止后保留 settled 投影行。
         assert_eq!(components.child_agent_count_for_test(), 1);
@@ -5741,17 +5695,8 @@ mod tests {
         assert_eq!(delivery["agent_id"], serde_json::json!(agent_id.get()));
         assert_eq!(delivery["outcome"], serde_json::json!("completed"));
         assert_eq!(
-            delivery["summary"],
-            serde_json::json!(QUEUED_CHILD_REFINED_ANSWER)
-        );
-        assert_eq!(
             delivery["report"],
             serde_json::json!(QUEUED_CHILD_REFINED_ANSWER)
-        );
-        assert_eq!(
-            delivery["queued"],
-            serde_json::json!(true),
-            "message sent to a running child must be reported as queued"
         );
 
         // transcript 连续：objective 与 followup 消息先后成为各 turn 的 user 输入。
@@ -5850,7 +5795,7 @@ mod tests {
         events: Vec<AgentEvent>,
         is_shutdown: bool,
         /// 记录每次 SubmitTurn 在 adapter 消费点（`into_parts` 之后）的 provider-visible
-        /// 文本，供全链断言 launch instructions 真正抵达 child provider request。
+        /// 文本，供全链断言 launch 的身份指令真正抵达 child provider request。
         submitted_provider_texts: ChildProviderTextLog,
     }
 
@@ -6084,8 +6029,7 @@ mod tests {
                         "spawn_agents",
                         serde_json::json!({
                             "agents": [{
-                                "objective": "write a haiku about ports",
-                                "instructions": "PRIVATE_INSTRUCTIONS"
+                                "objective": "write a haiku about ports"
                             }]
                         }),
                     ),
@@ -6146,7 +6090,7 @@ mod tests {
                 _ => None,
             })
             .expect("per-agent snapshot should be delivered");
-        // launch 冻结 delivery-safe user objective；instructions 不进入 transcript。
+        // launch 冻结 delivery-safe user objective；身份指令不进入 transcript。
         assert_eq!(
             view_snapshot.transcript.items,
             vec![runtime_domain::agent::AgentTranscriptItem::User {
@@ -6499,7 +6443,6 @@ mod tests {
     #[tokio::test]
     async fn spawn_agents_full_chain_persists_and_resumes_semantically_equivalent_facts() {
         const PRIVATE_SECOND_LINE: &str = "PRIVATE_SECOND_LINE";
-        const PRIVATE_INSTRUCTIONS: &str = "PRIVATE_INSTRUCTIONS";
 
         let submitted_child_provider_texts = ChildProviderTextLog::default();
         let child_provider_texts = Arc::clone(&submitted_child_provider_texts);
@@ -6531,8 +6474,7 @@ mod tests {
                         "display_title": "first child title"
                     },
                     {
-                        "objective": format!("summarize findings\n{PRIVATE_SECOND_LINE}"),
-                        "instructions": PRIVATE_INSTRUCTIONS
+                        "objective": format!("summarize findings\n{PRIVATE_SECOND_LINE}")
                     }
                 ]
             }),
@@ -6546,8 +6488,8 @@ mod tests {
         }
         assert_eq!(components.child_agent_count_for_test(), 2);
 
-        // child provider request（adapter 消费点读取）：objective 全文 + caller
-        // instructions + host 身份指令；拼接顺序固定，两个 child 都收到身份指令。
+        // child provider request（adapter 消费点读取）：objective 全文 + host 身份
+        // 指令；拼接顺序固定，两个 child 都收到身份指令。
         let submitted_provider_texts = submitted_child_provider_texts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -6558,20 +6500,24 @@ mod tests {
                 .iter()
                 .all(|text| text.contains("You are a child agent dispatched"))
         );
-        let instructed_child = submitted_provider_texts
+        let second_child_text = submitted_provider_texts
             .iter()
-            .find(|text| text.contains(PRIVATE_INSTRUCTIONS))
-            .expect("caller instructions should reach the child provider request");
+            .find(|text| text.contains(PRIVATE_SECOND_LINE))
+            .expect("the multi-line objective should reach the child provider request in full");
         assert!(
-            instructed_child.starts_with(&format!(
-                "summarize findings\n{PRIVATE_SECOND_LINE}\n\n{PRIVATE_INSTRUCTIONS}\n\n\
+            second_child_text.starts_with(&format!(
+                "summarize findings\n{PRIVATE_SECOND_LINE}\n\n\
                  You are a child agent dispatched"
             )),
-            "unexpected provider text: {instructed_child}"
+            "unexpected provider text: {second_child_text}"
         );
-        assert!(instructed_child.contains("self-contained"));
-        assert!(instructed_child.contains("unverified"));
-        assert!(!instructed_child.contains("\n\n\n"));
+        assert!(second_child_text.contains("self-contained"));
+        assert!(second_child_text.contains("unverified"));
+        assert!(
+            submitted_provider_texts
+                .iter()
+                .all(|text| !text.contains("\n\n\n"))
+        );
 
         // launch fact：grouped form、title 冻结、objective 只保留 delivery-safe 首行。
         let projection_events = components.drain_agent_projection_events();
@@ -6654,19 +6600,16 @@ mod tests {
             .expect("spawn tool task should finish after group completion");
         assert_eq!(tool_result.outcome(), ToolResultOutcome::Success);
         let completion_text = tool_result.text_content();
-        let completion: AgentGroupCompletion = serde_json::from_str(&completion_text)
-            .expect("spawn tool should return typed group completion JSON");
-        assert_eq!(completion.parent_agent_id, AgentId::MAIN);
-        assert_eq!(completion.group_id, projected_launch.group_id);
-        assert_eq!(completion.children.len(), 2);
+        let children: Vec<AgentChildCompletion> = serde_json::from_str(&completion_text)
+            .expect("spawn tool result should be the flat children array");
+        assert_eq!(children.len(), 2);
         assert!(
-            completion
-                .children
+            children
                 .iter()
                 .all(|child| child.outcome == AgentOutcome::Completed)
         );
         // 信封字段：两个 child 的完整报告与终态 metrics 直达父模型。
-        for child in &completion.children {
+        for child in &children {
             assert_eq!(child.report.as_deref(), Some("child answer"));
             assert!(!child.truncated);
             assert_eq!(child.tool_uses, Some(1));
@@ -6676,8 +6619,8 @@ mod tests {
                 "production-staged children should carry a terminal duration"
             );
         }
+        // tool result 不携带 objective 第二行（delivery-safe 摘要只取首行）。
         assert!(!completion_text.contains(PRIVATE_SECOND_LINE));
-        assert!(!completion_text.contains(PRIVATE_INSTRUCTIONS));
 
         // session resume 语义等价：replay items 与 live document facts 是同一 typed snapshots。
         let restored = store
@@ -6707,7 +6650,6 @@ mod tests {
         let replay_json = serde_json::to_string(&restored.transcript)
             .expect("replay projection should remain serializable");
         assert!(!replay_json.contains(PRIVATE_SECOND_LINE));
-        assert!(!replay_json.contains(PRIVATE_INSTRUCTIONS));
 
         components.shutdown().expect("runtime should shut down");
     }
@@ -6797,11 +6739,11 @@ mod tests {
             .await
             .expect("spawn tool should finish with a successful group completion");
         assert_eq!(tool_result.outcome(), ToolResultOutcome::Success);
-        let completion: AgentGroupCompletion = serde_json::from_str(&tool_result.text_content())
-            .expect("group completion JSON should decode");
-        assert_eq!(completion.children.len(), 1);
-        assert_eq!(completion.children[0].agent_id, child_id);
-        assert_eq!(completion.children[0].outcome, AgentOutcome::Completed);
+        let children: Vec<AgentChildCompletion> = serde_json::from_str(&tool_result.text_content())
+            .expect("spawn tool result should be the flat children array");
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].agent_id, child_id);
+        assert_eq!(children[0].outcome, AgentOutcome::Completed);
         // completion 后 child settle：runtime/context 保留作 followup 宿主，不再随
         // terminal 释放。
         assert!(components.agent_orchestrator.child_has_authority(child_id));
@@ -6905,24 +6847,18 @@ mod tests {
             }] if *agent_id == child_id
         ));
 
-        // group waiter 收到 group completion；被显式停止的 child outcome 为 Cancelled
-        // 且 summary 明确标识"被停止"。
+        // group waiter 收到 group completion；被显式停止的 child outcome 为 Cancelled，
+        // "被停止"标识由 outcome snapshot 摘要承载（TUI 面）。
         let tool_result = execution
             .await
             .expect("spawn tool task should finish after the explicit stop");
         assert_eq!(tool_result.outcome(), ToolResultOutcome::Success);
-        let completion: AgentGroupCompletion = serde_json::from_str(&tool_result.text_content())
-            .expect("group completion JSON should decode");
-        assert_eq!(completion.children.len(), 1);
-        assert_eq!(completion.children[0].agent_id, child_id);
-        assert_eq!(completion.children[0].outcome, AgentOutcome::Cancelled);
-        assert_eq!(
-            completion.children[0]
-                .summary
-                .as_ref()
-                .map(runtime_domain::agent::AgentOutcomeSummary::as_str),
-            Some("Child Agent stopped")
-        );
+        let children: Vec<AgentChildCompletion> = serde_json::from_str(&tool_result.text_content())
+            .expect("spawn tool result should be the flat children array");
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].agent_id, child_id);
+        assert_eq!(children[0].outcome, AgentOutcome::Cancelled);
+        assert_eq!(children[0].report, None);
 
         // launch-group child 的 settled row 保留（terminal projection 由 session 统一回收）。
         assert_eq!(components.child_agent_count_for_test(), 1);
@@ -7104,10 +7040,10 @@ mod tests {
             .await
             .expect("group completion should settle from the frozen terminal fact");
         assert_eq!(tool_result.outcome(), ToolResultOutcome::Success);
-        let completion: AgentGroupCompletion = serde_json::from_str(&tool_result.text_content())
-            .expect("spawn tool should return typed group completion JSON");
-        assert_eq!(completion.children.len(), 1);
-        assert_eq!(completion.children[0].outcome, AgentOutcome::Cancelled);
+        let children: Vec<AgentChildCompletion> = serde_json::from_str(&tool_result.text_content())
+            .expect("spawn tool result should be the flat children array");
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].outcome, AgentOutcome::Cancelled);
 
         // 清理收敛后（drain 边界的同一 owner 重试）：held terminal fact 补交且
         // exactly-once，launch-group 投影行按 stop 语义保留。
@@ -7598,8 +7534,7 @@ mod tests {
                             "spawn_agents",
                             serde_json::json!({
                                 "agents": [{
-                                    "objective": "PRIVATE_FAILED_LAUNCH_OBJECTIVE",
-                                    "instructions": "PRIVATE_FAILED_LAUNCH_INSTRUCTIONS"
+                                    "objective": "PRIVATE_FAILED_LAUNCH_OBJECTIVE"
                                 }]
                             }),
                         ),
@@ -8014,9 +7949,10 @@ mod tests {
             .await
             .expect("retry batch tool task should finish");
         assert_eq!(retry_result.outcome(), ToolResultOutcome::Success);
-        let completion: AgentGroupCompletion = serde_json::from_str(&retry_result.text_content())
-            .expect("retry batch should return typed completion");
-        assert_eq!(completion.children.len(), 2);
+        let children: Vec<AgentChildCompletion> =
+            serde_json::from_str(&retry_result.text_content())
+                .expect("retry batch should return the flat children array");
+        assert_eq!(children.len(), 2);
         assert_eq!(construction_attempts.load(Ordering::SeqCst), 4);
         // retry batch 的两个 child terminal 只 settle 不清理：仅首次失败的 rollback
         // 触发过一次 shutdown。

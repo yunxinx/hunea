@@ -5,7 +5,7 @@ use ratatui::{
 
 use crate::{
     display_width::display_width,
-    theme::{TerminalPalette, secondary_text_style},
+    theme::{TerminalPalette, secondary_text_style, style_for_color},
     transcript::markdown_highlight::{HighlightChunk, wrap_highlight_chunks_soft},
 };
 use runtime_domain::session::{
@@ -18,7 +18,7 @@ use super::{
         ToolActivityGroupFamily, is_list_dir_tool_call, is_runtime_read_tool_activity,
         list_dir_tool_call_title_chunks, runtime_read_tool_activity_title_chunks,
         runtime_skill_usage_descriptor, runtime_tool_activity_display_title,
-        specific_search_tool_activity_parts, style_for_color, tool_activity_group_family,
+        specific_search_tool_activity_parts, tool_activity_group_family,
     },
     diff::runtime_tool_activity_has_diff_content,
 };

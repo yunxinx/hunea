@@ -89,28 +89,15 @@ impl RuntimeEventApply for Model {
             }
             RuntimeEvent::ToolActivityStarted { activity, .. } => {
                 self.flush_runtime_response_buffer();
-                // host Agent 工具（spawn/send/stop）执行期同步阻塞等待 child
-                // runtime：状态行切到等待语义；其他工具开始即结束等待语义。
-                let is_host_agent_tool = is_host_agent_tool_activity_title(&activity.title);
                 if !suppresses_agent_launch_activity_row(&activity.title) {
                     self.append_runtime_tool_activity_from_runtime(activity);
                 }
                 self.record_runtime_tool_activity_started_for_final_body_divider();
-                self.set_stream_activity_waiting_for_child_agents(is_host_agent_tool);
                 self.set_stream_activity_thinking(false);
             }
             RuntimeEvent::ToolActivityUpdated { update, .. } => {
                 self.flush_runtime_response_buffer();
-                // 工具循环串行，终态 update 必属当前执行的 host 工具：
-                // 阻塞结束，状态行恢复流式语义。
-                let activity_settled = matches!(
-                    update.status,
-                    Some(RuntimeToolActivityStatus::Completed | RuntimeToolActivityStatus::Failed)
-                );
                 upsert_runtime_tool_activity(self, update);
-                if activity_settled {
-                    self.set_stream_activity_waiting_for_child_agents(false);
-                }
                 self.set_stream_activity_thinking(false);
             }
             RuntimeEvent::TerminalUpdated { snapshot, .. } => {
@@ -860,17 +847,13 @@ fn normalize_error_description(description: &str) -> String {
 }
 
 /// host 侧 Agent 工具的 activity title 集（`spawn_agents` / `send_agent_message` /
-/// `stop_agents` 的 definition label）：这些工具在主 turn 内同步阻塞等待 child
-/// runtime，执行期状态行切换为等待语义。MetadataOnly 工具的 activity title
-/// 恒等于 definition label，以 title 识别。
+/// `stop_agents` 的 definition label）：`spawn_agents` 条目供 document 行抑制
+/// 识别（activity 行与 AgentLaunchFact 表达同一事实）。MetadataOnly 工具的
+/// activity title 恒等于 definition label，以 title 识别。
 const HOST_AGENT_TOOL_TITLES: [&str; 3] = ["Spawn agents", "Send agent message", "Stop agents"];
 
 /// `spawn_agents` 的 activity title（host 工具 title 集首个成员）。
 const AGENT_LAUNCH_ACTIVITY_ROW_TITLE: &str = HOST_AGENT_TOOL_TITLES[0];
-
-fn is_host_agent_tool_activity_title(title: &str) -> bool {
-    HOST_AGENT_TOOL_TITLES.contains(&title)
-}
 
 /// `spawn_agents` 的 tool activity 行与紧随的 AgentLaunchFact document 行表达同一事实；
 /// 主文档流只保留 fact 行。抑制只作用于 document item 追加（live 与 replay），stream

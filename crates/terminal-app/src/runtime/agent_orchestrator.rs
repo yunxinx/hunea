@@ -2374,8 +2374,12 @@ impl AgentOrchestrator {
             let mut stopping_started = false;
             let mut permission_cleared = false;
             if let Some(record) = self.children.get_mut(agent_id) {
+                // intent 只在首次转入 Disposing 时写入：已在清理中的行保留最初
+                // 意图，后续 stop/淘汰重试不得改写收敛语义（保留投影行 vs 删除）。
+                if record.lifecycle != ChildLifecycle::Disposing {
+                    record.disposal_intent = intent;
+                }
                 record.lifecycle = ChildLifecycle::Disposing;
-                record.disposal_intent = intent;
                 // Disposing child 不再执行任何 turn：排队消息随 authority 一并失效。
                 record.queued_messages.clear();
                 if record.status != AgentProjectionStatus::Stopping {
@@ -2572,18 +2576,27 @@ impl AgentOrchestrator {
     }
 
     /// settled 数量超过上限时按最旧淘汰。agent id 按分配单调递增，BTreeMap 顺序即
-    /// 创建顺序；淘汰复用显式 stop 的完整清理路径（launch-group 投影行按既有语义保留）。
+    /// 创建顺序；淘汰与过期清扫同语义（完整 delete 路径），不是显式 stop——残留
+    /// 消息 waiter 以 `TargetUnavailable` 结算，模型不会误读"被停止"。所属 launch
+    /// group 的 completion 仍在等待的成员让位（与过期清扫共用同一谓词），否则成员
+    /// 行被销毁后 completion 永远无法凑齐。
     fn evict_settled_children_over_limit(&mut self) {
         while self.settled_child_count() > MAX_SETTLED_CHILD_AGENTS {
             let Some(oldest) = self
                 .children
                 .iter()
-                .find(|(_, record)| matches!(record.lifecycle, ChildLifecycle::Settled))
+                .find(|(_, record)| {
+                    matches!(record.lifecycle, ChildLifecycle::Settled)
+                        && !self.launch_group_completion_pending(record)
+                })
                 .map(|(agent_id, _)| *agent_id)
             else {
                 break;
             };
-            if self.stop_child(oldest).is_err() {
+            if self
+                .dispose_child_ids(self.subtree_ids(oldest), ChildDisposalIntent::default())
+                .is_err()
+            {
                 // CleanupBlocked：owner 保留，本 pass 停止淘汰，下轮 settle 重试。
                 break;
             }
@@ -5647,11 +5660,266 @@ mod tests {
             MAX_SETTLED_CHILD_AGENTS + 1
         );
 
-        // 下轮 settle 以同一 owner 重试：收敛后行随 stop 意图移除；held terminal fact
-        // 随完全释放的行一并终结（durable outcome 已交付，AgentEvent 流不再补发）。
+        // 下轮 settle 以同一 owner 重试：收敛后行随淘汰的生命周期收敛意图移除；
+        // held terminal fact 随完全释放的行一并终结（durable outcome 已交付，
+        // AgentEvent 流不再补发）。
         assert!(orchestrator.drain_child_events().is_empty());
         assert!(!orchestrator.child_has_authority(oldest_id));
         assert_eq!(orchestrator.child_count(), MAX_SETTLED_CHILD_AGENTS);
+    }
+
+    #[test]
+    fn cap_eviction_settles_pending_message_waiters_as_unavailable() {
+        // 恒失败 replay port：target settle 后 outcome 持久化不收敛，followup 消息
+        // 只入队不触发 turn——这是 cap 淘汰命中"带 pending waiter 的 settled 行"的
+        // 生产形态（持久化退避期间）。
+        let replay_port = Arc::new(FlakyReplayAppendPort::new(usize::MAX));
+        let mut orchestrator = AgentOrchestrator::new(
+            Box::new(SessionedMainRuntime {
+                session_id: session_store::SessionId::new(),
+            }),
+            None,
+            None,
+        );
+        let session_port: Arc<dyn SessionPort> = replay_port.clone();
+        orchestrator.bind_session_port(Some(session_port));
+        let caller_id = AgentId::new(2);
+        let target_id = AgentId::new(3);
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let caller_context =
+            register_message_caller_child(&mut orchestrator, caller_id, AgentTurnId::new(20));
+        let _staged = register_message_target_child(
+            &mut orchestrator,
+            caller_id,
+            target_id,
+            target.clone(),
+            vec![child_event(
+                target_id,
+                AgentTurnId::new(target_id.get()),
+                &target,
+                finished_turn_event("settled answer"),
+            )],
+        );
+
+        // 首轮 drain：target settle、outcome 持久化失败进入退避；settled 数未超限。
+        let _ = orchestrator.drain_child_events();
+        // caller 追加 followup：outcome 未持久化 → 消息入队、waiter 保持 pending。
+        let mut receiver = child_caller_message_request(
+            &mut orchestrator,
+            caller_id,
+            &caller_context,
+            AgentTurnId::new(20),
+            target_id,
+            "work that outlives the cap",
+        );
+        assert!(
+            receiver.try_recv().is_err(),
+            "the queued message must not settle the waiter before its follow-up turn"
+        );
+
+        // 更晚 settle 的 child 填满上限：最旧 settled（target）成为容量淘汰对象。
+        for index in 0..(MAX_SETTLED_CHILD_AGENTS as u64) {
+            let agent_id = AgentId::new(index + 4);
+            let turn_id = AgentTurnId::new(agent_id.get());
+            orchestrator.register_child_for_test(
+                agent_id,
+                AgentId::MAIN,
+                turn_id,
+                test_title("cap settled child"),
+                test_context(&format!("cap-waiter-child-{index}")),
+                Box::new(StubMainRuntime {
+                    events: vec![child_event(
+                        agent_id,
+                        turn_id,
+                        &target,
+                        finished_turn_event("later answer"),
+                    )],
+                }),
+            );
+        }
+        let _ = orchestrator.drain_child_events();
+
+        // 淘汰是容量压力下的生命周期收敛，不是显式 stop：waiter 必须以
+        // TargetUnavailable 结算，模型才不会误判"目标被停止"而放弃后续 followup。
+        let failure = receiver
+            .try_recv()
+            .expect("cap eviction must settle the pending message waiter")
+            .expect_err("the evicted target must deliver a closed failure");
+        assert_eq!(failure, SendAgentMessageFailure::TargetUnavailable);
+        assert_eq!(
+            failure.delivery_message(),
+            "send_agent_message target agent is no longer available"
+        );
+        // 淘汰走完整 delete 路径：authority 释放、registry 行移除。
+        assert!(!orchestrator.child_has_authority(target_id));
+        assert_eq!(
+            orchestrator.child_count(),
+            MAX_SETTLED_CHILD_AGENTS + 1,
+            "the caller and the later settled children must survive the eviction"
+        );
+    }
+
+    #[test]
+    fn cap_eviction_spares_children_with_a_pending_launch_group() {
+        let group_id = AgentLaunchGroupId::new(1);
+        let early_id = AgentId::new(2);
+        let running_id = AgentId::new(3);
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        // launch-group 成员：早 settle 的成员 + 仍运行的同组成员。
+        orchestrator.register_child_for_test(
+            early_id,
+            AgentId::MAIN,
+            AgentTurnId::new(early_id.get()),
+            test_title("early group member"),
+            test_context("early-group-member"),
+            Box::new(ShutdownCountingRuntime {
+                events: vec![child_event(
+                    early_id,
+                    AgentTurnId::new(early_id.get()),
+                    &target,
+                    finished_turn_event("early answer"),
+                )],
+                shutdown_calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        orchestrator.mark_child_launch_group_for_test(early_id, group_id);
+        let (running_runtime, running_staged, _running_dispatched, _running_submitted) =
+            ScriptedChildRuntime::new(Vec::new());
+        orchestrator.register_child_for_test(
+            running_id,
+            AgentId::MAIN,
+            AgentTurnId::new(running_id.get()),
+            test_title("running group member"),
+            test_context("running-group-member"),
+            Box::new(running_runtime),
+        );
+        orchestrator.mark_child_launch_group_for_test(running_id, group_id);
+        let _ = orchestrator.drain_child_events();
+
+        // group completion 仍在等待：成员行是 completion 的凑齐依据。
+        let (response, response_receiver) = oneshot::channel();
+        orchestrator.group_waiters.insert(
+            group_id,
+            GroupWaiter {
+                parent_agent_id: AgentId::MAIN,
+                child_ids: vec![early_id, running_id],
+                response,
+            },
+        );
+
+        // 16 个更晚 settle 的 child 让 early 成为最旧 settled：容量淘汰必须让位，
+        // 否则成员行被销毁后 completion 永远无法凑齐（等待方挂死）。
+        for index in 0..(MAX_SETTLED_CHILD_AGENTS as u64) {
+            let agent_id = AgentId::new(index + 4);
+            let turn_id = AgentTurnId::new(agent_id.get());
+            orchestrator.register_child_for_test(
+                agent_id,
+                AgentId::MAIN,
+                turn_id,
+                test_title("cap settled child"),
+                test_context(&format!("cap-group-child-{index}")),
+                Box::new(StubMainRuntime {
+                    events: vec![child_event(
+                        agent_id,
+                        turn_id,
+                        &target,
+                        finished_turn_event("later answer"),
+                    )],
+                }),
+            );
+        }
+        let _ = orchestrator.drain_child_events();
+
+        // group-pending 的成员未被淘汰：authority 保留、仍可作为 followup 宿主。
+        assert!(
+            orchestrator.child_has_authority(early_id),
+            "a settled child whose launch group is still pending must not be evicted"
+        );
+
+        // running 成员终态后 completion 仍可凑齐：让位不改变报告回传可达性。
+        running_staged
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(child_event(
+                running_id,
+                AgentTurnId::new(running_id.get()),
+                &target,
+                finished_turn_event("running answer"),
+            ));
+        let _ = orchestrator.drain_child_events();
+        let completion = response_receiver
+            .blocking_recv()
+            .expect("the group waiter must complete once every member settles")
+            .expect("group completion should deliver the member reports");
+        let mut member_ids = completion
+            .children
+            .iter()
+            .map(|child| child.agent_id)
+            .collect::<Vec<_>>();
+        member_ids.sort();
+        assert_eq!(member_ids, vec![early_id, running_id]);
+    }
+
+    #[test]
+    fn stop_on_a_disposing_child_keeps_the_original_disposal_intent() {
+        let agent_id = AgentId::new(2);
+        let turn_id = AgentTurnId::new(agent_id.get());
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        orchestrator.register_child_for_test(
+            agent_id,
+            AgentId::MAIN,
+            turn_id,
+            test_title("sweep-blocked child"),
+            test_context("sweep-blocked-child"),
+            Box::new(FailingShutdownRuntime {
+                // 过期清扫与随后的 stop 各阻断一次：两轮都停在 Disposing，
+                // 收敛只能由 settle pass 以存储 intent 重试完成。
+                failures_remaining: 2,
+                events: vec![child_event(
+                    agent_id,
+                    turn_id,
+                    &target,
+                    finished_turn_event("swept answer"),
+                )],
+            }),
+        );
+        // launch-group 成员：stop 路径的 retain 语义会保留投影行，与过期清扫的
+        // delete 意图相冲突——冲突时必须以先登记的清扫意图为准。
+        orchestrator.mark_child_launch_group_for_test(agent_id, AgentLaunchGroupId::new(1));
+
+        // settle 后回拨：下一次 drain 触发过期清扫，清理被 runtime shutdown 阻断。
+        let _ = orchestrator.drain_child_events();
+        backdate_child_settled_at(
+            &mut orchestrator,
+            agent_id,
+            SETTLED_CHILD_AUTO_DESTROY_AFTER_MS,
+        );
+        let _ = orchestrator.drain_child_events();
+        assert_eq!(
+            orchestrator.child_status(agent_id),
+            Some(AgentProjectionStatus::CleanupBlocked)
+        );
+        assert!(orchestrator.child_has_authority(agent_id));
+
+        // 清理未收敛期间用户/模型发起 stop：不得改写清扫已登记的 delete 意图。
+        assert!(
+            orchestrator.stop_child(agent_id).is_err(),
+            "the blocked cleanup must report a pending shutdown"
+        );
+
+        // settle pass 以存储 intent 重试：收敛结果由过期清扫的 delete 意图决定，
+        // 而不是按 stop 的 launch-group 保留语义滞留为投影行（否则需再删一次）。
+        let _ = orchestrator.drain_child_events();
+        assert!(!orchestrator.child_has_authority(agent_id));
+        assert_eq!(
+            orchestrator.child_count(),
+            0,
+            "the sweep's delete intent must decide the convergence outcome"
+        );
     }
 
     /// 先交付 staged events、随后拒绝 SubmitTurn 的 fixture：构造 followup dispatch

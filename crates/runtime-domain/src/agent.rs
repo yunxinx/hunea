@@ -31,7 +31,8 @@ pub use child::{
     AgentPermissionRequest, AgentPermissionState, AgentPermissionTarget, AgentPermissionUpdate,
     AgentPreviewSnapshot, AgentProjectionEvent, AgentProjectionRevision, AgentProjectionStatus,
     AgentRuntimeGeneration, AgentTitle, AgentTranscriptItem, AgentTranscriptSnapshot,
-    AgentViewSnapshot, SETTLED_CHILD_AUTO_DESTROY_AFTER_MS,
+    AgentViewSnapshot, SEND_AGENT_MESSAGE_TOOL_LABEL, SETTLED_CHILD_AUTO_DESTROY_AFTER_MS,
+    SPAWN_AGENTS_TOOL_LABEL, STOP_AGENTS_TOOL_LABEL,
 };
 
 /// `AgentId` 标识一个由 runtime host 管理的 Agent handle。

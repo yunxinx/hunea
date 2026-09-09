@@ -646,9 +646,10 @@ fn host_agent_tool_activity_keeps_streaming_semantics() {
     use crate::runtime::RuntimeEventApply;
 
     for title in [
-        "Spawn agents",
-        "Send agent message",
-        "Stop agents",
+        // host 工具 label 用共享常量，与 runtime 侧 with_label 单源一致。
+        runtime_domain::agent::SPAWN_AGENTS_TOOL_LABEL,
+        runtime_domain::agent::SEND_AGENT_MESSAGE_TOOL_LABEL,
+        runtime_domain::agent::STOP_AGENTS_TOOL_LABEL,
         "List Directory crates",
     ] {
         let mut model = Model::new(StartupBannerOptions::default());

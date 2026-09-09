@@ -1,5 +1,6 @@
 use ratatui::{buffer::Buffer, style::Color};
 use runtime_domain::{
+    agent::{SEND_AGENT_MESSAGE_TOOL_LABEL, SPAWN_AGENTS_TOOL_LABEL, STOP_AGENTS_TOOL_LABEL},
     context_budget::{ContextTokenLimit, ContextWindowUsage},
     model_catalog::{ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource},
     prompt_assembly::persistence::PromptAssemblyScope,
@@ -922,7 +923,7 @@ fn spawn_agents_activity_row_is_suppressed_in_favor_of_launch_fact() {
         target: target.clone(),
         activity: RuntimeToolActivity {
             activity_id: "call-spawn".to_string(),
-            title: "Spawn agents".to_string(),
+            title: SPAWN_AGENTS_TOOL_LABEL.to_string(),
             kind: RuntimeToolKind::Other,
             status: RuntimeToolActivityStatus::InProgress,
             content: Vec::new(),
@@ -936,7 +937,7 @@ fn spawn_agents_activity_row_is_suppressed_in_favor_of_launch_fact() {
         target,
         update: RuntimeToolActivityUpdate {
             activity_id: "call-spawn".to_string(),
-            title: Some("Spawn agents".to_string()),
+            title: Some(SPAWN_AGENTS_TOOL_LABEL.to_string()),
             kind: Some(RuntimeToolKind::Other),
             status: Some(RuntimeToolActivityStatus::Completed),
             content: Some(Vec::new()),
@@ -956,7 +957,7 @@ fn spawn_agents_activity_row_is_suppressed_in_favor_of_launch_fact() {
 
     let transcript = model.transcript_plain_items().join("\n");
     assert!(
-        !transcript.contains("Spawn agents"),
+        !transcript.contains(SPAWN_AGENTS_TOOL_LABEL),
         "spawn activity row duplicates the launch fact: {transcript:?}"
     );
     assert!(transcript.contains("● Launched research task"));
@@ -970,8 +971,8 @@ fn send_and_stop_agent_activity_rows_stay_in_document_flow() {
     let mut model = scrollable_model();
 
     for (activity_id, title) in [
-        ("call-send", "Send agent message"),
-        ("call-stop", "Stop agents"),
+        ("call-send", SEND_AGENT_MESSAGE_TOOL_LABEL),
+        ("call-stop", STOP_AGENTS_TOOL_LABEL),
     ] {
         model.apply_runtime_event(RuntimeEvent::ToolActivityStarted {
             target: target.clone(),
@@ -990,11 +991,11 @@ fn send_and_stop_agent_activity_rows_stay_in_document_flow() {
 
     let transcript = model.transcript_plain_items().join("\n");
     assert!(
-        transcript.contains("Send agent message"),
+        transcript.contains(SEND_AGENT_MESSAGE_TOOL_LABEL),
         "send has no document fact row and must keep its activity row: {transcript:?}"
     );
     assert!(
-        transcript.contains("Stop agents"),
+        transcript.contains(STOP_AGENTS_TOOL_LABEL),
         "stop has no document fact row and must keep its activity row: {transcript:?}"
     );
 }
@@ -1016,7 +1017,7 @@ fn session_resume_does_not_restore_suppressed_spawn_activity_row() {
                 TranscriptReplayItem::ToolActivity {
                     activity: RuntimeToolActivity {
                         activity_id: "call-spawn".to_string(),
-                        title: "Spawn agents".to_string(),
+                        title: SPAWN_AGENTS_TOOL_LABEL.to_string(),
                         kind: RuntimeToolKind::Other,
                         status: RuntimeToolActivityStatus::Completed,
                         content: Vec::new(),
@@ -1035,7 +1036,7 @@ fn session_resume_does_not_restore_suppressed_spawn_activity_row() {
 
     let transcript = model.transcript_plain_items().join("\n");
     assert!(
-        !transcript.contains("Spawn agents"),
+        !transcript.contains(SPAWN_AGENTS_TOOL_LABEL),
         "resume must not resurrect the suppressed spawn activity row: {transcript:?}"
     );
     assert!(transcript.contains("● Launched research task"));

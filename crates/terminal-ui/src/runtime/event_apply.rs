@@ -1,4 +1,6 @@
-use runtime_domain::agent::{AgentOverviewDeltaKind, AgentProjectionEvent};
+use runtime_domain::agent::{
+    AgentOverviewDeltaKind, AgentProjectionEvent, SPAWN_AGENTS_TOOL_LABEL,
+};
 use runtime_domain::prompt_assembly::{
     PromptAssemblyDiscoveredSkill, PromptAssemblyExtraPromptCandidate,
 };
@@ -867,20 +869,13 @@ fn normalize_error_description(description: &str) -> String {
     normalized_lines.join("\n")
 }
 
-/// host 侧 Agent 工具的 activity title 集（`spawn_agents` / `send_agent_message` /
-/// `stop_agents` 的 definition label）：`spawn_agents` 条目供 document 行抑制
-/// 识别（activity 行与 AgentLaunchFact 表达同一事实）。MetadataOnly 工具的
-/// activity title 恒等于 definition label，以 title 识别。
-const HOST_AGENT_TOOL_TITLES: [&str; 3] = ["Spawn agents", "Send agent message", "Stop agents"];
-
-/// `spawn_agents` 的 activity title（host 工具 title 集首个成员）。
-const AGENT_LAUNCH_ACTIVITY_ROW_TITLE: &str = HOST_AGENT_TOOL_TITLES[0];
-
 /// `spawn_agents` 的 tool activity 行与紧随的 AgentLaunchFact document 行表达同一事实；
 /// 主文档流只保留 fact 行。抑制只作用于 document item 追加（live 与 replay），stream
-/// activity、final body divider、审批预览对 activity 事件的消费不受影响。
+/// activity、final body divider、审批预览对 activity 事件的消费不受影响。识别用的
+/// label 与 terminal-app 的工具定义共用 [`SPAWN_AGENTS_TOOL_LABEL`]（MetadataOnly
+/// 工具的 activity title 恒等于 definition label），保证抑制契约两侧编译期一致。
 fn suppresses_agent_launch_activity_row(title: &str) -> bool {
-    title == AGENT_LAUNCH_ACTIVITY_ROW_TITLE
+    title == SPAWN_AGENTS_TOOL_LABEL
 }
 
 fn upsert_runtime_tool_activity(model: &mut Model, update: RuntimeToolActivityUpdate) {

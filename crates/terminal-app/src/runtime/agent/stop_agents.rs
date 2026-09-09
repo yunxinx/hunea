@@ -1,6 +1,8 @@
 //! Host-owned `stop_agents` tool boundary。
 
-use runtime_domain::agent::{AgentId, AgentOutcome, AgentOutcomeSummary, AgentTitle};
+use runtime_domain::agent::{
+    AgentId, AgentOutcome, AgentOutcomeSummary, AgentTitle, STOP_AGENTS_TOOL_LABEL,
+};
 use runtime_domain::event_notifier::RuntimeEventNotifier;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -121,7 +123,7 @@ impl StopAgentsTool {
 impl Tool for StopAgentsTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(STOP_AGENTS_TOOL_NAME)
-            .with_label("Stop agents")
+            .with_label(STOP_AGENTS_TOOL_LABEL)
             .with_description(STOP_AGENTS_DESCRIPTION)
             // guidelines 是 description 的展开版，经 prompt assembly 注入 system prompt。
             .with_prompt_guidelines(STOP_AGENTS_PROMPT_GUIDELINES)

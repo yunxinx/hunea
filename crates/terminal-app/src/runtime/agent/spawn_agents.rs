@@ -3,7 +3,7 @@
 use runtime_domain::{
     agent::{
         AgentGroupCompletion, AgentId, AgentLaunchBatch, AgentLaunchInputError, AgentLaunchRequest,
-        AgentObjective,
+        AgentObjective, SPAWN_AGENTS_TOOL_LABEL,
     },
     event_notifier::RuntimeEventNotifier,
 };
@@ -144,7 +144,7 @@ impl SpawnAgentsTool {
 impl Tool for SpawnAgentsTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(SPAWN_AGENTS_TOOL_NAME)
-            .with_label("Spawn agents")
+            .with_label(SPAWN_AGENTS_TOOL_LABEL)
             .with_description(SPAWN_AGENTS_DESCRIPTION)
             // guidelines 是 description 的展开版，经 prompt assembly 注入 system prompt。
             .with_prompt_guidelines(SPAWN_AGENTS_PROMPT_GUIDELINES)

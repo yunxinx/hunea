@@ -19,6 +19,24 @@ pub const AGENT_TITLE_MAX_DISPLAY_WIDTH: usize = 64;
 /// （runtime 清扫与 UI 侧销毁唤醒 deadline）共用该值，保证唤醒与清扫窗口一致。
 pub const SETTLED_CHILD_AUTO_DESTROY_AFTER_MS: i64 = 20_000;
 
+/// host-owned `spawn_agents` 工具的 definition label。
+///
+/// terminal-app 的工具定义与 terminal-ui 的 document 行抑制（spawn activity 行与
+/// AgentLaunchFact 表达同一事实，只保留 fact 行）跨 crate 消费同一 label 文本；
+/// MetadataOnly 工具的 activity title 恒等于 definition label。下沉到本 crate 让
+/// 两侧共享单一事实源：任一侧改名即编译失败，防止抑制契约静默漂移。
+pub const SPAWN_AGENTS_TOOL_LABEL: &str = "Spawn agents";
+
+/// host-owned `send_agent_message` 工具的 definition label（下沉原因见
+/// [`SPAWN_AGENTS_TOOL_LABEL`]；该工具的 activity 行保留在文档流，terminal-ui 侧
+/// 仅负向测试消费）。
+pub const SEND_AGENT_MESSAGE_TOOL_LABEL: &str = "Send agent message";
+
+/// host-owned `stop_agents` 工具的 definition label（下沉原因见
+/// [`SPAWN_AGENTS_TOOL_LABEL`]；该工具的 activity 行保留在文档流，terminal-ui 侧
+/// 仅负向测试消费）。
+pub const STOP_AGENTS_TOOL_LABEL: &str = "Stop agents";
+
 const AGENT_OUTCOME_SUMMARY_MAX_DISPLAY_WIDTH: usize = 240;
 const AGENT_OBJECTIVE_SUMMARY_MAX_DISPLAY_WIDTH: usize = 240;
 const TRUNCATION_MARKER: &str = "...";

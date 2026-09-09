@@ -2,6 +2,7 @@
 
 use runtime_domain::agent::{
     AgentChildMessage, AgentId, AgentLaunchInputError, AgentOutcome, AgentTitle,
+    SEND_AGENT_MESSAGE_TOOL_LABEL,
 };
 use runtime_domain::event_notifier::RuntimeEventNotifier;
 use serde::{Deserialize, Serialize};
@@ -227,7 +228,7 @@ impl SendAgentMessageTool {
 impl Tool for SendAgentMessageTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(SEND_AGENT_MESSAGE_TOOL_NAME)
-            .with_label("Send agent message")
+            .with_label(SEND_AGENT_MESSAGE_TOOL_LABEL)
             .with_description(SEND_AGENT_MESSAGE_DESCRIPTION)
             // guidelines 是 description 的展开版，经 prompt assembly 注入 system prompt。
             .with_prompt_guidelines(SEND_AGENT_MESSAGE_PROMPT_GUIDELINES)

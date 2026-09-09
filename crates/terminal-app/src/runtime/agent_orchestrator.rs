@@ -748,6 +748,11 @@ impl AgentOrchestrator {
     }
 
     /// 消息目标必须是 caller 的 direct child 且 authority 仍可寻址。
+    ///
+    /// 寻址窗口与过期清扫共用同一时间谓词（含 `>=` 边界）：send bridge 的 drain 先于
+    /// child 清扫，若受理只看 lifecycle，恰好落在清扫前的超窗消息会开启 followup
+    /// turn 并清除定格时刻，清扫谓词随之永不成立——窗口必须由时间边界自己判定，
+    /// 不能依赖清理时序兜底。
     fn child_is_message_target(&self, caller: AgentId, record: &ChildAgentRecord) -> bool {
         record.generation == self.generation
             && matches!(
@@ -755,6 +760,17 @@ impl AgentOrchestrator {
                 ChildLifecycle::Active | ChildLifecycle::Settled
             )
             && record.parent_agent_id == caller
+            && Self::settled_followup_window_open(record)
+    }
+
+    /// settled 定格仍在 followup 寻址窗口内；无定格时刻的行（未进入终态、或 resume
+    /// 恢复的投影）与过期清扫跳过它们的语义一致，恒在窗口内。
+    fn settled_followup_window_open(record: &ChildAgentRecord) -> bool {
+        let Some(settled_at) = record.settled_at_ms else {
+            return true;
+        };
+        let now_ms = runtime_domain::time::unix_timestamp_ms().unwrap_or(0);
+        now_ms - settled_at < SETTLED_CHILD_AUTO_DESTROY_AFTER_MS
     }
 
     /// caller 当前可寻址的消息目标列表；只进入 closed NotFound 文案。
@@ -4748,6 +4764,199 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .is_empty(),
             "expired child must not consume the queued message as a followup turn"
+        );
+    }
+
+    #[test]
+    fn expired_settled_child_is_not_addressable_before_the_sweep() {
+        // 寻址窗口必须由时间边界自己判定：send bridge 的 drain 先于 child 清扫，
+        // 若受理只看 lifecycle，恰好落在清扫前的超窗消息会重开 terminal 周期、
+        // 清扫谓词随之失效（已过期 child 被消息"复活"）。
+        let caller_id = AgentId::new(2);
+        let expired_id = AgentId::new(3);
+        let warm_id = AgentId::new(4);
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        let caller_context =
+            register_message_caller_child(&mut orchestrator, caller_id, AgentTurnId::new(20));
+        register_message_target_child(
+            &mut orchestrator,
+            caller_id,
+            expired_id,
+            target.clone(),
+            vec![child_event(
+                expired_id,
+                AgentTurnId::new(expired_id.get()),
+                &target,
+                finished_turn_event("expired answer"),
+            )],
+        );
+        register_message_target_child(
+            &mut orchestrator,
+            caller_id,
+            warm_id,
+            target.clone(),
+            vec![child_event(
+                warm_id,
+                AgentTurnId::new(warm_id.get()),
+                &target,
+                finished_turn_event("warm answer"),
+            )],
+        );
+        let _ = orchestrator.drain_child_events();
+
+        // 回拨到阈值边界（恰好 20s 即窗外，与清扫的 `>=` 同界）；此刻不 drain，
+        // 清扫不会先运行——拒绝只能来自寻址窗口本身。
+        backdate_child_settled_at(
+            &mut orchestrator,
+            expired_id,
+            SETTLED_CHILD_AUTO_DESTROY_AFTER_MS,
+        );
+
+        let mut receiver = child_caller_message_request(
+            &mut orchestrator,
+            caller_id,
+            &caller_context,
+            AgentTurnId::new(20),
+            expired_id,
+            "late follow-up",
+        );
+        let failure = receiver
+            .try_recv()
+            .expect("out-of-window target must reject synchronously")
+            .expect_err("expired settled child must not be addressable");
+        // NotFound 回执的可用列表只包含窗口内的 sibling，过期目标不再被列出——
+        // 受理口径与列表口径共用同一谓词。
+        assert_eq!(
+            failure,
+            SendAgentMessageFailure::NotFound {
+                available_agent_ids: vec![warm_id],
+            }
+        );
+        assert_eq!(
+            orchestrator.child_count(),
+            3,
+            "the window rejection must not depend on the sweep having run"
+        );
+
+        // 窗口内的 sibling 仍可受理 followup。
+        let mut warm_receiver = child_caller_message_request(
+            &mut orchestrator,
+            caller_id,
+            &caller_context,
+            AgentTurnId::new(20),
+            warm_id,
+            "still warm follow-up",
+        );
+        assert!(
+            warm_receiver.try_recv().is_err(),
+            "within-window settled child must stay addressable"
+        );
+        assert_eq!(
+            orchestrator.child_status(warm_id),
+            Some(AgentProjectionStatus::Pending),
+            "within-window followup should start immediately"
+        );
+    }
+
+    #[test]
+    fn within_window_settled_child_remains_addressable() {
+        let caller_id = AgentId::new(2);
+        let target_id = AgentId::new(3);
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        let caller_context =
+            register_message_caller_child(&mut orchestrator, caller_id, AgentTurnId::new(20));
+        register_message_target_child(
+            &mut orchestrator,
+            caller_id,
+            target_id,
+            target.clone(),
+            vec![child_event(
+                target_id,
+                AgentTurnId::new(target_id.get()),
+                &target,
+                finished_turn_event("settled answer"),
+            )],
+        );
+        let _ = orchestrator.drain_child_events();
+
+        // 阈值内回拨 1s 余量：窗口边界（>= 20s）之外仍可 followup。
+        backdate_child_settled_at(
+            &mut orchestrator,
+            target_id,
+            SETTLED_CHILD_AUTO_DESTROY_AFTER_MS - 1_000,
+        );
+
+        let mut receiver = child_caller_message_request(
+            &mut orchestrator,
+            caller_id,
+            &caller_context,
+            AgentTurnId::new(20),
+            target_id,
+            "timely follow-up",
+        );
+        assert!(
+            receiver.try_recv().is_err(),
+            "within-window settled child must accept the message"
+        );
+        assert_eq!(
+            orchestrator.child_status(target_id),
+            Some(AgentProjectionStatus::Pending),
+            "the followup turn should start and reset the terminal projection"
+        );
+    }
+
+    #[test]
+    fn restored_settled_child_without_timestamp_stays_addressable() {
+        // resume 恢复的 settled 投影没有 terminal 定格时刻：与过期清扫跳过它们的
+        // 既有语义一致，无时间戳的行不可被窗口判定淘汰，保持可寻址。
+        let caller_id = AgentId::new(2);
+        let target_id = AgentId::new(3);
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        let caller_context =
+            register_message_caller_child(&mut orchestrator, caller_id, AgentTurnId::new(20));
+        register_message_target_child(
+            &mut orchestrator,
+            caller_id,
+            target_id,
+            target.clone(),
+            vec![child_event(
+                target_id,
+                AgentTurnId::new(target_id.get()),
+                &target,
+                finished_turn_event("restored answer"),
+            )],
+        );
+        let _ = orchestrator.drain_child_events();
+        {
+            let Some(record) = orchestrator.children.get_mut(&target_id) else {
+                panic!("target child should be registered");
+            };
+            assert!(matches!(record.lifecycle, ChildLifecycle::Settled));
+            record.settled_at_ms = None;
+        }
+
+        let mut receiver = child_caller_message_request(
+            &mut orchestrator,
+            caller_id,
+            &caller_context,
+            AgentTurnId::new(20),
+            target_id,
+            "follow-up on a restored row",
+        );
+        assert!(
+            receiver.try_recv().is_err(),
+            "a settled row without a freeze timestamp must stay addressable"
+        );
+        assert_eq!(
+            orchestrator.child_status(target_id),
+            Some(AgentProjectionStatus::Pending),
+            "the followup turn should start on the restored row"
         );
     }
 

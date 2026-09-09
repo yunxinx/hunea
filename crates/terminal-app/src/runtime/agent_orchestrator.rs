@@ -854,7 +854,9 @@ impl AgentOrchestrator {
                 agent_id,
                 record.title.clone(),
                 outcome_for_status(record.terminal_status),
-                child_report_envelope(
+                // 回执答复只回溯当前 turn：launch turn 的旧报告不得越过 User 分界
+                // 冒充 followup 答复。
+                child_followup_report_envelope(
                     record,
                     runtime_domain::time::unix_timestamp_ms().unwrap_or(0),
                 ),
@@ -2745,6 +2747,25 @@ fn latest_committed_assistant_content(record: &ChildAgentRecord) -> Option<&str>
     })
 }
 
+/// 当前 turn 内最近一条有非空正文的 committed assistant 内容。
+///
+/// followup 回执的答复只属于触发它的那条消息：回溯遇到最近一条 `User` item（turn
+/// 分界）即停，launch turn 的旧报告不得越过边界冒充 followup 答复。当前 turn 没有
+/// 可回传正文时返回 `None`，走 reasoning-only 收尾语义。
+fn latest_committed_assistant_content_in_current_turn(record: &ChildAgentRecord) -> Option<&str> {
+    for item in record.transcript.iter().rev() {
+        match item {
+            AgentTranscriptItem::User { .. } => return None,
+            AgentTranscriptItem::Assistant { content } if !content.trim().is_empty() => {
+                return Some(content.as_str());
+            }
+            // 空正文 assistant item 不代表答复，继续回溯当前 turn 内更早的非空 item。
+            _ => {}
+        }
+    }
+    None
+}
+
 /// 父 Agent tool result 携带的完整报告字符上限；超出时截断并追加固定 note。
 const AGENT_REPORT_MAX_CHARS: usize = 16 * 1024;
 
@@ -2770,7 +2791,30 @@ fn format_child_duration(duration_ms: u64) -> String {
 /// 报告只进入父 Agent 可见的 tool result。reasoning-only 收尾没有可回传的正文，
 /// `report` 为 `None`，由 summary 保留空占位语义。
 fn child_report_envelope(record: &ChildAgentRecord, now_ms: i64) -> AgentReportEnvelope {
-    let (report, truncated) = match latest_committed_assistant_content(record) {
+    report_envelope_for_content(record, now_ms, latest_committed_assistant_content(record))
+}
+
+/// followup 消息回执的报告信封取值。
+///
+/// 答复只在触发消息的当前 turn 内回溯（`User` item 是 turn 分界）：launch turn 的
+/// 旧报告不越过边界进入 followup 回执；当前 turn 没有非空正文时按 reasoning-only
+/// 语义回 `None`。
+fn child_followup_report_envelope(record: &ChildAgentRecord, now_ms: i64) -> AgentReportEnvelope {
+    report_envelope_for_content(
+        record,
+        now_ms,
+        latest_committed_assistant_content_in_current_turn(record),
+    )
+}
+
+/// 由已解析的 assistant 正文构造报告信封；正文来源（transcript 级 / 当前 turn 级）
+/// 由调用方决定。
+fn report_envelope_for_content(
+    record: &ChildAgentRecord,
+    now_ms: i64,
+    content: Option<&str>,
+) -> AgentReportEnvelope {
+    let (report, truncated) = match content {
         Some(content) => {
             let char_count = content.chars().count();
             if char_count <= AGENT_REPORT_MAX_CHARS {
@@ -5862,6 +5906,134 @@ mod tests {
             .expect("second delivery should succeed");
         let payload = serde_json::to_value(&second_delivery).expect("delivery should serialize");
         assert_eq!(payload["report"], serde_json::json!("second refined"));
+    }
+
+    #[test]
+    fn followup_receipt_does_not_backtrack_past_the_turn_boundary() {
+        // followup turn 以空正文收尾（纯 tool_use / reasoning-only）：当前 turn 没有
+        // 可回传的答复，回执 report 必须是 None，不得穿过 User 分界把 launch turn 的
+        // 旧报告冒充 followup 答复交付给父 Agent。
+        let caller_id = AgentId::new(2);
+        let target_id = AgentId::new(3);
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        let caller_context =
+            register_message_caller_child(&mut orchestrator, caller_id, AgentTurnId::new(20));
+        let staged = register_message_target_child(
+            &mut orchestrator,
+            caller_id,
+            target_id,
+            target.clone(),
+            Vec::new(),
+        );
+
+        let mut receiver = child_caller_message_request(
+            &mut orchestrator,
+            caller_id,
+            &caller_context,
+            AgentTurnId::new(20),
+            target_id,
+            "refine the report",
+        );
+
+        // launch turn terminal：只交付 launch 报告，不结算 waiter，followup 随后自动开始。
+        staged
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(child_event(
+                target_id,
+                AgentTurnId::new(target_id.get()),
+                &target,
+                finished_turn_event("first report"),
+            ));
+        let _ = orchestrator.drain_child_events();
+        assert!(
+            receiver.try_recv().is_err(),
+            "launch turn terminal must not settle a message waiter"
+        );
+
+        // followup turn 空正文收尾：launch 报告在 User 分界之前，不属于本次答复。
+        staged
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(child_event(
+                target_id,
+                AgentTurnId::new(target_id.get()),
+                &target,
+                finished_turn_event(""),
+            ));
+        let _ = orchestrator.drain_child_events();
+        let delivery = receiver
+            .try_recv()
+            .expect("the follow-up terminal should settle the waiter")
+            .expect("delivery should succeed");
+        let payload = serde_json::to_value(&delivery).expect("delivery should serialize");
+        assert_eq!(payload["outcome"], serde_json::json!("completed"));
+        assert_eq!(
+            payload["report"],
+            serde_json::Value::Null,
+            "an empty follow-up turn must not deliver the launch turn report"
+        );
+    }
+
+    #[test]
+    fn followup_receipt_backtracks_within_the_current_turn() {
+        // followup turn 以空正文 assistant item 收尾、报告在当前 turn 更早的非空
+        // item：当前 turn 内回溯保留（与 group completion 的 within-turn 语义一致），
+        // 同时不越过 User 分界取 launch turn 的报告。
+        let agent_id = AgentId::new(2);
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        orchestrator.register_child_for_test(
+            agent_id,
+            AgentId::MAIN,
+            AgentTurnId::new(agent_id.get()),
+            test_title("followup receipt child"),
+            test_context("followup-receipt-child"),
+            Box::new(StubMainRuntime::default()),
+        );
+        {
+            let record = orchestrator
+                .children
+                .get_mut(&agent_id)
+                .expect("registered child should have a record");
+            record.transcript.push(AgentTranscriptItem::User {
+                content: "launch objective".to_string(),
+            });
+            record.transcript.push(AgentTranscriptItem::Assistant {
+                content: "launch report".to_string(),
+            });
+            record.transcript.push(AgentTranscriptItem::User {
+                content: "refine the report".to_string(),
+            });
+            record.transcript.push(AgentTranscriptItem::Assistant {
+                content: "the follow-up in-turn report".to_string(),
+            });
+            record.transcript.push(AgentTranscriptItem::Assistant {
+                content: "   ".to_string(),
+            });
+            record.terminal_status = Some(AgentProjectionStatus::Completed);
+        }
+        let (response_sender, response_receiver) = oneshot::channel();
+        orchestrator.message_waiters.insert(
+            agent_id,
+            [MessageWaiter {
+                response: response_sender,
+            }]
+            .into(),
+        );
+        orchestrator.settle_message_waiter(agent_id);
+
+        let delivery = response_receiver
+            .blocking_recv()
+            .expect("the message waiter should settle from the prepared record")
+            .expect("delivery should succeed");
+        let payload = serde_json::to_value(&delivery).expect("delivery should serialize");
+        assert_eq!(
+            payload["report"],
+            serde_json::json!("the follow-up in-turn report")
+        );
     }
 
     #[test]

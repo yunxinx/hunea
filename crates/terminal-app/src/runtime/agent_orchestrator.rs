@@ -645,13 +645,16 @@ impl AgentOrchestrator {
             if record.generation != self.generation {
                 return Err(AgentRuntimeError::UnknownAgent);
             }
-            // Disposing/Disposed 的 child 不是可寻址的消息目标；拒绝路径不产生投影副作用。
+            // Disposing/Disposed 的 child 不是可寻址的消息目标，直接拒绝且无投影副作用。
             if !matches!(
                 record.lifecycle,
                 ChildLifecycle::Active | ChildLifecycle::Settled
             ) {
                 return Err(AgentRuntimeError::UnknownAgent);
             }
+            // context 已失效的 child 同样拒绝；这里防御性重申 CleanupBlocked 置位
+            // （正常清理路径已写过该状态，无 revision bump）——拒绝瞬间投影不得
+            // 回退为可用状态。
             if record
                 .context
                 .as_ref()
@@ -1204,16 +1207,18 @@ impl AgentOrchestrator {
 
     /// 为 immediate parent 创建并注册一个 child record。
     ///
-    /// 这是 `launch_batch` 的唯一 staging seam：先完成身份分配、scoped context 与
-    /// adapter construction，再提交 record；任何失败都不会留下 registry row。
+    /// 这是 `launch_batch` 的唯一 staging seam：agent id 由调用方显式分配后传入，
+    /// 这里完成 scoped context 与 adapter construction，再提交 record；任何失败都
+    /// 不会留下 registry row。
     fn stage_child_record(
         &mut self,
+        agent_id: AgentId,
         parent_agent_id: AgentId,
         turn_id: AgentTurnId,
         title: AgentTitle,
         grants: AgentChildCapabilityGrants,
         request: &AgentTurnRequest,
-    ) -> Result<(AgentId, ChildAgentRecord), AgentRuntimeError> {
+    ) -> Result<ChildAgentRecord, AgentRuntimeError> {
         self.retry_pending_context_cleanups()?;
         self.retry_pending_child_cleanups()?;
         if self.active_child_count() >= MAX_ACTIVE_CHILD_AGENTS {
@@ -1222,7 +1227,6 @@ impl AgentOrchestrator {
             ));
         }
         let parent_context = self.parent_context(parent_agent_id)?;
-        let agent_id = self.allocate_agent_id()?;
         let owner = AgentContextOwner::try_new(format!("child-agent-{}", agent_id.get())).map_err(
             |_| AgentRuntimeError::CommandRejected("Child owner is unavailable".to_string()),
         )?;
@@ -1302,7 +1306,7 @@ impl AgentOrchestrator {
             child_context,
             runtime,
         );
-        Ok((agent_id, record))
+        Ok(record)
     }
 
     /// 处理 host-owned `spawn_agents` request；tool bridge 不直接持有 lifecycle authority。
@@ -1374,7 +1378,9 @@ impl AgentOrchestrator {
         let group_id = self.allocate_launch_group_id()?;
         let mut staged: Vec<StagedChild> = Vec::with_capacity(batch.requests().len());
         for request in batch.into_requests() {
-            let child_id = AgentId::new(self.next_agent_id);
+            // id 分配在 staging 前显式完成：turn id 派生与 record 注册共享同一权威
+            // 分配，不依赖 stage 内部分配与调用方预绑定的隐式相等。
+            let child_id = self.allocate_agent_id()?;
             let child_turn_id = AgentTurnId::new(child_id.get());
             let turn_request = child_turn_request(&target, &request);
             let objective_summary = AgentObjectiveSummary::from_objective(request.objective())
@@ -1383,7 +1389,8 @@ impl AgentOrchestrator {
                         "Agent objective summary is unavailable".to_string(),
                     )
                 })?;
-            let (child_id, mut record) = match self.stage_child_record(
+            let mut record = match self.stage_child_record(
+                child_id,
                 parent_agent_id,
                 child_turn_id,
                 request.title().clone(),
@@ -2860,8 +2867,9 @@ const AGENT_REPORT_MAX_CHARS: usize = 16 * 1024;
 /// child completion/delivery 信封的耗时档位格式。
 ///
 /// 不足一分钟只输出整秒（`16s`）；不足一小时输出分 + 两位秒（`2m 05s`）；一小时及
-/// 以上只保留时 + 两位分（`1h 05m`）。毫秒向下取整到秒；输出是固定档位文本，
-/// 不携带计时原始数值。
+/// 以上输出时 + 两位分 + 两位秒（`1h 02m 03s`），与 TUI `format_elapsed_compact`
+/// 同档——同一 child 在信封与面板两面不出现不同精度。毫秒向下取整到秒；输出是
+/// 固定档位文本，不携带计时原始数值。
 fn format_child_duration(duration_ms: u64) -> String {
     let total_secs = duration_ms / 1_000;
     if total_secs < 60 {
@@ -2869,7 +2877,12 @@ fn format_child_duration(duration_ms: u64) -> String {
     } else if total_secs < 3_600 {
         format!("{}m {:02}s", total_secs / 60, total_secs % 60)
     } else {
-        format!("{}h {:02}m", total_secs / 3_600, total_secs % 3_600 / 60)
+        format!(
+            "{}h {:02}m {:02}s",
+            total_secs / 3_600,
+            total_secs % 3_600 / 60,
+            total_secs % 60
+        )
     }
 }
 
@@ -4435,7 +4448,8 @@ mod tests {
 
     #[test]
     fn format_child_duration_uses_tiered_human_readable_format() {
-        // 档位边界：秒档毫秒向下取整；分秒档秒两位补零；小时档丢弃秒。
+        // 档位边界：秒档毫秒向下取整；分秒档秒两位补零；小时档保留两位分与两位秒，
+        // 与 TUI `format_elapsed_compact` 同档，同一 child 两面不出现不同精度。
         for (duration_ms, expected) in [
             (0, "0s"),
             (16_140, "16s"),
@@ -4443,9 +4457,10 @@ mod tests {
             (60_000, "1m 00s"),
             (125_000, "2m 05s"),
             (3_599_999, "59m 59s"),
-            (3_600_000, "1h 00m"),
-            (3_900_000, "1h 05m"),
-            (125_000_000, "34h 43m"),
+            (3_600_000, "1h 00m 00s"),
+            (3_723_000, "1h 02m 03s"),
+            (3_900_000, "1h 05m 00s"),
+            (125_000_000, "34h 43m 20s"),
         ] {
             assert_eq!(
                 format_child_duration(duration_ms),
@@ -5170,6 +5185,27 @@ mod tests {
         // 截断保留正文主体：note 之前的内容仍达到字符上限。
         let body: String = report.chars().take(AGENT_REPORT_MAX_CHARS).collect();
         assert_eq!(body.chars().count(), AGENT_REPORT_MAX_CHARS);
+    }
+
+    #[test]
+    fn group_completion_report_keeps_content_exactly_at_char_limit() {
+        // `<=` 边界：恰好等于上限的内容不截断、不追加 note。
+        let exact_report = "x".repeat(AGENT_REPORT_MAX_CHARS);
+        let child = completed_group_child(finished_turn_event(&exact_report));
+        assert!(!child.truncated);
+        assert_eq!(child.report.as_deref(), Some(exact_report.as_str()));
+    }
+
+    #[test]
+    fn group_completion_report_limit_counts_chars_not_bytes() {
+        // 全 CJK 报告：字符数低于上限、字节数显著超过 16KiB；上限是 chars 语义，
+        // 不得按 bytes 截断。
+        let cjk_report = "深".repeat(AGENT_REPORT_MAX_CHARS / 2);
+        assert!(cjk_report.chars().count() < AGENT_REPORT_MAX_CHARS);
+        assert!(cjk_report.len() > AGENT_REPORT_MAX_CHARS);
+        let child = completed_group_child(finished_turn_event(&cjk_report));
+        assert!(!child.truncated);
+        assert_eq!(child.report.as_deref(), Some(cjk_report.as_str()));
     }
 
     #[test]

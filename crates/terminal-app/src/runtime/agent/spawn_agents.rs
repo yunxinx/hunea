@@ -289,7 +289,7 @@ struct SpawnAgentArgument {
 
 fn parse_batch(arguments: serde_json::Value) -> Result<AgentLaunchBatch, AgentLaunchInputError> {
     let arguments = serde_json::from_value::<SpawnAgentsArguments>(arguments)
-        .map_err(|_| AgentLaunchInputError::EmptyBatch)?;
+        .map_err(|_| AgentLaunchInputError::InvalidArguments)?;
     let requests = arguments
         .agents
         .into_iter()
@@ -416,6 +416,24 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn parser_maps_schema_violations_to_invalid_arguments() {
+        // schema 违规（类型错/缺字段）是结构失败，不得伪装成"批次为空"的值语义
+        // 变体——Empty 类只由真实的空批次触发。
+        assert!(matches!(
+            parse_batch(json!({ "agents": "not an array" })),
+            Err(AgentLaunchInputError::InvalidArguments)
+        ));
+        assert!(matches!(
+            parse_batch(json!({ "objective": "work" })),
+            Err(AgentLaunchInputError::InvalidArguments)
+        ));
+        assert!(matches!(
+            parse_batch(json!({ "agents": [] })),
+            Err(AgentLaunchInputError::EmptyBatch)
+        ));
     }
 
     #[tokio::test]

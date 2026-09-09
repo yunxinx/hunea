@@ -500,6 +500,8 @@ pub enum AgentLaunchInputError {
     EmptyChildMessage,
     #[error("Agent message contains a terminal control character")]
     ChildMessageContainsTerminalControl,
+    #[error("Agent tool arguments do not match the input schema")]
+    InvalidArguments,
 }
 
 /// immutable launch fact 中的单个 child identity 与 frozen title。
@@ -575,7 +577,7 @@ pub struct AgentChildCompletion {
     /// 终态定格的工具调用次数。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_uses: Option<usize>,
-    /// 终态定格的累计耗时（人类可读档位，如 `16s` / `2m 05s` / `1h 05m`）。
+    /// 终态定格的累计耗时（人类可读档位，如 `16s` / `2m 05s` / `1h 02m 03s`）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration: Option<String>,
     /// `report` 超出字符上限被截断时为 `true`。

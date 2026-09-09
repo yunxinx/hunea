@@ -103,15 +103,15 @@ pub(in crate::runtime) struct AgentMessageDelivery {
     agent_id: AgentId,
     title: AgentTitle,
     outcome: AgentOutcome,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     report: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     tokens: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     tool_uses: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     duration: Option<String>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
     truncated: bool,
 }
 
@@ -128,7 +128,7 @@ pub(in crate::runtime) struct AgentReportEnvelope {
     pub tokens: Option<usize>,
     /// 终态定格的工具调用次数。
     pub tool_uses: Option<usize>,
-    /// 终态定格的累计耗时（人类可读档位，如 `16s` / `2m 05s` / `1h 05m`）。
+    /// 终态定格的累计耗时（人类可读档位，如 `16s` / `2m 05s` / `1h 02m 03s`）。
     pub duration: Option<String>,
 }
 
@@ -338,7 +338,7 @@ fn parse_arguments(
     arguments: serde_json::Value,
 ) -> Result<(AgentId, AgentChildMessage), AgentLaunchInputError> {
     let arguments = serde_json::from_value::<SendAgentMessageArguments>(arguments)
-        .map_err(|_| AgentLaunchInputError::EmptyChildMessage)?;
+        .map_err(|_| AgentLaunchInputError::InvalidArguments)?;
     let message = AgentChildMessage::new(arguments.message)?;
     Ok((AgentId::new(arguments.agent_id), message))
 }
@@ -412,6 +412,24 @@ mod tests {
         assert!(
             parse_arguments(json!({ "agent_id": 2, "message": "escape\u{001b}[31m" })).is_err()
         );
+    }
+
+    #[test]
+    fn parser_maps_schema_violations_to_invalid_arguments() {
+        // schema 违规（类型错/缺字段）是结构失败，不得伪装成"消息为空"的值语义
+        // 变体——EmptyChildMessage 只由真实的空消息触发。
+        assert!(matches!(
+            parse_arguments(json!({ "agent_id": "two", "message": "work" })),
+            Err(AgentLaunchInputError::InvalidArguments)
+        ));
+        assert!(matches!(
+            parse_arguments(json!({ "agent_id": 2 })),
+            Err(AgentLaunchInputError::InvalidArguments)
+        ));
+        assert!(matches!(
+            parse_arguments(json!({ "agent_id": 2, "message": "   " })),
+            Err(AgentLaunchInputError::EmptyChildMessage)
+        ));
     }
 
     #[tokio::test]

@@ -16,8 +16,8 @@ use agent_kernel_protocol::{
 };
 use runtime_domain::{
     agent::{
-        AgentCommand, AgentCommandReceipt, AgentEvent, AgentEventKind, AgentId, AgentRuntime,
-        AgentRuntimeError, AgentTurnId, AgentTurnRequest,
+        AgentChildMessage, AgentCommand, AgentCommandReceipt, AgentEvent, AgentEventKind, AgentId,
+        AgentRuntime, AgentRuntimeError, AgentTurnId, AgentTurnRequest,
     },
     event_notifier::{RuntimeEventBinding, RuntimeEventNotifier},
     session::{ConversationTurnRequest, RuntimeTarget},
@@ -785,6 +785,33 @@ fn non_main_commands_fail_closed_without_reaching_the_kernel() {
     // main session 语义不受影响：MAIN submit 仍被正常接纳。
     runtime.dispatch(submit()).expect("MAIN submit");
     assert_eq!(generation.commands.lock().expect("commands").len(), 1);
+}
+
+#[test]
+fn send_message_command_fails_closed_without_reaching_the_kernel() {
+    let source = ScriptSource::new(ScriptMode::Normal);
+    let mut runtime = runtime(Arc::clone(&source));
+    runtime
+        .activate(RuntimeEventNotifier::default())
+        .expect("activation");
+
+    // kernel 协议没有消息 method：followup 由 host orchestrator 路由为 SubmitTurn，
+    // SendMessage 必须在 codec 边界 fail closed，不产生任何 wire request。
+    let command = AgentCommand::SendMessage {
+        agent_id: AgentId::new(1),
+        turn_id: AgentTurnId::new(1),
+        message: AgentChildMessage::new("follow-up").expect("test message should be valid"),
+    };
+    assert!(matches!(
+        runtime.dispatch(command),
+        Err(AgentRuntimeError::CommandRejected(message))
+            if message == "External Agent messages are unavailable"
+    ));
+    let generation = source.generation(0);
+    assert!(
+        generation.commands.lock().expect("commands").is_empty(),
+        "a rejected SendMessage must not reach the kernel"
+    );
 }
 
 #[test]

@@ -1285,10 +1285,14 @@ impl AgentOrchestrator {
         let SpawnAgentsRequest {
             identity,
             batch,
+            launched_agent_ids,
             response,
         } = request;
         match self.launch_batch(identity, batch) {
             Ok((receipt, child_ids)) => {
+                // staging 成功即回传本批全部 agent id，服务工具等待超时的回执；
+                // 工具可能已超时返回，send 失败安全忽略。
+                let _ = launched_agent_ids.send(child_ids.clone());
                 self.group_waiters.insert(
                     receipt.group_id,
                     GroupWaiter {

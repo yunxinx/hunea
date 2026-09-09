@@ -2,13 +2,14 @@
 
 use runtime_domain::{
     agent::{
-        AgentGroupCompletion, AgentLaunchBatch, AgentLaunchInputError, AgentLaunchRequest,
+        AgentGroupCompletion, AgentId, AgentLaunchBatch, AgentLaunchInputError, AgentLaunchRequest,
         AgentObjective,
     },
     event_notifier::RuntimeEventNotifier,
 };
 use serde::Deserialize;
 use serde_json::json;
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tool_runtime::{
@@ -21,15 +22,16 @@ const SPAWN_AGENTS_DESCRIPTION: &str = "\
 Launch child Agents for independent subtasks and wait for their completion reports. \
 Dispatch when subtasks can run in parallel or when exploratory work would flood the main \
 context: each child runs in its own context and only its final report returns. Put multiple \
-independent subtasks in one batch; the call blocks until every child in the batch finishes. \
-Do not dispatch for a single file read or a simple lookup — use read, list_dir, or grep \
-directly. Each objective must be self-contained: children cannot see this conversation, so \
-include the background, constraints, and the exact deliverable. Children inherit this \
-session's tool permissions, so their tool calls may require user approval. Each report \
-returns only to you: restate or quote it in your reply. To ask a follow-up question about a \
-dispatched child later, use send_agent_message with its agent_id. If a child's direction \
-turns out wrong or its work is no longer needed, stop it with stop_agents instead of \
-waiting for it to finish.";
+independent subtasks in one batch; the call blocks until every child in the batch finishes, \
+or, if the batch is not finished within about 30 seconds, it returns a still_running receipt \
+instead and the children keep running. Do not dispatch for a single file read or a simple \
+lookup — use read, list_dir, or grep directly. Each objective must be self-contained: \
+children cannot see this conversation, so include the background, constraints, and the \
+exact deliverable. Children inherit this session's tool permissions, so their tool calls \
+may require user approval. Each report returns only to you: restate or quote it in your \
+reply. To ask a follow-up question about a dispatched child later, use send_agent_message \
+with its agent_id. If a child's direction turns out wrong or its work is no longer needed, \
+stop it with stop_agents instead of waiting for it to finish.";
 const SPAWN_AGENTS_PROMPT_GUIDELINES: &str = "\
 When to dispatch:
 - Independent subtasks that can run in parallel: put them in one batch (up to 8 agents) instead of multiple serial calls.
@@ -45,6 +47,9 @@ Writing objectives:
 
 Wait semantics:
 - The call blocks until every child in the batch completes. Prefer one batch of parallel agents over several serial calls.
+- If the batch is not finished within about 30 seconds, the call returns a still_running receipt naming the batch's agent_ids: the children keep running and are not affected.
+- After a still_running receipt, do not spawn the same batch again — the earlier children are still running. Collect each child's report with send_agent_message using its agent_id from the receipt.
+- If the still_running receipt has no agent_ids, the batch is still queued to start: do other work first, then discover the started children through send_agent_message's not-found receipt, which lists the agent ids currently available to you.
 
 Results:
 - Each child returns its final report. Only this conversation receives it: restate or quote the report in your own reply.
@@ -90,7 +95,19 @@ impl SpawnAgentsFailure {
 pub struct SpawnAgentsRequest {
     pub(crate) identity: ToolInvocationIdentity,
     pub(crate) batch: AgentLaunchBatch,
+    /// 前置回执通道：`launch_batch` staging 成功后立即回传本批全部 agent id。
+    /// group completion 仍由 `response` 结算；本通道只服务工具等待超时的回执，
+    /// 让超时时刻能报告"哪些 children 已在运行"。
+    pub(crate) launched_agent_ids: oneshot::Sender<Vec<AgentId>>,
     pub(crate) response: oneshot::Sender<Result<AgentGroupCompletion, SpawnAgentsFailure>>,
+}
+
+/// 工具侧等待的收尾：host 回执（含 caller 取消/通道关闭折算的失败）与等待上限到达。
+/// 超时不是 failure——batch 已提交且 children 仍在运行，回执走 success 面告知模型
+/// 不要重复派遣、改用 agent_id 收集报告。
+enum HostWaitOutcome {
+    Response(Result<AgentGroupCompletion, SpawnAgentsFailure>),
+    TimedOut,
 }
 
 /// `SpawnAgentsTool` 只拥有 host bridge sender，不拥有 orchestrator 或 child authority。
@@ -98,6 +115,7 @@ pub struct SpawnAgentsRequest {
 pub struct SpawnAgentsTool {
     sender: mpsc::UnboundedSender<SpawnAgentsRequest>,
     notifier: RuntimeEventNotifier,
+    wait_timeout: Duration,
 }
 
 impl SpawnAgentsTool {
@@ -105,7 +123,21 @@ impl SpawnAgentsTool {
         notifier: RuntimeEventNotifier,
     ) -> (Self, mpsc::UnboundedReceiver<SpawnAgentsRequest>) {
         let (sender, receiver) = mpsc::unbounded_channel();
-        (Self { sender, notifier }, receiver)
+        (
+            Self {
+                sender,
+                notifier,
+                wait_timeout: super::HOST_AGENT_TOOL_WAIT_TIMEOUT,
+            },
+            receiver,
+        )
+    }
+
+    /// 注入测试用等待上限；生产构造恒用 `HOST_AGENT_TOOL_WAIT_TIMEOUT`。
+    #[cfg(test)]
+    pub(super) fn with_wait_timeout(mut self, wait_timeout: Duration) -> Self {
+        self.wait_timeout = wait_timeout;
+        self
     }
 }
 
@@ -159,6 +191,7 @@ impl Tool for SpawnAgentsTool {
         let notifier = self.notifier.clone();
         let cancellation = context.cancellation().clone();
         let identity = context.invocation_identity();
+        let wait_timeout = self.wait_timeout;
         Box::pin(async move {
             let Some(identity) = identity.filter(valid_identity) else {
                 return ToolResult::error(
@@ -171,10 +204,12 @@ impl Tool for SpawnAgentsTool {
                 Err(_) => return ToolResult::error(call.call_id, SPAWN_AGENTS_INVALID_INPUT),
             };
             let (response_sender, response_receiver) = oneshot::channel();
+            let (launched_ids_sender, mut launched_ids_receiver) = oneshot::channel();
             if sender
                 .send(SpawnAgentsRequest {
                     identity,
                     batch,
+                    launched_agent_ids: launched_ids_sender,
                     response: response_sender,
                 })
                 .is_err()
@@ -186,23 +221,45 @@ impl Tool for SpawnAgentsTool {
             }
             notifier.notify();
 
-            let result = tokio::select! {
+            // 已提交 orchestrator 的 batch scope 不随 caller cancellation / 等待上限撤销；
+            // 这里只结束等待，children 继续运行，迟到的 group completion send 落入已
+            // 关闭通道被忽略。
+            let outcome = tokio::select! {
                 biased;
-                () = cancellation.cancelled() => Err(SpawnAgentsFailure::RequestCancelled),
-                response = response_receiver => response
-                    .unwrap_or(Err(SpawnAgentsFailure::Unavailable)),
+                () = cancellation.cancelled() => HostWaitOutcome::Response(
+                    Err(SpawnAgentsFailure::RequestCancelled),
+                ),
+                response = response_receiver => HostWaitOutcome::Response(
+                    response.unwrap_or(Err(SpawnAgentsFailure::Unavailable)),
+                ),
+                _ = tokio::time::sleep(wait_timeout) => HostWaitOutcome::TimedOut,
             };
-            match result {
-                // tool result 只序列化 children 数组：group 归属等 host 控制元数据与
-                // 240 列单行摘要对模型无用，报告与 metrics 信封直达父 Agent。
-                Ok(completion) => match serde_json::to_string(&completion.children) {
-                    Ok(children) => ToolResult::success(call.call_id, children),
-                    Err(_) => ToolResult::error(
-                        call.call_id,
-                        SpawnAgentsFailure::CompletionUnavailable.delivery_message(),
-                    ),
+            match outcome {
+                HostWaitOutcome::Response(result) => match result {
+                    // tool result 只序列化 children 数组：group 归属等 host 控制元数据与
+                    // 240 列单行摘要对模型无用，报告与 metrics 信封直达父 Agent。
+                    Ok(completion) => match serde_json::to_string(&completion.children) {
+                        Ok(children) => ToolResult::success(call.call_id, children),
+                        Err(_) => ToolResult::error(
+                            call.call_id,
+                            SpawnAgentsFailure::CompletionUnavailable.delivery_message(),
+                        ),
+                    },
+                    Err(failure) => ToolResult::error(call.call_id, failure.delivery_message()),
                 },
-                Err(failure) => ToolResult::error(call.call_id, failure.delivery_message()),
+                // 超时回执与成功面的扁平 children 数组可区分：batch 已提交、children
+                // 仍在运行。staging 已回传本批 id 时随回执给出；未回传表示请求尚未
+                // 被 orchestrator 处理，不造 agent_ids 字段。
+                HostWaitOutcome::TimedOut => {
+                    let receipt = match launched_ids_receiver.try_recv() {
+                        Ok(agent_ids) => json!({
+                            "still_running": true,
+                            "agent_ids": agent_ids,
+                        }),
+                        Err(_) => json!({ "still_running": true }),
+                    };
+                    ToolResult::success(call.call_id, receipt.to_string())
+                }
             }
         })
     }
@@ -272,6 +329,18 @@ mod tests {
         assert!(guidelines.contains("stop_agents"));
         assert!(guidelines.contains("no longer needed"));
         assert!(guidelines.contains("does not need to be stopped"));
+        assert!(
+            guidelines.contains("about 30 seconds"),
+            "spawn guidelines should state the bounded wait window"
+        );
+        assert!(
+            guidelines.contains("still_running"),
+            "spawn guidelines should describe the timeout receipt"
+        );
+        assert!(
+            guidelines.contains("do not spawn the same batch again"),
+            "spawn guidelines should forbid re-dispatching after a timeout receipt"
+        );
         let description = definition
             .description
             .as_deref()
@@ -279,6 +348,10 @@ mod tests {
         assert!(description.contains("self-contained"));
         assert!(description.contains("send_agent_message"));
         assert!(description.contains("stop_agents"));
+        assert!(
+            description.contains("still_running receipt"),
+            "spawn description should mention the bounded wait receipt"
+        );
         // 给模型的文本不引用用户界面：模型只需回执链即可正确使用。
         for text in [description, guidelines] {
             assert!(!text.contains("/agents"), "{text}");
@@ -494,6 +567,156 @@ mod tests {
                 "truncated": true,
             }),
             "spawn result face should be exactly the 8-field child envelope"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_timeout_returns_still_running_receipt_with_agent_ids_and_ignores_late_settlement()
+    {
+        use runtime_domain::agent::AgentId;
+
+        let (tool, mut receiver) = SpawnAgentsTool::channel(RuntimeEventNotifier::default());
+        // 注入短等待上限：测试不等待生产的 30s 上限。
+        let tool = tool.with_wait_timeout(Duration::from_millis(50));
+        let cancellation = CancellationToken::new();
+        let execution = tool.execute_with_context(
+            ToolCall::new(
+                "call",
+                SPAWN_AGENTS_TOOL_NAME,
+                json!({
+                    "agents": [
+                        { "objective": "scout the workspace layout" },
+                        { "objective": "summarize the build pipeline" }
+                    ]
+                }),
+            ),
+            ToolExecutionContext::new(&cancellation).with_invocation_identity(test_identity()),
+        );
+        let host = async move {
+            let request = receiver.recv().await.expect("host request should arrive");
+            // staging 已完成：先回传本批 id，再模拟 group completion 被持久化 gate 卡住，
+            // 直到远超等待上限后才尝试迟到结算。
+            request
+                .launched_agent_ids
+                .send(vec![AgentId::new(2), AgentId::new(3)])
+                .expect("tool should still hold the launched-id channel");
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            // 工具已超时返回，迟到结算落入已关闭的通道，被安全忽略。
+            assert!(
+                request
+                    .response
+                    .send(Err(SpawnAgentsFailure::CompletionUnavailable))
+                    .is_err()
+            );
+        };
+        let (result, ()) = tokio::join!(execution, host);
+
+        // 超时回执走 success 面：batch 已提交、children 仍在运行，与扁平 children
+        // 数组的成功面可区分。
+        assert!(!result.is_error(), "{}", result.text_content());
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.text_content()).expect("timeout receipt should be JSON");
+        assert_eq!(
+            payload,
+            json!({ "still_running": true, "agent_ids": [2, 3] }),
+            "timeout receipt face should name the whole batch and report it is still running"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_timeout_without_launched_ids_reports_batch_still_queued() {
+        let (tool, mut receiver) = SpawnAgentsTool::channel(RuntimeEventNotifier::default());
+        let tool = tool.with_wait_timeout(Duration::from_millis(50));
+        let cancellation = CancellationToken::new();
+        let execution = tool.execute_with_context(
+            ToolCall::new(
+                "call",
+                SPAWN_AGENTS_TOOL_NAME,
+                json!({ "agents": [{ "objective": "scout the workspace layout" }] }),
+            ),
+            ToolExecutionContext::new(&cancellation).with_invocation_identity(test_identity()),
+        );
+        let host = async move {
+            // 模拟请求尚未被 orchestrator 处理：持有整个 request（含前置回执 sender）
+            // 不发送任何回执，直到远超等待上限后才尝试迟到结算。
+            let request = receiver.recv().await.expect("host request should arrive");
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let _ = request
+                .response
+                .send(Err(SpawnAgentsFailure::RequestRejected));
+        };
+        let (result, ()) = tokio::join!(execution, host);
+
+        assert!(!result.is_error(), "{}", result.text_content());
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.text_content()).expect("timeout receipt should be JSON");
+        // ids 不可得时不得伪造 agent_ids 字段：语义是批次已提交、尚未启动。
+        assert_eq!(
+            payload,
+            json!({ "still_running": true }),
+            "queued-batch receipt face must not invent agent_ids"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_timeout_leaves_host_completion_path_intact() {
+        use runtime_domain::agent::{
+            AgentChildCompletion, AgentId, AgentLaunchGroupId, AgentOutcome, AgentTitle,
+        };
+
+        let (tool, mut receiver) = SpawnAgentsTool::channel(RuntimeEventNotifier::default());
+        let tool = tool.with_wait_timeout(Duration::from_millis(50));
+        let cancellation = CancellationToken::new();
+        let execution = tool.execute_with_context(
+            ToolCall::new(
+                "call",
+                SPAWN_AGENTS_TOOL_NAME,
+                json!({ "agents": [{ "objective": "scout the workspace layout" }] }),
+            ),
+            ToolExecutionContext::new(&cancellation).with_invocation_identity(test_identity()),
+        );
+        let host = async move {
+            let request = receiver.recv().await.expect("host request should arrive");
+            // 等待上限内 staging 回执与 group completion 均已就绪：response 臂必须先于
+            // timeout 臂完成，正常路径不受有界等待影响。
+            let _ = request.launched_agent_ids.send(vec![AgentId::new(2)]);
+            request
+                .response
+                .send(Ok(AgentGroupCompletion {
+                    group_id: AgentLaunchGroupId::new(7),
+                    parent_agent_id: AgentId::new(1),
+                    children: vec![AgentChildCompletion {
+                        agent_id: AgentId::new(2),
+                        title: AgentTitle::resolve(
+                            &AgentObjective::new("scout the workspace layout")
+                                .expect("test objective should be valid"),
+                            Some("workspace scout"),
+                        )
+                        .expect("test title should resolve"),
+                        outcome: AgentOutcome::Completed,
+                        report: Some("scouted report body".to_string()),
+                        tokens: Some(1200),
+                        tool_uses: Some(3),
+                        duration: Some("45s".to_string()),
+                        truncated: true,
+                    }],
+                    occurred_at_ms: 123,
+                }))
+                .expect("tool should still await the response");
+        };
+        let (result, ()) = tokio::join!(execution, host);
+
+        assert!(!result.is_error());
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.text_content()).expect("spawn result should be JSON");
+        let children = payload
+            .as_array()
+            .unwrap_or_else(|| panic!("in-time spawn result should stay a flat array: {payload}"));
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0]["agent_id"], json!(2));
+        assert!(
+            payload.get("still_running").is_none(),
+            "in-time completion must not surface the timeout receipt face"
         );
     }
 }

@@ -232,6 +232,12 @@ fn agent_host_tool_guidelines_enter_prompt_assembly_tool_guidelines_body() {
     assert!(
         guidelines_section
             .body
+            .contains("do not spawn the same batch again"),
+        "spawn_agents guidelines body should carry the bounded-wait no-respawn rule"
+    );
+    assert!(
+        guidelines_section
+            .body
             .contains("blocks until the child completes the turn"),
         "send_agent_message guidelines body should carry the wait rule"
     );

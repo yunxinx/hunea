@@ -10,7 +10,7 @@ mod stop_agents;
 #[cfg(test)]
 mod tests;
 
-use std::{fmt, path::PathBuf, sync::Arc};
+use std::{fmt, path::PathBuf, sync::Arc, time::Duration};
 
 use agent_kernel_runtime::{AgentKernelSource, ExternalAgentRuntimeOptions};
 
@@ -73,6 +73,13 @@ pub(super) const AGENT_HOST_TOOL_NAMES: [&str; 3] = [
     send_agent_message::SEND_AGENT_MESSAGE_TOOL_NAME,
     stop_agents::STOP_AGENTS_TOOL_NAME,
 ];
+
+/// host-owned Agent 工具等待 child 终态回执的上限。
+///
+/// orchestrator 侧 waiter 在持久化 gate 持续失败时可能长时间不结算；有界等待防止
+/// 工具调用无限期占用父 Agent turn。超时只结束等待，不撤销已提交的 child scope——
+/// 后续终态仍由 orchestrator 自然收敛，迟到回执的 send 失败被忽略。
+pub(super) const HOST_AGENT_TOOL_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 struct AgentPermissionConstructionGrant {
     runtime_request_policy: RuntimeRequestPolicy,

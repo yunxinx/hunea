@@ -236,6 +236,14 @@ fn agent_host_tool_guidelines_enter_prompt_assembly_tool_guidelines_body() {
         "send_agent_message guidelines body should carry the wait rule"
     );
     assert!(
+        guidelines_section.body.contains("still_running"),
+        "send_agent_message guidelines body should carry the bounded-wait rule"
+    );
+    assert!(
+        guidelines_section.body.contains("about 20 seconds"),
+        "send_agent_message guidelines body should carry the followup window rule"
+    );
+    assert!(
         guidelines_section.body.contains("instead of an error"),
         "stop_agents guidelines body should carry the idempotence rule"
     );

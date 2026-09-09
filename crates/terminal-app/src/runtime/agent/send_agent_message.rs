@@ -6,6 +6,7 @@ use runtime_domain::agent::{
 use runtime_domain::event_notifier::RuntimeEventNotifier;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tool_runtime::{
@@ -21,9 +22,10 @@ Send a follow-up message to a child Agent you already dispatched and wait for it
 Use it to add instructions or ask questions about that child's work: the child keeps its \
 conversation context, so refer to its earlier objective and report. If the child is still \
 running a task, the message runs after that task finishes. The call blocks until the child \
-completes the turn triggered by this message and returns that turn's full report. \
-The agent_id must come from a spawn_agents completion result or a send_agent_message \
-receipt.";
+completes the turn triggered by this message and returns that turn's full report; if the \
+reply is not ready within about 30 seconds, it returns a still_running receipt instead and \
+the child keeps running. The agent_id must come from a spawn_agents completion result or a \
+send_agent_message receipt.";
 const SEND_AGENT_MESSAGE_PROMPT_GUIDELINES: &str = "\
 When to use:
 - Add instructions or constraints after reviewing a dispatched child's report.
@@ -36,9 +38,11 @@ Message content:
 Wait semantics:
 - The call blocks until the child completes the turn triggered by this message and returns that turn's full report.
 - If the child is still running an earlier task, the message runs after that task finishes.
+- If the reply is not ready within about 30 seconds, the call returns a still_running receipt naming the agent_id: the child keeps running and is not interrupted. Call send_agent_message again to keep waiting for the reply, or do other work first and follow up later.
 
 Addressing:
-- agent_id comes from a spawn_agents completion result or a send_agent_message receipt; an unknown id returns the child agent ids currently available to you.";
+- agent_id comes from a spawn_agents completion result or a send_agent_message receipt; an unknown id returns the child agent ids currently available to you.
+- A finished child stays addressable for a short window (about 20 seconds) after it settles; once that window passes it is no longer a valid target, and the not-found receipt lists the agent ids currently available to you.";
 const SEND_AGENT_MESSAGE_INVALID_INPUT: &str = "send_agent_message arguments are invalid";
 
 /// `send_agent_message` 的 closed delivery failure；control-plane source message 不跨越
@@ -182,11 +186,19 @@ pub(in crate::runtime) struct SendAgentMessageRequest {
     pub(crate) response: oneshot::Sender<Result<AgentMessageDelivery, SendAgentMessageFailure>>,
 }
 
+/// 工具侧等待的三种收尾：host 回执（含 caller 取消/通道关闭折算的失败）与等待上限
+/// 到达。超时不是 failure——目标仍在运行，回执走 success 面告知模型可继续等待。
+enum HostWaitOutcome {
+    Response(Result<AgentMessageDelivery, SendAgentMessageFailure>),
+    TimedOut(AgentId),
+}
+
 /// `SendAgentMessageTool` 只拥有 host bridge sender，不拥有 orchestrator 或 child authority。
 #[derive(Clone)]
 pub(in crate::runtime) struct SendAgentMessageTool {
     sender: mpsc::UnboundedSender<SendAgentMessageRequest>,
     notifier: RuntimeEventNotifier,
+    wait_timeout: Duration,
 }
 
 impl SendAgentMessageTool {
@@ -194,7 +206,21 @@ impl SendAgentMessageTool {
         notifier: RuntimeEventNotifier,
     ) -> (Self, mpsc::UnboundedReceiver<SendAgentMessageRequest>) {
         let (sender, receiver) = mpsc::unbounded_channel();
-        (Self { sender, notifier }, receiver)
+        (
+            Self {
+                sender,
+                notifier,
+                wait_timeout: super::HOST_AGENT_TOOL_WAIT_TIMEOUT,
+            },
+            receiver,
+        )
+    }
+
+    /// 注入测试用等待上限；生产构造恒用 `HOST_AGENT_TOOL_WAIT_TIMEOUT`。
+    #[cfg(test)]
+    pub(super) fn with_wait_timeout(mut self, wait_timeout: Duration) -> Self {
+        self.wait_timeout = wait_timeout;
+        self
     }
 }
 
@@ -237,6 +263,7 @@ impl Tool for SendAgentMessageTool {
         let notifier = self.notifier.clone();
         let cancellation = context.cancellation().clone();
         let identity = context.invocation_identity();
+        let wait_timeout = self.wait_timeout;
         Box::pin(async move {
             let Some(identity) = identity.filter(valid_identity) else {
                 return ToolResult::error(
@@ -265,23 +292,35 @@ impl Tool for SendAgentMessageTool {
             }
             notifier.notify();
 
-            // 已提交 orchestrator 的消息 scope 不随 caller cancellation 撤销；
-            // 这里只结束等待，回执由 explicit stop / disposal 收敛。
-            let result = tokio::select! {
+            // 已提交 orchestrator 的消息 scope 不随 caller cancellation / 等待上限撤销；
+            // 这里只结束等待，回执由 explicit stop / disposal 收敛，迟到的结算 send
+            // 落入已关闭通道被忽略。
+            let outcome = tokio::select! {
                 biased;
-                () = cancellation.cancelled() => Err(SendAgentMessageFailure::RequestCancelled),
-                response = response_receiver => response
-                    .unwrap_or(Err(SendAgentMessageFailure::Unavailable)),
+                () = cancellation.cancelled() => HostWaitOutcome::Response(
+                    Err(SendAgentMessageFailure::RequestCancelled),
+                ),
+                response = response_receiver => HostWaitOutcome::Response(
+                    response.unwrap_or(Err(SendAgentMessageFailure::Unavailable)),
+                ),
+                _ = tokio::time::sleep(wait_timeout) => HostWaitOutcome::TimedOut(agent_id),
             };
-            match result {
-                Ok(delivery) => match serde_json::to_string(&delivery) {
-                    Ok(payload) => ToolResult::success(call.call_id, payload),
-                    Err(_) => ToolResult::error(
-                        call.call_id,
-                        SendAgentMessageFailure::DeliveryUnavailable.delivery_message(),
-                    ),
+            match outcome {
+                HostWaitOutcome::Response(result) => match result {
+                    Ok(delivery) => match serde_json::to_string(&delivery) {
+                        Ok(payload) => ToolResult::success(call.call_id, payload),
+                        Err(_) => ToolResult::error(
+                            call.call_id,
+                            SendAgentMessageFailure::DeliveryUnavailable.delivery_message(),
+                        ),
+                    },
+                    Err(failure) => ToolResult::error(call.call_id, failure.delivery_message()),
                 },
-                Err(failure) => ToolResult::error(call.call_id, failure.delivery_message()),
+                // 超时回执与 8 字段成功信封可区分：目标仍在运行、报告未到。
+                HostWaitOutcome::TimedOut(agent_id) => ToolResult::success(
+                    call.call_id,
+                    json!({ "agent_id": agent_id.get(), "still_running": true }).to_string(),
+                ),
             }
         })
     }
@@ -330,6 +369,7 @@ mod tests {
         assert!(description.contains("follow-up message"));
         assert!(description.contains("full report"));
         assert!(description.contains("agent_id"));
+        assert!(description.contains("still_running receipt"));
         let guidelines = definition
             .prompt_guidelines
             .as_deref()
@@ -337,6 +377,8 @@ mod tests {
         assert!(guidelines.contains("self-contained"));
         assert!(guidelines.contains("blocks until the child completes the turn"));
         assert!(guidelines.contains("after that task finishes"));
+        assert!(guidelines.contains("still_running"));
+        assert!(guidelines.contains("about 20 seconds"));
         assert!(guidelines.contains("available to you"));
         // 给模型的文本不引用用户界面：模型只需回执链即可正确使用。
         for text in [description, guidelines] {
@@ -503,6 +545,96 @@ mod tests {
         assert_eq!(
             result.text_content(),
             SendAgentMessageFailure::RequestCancelled.delivery_message()
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_timeout_returns_still_running_receipt_and_ignores_late_settlement() {
+        let (tool, mut receiver) = SendAgentMessageTool::channel(RuntimeEventNotifier::default());
+        // 注入短等待上限：测试不等待生产的 30s 上限。
+        let tool = tool.with_wait_timeout(Duration::from_millis(50));
+        let cancellation = CancellationToken::new();
+        let execution = tool.execute_with_context(
+            ToolCall::new(
+                "call",
+                SEND_AGENT_MESSAGE_TOOL_NAME,
+                json!({ "agent_id": 2, "message": "please refine the report" }),
+            ),
+            ToolExecutionContext::new(&cancellation).with_invocation_identity(test_identity()),
+        );
+        let host = async move {
+            let request = receiver.recv().await.expect("host request should arrive");
+            // 模拟 orchestrator waiter 被卡住：持有 response sender 不结算，
+            // 直到远超等待上限后才尝试迟到结算。
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            // 工具已超时返回，迟到结算落入已关闭的通道，被安全忽略。
+            assert!(
+                request
+                    .response
+                    .send(Err(SendAgentMessageFailure::TargetUnavailable))
+                    .is_err()
+            );
+        };
+        let (result, ()) = tokio::join!(execution, host);
+
+        // 超时回执走 success 面：目标仍在运行，与 8 字段成功信封可区分。
+        assert!(!result.is_error(), "{}", result.text_content());
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.text_content()).expect("timeout receipt should be JSON");
+        assert_eq!(
+            payload,
+            json!({ "agent_id": 2, "still_running": true }),
+            "timeout receipt face should name the target and report it is still running"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_timeout_leaves_host_response_path_intact() {
+        let (tool, mut receiver) = SendAgentMessageTool::channel(RuntimeEventNotifier::default());
+        let tool = tool.with_wait_timeout(Duration::from_millis(50));
+        let cancellation = CancellationToken::new();
+        let execution = tool.execute_with_context(
+            ToolCall::new(
+                "call",
+                SEND_AGENT_MESSAGE_TOOL_NAME,
+                json!({ "agent_id": 2, "message": "please refine the report" }),
+            ),
+            ToolExecutionContext::new(&cancellation).with_invocation_identity(test_identity()),
+        );
+        let host = async move {
+            let request = receiver.recv().await.expect("host request should arrive");
+            // 等待上限内正常结算：response 臂必须先于 timeout 臂完成。
+            request
+                .response
+                .send(Ok(AgentMessageDelivery::new(
+                    AgentId::new(2),
+                    AgentTitle::resolve(
+                        &AgentObjective::new("workspace scout")
+                            .expect("test objective should be valid"),
+                        None,
+                    )
+                    .expect("test title should resolve"),
+                    AgentOutcome::Completed,
+                    AgentReportEnvelope {
+                        report: Some("the full refined report body".to_string()),
+                        truncated: false,
+                        tokens: Some(1200),
+                        tool_uses: Some(3),
+                        duration: Some("45s".to_string()),
+                    },
+                )))
+                .expect("tool should still await the response");
+        };
+        let (result, ()) = tokio::join!(execution, host);
+
+        assert!(!result.is_error());
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.text_content()).expect("delivery should be JSON");
+        assert_eq!(payload["agent_id"], json!(2));
+        assert_eq!(payload["report"], json!("the full refined report body"));
+        assert!(
+            payload.get("still_running").is_none(),
+            "in-time delivery must not surface the timeout receipt face"
         );
     }
 }

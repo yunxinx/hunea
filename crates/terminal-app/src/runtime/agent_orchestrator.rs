@@ -2014,6 +2014,9 @@ impl AgentOrchestrator {
     pub(super) fn dispose_children_for_session_transition(
         &mut self,
     ) -> Result<(), AgentRuntimeError> {
+        // 父会话已切换：pending 的 launch completion 必须 fail closed。残留 waiter 会
+        // 让 `launch_group_completion_pending` 对已消亡 group 误报，进而阻塞 replacement。
+        self.fail_group_waiters(SpawnAgentsFailure::Unavailable);
         // observation 是 session-bound projection；session 切换后一律失效。
         self.observations.clear();
         let result = self.dispose_children();
@@ -3695,6 +3698,71 @@ mod tests {
                 .expect("waiter should receive a terminal response"),
             Err(SpawnAgentsFailure::Unavailable)
         );
+    }
+
+    #[test]
+    fn session_transition_fails_pending_group_waiters_closed() {
+        let settled_id = AgentId::new(2);
+        let running_id = AgentId::new(3);
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let group_id = AgentLaunchGroupId::new(1);
+        let mut orchestrator =
+            AgentOrchestrator::new(Box::new(StubMainRuntime::default()), None, None);
+        orchestrator.register_child_for_test(
+            settled_id,
+            AgentId::MAIN,
+            AgentTurnId::new(settled_id.get()),
+            test_title("settled sibling"),
+            test_context("settled-sibling"),
+            Box::new(ShutdownCountingRuntime {
+                events: vec![child_event(
+                    settled_id,
+                    AgentTurnId::new(settled_id.get()),
+                    &target,
+                    finished_turn_event("early answer"),
+                )],
+                shutdown_calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        orchestrator.mark_child_launch_group_for_test(settled_id, group_id);
+        let (running_runtime, _staged, _dispatched, _submitted) =
+            ScriptedChildRuntime::new(Vec::new());
+        orchestrator.register_child_for_test(
+            running_id,
+            AgentId::MAIN,
+            AgentTurnId::new(running_id.get()),
+            test_title("running sibling"),
+            test_context("running-sibling"),
+            Box::new(running_runtime),
+        );
+        orchestrator.mark_child_launch_group_for_test(running_id, group_id);
+        // drain 使 settled sibling 到终态；running sibling 未终态，group completion 保持 pending。
+        let _ = orchestrator.drain_child_events();
+
+        let (response, response_receiver) = oneshot::channel();
+        orchestrator.group_waiters.insert(
+            group_id,
+            GroupWaiter {
+                parent_agent_id: AgentId::MAIN,
+                child_ids: vec![settled_id, running_id],
+                response,
+            },
+        );
+
+        orchestrator
+            .dispose_children_for_session_transition()
+            .expect("session transition should converge child cleanup");
+
+        // 父会话已切换：pending 的 launch completion 必须 fail closed，
+        // 残留 waiter 会让后续 replacement 被 `validate_replace_main` 永久拒绝。
+        assert!(orchestrator.group_waiters.is_empty());
+        assert_eq!(
+            response_receiver
+                .blocking_recv()
+                .expect("session transition must settle the pending group waiter"),
+            Err(SpawnAgentsFailure::Unavailable)
+        );
+        assert_eq!(orchestrator.child_count(), 0);
     }
 
     fn registered_child_with_terminal_event(kind: AgentEventKind) -> (AgentOrchestrator, AgentId) {

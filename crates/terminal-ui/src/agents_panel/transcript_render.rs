@@ -86,11 +86,13 @@ impl Model {
         frame: &mut RenderFrame<'_>,
         area: Rect,
     ) {
+        // Clear 先于 early-return：极矮/零宽时正文不渲染，但模态层仍要遮蔽底层
+        // UI——ratatui 的 diff 渲染保留未覆盖 cell，不清屏则上一帧的主界面透出。
+        frame.render_widget(Clear, area);
         if area.width == 0 || area.height <= FULLSCREEN_LIST_CHROME_HEIGHT {
             // surface chrome（标题 + 分割线 + page rule + footer）之外至少还要有 1 行正文。
             return;
         }
-        frame.render_widget(Clear, area);
         let palette = self.palette;
 
         let Some(agent_id) = self

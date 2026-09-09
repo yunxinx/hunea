@@ -1,11 +1,11 @@
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use runtime_domain::agent::{AgentId, AgentObservationId};
 
-use crate::{AppEffect, runner::run_stop_agent_effect};
+use crate::{AppEffect, AppEvent, runner::run_stop_agent_effect};
 
 use super::common::{
-    RecordingRuntimePort, apply_view_snapshot_loaded, apply_view_updated, press_key,
-    ready_panel_model, view_snapshot,
+    RecordingRuntimePort, apply_overview_snapshot, apply_view_snapshot_loaded, apply_view_updated,
+    press_key, ready_panel_model, sample_rows, view_snapshot,
 };
 
 fn surface_transcript_items(model: &mut crate::Model) -> Vec<String> {
@@ -72,6 +72,26 @@ fn enter_opens_transcript_surface_and_dispatches_observe() {
             .and_then(|record| record.pending_request_id),
         Some(request_id)
     );
+}
+
+#[test]
+fn enter_with_modifiers_does_not_open_the_surface() {
+    // Enter 与 Space 是同一入口，也共用"无 modifier"要求：Alt/Ctrl+Enter 不是
+    // surface 入口（对齐 `x`、Space 等按键的 modifier guard）。
+    for modifiers in [KeyModifiers::ALT, KeyModifiers::CONTROL] {
+        let mut model = ready_panel_model();
+
+        let effect = model.update(AppEvent::Key(KeyEvent::new(KeyCode::Enter, modifiers)));
+
+        assert_eq!(
+            effect, None,
+            "Enter with {modifiers:?} must not dispatch an observe effect"
+        );
+        assert!(
+            !model.agents_panel_transcript_active(),
+            "Enter with {modifiers:?} must not open the transcript surface"
+        );
+    }
 }
 
 #[test]
@@ -220,6 +240,38 @@ fn transcript_surface_renders_items_via_overlay_view() {
     assert!(
         rows.iter().any(|row| row.contains("Esc back")),
         "transcript footer should render the back hint: {rows:?}"
+    );
+}
+
+#[test]
+fn tiny_height_surface_still_clears_the_modal_area() {
+    // 连续帧语义（ratatui diff 渲染保留未覆盖 cell）：极矮终端上 surface 正文
+    // 放不下而 early-return，但模态层仍必须清屏——否则上一帧的主界面从模态层
+    // 透出。用同一 buffer 渲染两帧模拟连续帧。
+    let mut model = crate::Model::new(crate::StartupBannerOptions::default());
+    model.set_window(100, 4);
+    model.set_palette(crate::theme::default_palette(), true);
+
+    // 帧 1：主 UI（panel 未开）写入 buffer。
+    let mut buffer = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 100, 4));
+    let _ = model.render_to_buffer(buffer.area, &mut buffer);
+    let rows_before = crate::test_helpers::rendered_rows(&buffer);
+    assert!(
+        rows_before.iter().any(|row| !row.trim().is_empty()),
+        "frame 1 should paint the main UI: {rows_before:?}"
+    );
+
+    // 帧 2：打开面板 + surface（高度 4 = chrome 预算，正文 early-return）。
+    let request_id = model.open_agents_panel_loading();
+    apply_overview_snapshot(&mut model, request_id, sample_rows());
+    press_key(&mut model, KeyCode::Enter);
+    assert!(model.agents_panel_transcript_active());
+    let _ = model.render_to_buffer(buffer.area, &mut buffer);
+
+    let rows_after = crate::test_helpers::rendered_rows(&buffer);
+    assert!(
+        rows_after.iter().all(|row| row.trim().is_empty()),
+        "tiny-height surface must still clear the modal area: {rows_after:?}"
     );
 }
 

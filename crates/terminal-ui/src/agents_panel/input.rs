@@ -418,7 +418,11 @@ impl Model {
             KeyCode::Char(' ') if key.modifiers.is_empty() => {
                 self.open_agents_panel_transcript_surface()
             }
-            KeyCode::Enter => self.open_agents_panel_transcript_surface(),
+            // Enter 与 Space 同一入口，同样要求无 modifier：Alt/Ctrl+Enter 不是
+            // surface 入口。
+            KeyCode::Enter if key.modifiers.is_empty() => {
+                self.open_agents_panel_transcript_surface()
+            }
             KeyCode::Char('x') if key.modifiers.is_empty() => self.handle_agents_panel_stop_key(),
             _ => OverlayInputResult::Handled,
         }

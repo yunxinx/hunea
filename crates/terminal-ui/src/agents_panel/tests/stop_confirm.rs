@@ -293,6 +293,56 @@ fn loading_notice_clears_once_snapshot_arrives() {
 }
 
 #[test]
+fn narrow_width_falls_back_to_footer_for_the_confirm_hint() {
+    // 80 列下 latest 列只剩 20 宽，放不下 23 宽的完整内联提示：footer 回退显示
+    // 完整文案，行内 latest 恢复活动文本——截断成 "…" 的提示让二次确认要求
+    // 不可读，第二次 x 会在用户无感知的情况下直接触发 stop。
+    let mut model = ready_panel_model();
+    model.set_window(80, 24);
+    press_key(&mut model, KeyCode::Char('x'));
+
+    let rows = crate::test_helpers::rendered_rows(&crate::test_helpers::render_model_buffer(
+        &mut model, 80, 24,
+    ));
+    // footer 是全屏 chrome 的最后一行。
+    let footer = rows.last().expect("list footer should render");
+    assert!(
+        footer.contains("Press x again to stop"),
+        "narrow width must surface the confirm hint in the footer: {footer}"
+    );
+    assert!(
+        rows[..rows.len() - 1]
+            .iter()
+            .all(|row| !row.contains("Press x again")),
+        "the truncated inline hint must not render in the row: {rows:?}"
+    );
+}
+
+#[test]
+fn wide_width_keeps_the_inline_confirm_hint_out_of_the_footer() {
+    // 100 列下 latest 列（40 宽）放得下完整提示：维持内联现状，footer 不重复。
+    let mut model = ready_panel_model();
+    press_key(&mut model, KeyCode::Char('x'));
+
+    let rows = crate::test_helpers::rendered_rows(&crate::test_helpers::render_model_buffer(
+        &mut model, 100, 24,
+    ));
+    let cursor_row = rows
+        .iter()
+        .find(|row| row.contains("research task"))
+        .expect("the selected row should render");
+    assert!(
+        cursor_row.contains("Press x again to stop"),
+        "wide width keeps the inline hint on the selected row: {cursor_row}"
+    );
+    let footer = rows.last().expect("list footer should render");
+    assert!(
+        !footer.contains("Press x again"),
+        "the footer must not duplicate the inline hint: {footer}"
+    );
+}
+
+#[test]
 fn space_and_esc_do_not_implicitly_stop() {
     let mut model = ready_panel_model();
     press_key(&mut model, KeyCode::Char('x'));

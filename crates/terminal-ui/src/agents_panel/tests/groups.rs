@@ -72,7 +72,7 @@ fn group_kind_partitions_every_projection_status() {
     for status in running {
         let row = overview_row(2, "task", status);
         assert_eq!(
-            agents_row_group_kind(&row, NOW_MS),
+            agents_row_group_kind(&row, Some(NOW_MS)),
             AgentsRowGroupKind::Running,
             "status {status:?} must stay in the Running group"
         );
@@ -85,20 +85,20 @@ fn group_kind_partitions_every_projection_status() {
     ] {
         let recent = settled_row(2, "task", status, Some(NOW_MS - 1_000));
         assert_eq!(
-            agents_row_group_kind(&recent, NOW_MS),
+            agents_row_group_kind(&recent, Some(NOW_MS)),
             AgentsRowGroupKind::JustFinished,
             "recently settled {status:?} must be Just finished"
         );
         let old = settled_row(2, "task", status, Some(NOW_MS - 60_000));
         assert_eq!(
-            agents_row_group_kind(&old, NOW_MS),
+            agents_row_group_kind(&old, Some(NOW_MS)),
             AgentsRowGroupKind::Completed,
             "long-settled {status:?} must be Completed"
         );
         // 无计时起点（resume 恢复的投影）没有过渡组可判，直接归 Completed。
         let resumed = settled_row(2, "task", status, None);
         assert_eq!(
-            agents_row_group_kind(&resumed, NOW_MS),
+            agents_row_group_kind(&resumed, Some(NOW_MS)),
             AgentsRowGroupKind::Completed,
             "settled without a timestamp must be Completed"
         );
@@ -110,14 +110,52 @@ fn just_finished_window_boundary_is_exactly_ten_seconds() {
     let status = AgentProjectionStatus::Completed;
     let inside = settled_row(2, "task", status, Some(NOW_MS - 9_999));
     assert_eq!(
-        agents_row_group_kind(&inside, NOW_MS),
+        agents_row_group_kind(&inside, Some(NOW_MS)),
         AgentsRowGroupKind::JustFinished
     );
     let outside = settled_row(2, "task", status, Some(NOW_MS - 10_000));
     assert_eq!(
-        agents_row_group_kind(&outside, NOW_MS),
+        agents_row_group_kind(&outside, Some(NOW_MS)),
         AgentsRowGroupKind::Completed,
         "the boundary itself belongs to Completed"
+    );
+}
+
+#[test]
+fn clock_unavailable_settled_rows_group_into_completed() {
+    // 取钟失败（None）即无计时依据：终态行不猜"刚结束"，保守归 Completed——
+    // 与无 settled_at 起点的恢复行同一规则；running 行分组不依赖时钟。
+    let recent = settled_row(
+        6,
+        "just done",
+        AgentProjectionStatus::Completed,
+        Some(FAR_FUTURE_SETTLED_MS),
+    );
+    assert_eq!(
+        agents_row_group_kind(&recent, None),
+        AgentsRowGroupKind::Completed,
+        "clock failure must not pin settled rows into Just finished"
+    );
+    let resumed = settled_row(8, "resumed", AgentProjectionStatus::Cancelled, None);
+    assert_eq!(
+        agents_row_group_kind(&resumed, None),
+        AgentsRowGroupKind::Completed
+    );
+    let working = overview_row(2, "working", AgentProjectionStatus::Working);
+    assert_eq!(
+        agents_row_group_kind(&working, None),
+        AgentsRowGroupKind::Running
+    );
+    // 时钟可用时窗口判定不变（成功路径锚点）。
+    assert_eq!(
+        agents_row_group_kind(&recent, Some(FAR_FUTURE_SETTLED_MS + 1_000)),
+        AgentsRowGroupKind::JustFinished
+    );
+    // 分组管线整体：None 时钟下 settled 行落 Completed 组。
+    let groups = agents_panel_row_groups(&row_refs(&[recent, working]), None);
+    assert_eq!(
+        group_kinds(&groups),
+        vec![AgentsRowGroupKind::Running, AgentsRowGroupKind::Completed]
     );
 }
 
@@ -159,7 +197,7 @@ fn row_groups_order_kinds_and_sort_within_each_group() {
         ),
     ];
 
-    let groups = agents_panel_row_groups(&row_refs(&rows), NOW_MS);
+    let groups = agents_panel_row_groups(&row_refs(&rows), Some(NOW_MS));
 
     assert_eq!(
         group_kinds(&groups),
@@ -182,7 +220,7 @@ fn empty_groups_are_omitted() {
         overview_row(3, "pending", AgentProjectionStatus::Pending),
     ];
 
-    let groups = agents_panel_row_groups(&row_refs(&rows), NOW_MS);
+    let groups = agents_panel_row_groups(&row_refs(&rows), Some(NOW_MS));
 
     assert_eq!(group_kinds(&groups), vec![AgentsRowGroupKind::Running]);
     assert_eq!(
@@ -191,7 +229,7 @@ fn empty_groups_are_omitted() {
         "empty groups must not produce headers"
     );
 
-    let groups = agents_panel_row_groups(&[], NOW_MS);
+    let groups = agents_panel_row_groups(&[], Some(NOW_MS));
     assert!(groups.is_empty());
 }
 
@@ -226,12 +264,12 @@ fn page_body_line_plan_interleaves_headers_and_rows() {
     let page_size = agents_panel_list_page_size(24);
 
     let panel = model.agents_panel.as_mut().expect("panel should be ready");
-    panel.refresh_display_order(NOW_MS);
+    panel.refresh_display_order(Some(NOW_MS));
     let plan = model
         .agents_panel
         .as_ref()
         .expect("panel should be ready")
-        .page_body_line_plan(page_size, NOW_MS);
+        .page_body_line_plan(page_size, Some(NOW_MS));
 
     assert_eq!(
         plan,
@@ -272,12 +310,12 @@ fn display_order_migrates_with_now_across_the_window_boundary() {
     let page_size = agents_panel_list_page_size(24);
 
     let panel = model.agents_panel.as_mut().expect("panel should be ready");
-    panel.refresh_display_order(settled_at + 5_000);
+    panel.refresh_display_order(Some(settled_at + 5_000));
     let fresh = model
         .agents_panel
         .as_ref()
         .expect("panel should be ready")
-        .page_body_line_plan(page_size, settled_at + 5_000);
+        .page_body_line_plan(page_size, Some(settled_at + 5_000));
     assert_eq!(
         fresh,
         vec![
@@ -290,7 +328,7 @@ fn display_order_migrates_with_now_across_the_window_boundary() {
     );
 
     let panel = model.agents_panel.as_mut().expect("panel should be ready");
-    panel.refresh_display_order(settled_at + 15_000);
+    panel.refresh_display_order(Some(settled_at + 15_000));
     let panel = model.agents_panel.as_ref().expect("panel should be ready");
     // 迁移后两行同归 Completed：旧 settled（agent 9）重排到最前，
     // 显示位置随行序归一重新编号。
@@ -303,7 +341,7 @@ fn display_order_migrates_with_now_across_the_window_boundary() {
         Some(6)
     );
     assert_eq!(
-        panel.page_body_line_plan(page_size, settled_at + 15_000),
+        panel.page_body_line_plan(page_size, Some(settled_at + 15_000)),
         vec![
             header_line(AgentsRowGroupKind::Completed, 2),
             row_line(0),
@@ -332,7 +370,7 @@ fn continuation_page_does_not_repeat_the_group_header() {
     let panel = model.agents_panel.as_ref().expect("panel should be ready");
     assert_eq!(panel.page_start(page_size), 12);
     assert_eq!(
-        panel.page_body_line_plan(page_size, NOW_MS),
+        panel.page_body_line_plan(page_size, Some(NOW_MS)),
         vec![row_line(12), row_line(13)],
         "a group continuing from the previous page must not repeat its header"
     );
@@ -342,7 +380,7 @@ fn continuation_page_does_not_repeat_the_group_header() {
     let panel = model.agents_panel.as_ref().expect("panel should be ready");
     let mut expected = vec![header_line(AgentsRowGroupKind::Running, 14)];
     expected.extend((0..12).map(row_line));
-    assert_eq!(panel.page_body_line_plan(page_size, NOW_MS), expected);
+    assert_eq!(panel.page_body_line_plan(page_size, Some(NOW_MS)), expected);
 }
 
 // ---- 渲染 ----

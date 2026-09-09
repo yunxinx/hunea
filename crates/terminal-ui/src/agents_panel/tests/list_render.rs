@@ -1,13 +1,13 @@
 use ratatui::style::Modifier;
-use runtime_domain::agent::{AgentActivitySummary, AgentProjectionStatus};
+use runtime_domain::agent::{AgentActivitySummary, AgentId, AgentProjectionStatus};
 
 use crate::agents_panel::{
     AGENTS_ELAPSED_COLUMN_WIDTH, AGENTS_STATUS_COLUMN_WIDTH, AGENTS_TOKENS_COLUMN_WIDTH,
-    AGENTS_TOOLS_COLUMN_WIDTH, agent_status_dot_style, agent_status_dot_symbol, agent_status_label,
-    format_agent_token_usage, format_agent_tool_uses, list_render::AGENTS_ROW_RIGHT_PADDING,
-    list_render::AGENTS_STOP_CONFIRM_HINT, list_render::agents_panel_column_header_line,
-    list_render::agents_panel_row_geometry, list_render::agents_panel_row_layout,
-    list_render::agents_panel_row_line,
+    AGENTS_TOOLS_COLUMN_WIDTH, AgentsPanelStopConfirmation, agent_status_dot_style,
+    agent_status_dot_symbol, agent_status_label, format_agent_token_usage, format_agent_tool_uses,
+    list_render::AGENTS_ROW_RIGHT_PADDING, list_render::agents_panel_column_header_line,
+    list_render::agents_panel_inline_confirm_hint_text, list_render::agents_panel_row_geometry,
+    list_render::agents_panel_row_layout, list_render::agents_panel_row_line,
 };
 use crate::display_width::{display_width, line_display_width};
 use crate::theme::{default_palette, terminal_default_palette};
@@ -642,10 +642,11 @@ fn status_column_width_is_shared_across_rows() {
 fn stop_confirm_hint_takes_the_latest_column_slot() {
     let row = overview_row(2, "research task", AgentProjectionStatus::Working);
     let palette = default_palette();
+    let stop_hint =
+        agents_panel_inline_confirm_hint_text(AgentsPanelStopConfirmation::Stop(AgentId::new(2)));
 
     let plain = agents_panel_row_line(&row, 100, true, None, "", palette);
-    let hinted =
-        agents_panel_row_line(&row, 100, true, Some(AGENTS_STOP_CONFIRM_HINT), "", palette);
+    let hinted = agents_panel_row_line(&row, 100, true, Some(stop_hint.as_str()), "", palette);
 
     // 提示接管 latest 列槽位：列几何不变，行仍锚定同一右端。
     assert_eq!(line_display_width(&plain), line_display_width(&hinted));
@@ -667,15 +668,36 @@ fn stop_confirm_hint_takes_the_latest_column_slot() {
 fn stop_confirm_hint_replaces_idle_latest_activity() {
     let mut row = overview_row(2, "research task", AgentProjectionStatus::Working);
     row.latest_activity = AgentActivitySummary::Idle;
+    let stop_hint =
+        agents_panel_inline_confirm_hint_text(AgentsPanelStopConfirmation::Stop(AgentId::new(2)));
 
     // 提示优先于活动文本：Idle 行的 latest 列仍显示确认提示。
-    let hinted = agents_panel_row_layout(&row, 100, Some(AGENTS_STOP_CONFIRM_HINT));
-    assert_eq!(
-        hinted.latest.as_deref(),
-        Some(crate::agents_panel::list_render::AGENTS_STOP_CONFIRM_HINT)
-    );
+    let hinted = agents_panel_row_layout(&row, 100, Some(stop_hint.as_str()));
+    assert_eq!(hinted.latest.as_deref(), Some(stop_hint.as_str()));
     let plain = agents_panel_row_layout(&row, 100, None);
     assert!(plain.latest.is_none());
+}
+
+#[test]
+fn confirm_hint_inline_fit_boundary_is_the_full_hint_width() {
+    // 分界宽度推导：2 marker + 2 状态点前缀 + 10 status + 1 gap + 16 title(min)
+    // + 1 gap + 23 提示 + 1 gap + 25 metrics + 2 右留白 = 83。
+    let row = overview_row(2, "research task", AgentProjectionStatus::Working);
+    let stop_hint =
+        agents_panel_inline_confirm_hint_text(AgentsPanelStopConfirmation::Stop(AgentId::new(2)));
+
+    // 恰好放得下（latest 列 23 = 提示宽）：完整内联，不截断。
+    let fits = agents_panel_row_layout(&row, 83, Some(stop_hint.as_str()));
+    assert_eq!(
+        fits.latest.as_deref(),
+        Some(stop_hint.as_str()),
+        "an exactly-fitting hint must render inline without truncation"
+    );
+
+    // 差 1 列：布局层本身仍会截断——生产路径在 body 层把放不下的提示门控回
+    // footer（见 stop_confirm 的窄宽渲染测试），截断形态不交给用户。
+    let tight = agents_panel_row_layout(&row, 82, Some(stop_hint.as_str()));
+    assert_ne!(tight.latest.as_deref(), Some(stop_hint.as_str()));
 }
 
 #[test]

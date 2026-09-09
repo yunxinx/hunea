@@ -42,12 +42,15 @@ const AGENTS_ROW_PREFIX_WIDTH: usize = AGENTS_SELECTION_MARKER_WIDTH;
 /// 行右端保留的空白列；metrics 列右对齐锚定在 `width - AGENTS_ROW_RIGHT_PADDING`。
 pub(super) const AGENTS_ROW_RIGHT_PADDING: usize = 2;
 const AGENTS_COLUMN_GAP: usize = 1;
-/// `x` 二次确认的内联提示文案：占用选中行 latest 列槽位（Idle 行同样显示，
-/// 提示优先于活动文本），command_accent 着色。footer 不再承担该提示。
-/// stop 与 delete 的提示文案分开，确认态向用户声明本次动作语义；Sentence case
-/// 对齐 exit confirmation 系列（"Press again to exit"）。
-pub(super) const AGENTS_STOP_CONFIRM_HINT: &str = "· Press x again to stop";
-pub(super) const AGENTS_DELETE_CONFIRM_HINT: &str = "· Press x again to delete";
+/// `x` 二次确认的提示文案：stop 与 delete 分开，确认态向用户声明本次动作语义；
+/// Sentence case 对齐 exit confirmation 系列（"Press again to exit"）。
+/// 内联（选中行 latest 列，Idle 行同样显示、提示优先于活动文本，command_accent
+/// 着色）与 footer 回退两种形态共用同一文案。
+pub(super) const AGENTS_STOP_CONFIRM_TEXT: &str = "Press x again to stop";
+pub(super) const AGENTS_DELETE_CONFIRM_TEXT: &str = "Press x again to delete";
+/// 内联提示进 latest 列时的分隔前缀（与活动文本列的分隔形态一致）；
+/// footer 回退形态独占一行，不携带前缀。
+const AGENTS_CONFIRM_HINT_INLINE_PREFIX: &str = "· ";
 /// metric 列之间的间隔：固定列宽下纵向对齐由列边界承载，不需要 `·` 分隔。
 const AGENTS_METRIC_COLUMN_GAP: usize = 1;
 /// metrics 列数（elapsed / tools / tokens）。
@@ -177,7 +180,9 @@ impl Model {
             return;
         };
         let page_size = agents_panel_list_page_size(area.height);
-        let width = usize::from(area.width);
+        // 宽度归一（至少 1 列）：body 行布局与 footer 的确认提示回退判定共用
+        // 同一有效宽度，两处的"放得下/放不下"结论才一致。
+        let width = usize::from(area.width).max(1);
 
         let Some(state) = self.agents_panel.as_ref() else {
             return;
@@ -211,7 +216,7 @@ impl Model {
         );
         frame.render_widget(
             Paragraph::new(Line::styled(
-                agents_panel_list_footer_hint(state, area.width),
+                agents_panel_list_footer_hint(state, width),
                 tertiary_text_style(self.palette).add_modifier(Modifier::ITALIC),
             )),
             chrome.footer,
@@ -252,9 +257,9 @@ impl Model {
         width: usize,
         body_height: usize,
         page_size: usize,
-        now_ms: i64,
+        now_ms: Option<i64>,
     ) -> Vec<Line<'static>> {
-        let width = width.max(1);
+        // 有效宽度（≥1 列）由渲染入口归一后传入。
         let mut lines = Vec::new();
 
         if state.is_loading {
@@ -306,7 +311,7 @@ impl Model {
                         let confirm_hint = is_cursor
                             .then(|| match state.stop_confirmation {
                                 Some(confirmation) if confirmation.agent_id() == row.agent_id => {
-                                    Some(agents_panel_confirm_hint_text(confirmation))
+                                    agents_panel_inline_confirm_hint(row, width, confirmation)
                                 }
                                 _ => None,
                             })
@@ -315,7 +320,7 @@ impl Model {
                             row,
                             width,
                             is_cursor,
-                            confirm_hint,
+                            confirm_hint.as_deref(),
                             state.search_query(),
                             self.palette,
                         ));
@@ -364,12 +369,45 @@ pub(super) fn agents_panel_group_header_line(
     )])
 }
 
-/// 确认态动作对应的内联提示文案。
+/// 确认态动作对应的提示文案（不含内联分隔前缀）。
 fn agents_panel_confirm_hint_text(confirmation: AgentsPanelStopConfirmation) -> &'static str {
     match confirmation {
-        AgentsPanelStopConfirmation::Stop(_) => AGENTS_STOP_CONFIRM_HINT,
-        AgentsPanelStopConfirmation::Delete(_) => AGENTS_DELETE_CONFIRM_HINT,
+        AgentsPanelStopConfirmation::Stop(_) => AGENTS_STOP_CONFIRM_TEXT,
+        AgentsPanelStopConfirmation::Delete(_) => AGENTS_DELETE_CONFIRM_TEXT,
     }
+}
+
+/// 确认提示的内联形态：`· ` 分隔前缀 + 文案（latest 列与活动文本的分隔形态）。
+pub(super) fn agents_panel_inline_confirm_hint_text(
+    confirmation: AgentsPanelStopConfirmation,
+) -> String {
+    format!(
+        "{AGENTS_CONFIRM_HINT_INLINE_PREFIX}{}",
+        agents_panel_confirm_hint_text(confirmation)
+    )
+}
+
+/// 选中行的内联确认提示：latest 列放得下完整文案（不截断）时返回带分隔前缀的
+/// 提示；放不下时返回 `None`——截断成 `…` 的提示让二次确认要求不可读，回退
+/// footer 显示（见 `agents_panel_list_footer_hint`），latest 列恢复活动文本。
+fn agents_panel_inline_confirm_hint(
+    row: &AgentOverviewRow,
+    width: usize,
+    confirmation: AgentsPanelStopConfirmation,
+) -> Option<String> {
+    let hint = agents_panel_inline_confirm_hint_text(confirmation);
+    agents_panel_confirm_hint_fits_inline(row, width, &hint).then_some(hint)
+}
+
+/// 确认提示能否在行 latest 列完整放下（不截断）：与 footer 回退判定共用同一
+/// latest 列宽推导，两处结论互补（内联与 footer 恰有一处显示提示）。
+fn agents_panel_confirm_hint_fits_inline(
+    row: &AgentOverviewRow,
+    width: usize,
+    inline_hint: &str,
+) -> bool {
+    let (_, latest_width) = agents_panel_elastic_column_widths(row.title.as_str(), width);
+    latest_width >= display_width(inline_hint)
 }
 
 /// 固定单行 row：选中 marker + status 列（状态点 + 状态文字）+ title 主导列 +
@@ -382,7 +420,7 @@ pub(super) fn agents_panel_row_line(
     row: &AgentOverviewRow,
     width: usize,
     is_cursor: bool,
-    confirm_hint: Option<&'static str>,
+    confirm_hint: Option<&str>,
     search_query: &str,
     palette: TerminalPalette,
 ) -> Line<'static> {
@@ -591,7 +629,9 @@ pub(super) struct AgentsPanelRowLayout {
 /// title 主导弹性列 → latest 弹性列 → metrics 固定列宽右对齐锚定行右端。
 /// 收窄让位顺序 tokens → tools → elapsed；极窄回退仅保留前缀 + 状态 + 标题。
 /// 确认提示激活时 latest 列槽位固定给内联提示（Idle 行同样显示，提示
-/// 优先于活动文本），截断规则与普通 latest 一致，列几何不受影响。
+/// 优先于活动文本）；提示只在 latest 列放得下完整文案时才会传入（见
+/// `agents_panel_inline_confirm_hint`，放不下时回退 footer），截断规则与
+/// 普通 latest 一致，列几何不受影响。
 pub(super) fn agents_panel_row_layout(
     row: &AgentOverviewRow,
     width: usize,
@@ -632,13 +672,8 @@ pub(super) fn agents_panel_row_layout(
         // 极窄回退：仅前缀 + 状态 + 标题，title 安全截断。
         (truncate_display_width_with_ellipsis(title_text, rest), None)
     } else {
-        let flexible = rest - AGENTS_COLUMN_GAP;
-        // title 主导：优先吃满弹性预算（受 max 上限约束），latest 只保底 min。
-        let title_width = display_width(title_text)
-            .min(AGENTS_TITLE_MAX_WIDTH)
-            .min(flexible.saturating_sub(AGENTS_LATEST_MIN_WIDTH))
-            .max(AGENTS_TITLE_MIN_WIDTH);
-        let latest_width = flexible.saturating_sub(title_width);
+        // 弹性列宽分配与确认提示的内联/footer 回退判定共用同一推导。
+        let (title_width, latest_width) = agents_panel_elastic_column_widths(title_text, width);
         (
             truncate_display_width_with_ellipsis(title_text, title_width),
             latest_text
@@ -655,6 +690,30 @@ pub(super) fn agents_panel_row_layout(
         latest,
         metrics,
     }
+}
+
+/// 弹性列（title 主导 + latest 保底）的宽度分配：title 优先吃满弹性预算
+/// （受 max 上限约束），latest 只保底 min。极窄回退（弹性预算不足）时
+/// latest 为 0，表示该列整体隐藏、title 截断到全部预算。行布局与确认提示的
+/// 内联/footer 回退判定共用同一推导，两处"放得下/放不下"的结论才一致。
+fn agents_panel_elastic_column_widths(title_text: &str, width: usize) -> (usize, usize) {
+    let geometry = agents_panel_row_geometry(width);
+    let rest = geometry.elastic_width;
+    if rest <= AGENTS_TITLE_MIN_WIDTH {
+        return (rest, 0);
+    }
+    let flexible = rest - AGENTS_COLUMN_GAP;
+    let title_width = agents_panel_title_column_width(title_text, flexible);
+    (title_width, flexible.saturating_sub(title_width))
+}
+
+/// title 主导弹性分配下的 title 列宽：内容宽受 max 上限与 latest 保底约束，
+/// 下限 title min。
+fn agents_panel_title_column_width(title_text: &str, flexible: usize) -> usize {
+    display_width(title_text)
+        .min(AGENTS_TITLE_MAX_WIDTH)
+        .min(flexible.saturating_sub(AGENTS_LATEST_MIN_WIDTH))
+        .max(AGENTS_TITLE_MIN_WIDTH)
 }
 
 /// status 列固定宽度填充：所有行的 status 标签占同一列宽，后续列纵向对齐。
@@ -676,13 +735,18 @@ fn align_metric_to_column(label: &str, column_width: usize) -> String {
     }
 }
 
-fn agents_panel_list_footer_hint(state: &AgentsPanelState, width: u16) -> String {
+fn agents_panel_list_footer_hint(state: &AgentsPanelState, width: usize) -> String {
     // loading 期按下 x 后的可见回执：stop 暂不可用但按键不被静默吞掉。
     if state.stop_unavailable_notice {
         return truncate_display_width_with_ellipsis(
             "  Agents state is loading — x stop is unavailable yet",
-            usize::from(width),
+            width,
         );
+    }
+    // 窄终端回退：latest 列放不下完整内联提示时，footer 独占一行显示二次确认
+    // 要求——截断的提示会让用户无感知地直接触发 stop/delete。
+    if let Some(hint) = agents_panel_footer_confirm_hint(state, width) {
+        return truncate_display_width_with_ellipsis(&format!("  {hint}"), width);
     }
     let mut parts = vec!["Esc close", "Space/Enter transcript"];
     // x 的动作语义跟随选中行状态；不可操作选区不渲染该段，footer 不预告无效动作。
@@ -698,6 +762,23 @@ fn agents_panel_list_footer_hint(state: &AgentsPanelState, width: u16) -> String
         parts.push("←/→/h/l page");
     }
     format!("  {}", parts.join(" · "))
+}
+
+/// footer 回退的确认提示：确认态仍指向选中行、且 latest 列放不下完整内联文案
+/// 时返回提示文本（不带 `· ` 分隔前缀，footer 独占一行）。与
+/// `agents_panel_inline_confirm_hint` 的判定互补，提示恒恰在一处显示。
+fn agents_panel_footer_confirm_hint(
+    state: &AgentsPanelState,
+    width: usize,
+) -> Option<&'static str> {
+    let row = state.selected_row()?;
+    let confirmation = state.stop_confirmation?;
+    if confirmation.agent_id() != row.agent_id {
+        return None;
+    }
+    let inline_hint = agents_panel_inline_confirm_hint_text(confirmation);
+    let fits_inline = agents_panel_confirm_hint_fits_inline(row, width, &inline_hint);
+    (!fits_inline).then(|| agents_panel_confirm_hint_text(confirmation))
 }
 
 /// footer 的 `x` 动作标签：running 行是 stop、settled 投影行是 delete——分类与

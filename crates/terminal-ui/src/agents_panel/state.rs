@@ -324,7 +324,8 @@ impl AgentsPanelState {
     /// 分组随墙钟迁移（Just finished → Completed），没有事件驱动；渲染与输入
     /// 在读取顺序敏感状态（分页、导航、物理行换算）前调用。归一只改顺序，
     /// 不改行集合与选中行，幂等；折叠缓存与确认态都以 id 绑定，无需重置。
-    pub(super) fn refresh_display_order(&mut self, now_ms: i64) {
+    /// `now_ms` 为 `None`（取钟失败）时终态行保守归 Completed。
+    pub(super) fn refresh_display_order(&mut self, now_ms: Option<i64>) {
         self.list.reorder_rows(
             |a, b| agents_row_display_order(a, b, now_ms),
             agents_row_matches,
@@ -345,7 +346,7 @@ impl AgentsPanelState {
     pub(super) fn page_body_line_plan(
         &self,
         page_size: usize,
-        now_ms: i64,
+        now_ms: Option<i64>,
     ) -> Vec<AgentsPanelPageBodyLine> {
         let page_start = self.page_start(page_size);
         let page_end = page_start
@@ -394,7 +395,7 @@ impl AgentsPanelState {
         page_size: usize,
         physical_offset: usize,
         width: usize,
-        now_ms: i64,
+        now_ms: Option<i64>,
     ) -> bool {
         // 折叠行只挂在当前 selection 名下：归属脱节的陈旧缓存不占物理行
         // （与渲染侧共用 `visible_line_count` 的归属校验）。

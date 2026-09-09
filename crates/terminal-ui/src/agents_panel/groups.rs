@@ -53,13 +53,17 @@ pub(crate) struct AgentsRowGroup {
 }
 
 /// 行归属：非终态（含 CleanupBlocked）归 Running；终态按距 settled 的时长
-/// 分流——窗口内是 Just finished，窗口外（含无计时起点的恢复行）归 Completed。
-pub(super) fn agents_row_group_kind(row: &AgentOverviewRow, now_ms: i64) -> AgentsRowGroupKind {
+/// 分流——时钟可用且距 settled 仍在窗口内是 Just finished，其余（含无计时
+/// 起点的恢复行、取钟失败的 `None`）归 Completed：无计时依据时不猜"刚结束"。
+pub(super) fn agents_row_group_kind(
+    row: &AgentOverviewRow,
+    now_ms: Option<i64>,
+) -> AgentsRowGroupKind {
     if agent_status_is_running(row.status) || row.status == AgentProjectionStatus::CleanupBlocked {
         return AgentsRowGroupKind::Running;
     }
-    match row.settled_at_ms {
-        Some(settled_at_ms)
+    match (row.settled_at_ms, now_ms) {
+        (Some(settled_at_ms), Some(now_ms))
             if now_ms.saturating_sub(settled_at_ms) < AGENTS_JUST_FINISHED_WINDOW_MS =>
         {
             AgentsRowGroupKind::JustFinished
@@ -84,7 +88,7 @@ fn settled_order_key(row: &AgentOverviewRow) -> (bool, i64) {
 pub(super) fn agents_row_display_order(
     a: &AgentOverviewRow,
     b: &AgentOverviewRow,
-    now_ms: i64,
+    now_ms: Option<i64>,
 ) -> Ordering {
     let kind_a = agents_row_group_kind(a, now_ms);
     let kind_b = agents_row_group_kind(b, now_ms);
@@ -110,7 +114,7 @@ pub(super) fn agents_row_display_order(
 /// （`row_indices` 指向输入切片）。空组不产出。
 pub(crate) fn agents_panel_row_groups(
     rows: &[&AgentOverviewRow],
-    now_ms: i64,
+    now_ms: Option<i64>,
 ) -> Vec<AgentsRowGroup> {
     let mut row_indices: Vec<usize> = (0..rows.len()).collect();
     row_indices.sort_by(|&a, &b| agents_row_display_order(rows[a], rows[b], now_ms));
@@ -130,8 +134,10 @@ pub(crate) fn agents_panel_row_groups(
     groups
 }
 
-/// 分组判定的墙钟来源：共享的 Unix 毫秒时间戳。时钟异常退化为 0，
-/// 只影响展示分组，不影响任何 runtime authority。
-pub(super) fn agents_panel_now_unix_ms() -> i64 {
-    runtime_domain::time::unix_timestamp_ms().unwrap_or(0)
+/// 分组判定的墙钟来源：共享的 Unix 毫秒时间戳。取钟失败返回 `None`：分组把
+/// 无计时依据的终态行保守归 Completed（见 `agents_row_group_kind`），不再退化
+/// 为 0 把全部终态行钉在 Just finished。只影响展示分组，不影响任何 runtime
+/// authority。
+pub(super) fn agents_panel_now_unix_ms() -> Option<i64> {
+    runtime_domain::time::unix_timestamp_ms().ok()
 }

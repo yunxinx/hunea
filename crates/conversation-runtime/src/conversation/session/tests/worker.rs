@@ -5,6 +5,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
     },
     thread,
+    time::Instant,
 };
 
 #[test]
@@ -13,6 +14,7 @@ fn conversation_worker_reset_waits_until_the_owned_thread_exits() {
     let cancellation = CancellationToken::new();
     let thread_cancellation = cancellation.clone();
     let (event_sender, event_receiver) = mpsc::channel();
+    let (exit_sender, exit_receiver) = mpsc::channel::<()>();
     let (cancellation_seen_sender, cancellation_seen_receiver) = mpsc::channel();
     let (allow_exit_sender, allow_exit_receiver) = mpsc::channel();
     let worker_thread = thread::spawn(move || {
@@ -26,9 +28,11 @@ fn conversation_worker_reset_waits_until_the_owned_thread_exits() {
             .recv()
             .expect("test should release the worker thread");
         drop(event_sender);
+        let _ = exit_sender.send(());
     });
     worker.receiver = Some(event_receiver);
     worker.worker_thread = Some(worker_thread);
+    worker.worker_exit_receiver = Some(exit_receiver);
     worker.cancellation = Some(cancellation);
 
     let (reset_sender, reset_receiver) = mpsc::channel();
@@ -59,6 +63,118 @@ fn conversation_worker_reset_waits_until_the_owned_thread_exits() {
     reset_thread.join().expect("reset test thread should join");
     assert!(worker.worker_thread.is_none());
     assert!(!worker.is_running());
+}
+
+#[test]
+fn conversation_worker_join_times_out_and_keeps_the_handle_for_retry() {
+    let mut worker = ConversationWorker::new(RuntimeEventNotifier::default());
+    // 缩短 join 时限，让超时路径在测试时限内可观察。
+    worker.join_timeout = Duration::from_millis(200);
+    let (event_sender, event_receiver) = mpsc::channel();
+    let (exit_sender, exit_receiver) = mpsc::channel::<()>();
+    let (release_sender, release_receiver) = mpsc::channel::<()>();
+    let (thread_done_sender, thread_done_receiver) = mpsc::channel::<()>();
+    let worker_thread = thread::spawn(move || {
+        // 模拟无视 cancellation 的同步阻塞工具：只有显式 release 才会退出。
+        let _ = release_receiver.recv();
+        drop(event_sender);
+        let _ = exit_sender.send(());
+        let _ = thread_done_sender.send(());
+    });
+    worker.receiver = Some(event_receiver);
+    worker.worker_thread = Some(worker_thread);
+    worker.worker_exit_receiver = Some(exit_receiver);
+    worker.cancellation = Some(CancellationToken::new());
+
+    let joined_at = Instant::now();
+    let cleanup = worker.reset_after_clear();
+    assert!(
+        joined_at.elapsed() < Duration::from_secs(2),
+        "join 必须在时限附近返回，而不是等阻塞 worker 退出"
+    );
+    assert_eq!(
+        cleanup,
+        Err("conversation worker did not stop within 200 ms".to_string())
+    );
+    assert!(
+        worker.worker_thread.is_some(),
+        "超时后 handle 必须保留，供 settle pass 重试回收"
+    );
+    assert!(
+        worker.worker_exit_receiver.is_some(),
+        "退出信号端必须随 handle 一起保留"
+    );
+    assert!(!worker.is_running());
+
+    release_sender
+        .send(())
+        .expect("test should release the blocking worker");
+    thread_done_receiver
+        .recv_timeout(Duration::from_secs(1))
+        .expect("blocking worker should exit after release");
+    worker
+        .reset_after_clear()
+        .expect("retry should join the released worker");
+    assert!(worker.worker_thread.is_none());
+}
+
+#[test]
+fn conversation_worker_join_reports_panicked_thread() {
+    let mut worker = ConversationWorker::new(RuntimeEventNotifier::default());
+    let (event_sender, event_receiver) = mpsc::channel();
+    let (exit_sender, exit_receiver) = mpsc::channel::<()>();
+    let worker_thread = thread::spawn(move || {
+        drop(event_sender);
+        // 不显式发送退出信号：panic 使 exit_sender 直接 drop，
+        // 接收端收到 Disconnected 后 join 必须报告 panic 而不是挂起。
+        drop(exit_sender);
+        panic!("worker thread fixture panic");
+    });
+    worker.receiver = Some(event_receiver);
+    worker.worker_thread = Some(worker_thread);
+    worker.worker_exit_receiver = Some(exit_receiver);
+    worker.cancellation = Some(CancellationToken::new());
+
+    assert_eq!(
+        worker.reset_after_clear(),
+        Err("conversation worker thread panicked".to_string())
+    );
+    assert!(worker.worker_thread.is_none());
+}
+
+#[test]
+fn conversation_worker_reset_joins_a_started_worker_promptly() {
+    let mut worker = ConversationWorker::new(RuntimeEventNotifier::default());
+    let turn = runtime_domain::session::ConversationTurnRequest::new(
+        "fixture",
+        "qwen3",
+        ConversationItem::text(Role::User, "hello"),
+    );
+    let request = PreparedConversationRequest::from_turn(
+        &turn,
+        vec![ConversationItem::text(Role::User, "hello")],
+        None,
+        None,
+        None,
+    );
+    worker.start(
+        request,
+        fake_provider_lease(),
+        ToolExecutorRegistry::new(),
+        // 零重试：FakeProvider 立即失败，worker 线程毫秒级退出。
+        RuntimeRequestPolicy::new(0, vec![], 1),
+        None,
+        ExtensionHookRegistry::new(),
+    );
+    assert!(
+        worker.worker_exit_receiver.is_some(),
+        "start 必须装配退出信号通道"
+    );
+
+    worker
+        .reset_after_clear()
+        .expect("started worker should stop promptly");
+    assert!(worker.worker_thread.is_none());
 }
 
 #[tokio::test]

@@ -4,7 +4,7 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver},
+        mpsc::{self, Receiver, RecvTimeoutError},
     },
     thread::{self, JoinHandle},
     time::Duration,
@@ -51,6 +51,11 @@ use persistence::{
 const CANCEL_REPAIR_GRACE: Duration = Duration::from_secs(2);
 const SESSION_PERSISTENCE_QUEUE_CAPACITY: usize = 256;
 const TOOL_EXECUTION_INTERRUPTED: &str = "Tool execution interrupted";
+/// join 等待 worker 线程退出的默认时限。
+/// cancellation 传播通常在毫秒级完成，该时限只为防住无视 cancellation 的同步
+/// 阻塞工具（如 session store 桥）无限拖住调用线程；超时把 handle 放回字段，
+/// 交给上层（orchestrator settle pass）重试回收。
+const WORKER_JOIN_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ConversationWorkerEvent {
@@ -82,6 +87,11 @@ struct ConversationWorkerOptions {
 pub struct ConversationWorker {
     receiver: Option<Receiver<ConversationWorkerEvent>>,
     worker_thread: Option<JoinHandle<()>>,
+    /// worker 线程收尾时发送完成信号的接收端；join 前先限时等待它，
+    /// 避免直接 join 被无视 cancellation 的同步阻塞工具无限拖住调用线程。
+    worker_exit_receiver: Option<Receiver<()>>,
+    /// join 等待 worker 退出的时限；生产固定为 `WORKER_JOIN_TIMEOUT`，测试注入短值。
+    join_timeout: Duration,
     pub cancellation: Option<CancellationToken>,
     pub target: Option<RuntimeTarget>,
     pending_session_id: Option<SessionId>,
@@ -96,6 +106,8 @@ impl ConversationWorker {
         Self {
             receiver: None,
             worker_thread: None,
+            worker_exit_receiver: None,
+            join_timeout: WORKER_JOIN_TIMEOUT,
             cancellation: None,
             target: None,
             pending_session_id: None,
@@ -143,6 +155,7 @@ impl ConversationWorker {
         let cancellation = CancellationToken::default();
         let thread_cancellation = cancellation.clone();
         let target = request.target();
+        let (exit_sender, exit_receiver) = mpsc::channel::<()>();
         let worker_thread = thread::spawn(move || {
             let _exit_notification = sender.notify_on_drop();
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -172,9 +185,13 @@ impl ConversationWorker {
                     ));
                 }
             }
+            // 线程收尾发送退出信号：join 侧据此在时限内判断线程是否已可回收；
+            // panic 时 exit_sender 被 drop，接收端收到 Disconnected 同样视为已可 join。
+            let _ = exit_sender.send(());
         });
         self.receiver = Some(receiver);
         self.worker_thread = Some(worker_thread);
+        self.worker_exit_receiver = Some(exit_receiver);
         self.cancellation = Some(cancellation);
         self.target = Some(target);
         self.pending_session_id = None;
@@ -234,6 +251,30 @@ impl ConversationWorker {
         let Some(worker_thread) = self.worker_thread.take() else {
             return Ok(());
         };
+        let exit_receiver = self.worker_exit_receiver.take();
+        // 先限时等待退出信号再 join：worker 可能正卡在无视 cancellation 的同步
+        // 阻塞工具里，直接 join 会无限期拖住调用线程（child stop 与清扫都运行在
+        // UI 事件泵上）。
+        let timed_out = match exit_receiver.as_ref() {
+            // 直接装配 worker_thread 而未装配信号端（仅测试路径会出现）时，
+            // 没有信号可等，退回直接 join。
+            None => false,
+            Some(receiver) => matches!(
+                receiver.recv_timeout(self.join_timeout),
+                Err(RecvTimeoutError::Timeout)
+            ),
+        };
+        if timed_out {
+            // 超时但线程仍活着：handle 与信号端原样放回，供上层（orchestrator
+            // settle pass）重试 join；调用方按 Err 把 child 标记为 CleanupBlocked，
+            // 线程所有权不丢失。
+            self.worker_thread = Some(worker_thread);
+            self.worker_exit_receiver = exit_receiver;
+            return Err(format!(
+                "conversation worker did not stop within {} ms",
+                self.join_timeout.as_millis()
+            ));
+        }
         worker_thread
             .join()
             .map_err(|_| "conversation worker thread panicked".to_string())

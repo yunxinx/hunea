@@ -11,6 +11,8 @@ fn conversation_runtime_clears_receiver_after_terminal_event() {
     let mut runtime = ConversationWorker {
         receiver: Some(receiver),
         worker_thread: None,
+        worker_exit_receiver: None,
+        join_timeout: WORKER_JOIN_TIMEOUT,
         cancellation: Some(CancellationToken::new()),
         target: Some(RuntimeTarget::provider("provider", "model")),
         pending_session_id: None,
@@ -34,6 +36,8 @@ fn conversation_runtime_keeps_receiver_after_retry_event() {
     let mut runtime = ConversationWorker {
         receiver: Some(receiver),
         worker_thread: None,
+        worker_exit_receiver: None,
+        join_timeout: WORKER_JOIN_TIMEOUT,
         cancellation: Some(CancellationToken::new()),
         target: Some(RuntimeTarget::provider("provider", "model")),
         pending_session_id: None,
@@ -85,6 +89,8 @@ fn conversation_runtime_keeps_receiver_after_token_estimate_event() {
     let mut runtime = ConversationWorker {
         receiver: Some(receiver),
         worker_thread: None,
+        worker_exit_receiver: None,
+        join_timeout: WORKER_JOIN_TIMEOUT,
         cancellation: Some(CancellationToken::new()),
         target: Some(RuntimeTarget::provider("provider", "model")),
         pending_session_id: None,
@@ -113,6 +119,8 @@ fn conversation_runtime_keeps_receiver_after_text_delta_event() {
     let mut runtime = ConversationWorker {
         receiver: Some(receiver),
         worker_thread: None,
+        worker_exit_receiver: None,
+        join_timeout: WORKER_JOIN_TIMEOUT,
         cancellation: Some(CancellationToken::new()),
         target: Some(RuntimeTarget::provider("provider", "model")),
         pending_session_id: None,
@@ -145,6 +153,8 @@ fn conversation_runtime_buffers_session_events_without_ui_event() {
     let mut runtime = ConversationWorker {
         receiver: Some(receiver),
         worker_thread: None,
+        worker_exit_receiver: None,
+        join_timeout: WORKER_JOIN_TIMEOUT,
         cancellation: Some(CancellationToken::new()),
         target: Some(RuntimeTarget::provider("provider", "model")),
         pending_session_id: None,
@@ -193,6 +203,8 @@ fn conversation_runtime_preserves_turn_entry_id_when_retry_replays_turn_start() 
     let mut runtime = ConversationWorker {
         receiver: Some(receiver),
         worker_thread: None,
+        worker_exit_receiver: None,
+        join_timeout: WORKER_JOIN_TIMEOUT,
         cancellation: Some(CancellationToken::new()),
         target: Some(RuntimeTarget::provider("provider", "model")),
         pending_session_id: None,
@@ -232,6 +244,8 @@ fn conversation_interrupt_keeps_receiver_until_worker_terminal_event() {
     let mut runtime = ConversationWorker {
         receiver: Some(receiver),
         worker_thread: None,
+        worker_exit_receiver: None,
+        join_timeout: WORKER_JOIN_TIMEOUT,
         cancellation: Some(CancellationToken::new()),
         target: Some(RuntimeTarget::provider("provider", "model")),
         pending_session_id: None,

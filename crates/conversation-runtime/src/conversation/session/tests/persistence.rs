@@ -33,6 +33,8 @@ fn conversation_worker_persists_config_change_and_flushes_finished_turn() {
     let mut runtime = ConversationWorker {
         receiver: Some(receiver),
         worker_thread: None,
+        worker_exit_receiver: None,
+        join_timeout: WORKER_JOIN_TIMEOUT,
         cancellation: Some(CancellationToken::new()),
         target: Some(RuntimeTarget::provider("local", "qwen3")),
         pending_session_id: None,

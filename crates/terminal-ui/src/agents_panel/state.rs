@@ -84,10 +84,21 @@ pub(crate) struct AgentsPanelActivityFold {
 impl AgentsPanelActivityFold {
     /// 折叠区当前可渲染的行数（活动行 + 可选 `+N more` 行）。
     ///
-    /// 展开态由调用方传入：未展开、宽度低于阈值或无条目时为 0；
-    /// 渲染与鼠标物理行换算共用本判定，保证两处对"折叠区是否占行"的答案一致。
-    pub(super) fn visible_line_count(&self, width: usize, expanded: bool) -> usize {
-        if !expanded || width < AGENTS_ACTIVITY_FOLD_MIN_WIDTH || self.entries.is_empty() {
+    /// 归属校验内联在本判定：缓存 `agent_id` 与期望的选中 agent 不一致即视为
+    /// 陈旧，返回 0。展开态与宽度由调用方传入：未展开、宽度低于阈值或无条目
+    /// 时为 0；渲染与鼠标物理行换算共用本判定，保证两处对"折叠区是否占行"
+    /// 的答案一致。
+    pub(super) fn visible_line_count(
+        &self,
+        expected_agent_id: AgentId,
+        width: usize,
+        expanded: bool,
+    ) -> usize {
+        if self.agent_id != Some(expected_agent_id)
+            || !expanded
+            || width < AGENTS_ACTIVITY_FOLD_MIN_WIDTH
+            || self.entries.is_empty()
+        {
             return 0;
         }
         self.entries.len() + usize::from(self.more_count > 0)
@@ -385,9 +396,12 @@ impl AgentsPanelState {
         width: usize,
         now_ms: i64,
     ) -> bool {
-        let fold_line_count = self
-            .activity_fold
-            .visible_line_count(width, self.activity_fold_expanded);
+        // 折叠行只挂在当前 selection 名下：归属脱节的陈旧缓存不占物理行
+        // （与渲染侧共用 `visible_line_count` 的归属校验）。
+        let fold_line_count = self.selected_row().map_or(0, |row| {
+            self.activity_fold
+                .visible_line_count(row.agent_id, width, self.activity_fold_expanded)
+        });
         let page_start = self.page_start(page_size);
         let mut remaining = physical_offset;
         let mut logical_offset = None;

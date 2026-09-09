@@ -510,7 +510,9 @@ pub(super) fn agents_panel_column_header_line(
 /// 选中行下方的活动折叠区行：最多 3 条最近活动 + `+N more`。
 ///
 /// tertiary 色、不携带背景；仅在选中行上按 Tab 展开后渲染。缓存归属与行
-/// agent 脱节、宽度低于阈值或无条目时返回空。折叠区不改变主行的列布局。
+/// agent 脱节、宽度低于阈值或无条目时返回空（归属/可见性判定与鼠标物理行
+/// 换算共用 `AgentsPanelActivityFold::visible_line_count`）。折叠区不改变
+/// 主行的列布局。
 fn agents_panel_activity_fold_lines(
     fold: &AgentsPanelActivityFold,
     agent_id: AgentId,
@@ -518,7 +520,7 @@ fn agents_panel_activity_fold_lines(
     expanded: bool,
     palette: TerminalPalette,
 ) -> Vec<Line<'static>> {
-    if fold.agent_id != Some(agent_id) || fold.visible_line_count(width, expanded) == 0 {
+    if fold.visible_line_count(agent_id, width, expanded) == 0 {
         return Vec::new();
     }
     let style = tertiary_text_style(palette);

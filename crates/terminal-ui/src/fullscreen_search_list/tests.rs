@@ -1,3 +1,5 @@
+use std::cell::Cell;
+
 use crate::text_search::CaseInsensitiveQuery;
 
 use super::FullscreenSearchListState;
@@ -168,4 +170,73 @@ fn select_id_missing_keeps_selection() {
 
     assert!(!state.select_id("missing", |row| row.id));
     assert_eq!(state.selected_row().map(|row| row.id), Some("two"));
+}
+
+// ---- reorder_rows 幂等早退 ----
+
+#[test]
+fn reorder_rows_skips_the_filtered_rebuild_on_ordered_input() {
+    // 分组归一在每帧渲染前调用：行序已满足目标顺序时必须早退——不进入
+    // sort，也不重建过滤视图（matches_query 零调用），行序/过滤/selection
+    // 原样保持。
+    let mut state = FullscreenSearchListState::default();
+    // sample_rows 按 text 字母序（alpha < beta < beta extra）有序。
+    state.replace_rows(sample_rows(), row_text_matches, |row| row.id);
+    state.selected = 1;
+    state.sync_selected_id(|row| row.id);
+
+    let match_calls = Cell::new(0usize);
+    state.reorder_rows(
+        |a, b| a.text.cmp(b.text),
+        |row, query| {
+            match_calls.set(match_calls.get() + 1);
+            row_text_matches(row, query)
+        },
+        |row| row.id,
+    );
+
+    assert_eq!(
+        match_calls.get(),
+        0,
+        "ordered input must skip the filtered-view rebuild"
+    );
+    assert_eq!(state.filtered_indices_for_test(), &[0, 1, 2]);
+    assert_eq!(state.selected_row().map(|row| row.id), Some("two"));
+}
+
+#[test]
+fn reorder_rows_sorts_unordered_input_and_rebuilds_the_filter() {
+    let rows = vec![
+        Row {
+            id: "one",
+            text: "gamma",
+        },
+        Row {
+            id: "two",
+            text: "alpha",
+        },
+        Row {
+            id: "three",
+            text: "beta extra",
+        },
+    ];
+    let mut state = FullscreenSearchListState::default();
+    state.replace_rows(rows, row_text_matches, |row| row.id);
+    state.selected = 0;
+    state.sync_selected_id(|row| row.id);
+    // 搜索过滤后只剩 "beta extra" 一行。
+    state.start_search();
+    state.push_search_character('b', row_text_matches, |row| row.id);
+    assert_eq!(state.filtered_indices_for_test(), &[2]);
+
+    state.reorder_rows(|a, b| a.text.cmp(b.text), row_text_matches, |row| row.id);
+
+    // 无序输入走完整路径：重排行存储、重建过滤视图（每行匹配一次）、
+    // selection 以 stable id 重锚到迁移后的行。
+    assert_eq!(
+        state.rows().iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec!["two", "three", "one"],
+    );
+    assert_eq!(state.filtered_indices_for_test(), &[1]);
+    assert_eq!(state.selected_row().map(|row| row.id), Some("three"));
 }

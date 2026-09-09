@@ -1,7 +1,9 @@
 use crossterm::event::{KeyCode, MouseButton};
 use runtime_domain::agent::{AgentId, AgentProjectionStatus, AgentTranscriptItem};
 
-use crate::agents_panel::{agents_activity_fold_entries, agents_panel_list_page_size};
+use crate::agents_panel::{
+    AgentsPanelActivityFold, agents_activity_fold_entries, agents_panel_list_page_size,
+};
 use crate::test_helpers::{render_model_buffer, rendered_rows};
 
 use super::common::{
@@ -92,6 +94,36 @@ fn fold_tool_entries_strip_the_shell_transport_prefix() {
         vec!["cargo check", "Read Cargo.toml", "compilation output"]
     );
     assert_eq!(hidden, 0);
+}
+
+#[test]
+fn fold_entries_count_hidden_only_across_eligible_gaps() {
+    // 长 transcript 且 User 指令穿插：hidden 只数 eligible 条目，被折叠的
+    // 早期活动不因 ineligible 间隙计数错位。
+    let mut items = Vec::new();
+    for index in 0..7 {
+        items.push(AgentTranscriptItem::Tool {
+            title: format!("step {index}"),
+            content: String::new(),
+        });
+        items.push(AgentTranscriptItem::User {
+            content: format!("instruction {index}"),
+        });
+    }
+    let (entries, hidden) = agents_activity_fold_entries(&items);
+    assert_eq!(entries, vec!["step 4", "step 5", "step 6"]);
+    assert_eq!(hidden, 4);
+
+    // 恰好超出窗口一条：窗口内 3 条 + hidden 1。
+    let items: Vec<AgentTranscriptItem> = (0..4)
+        .map(|index| AgentTranscriptItem::Tool {
+            title: format!("run {index}"),
+            content: String::new(),
+        })
+        .collect();
+    let (entries, hidden) = agents_activity_fold_entries(&items);
+    assert_eq!(entries, vec!["run 1", "run 2", "run 3"]);
+    assert_eq!(hidden, 1);
 }
 
 #[test]
@@ -528,4 +560,50 @@ fn mouse_click_on_the_column_header_line_selects_nothing() {
         Some(AgentId::new(2)),
         "column header clicks must not select a row"
     );
+}
+
+#[test]
+fn mouse_mapping_ignores_fold_lines_of_a_stale_owner() {
+    // 归属脱节的折叠缓存（防御性场景）：缓存挂在 agent 3 名下而 selection 在
+    // agent 2。渲染侧不画该折叠区（归属校验），鼠标物理行换算必须给出同一
+    // 答案——不为归属脱节的缓存占物理行。
+    let mut model = ready_panel_model();
+    {
+        let panel = model.agents_panel.as_mut().expect("panel should be ready");
+        panel.activity_fold = AgentsPanelActivityFold {
+            agent_id: Some(AgentId::new(3)),
+            entries: vec!["stale step".to_string()],
+            more_count: 0,
+        };
+        panel.activity_fold_expanded = true;
+    }
+
+    // 渲染布局（折叠区不渲染）：列头(2) → "Running (1)"(3) → agent 2 行(4) →
+    // "Completed (1)"(5) → agent 3 行(6)。点击 agent 3 的数据行必须选中 agent 3。
+    let _ = model.handle_agents_panel_mouse_down(MouseButton::Left, 0, 6);
+    assert_eq!(
+        model
+            .agents_panel
+            .as_ref()
+            .unwrap()
+            .selected_row()
+            .map(|row| row.agent_id),
+        Some(AgentId::new(3)),
+        "a stale fold cache must not consume physical rows in mouse mapping"
+    );
+}
+
+#[test]
+fn fold_visible_line_count_validates_cache_ownership() {
+    // 归属校验内联进 visible_line_count：归属脱节即 0 行；归属匹配时行为
+    // 不变（条目行 + 可选 more 行），未展开 / 宽度低于阈值仍为 0。
+    let fold = AgentsPanelActivityFold {
+        agent_id: Some(AgentId::new(3)),
+        entries: vec!["step one".to_string(), "step two".to_string()],
+        more_count: 2,
+    };
+    assert_eq!(fold.visible_line_count(AgentId::new(2), 100, true), 0);
+    assert_eq!(fold.visible_line_count(AgentId::new(3), 100, true), 3);
+    assert_eq!(fold.visible_line_count(AgentId::new(3), 100, false), 0);
+    assert_eq!(fold.visible_line_count(AgentId::new(3), 59, true), 0);
 }

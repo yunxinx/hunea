@@ -130,12 +130,24 @@ where
     /// （无事件驱动），调用方在读取顺序敏感状态（分页、标签、物理行换算）前
     /// 调用本方法归一。排序会让既有 filtered 索引失效，故先捕获 selection id、
     /// 排序后统一恢复。
+    ///
+    /// 行序已满足目标顺序时幂等早退（不 sort、不重建过滤视图）：分组归一在
+    /// 每帧渲染前调用，无变化的帧不必重复全量 sort 与逐行大小写归一匹配。
+    /// 过滤索引无需重验——本类型的所有行/查询变更路径（replace/upsert/remove/
+    /// reorder 与搜索路径）都同步重建过滤视图，行序未变时既有索引仍指向
+    /// 正确的行。
     pub(crate) fn reorder_rows(
         &mut self,
-        order: impl FnMut(&Row, &Row) -> std::cmp::Ordering,
+        mut order: impl FnMut(&Row, &Row) -> std::cmp::Ordering,
         matches_query: impl Fn(&Row, &CaseInsensitiveQuery<'_>) -> bool,
         row_id: impl Fn(&Row) -> Id,
     ) {
+        if self
+            .rows
+            .is_sorted_by(|a, b| order(a, b) != std::cmp::Ordering::Greater)
+        {
+            return;
+        }
         let selected_id = self
             .selected_id
             .clone()

@@ -147,13 +147,43 @@ const AGENTS_ACTIVITY_FOLD_ENTRY_CACHE_WIDTH: usize = 200;
 /// 折叠区条目提取：transcript 尾部的 tool/assistant 条目转单行摘要。
 ///
 /// User 条目是发起指令而非 agent 活动，不进入折叠区。返回（最近 entries,
-/// 被折叠的更早条数）。
+/// 被折叠的更早条数）。折叠区缓存在每次 selection 变化与任意 overview/view
+/// 更新上整体刷新，因此只物化尾部 `AGENTS_ACTIVITY_FOLD_ENTRY_COUNT` 条，
+/// 更早的 eligible 条目仅计数，不为注定折叠的早期条目付出分配。
 pub(super) fn agents_activity_fold_entries(items: &[AgentTranscriptItem]) -> (Vec<String>, usize) {
-    let eligible: Vec<String> = items.iter().filter_map(activity_fold_entry_text).collect();
-    let hidden = eligible
-        .len()
-        .saturating_sub(AGENTS_ACTIVITY_FOLD_ENTRY_COUNT);
-    (eligible[hidden..].to_vec(), hidden)
+    // 从最新条目向前取尾部窗口；窗口装满后更早的 eligible 条目只计数。
+    let mut entries: Vec<String> = Vec::new();
+    let mut hidden = 0usize;
+    for item in items.iter().rev() {
+        if !activity_fold_entry_is_eligible(item) {
+            continue;
+        }
+        if entries.len() < AGENTS_ACTIVITY_FOLD_ENTRY_COUNT {
+            // 判定与物化共享同一 eligibility 条件，Some 恒成立；仍以 Option
+            // 接住，两份逻辑将来脱节时宁可少一行也不 panic。
+            if let Some(text) = activity_fold_entry_text(item) {
+                entries.push(text);
+            }
+        } else {
+            hidden += 1;
+        }
+    }
+    entries.reverse();
+    (entries, hidden)
+}
+
+/// 折叠区条目的 eligibility 判定：与 `activity_fold_entry_text` 的 None 条件
+/// 一致，但零分配——尾部窗口提取先以它区分条目，只为最终入窗的条目物化。
+fn activity_fold_entry_is_eligible(item: &AgentTranscriptItem) -> bool {
+    match item {
+        AgentTranscriptItem::User { .. } => false,
+        AgentTranscriptItem::Tool { title, content } => {
+            // 剥传输前缀后的 title 非空，或 content 存在首个非空行。
+            !normalized_tool_entry_title(title).is_empty()
+                || first_non_empty_line(content).is_some()
+        }
+        AgentTranscriptItem::Assistant { content } => first_non_empty_line(content).is_some(),
+    }
 }
 
 /// 单条活动的单行摘要：tool 条目用剥传输前缀后的归一化 title（空 title 回退

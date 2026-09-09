@@ -7738,11 +7738,15 @@ mod tests {
         assert!(components.drain_child_agent_events().is_empty());
         assert_eq!(replay_port.append_attempts(), 2);
         assert!(!execution.is_finished());
-        // outcome append 失败时不交付 outcome document fact；已成功的 launch fact 仍保留。
+        // outcome append 失败时不交付 outcome document fact；已成功的 launch fact 仍保留，
+        // 失败同时发布全局重试计划（UI 侧兜底唤醒的驱动源）。
         let projection_events = components.drain_agent_projection_events();
         assert!(matches!(
             projection_events.as_slice(),
-            [AgentProjectionEvent::AgentLaunchFact { .. }]
+            [
+                AgentProjectionEvent::AgentLaunchFact { .. },
+                AgentProjectionEvent::AgentPersistRetryScheduled { .. }
+            ]
         ));
         let child_id = components
             .agent_orchestrator
@@ -7754,6 +7758,18 @@ mod tests {
             .agent_orchestrator
             .pending_outcome_for_test(child_id)
             .expect("failed outcome should retain the original fact for retry");
+        // 退避窗口内 drain 不再重试：terminal 事实继续 held，attempt 数不增长，
+        // 计划事件持续发布退避节奏。
+        assert!(components.drain_child_agent_events().is_empty());
+        assert_eq!(replay_port.append_attempts(), 2);
+        assert!(matches!(
+            components.drain_agent_projection_events().as_slice(),
+            [AgentProjectionEvent::AgentPersistRetryScheduled { .. }]
+        ));
+        // 退避到期（测试清零模拟）后重试成功，交付的是同一 frozen snapshot。
+        components
+            .agent_orchestrator
+            .clear_persist_retry_backoff_for_test(child_id);
         let terminal_events = components.drain_child_agent_events();
         assert_eq!(terminal_events.len(), 1);
         assert_eq!(replay_port.append_attempts(), 3);

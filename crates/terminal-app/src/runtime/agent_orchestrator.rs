@@ -47,6 +47,10 @@ const CHILD_COMPLETED_WITHOUT_REPORT_TEXT: &str = "Child Agent completed without
 const CHILD_CANCELLED_TEXT: &str = "Child Agent cancelled";
 /// 显式 stop 定格的 Cancelled 摘要；帮助等待方区分"被停止"与自然取消/失败。
 const CHILD_STOPPED_BY_REQUEST_TEXT: &str = "Child Agent stopped";
+/// outcome 持久化失败后的重试退避间隔：durable append 经同步 bridge 最长阻塞
+/// `SESSION_STORE_BRIDGE_WAIT`，不退避时"每次 drain 每个子 agent 各阻塞一次"会把
+/// UI 事件泵线程拖死（8-child batch 最坏 40s）；按固定节奏收敛为单次重试。
+const AGENT_OUTCOME_PERSIST_RETRY_INTERVAL_MS: i64 = 5_000;
 
 /// Child adapter 由 context effect 和 registry record 共同引用，但 runtime owner 始终唯一。
 /// effect inverse 成功后取走 boxed adapter；失败则原位保留，供同一 owner 重试。
@@ -195,6 +199,10 @@ struct ChildAgentRecord {
     terminal_outcome_seen: bool,
     outcome_persisted: bool,
     pending_outcome: Option<runtime_domain::agent::AgentOutcomeSnapshot>,
+    /// outcome 持久化失败后的重试退避时刻（unix ms）；之前的 persist pass 跳过该
+    /// record，避免会话存储持续故障时每次 drain 重复承担同步阻塞的 append 尝试。
+    /// 持久化成功即清零；实现侧字段，不属于持久化面。
+    persist_retry_not_before_ms: i64,
     terminal_status: Option<AgentProjectionStatus>,
     pending_terminal_event: Option<AgentEvent>,
     started_at_ms: i64,
@@ -243,6 +251,7 @@ impl ChildAgentRecord {
             terminal_outcome_seen: false,
             outcome_persisted: false,
             pending_outcome: None,
+            persist_retry_not_before_ms: 0,
             terminal_status: None,
             pending_terminal_event: None,
             started_at_ms: 0,
@@ -1495,11 +1504,17 @@ impl AgentOrchestrator {
     fn persist_terminal_outcomes(&mut self) {
         // terminal 事实一旦冻结即可持久化；authority 保留（settled）与清理收敛都不
         // 阻塞 durable fact 与报告回传，失败的清理由 settle pass 以同一 owner 重试。
+        let now_ms = runtime_domain::time::unix_timestamp_ms().unwrap_or(0);
         let outcome_ids = self
             .children
             .iter()
             .filter_map(|(agent_id, record)| {
-                (record.terminal_status.is_some() && !record.outcome_persisted).then_some(*agent_id)
+                // 退避 gate：失败登记的重试时刻未到则跳过，会话存储持续故障时不
+                // 让每次 drain（含 stop/session 切换的嵌套调用）重复承担阻塞尝试。
+                (record.terminal_status.is_some()
+                    && !record.outcome_persisted
+                    && now_ms >= record.persist_retry_not_before_ms)
+                    .then_some(*agent_id)
             })
             .collect::<Vec<_>>();
         for agent_id in outcome_ids {
@@ -1509,18 +1524,46 @@ impl AgentOrchestrator {
             let Some(snapshot) = record.pending_outcome.clone() else {
                 continue;
             };
-            if self
-                .append_replay_fact(TranscriptReplayItem::AgentOutcome(snapshot.clone()))
-                .is_ok()
-                && let Some(record) = self.children.get_mut(&agent_id)
-            {
-                record.outcome_persisted = true;
-                record.pending_outcome = None;
-                // 与 launch fact 同理：先持久化（或确认无需持久化）再交付 document 投影，
-                // 重试成功时交付的是同一 frozen snapshot。
-                self.projection_events
-                    .push(AgentProjectionEvent::AgentOutcomeFact { snapshot });
+            match self.append_replay_fact(TranscriptReplayItem::AgentOutcome(snapshot.clone())) {
+                Ok(()) => {
+                    if let Some(record) = self.children.get_mut(&agent_id) {
+                        record.outcome_persisted = true;
+                        record.pending_outcome = None;
+                        // 成功即清退避：后续 terminal 周期的首次尝试不被旧退避延迟。
+                        record.persist_retry_not_before_ms = 0;
+                        // 与 launch fact 同理：先持久化（或确认无需持久化）再交付 document 投影，
+                        // 重试成功时交付的是同一 frozen snapshot。
+                        self.projection_events
+                            .push(AgentProjectionEvent::AgentOutcomeFact { snapshot });
+                    }
+                }
+                Err(_) => {
+                    if let Some(record) = self.children.get_mut(&agent_id) {
+                        record.persist_retry_not_before_ms =
+                            now_ms + AGENT_OUTCOME_PERSIST_RETRY_INTERVAL_MS;
+                    }
+                }
             }
+        }
+        // 仍有待持久化 outcome 时发布全局重试计划：值取全部待持久化 record 的最早
+        // 重试时刻，UI 单一 deadline 以替换语义消费——过期登记被消费后，后续 pass
+        // 重新发布同一计划，兜底唤醒不因一次 wake 而丢失。无 pending snapshot 的
+        // record（持久化面为空）不参与计划，避免发布立即到期的空转唤醒。
+        if let Some(retry_not_before_ms) = self
+            .children
+            .values()
+            .filter(|record| {
+                record.terminal_status.is_some()
+                    && !record.outcome_persisted
+                    && record.pending_outcome.is_some()
+            })
+            .map(|record| record.persist_retry_not_before_ms)
+            .min()
+        {
+            self.projection_events
+                .push(AgentProjectionEvent::AgentPersistRetryScheduled {
+                    retry_not_before_ms,
+                });
         }
     }
 
@@ -2145,6 +2188,15 @@ impl AgentOrchestrator {
         self.children
             .get(&agent_id)
             .and_then(|record| record.pending_outcome.clone())
+    }
+
+    /// 测试用：清除指定 child 的 persist 退避，模拟退避窗口已流逝、下一次 drain
+    /// 即为到期重试。生产路径的重试节奏只由真实时钟驱动。
+    #[cfg(test)]
+    pub(super) fn clear_persist_retry_backoff_for_test(&mut self, agent_id: AgentId) {
+        if let Some(record) = self.children.get_mut(&agent_id) {
+            record.persist_retry_not_before_ms = 0;
+        }
     }
 
     #[cfg(test)]
@@ -3213,9 +3265,13 @@ fn delivery_safe_tool_content(content: &[RuntimeToolActivityContent]) -> String 
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+    use std::{
+        future::Future,
+        pin::Pin,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
     use runtime_domain::{
@@ -3837,6 +3893,424 @@ mod tests {
         assert_eq!(
             snapshot.summary.as_ref().map(AgentOutcomeSummary::as_str),
             Some("final researched answer")
+        );
+    }
+
+    /// 持有固定 session id 的 main runtime stub：让 `append_replay_fact` 走绑定的
+    /// session port（无 session capability 的 stub 会把持久化短路为"无需持久化"）。
+    struct SessionedMainRuntime {
+        session_id: session_store::SessionId,
+    }
+
+    impl AgentRuntime for SessionedMainRuntime {
+        fn dispatch(
+            &mut self,
+            _command: AgentCommand,
+        ) -> Result<AgentCommandReceipt, AgentRuntimeError> {
+            Ok(AgentCommandReceipt::Accepted)
+        }
+
+        fn drain_events(&mut self) -> Vec<AgentEvent> {
+            Vec::new()
+        }
+
+        fn shutdown(&mut self) -> Result<(), AgentRuntimeError> {
+            Ok(())
+        }
+    }
+
+    impl AgentRuntimePort for SessionedMainRuntime {
+        fn activate(&mut self, _grants: AgentRuntimeActivationGrants) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn suspend(&mut self) -> Result<(), AgentRuntimeError> {
+            Ok(())
+        }
+
+        fn activity(&self) -> AgentRuntimeActivity {
+            AgentRuntimeActivity::Idle
+        }
+
+        fn session(&self) -> Option<&dyn AgentSessionCapability> {
+            Some(self)
+        }
+
+        fn session_mut(&mut self) -> Option<&mut dyn AgentSessionCapability> {
+            Some(self)
+        }
+
+        fn has_pending_work(&self) -> bool {
+            false
+        }
+    }
+
+    impl AgentSessionCapability for SessionedMainRuntime {
+        fn snapshot(&self) -> crate::runtime::agent::AgentSessionSnapshot {
+            crate::runtime::agent::AgentSessionSnapshot {
+                session_id: Some(self.session_id.clone()),
+                is_history_empty: false,
+            }
+        }
+
+        fn truncate_after_user_turns(
+            &mut self,
+            _retained_user_turns: usize,
+        ) -> Result<Option<(session_store::SessionId, String)>, String> {
+            Ok(None)
+        }
+
+        fn context_budget_snapshot(&self) -> crate::runtime::agent::AgentContextBudgetSnapshot {
+            crate::runtime::agent::AgentContextBudgetSnapshot {
+                items: Arc::from([]),
+                prompt_prelude: None,
+                upstream_context_tokens: None,
+                tool_definitions: Vec::new(),
+            }
+        }
+
+        fn update_empty_session_configuration(
+            &mut self,
+            _prompt_assembly: crate::runtime::prompt_assembly::PromptAssemblySessionSnapshot,
+            _session_workspace_tools: tool_runtime::ToolExecutorRegistry,
+        ) -> crate::runtime::agent::AgentEmptySessionConfigurationOutcome {
+            crate::runtime::agent::AgentEmptySessionConfigurationOutcome::DeferredToNextSession
+        }
+
+        fn restore_session(
+            &mut self,
+            _restore: crate::runtime::agent::AgentSessionRestore,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// 可控失败的 replay session port：`append_transcript_replay` 前 `fail_attempts`
+    /// 次返回 closed 失败、之后成功；记录尝试次数供退避节奏断言。orchestrator 的
+    /// persist 路径只触碰该能力面，其余方法统一返回 closed 错误。
+    struct FlakyReplayAppendPort {
+        fail_attempts: usize,
+        append_attempts: AtomicUsize,
+    }
+
+    impl FlakyReplayAppendPort {
+        fn new(fail_attempts: usize) -> Self {
+            Self {
+                fail_attempts,
+                append_attempts: AtomicUsize::new(0),
+            }
+        }
+
+        fn append_attempt_count(&self) -> usize {
+            self.append_attempts.load(Ordering::SeqCst)
+        }
+    }
+
+    fn closed_store_failure() -> session_store::SessionStoreError {
+        session_store::SessionStoreError::ConfigurationError {
+            message: "PRIVATE_TEST_REPLAY_APPEND_FAILURE".to_string(),
+        }
+    }
+
+    impl session_store::SessionLifecycleStore for FlakyReplayAppendPort {
+        fn create_session<'a>(
+            &'a self,
+            _header: session_store::SessionHeader,
+        ) -> Pin<
+            Box<
+                dyn Future<
+                        Output = Result<session_store::SessionId, session_store::SessionStoreError>,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async { Err(closed_store_failure()) })
+        }
+
+        fn append<'a>(
+            &'a self,
+            _session_id: &'a session_store::SessionId,
+            _item: provider_protocol::ConversationItem,
+        ) -> Pin<
+            Box<dyn Future<Output = Result<String, session_store::SessionStoreError>> + Send + 'a>,
+        > {
+            Box::pin(async { Err(closed_store_failure()) })
+        }
+
+        fn append_many<'a>(
+            &'a self,
+            _session_id: &'a session_store::SessionId,
+            _items: Vec<provider_protocol::ConversationItem>,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<Vec<String>, session_store::SessionStoreError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async { Err(closed_store_failure()) })
+        }
+
+        fn append_config_change<'a>(
+            &'a self,
+            _session_id: &'a session_store::SessionId,
+            _snapshot: session_store::ConfigSnapshot,
+        ) -> Pin<Box<dyn Future<Output = Result<(), session_store::SessionStoreError>> + Send + 'a>>
+        {
+            Box::pin(async { Err(closed_store_failure()) })
+        }
+
+        fn append_transcript_replay<'a>(
+            &'a self,
+            _session_id: &'a session_store::SessionId,
+            _item: runtime_domain::session::TranscriptReplayItem,
+        ) -> Pin<
+            Box<dyn Future<Output = Result<String, session_store::SessionStoreError>> + Send + 'a>,
+        > {
+            let attempt = self.append_attempts.fetch_add(1, Ordering::SeqCst);
+            if attempt < self.fail_attempts {
+                return Box::pin(async { Err(closed_store_failure()) });
+            }
+            Box::pin(async move { Ok(format!("replay-entry-{attempt}")) })
+        }
+
+        fn set_leaf<'a>(
+            &'a self,
+            _session_id: &'a session_store::SessionId,
+            _leaf_id: Option<&'a str>,
+        ) -> Pin<Box<dyn Future<Output = Result<(), session_store::SessionStoreError>> + Send + 'a>>
+        {
+            Box::pin(async { Err(closed_store_failure()) })
+        }
+
+        fn resolve<'a>(
+            &'a self,
+            _session_id: &'a session_store::SessionId,
+            _leaf_id: Option<&'a str>,
+        ) -> Pin<
+            Box<
+                dyn Future<
+                        Output = Result<
+                            Vec<provider_protocol::ConversationItem>,
+                            session_store::SessionStoreError,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async { Err(closed_store_failure()) })
+        }
+
+        fn load_session<'a>(
+            &'a self,
+            _session_id: &'a session_store::SessionId,
+            _leaf_id: Option<&'a str>,
+        ) -> Pin<
+            Box<
+                dyn Future<
+                        Output = Result<
+                            session_store::ResolvedSessionState,
+                            session_store::SessionStoreError,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async { Err(closed_store_failure()) })
+        }
+    }
+
+    impl session_store::SessionFlushStore for FlakyReplayAppendPort {
+        fn flush<'a>(
+            &'a self,
+            _session_id: &'a session_store::SessionId,
+        ) -> Pin<Box<dyn Future<Output = Result<(), session_store::SessionStoreError>> + Send + 'a>>
+        {
+            Box::pin(async { Err(closed_store_failure()) })
+        }
+
+        fn flush_all<'a>(
+            &'a self,
+        ) -> Pin<Box<dyn Future<Output = Result<(), session_store::SessionStoreError>> + Send + 'a>>
+        {
+            Box::pin(async { Err(closed_store_failure()) })
+        }
+    }
+
+    /// 构造 main 持有 session、child 带 terminal event 的 orchestrator；`bind_session_port`
+    /// 后 persist pass 会真实经过可控失败的 port，而非无 session 时的"无需持久化"短路。
+    fn sessioned_orchestrator_with_settled_child(
+        replay_port: &Arc<FlakyReplayAppendPort>,
+    ) -> (AgentOrchestrator, AgentId) {
+        let agent_id = AgentId::new(2);
+        let turn_id = AgentTurnId::new(agent_id.get());
+        let target = RuntimeTarget::provider("local", "qwen3");
+        let mut orchestrator = AgentOrchestrator::new(
+            Box::new(SessionedMainRuntime {
+                session_id: session_store::SessionId::new(),
+            }),
+            None,
+            None,
+        );
+        let session_port: Arc<dyn SessionPort> = replay_port.clone();
+        orchestrator.bind_session_port(Some(session_port));
+        orchestrator.register_child_for_test(
+            agent_id,
+            AgentId::MAIN,
+            turn_id,
+            test_title("persist retry child"),
+            test_context("persist-retry-child"),
+            Box::new(StubMainRuntime {
+                events: vec![child_event(
+                    agent_id,
+                    turn_id,
+                    &target,
+                    finished_turn_event("durable answer"),
+                )],
+            }),
+        );
+        orchestrator.mark_child_target_for_test(agent_id, target);
+        (orchestrator, agent_id)
+    }
+
+    /// 从投影事件中取出全局 persist 重试计划时刻。
+    fn persist_retry_schedule(events: &[AgentProjectionEvent]) -> Option<i64> {
+        events.iter().find_map(|event| match event {
+            AgentProjectionEvent::AgentPersistRetryScheduled {
+                retry_not_before_ms,
+            } => Some(*retry_not_before_ms),
+            _ => None,
+        })
+    }
+
+    /// 覆盖 test child 的 persist 退避时刻，模拟"退避已到期"或"清零重来"。
+    fn override_persist_retry_not_before(
+        orchestrator: &mut AgentOrchestrator,
+        agent_id: AgentId,
+        value: i64,
+    ) {
+        let Some(record) = orchestrator.children.get_mut(&agent_id) else {
+            panic!("test child {agent_id:?} should be registered");
+        };
+        record.persist_retry_not_before_ms = value;
+    }
+
+    #[test]
+    fn outcome_persist_failure_backsoff_and_publishes_retry_schedule() {
+        // 首次 append 失败、之后成功：覆盖失败退避、gate 抑制、到点重试与成功清零。
+        let replay_port = Arc::new(FlakyReplayAppendPort::new(1));
+        let (mut orchestrator, agent_id) = sessioned_orchestrator_with_settled_child(&replay_port);
+
+        let unix_before = runtime_domain::time::unix_timestamp_ms().expect("test clock is sane");
+        let _ = orchestrator.drain_child_events();
+        let unix_after = runtime_domain::time::unix_timestamp_ms().expect("test clock is sane");
+
+        // 失败：durable-before-visible 保持——outcome fact 不交付，只发布重试计划。
+        assert_eq!(replay_port.append_attempt_count(), 1);
+        let events = orchestrator.drain_projection_events();
+        assert!(
+            outcome_facts(&events).is_empty(),
+            "persist failure must not deliver the outcome fact: {events:?}"
+        );
+        let retry_not_before_ms = persist_retry_schedule(&events)
+            .expect("persist failure must publish the retry schedule");
+        assert!(
+            retry_not_before_ms >= unix_before + AGENT_OUTCOME_PERSIST_RETRY_INTERVAL_MS
+                && retry_not_before_ms <= unix_after + AGENT_OUTCOME_PERSIST_RETRY_INTERVAL_MS,
+            "retry schedule {retry_not_before_ms} must back off one interval from the failure"
+        );
+
+        // 退避窗口内再次 drain：不重复承担 append 尝试；计划事件持续发布同一时刻。
+        let _ = orchestrator.drain_child_events();
+        assert_eq!(
+            replay_port.append_attempt_count(),
+            1,
+            "the backoff gate must suppress retries before the deadline"
+        );
+        let events = orchestrator.drain_projection_events();
+        assert_eq!(persist_retry_schedule(&events), Some(retry_not_before_ms));
+        assert!(outcome_facts(&events).is_empty());
+
+        // 回拨退避时刻模拟到点：重试成功 → outcome fact 交付、不再发布计划。
+        override_persist_retry_not_before(&mut orchestrator, agent_id, 0);
+        let _ = orchestrator.drain_child_events();
+        assert_eq!(replay_port.append_attempt_count(), 2);
+        let events = orchestrator.drain_projection_events();
+        assert_eq!(
+            outcome_facts(&events).len(),
+            1,
+            "retry success must deliver the frozen outcome fact: {events:?}"
+        );
+        assert!(
+            persist_retry_schedule(&events).is_none(),
+            "a converged outcome must not publish a retry schedule"
+        );
+
+        // 成功后无待持久化 outcome：后续 drain 完全静默。
+        let _ = orchestrator.drain_child_events();
+        assert!(orchestrator.drain_projection_events().is_empty());
+    }
+
+    #[test]
+    fn stop_child_persist_attempt_is_bounded_by_the_backoff_gate() {
+        // 恒失败 port + launch-group child（投影行随 stop 保留）：
+        // `stop_child` 路径内 `persist_terminal_outcomes` 被嵌套调用两次
+        // （`dispose_child_ids` 一次、`stop_child` 收尾一次），退避 gate 保证单次
+        // stop 只承担一次同步 append 尝试。
+        let replay_port = Arc::new(FlakyReplayAppendPort::new(usize::MAX));
+        let (mut orchestrator, agent_id) = sessioned_orchestrator_with_settled_child(&replay_port);
+        orchestrator.mark_child_launch_group_for_test(agent_id, AgentLaunchGroupId::new(1));
+
+        let _ = orchestrator.drain_child_events();
+        assert_eq!(replay_port.append_attempt_count(), 1);
+
+        // 退避到期后 stop：第一次 persist pass 尝试并再次退避，第二次被 gate 拦截。
+        override_persist_retry_not_before(&mut orchestrator, agent_id, 0);
+        orchestrator
+            .stop_child(agent_id)
+            .expect("stop should converge");
+        assert_eq!(
+            replay_port.append_attempt_count(),
+            2,
+            "a single stop must only carry one blocking append attempt"
+        );
+
+        // launch-group 投影行保留且 outcome 未持久化：计划事件持续发布，fact 不交付。
+        let events = orchestrator.drain_projection_events();
+        assert!(persist_retry_schedule(&events).is_some());
+        assert!(outcome_facts(&events).is_empty());
+    }
+
+    #[test]
+    fn session_transition_persist_attempt_is_bounded_by_the_backoff_gate() {
+        // session 切换路径与 stop 同构：`dispose_children`（内含一次 persist pass）加
+        // transition 收尾的显式 pass。launch-group child 的未持久化 outcome 受
+        // removal 保护（durable-before-removal），record 随切换保留——显式 pass 若
+        // 无 gate 会对同一 record 立即重复承担阻塞尝试。
+        let replay_port = Arc::new(FlakyReplayAppendPort::new(usize::MAX));
+        let (mut orchestrator, agent_id) = sessioned_orchestrator_with_settled_child(&replay_port);
+        orchestrator.mark_child_launch_group_for_test(agent_id, AgentLaunchGroupId::new(1));
+
+        let _ = orchestrator.drain_child_events();
+        assert_eq!(replay_port.append_attempt_count(), 1);
+
+        override_persist_retry_not_before(&mut orchestrator, agent_id, 0);
+        orchestrator
+            .dispose_children_for_session_transition()
+            .expect("session transition should converge child cleanup");
+        assert_eq!(
+            replay_port.append_attempt_count(),
+            2,
+            "a single session transition must only carry one blocking append attempt"
+        );
+
+        // 未持久化的 launch-group 投影行随切换保留：后续 drain 仍按计划发布重试。
+        assert_eq!(orchestrator.child_count(), 1);
+        let _ = orchestrator.drain_projection_events();
+        let _ = orchestrator.drain_child_events();
+        assert!(
+            persist_retry_schedule(&orchestrator.drain_projection_events()).is_some(),
+            "the retained row must keep publishing its retry schedule"
         );
     }
 

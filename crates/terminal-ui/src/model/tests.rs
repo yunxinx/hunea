@@ -4066,6 +4066,117 @@ fn session_resume_and_runtime_stop_clear_settled_expiry_deadlines() {
     );
 }
 
+/// 构造指定全局重试时刻的 persist 重试计划事件。
+fn agent_persist_retry_event(retry_not_before_ms: i64) -> runtime_domain::session::RuntimeEvent {
+    runtime_domain::session::RuntimeEvent::AgentProjection(Box::new(
+        runtime_domain::agent::AgentProjectionEvent::AgentPersistRetryScheduled {
+            retry_not_before_ms,
+        },
+    ))
+}
+
+#[test]
+fn agent_persist_retry_event_registers_and_replaces_the_deadline() {
+    use crate::runtime::RuntimeEventApply;
+
+    let now_unix_ms = runtime_domain::time::unix_timestamp_ms().expect("test clock is sane");
+
+    // 未来 10s 的重试计划：deadline 落在换算窗口内，进入全局 timeout 聚合。
+    // 注册点会重新采样 unix 时钟，apply 期间的调度漂移会让 remaining 落在
+    // [10s - drift, 10s]——下界按 drift 收缩，负载下不 flake。
+    let before = Instant::now();
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.apply_runtime_event(agent_persist_retry_event(now_unix_ms + 10_000));
+    let unix_after = runtime_domain::time::unix_timestamp_ms().expect("test clock is sane");
+    let after = Instant::now();
+    let drift_ms = (unix_after - now_unix_ms).max(0) as u64;
+    let deadline = model
+        .agent_persist_retry
+        .deadline()
+        .expect("retry schedule should register the wake deadline");
+    assert!(
+        deadline >= before + Duration::from_millis(10_000u64.saturating_sub(drift_ms))
+            && deadline <= after + Duration::from_secs(10),
+        "deadline {deadline:?} must stay within the conversion window"
+    );
+    assert_eq!(model.next_timeout_deadline(), Some(deadline));
+
+    // 替换语义：新计划直接覆盖旧登记。事件值来自 orchestrator 对全部待持久化
+    // outcome 的全局最早时刻，UI 侧不做 min 合并（合并会让过期值遮蔽未来值）。
+    model.apply_runtime_event(agent_persist_retry_event(now_unix_ms + 3_000));
+    let earlier = model
+        .agent_persist_retry
+        .deadline()
+        .expect("an earlier schedule must replace the registration");
+    assert!(earlier < deadline);
+    model.apply_runtime_event(agent_persist_retry_event(now_unix_ms + 20_000));
+    let later = model
+        .agent_persist_retry
+        .deadline()
+        .expect("a later schedule must replace the registration too");
+    assert!(later > earlier);
+    assert_eq!(model.next_timeout_deadline(), Some(later));
+}
+
+#[test]
+fn agent_persist_retry_wake_consumes_the_registration_once() {
+    use crate::runtime::RuntimeEventApply;
+
+    // 计划时刻远早于当前（unix epoch 起点）：登记立即到期的唤醒。
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.apply_runtime_event(agent_persist_retry_event(0));
+    let expired = model
+        .agent_persist_retry
+        .deadline()
+        .expect("an exhausted schedule must still register an immediate deadline");
+    assert!(expired <= Instant::now());
+    assert_eq!(
+        model.timeout_event(Instant::now()),
+        Some(AppEvent::AgentPersistRetryTimeout)
+    );
+
+    // 消费后不再到点：防止重试未推进时事件泵以 0 超时空转。
+    let effect = model.update(AppEvent::AgentPersistRetryTimeout);
+    assert_eq!(effect, None);
+    assert!(model.agent_persist_retry.is_empty());
+    assert_eq!(model.timeout_event(Instant::now()), None);
+    assert_eq!(model.next_timeout_deadline(), None);
+}
+
+#[test]
+fn session_resume_and_runtime_stop_clear_persist_retry_deadlines() {
+    use crate::runtime::RuntimeEventApply;
+    use runtime_domain::session::{RuntimeEvent, RuntimeTarget};
+
+    let now_unix_ms = runtime_domain::time::unix_timestamp_ms().expect("test clock is sane");
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.apply_runtime_event(agent_persist_retry_event(now_unix_ms + 60_000));
+    assert!(!model.agent_persist_retry.is_empty());
+
+    model.apply_runtime_event(RuntimeEvent::SessionResumed {
+        payload: runtime_domain::session::SessionResumePayload {
+            session_id: "session-1".to_string(),
+            transcript: Vec::new(),
+            restored_model: None,
+        },
+    });
+    assert!(
+        model.agent_persist_retry.is_empty(),
+        "session transition must drop the previous session's retry schedule"
+    );
+
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.apply_runtime_event(agent_persist_retry_event(now_unix_ms + 60_000));
+    model.apply_runtime_event(RuntimeEvent::Stopped {
+        target: RuntimeTarget::provider("local", "qwen3"),
+        message: None,
+    });
+    assert!(
+        model.agent_persist_retry.is_empty(),
+        "runtime replacement must drop stale generation retry schedules"
+    );
+}
+
 fn file_picker_model(root: &Path) -> Model {
     let mut model = Model::new_with_options(
         StartupBannerOptions::default(),

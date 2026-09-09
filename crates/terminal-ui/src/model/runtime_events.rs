@@ -391,6 +391,19 @@ impl Model {
             .register(snapshot.agent_id, deadline);
     }
 
+    /// `register_agent_persist_retry_from_runtime` 登记一次 outcome 持久化失败后的
+    /// 重试唤醒；事件值是 orchestrator 全局的下次重试时刻（unix ms），替换式保存。
+    pub(crate) fn register_agent_persist_retry_from_runtime(&mut self, retry_not_before_ms: i64) {
+        let now_unix_ms = runtime_domain::time::unix_timestamp_ms().unwrap_or(0);
+        // 时钟偏差（重试时刻晚于当前）按未流逝处理；计划迟到则立即唤醒。
+        let remaining_ms = (retry_not_before_ms - now_unix_ms).max(0);
+        // 先采样 unix 时钟再采样 `Instant`：唤醒时刻不早于 drain 侧 gate 的判定
+        // 时刻（同一 unix 时钟），避免毫秒级采样漂移让唤醒早于 gate 放行。
+        let deadline =
+            Instant::now() + Duration::from_millis(u64::try_from(remaining_ms).unwrap_or(0));
+        self.agent_persist_retry.register(deadline);
+    }
+
     pub(crate) fn reset_runtime_final_body_divider_state(&mut self) {
         self.runtime_turn_tool_call_count = 0;
         self.runtime_final_body_divider_pending = false;

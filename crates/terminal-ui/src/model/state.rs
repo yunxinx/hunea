@@ -195,3 +195,47 @@ impl AgentSettledExpiryState {
         self.deadlines.is_empty()
     }
 }
+
+/// `AgentPersistRetryState` 收口 outcome 持久化失败后的重试唤醒登记。
+///
+/// 登记由 `AgentPersistRetryScheduled` 驱动：事件值是 orchestrator 对全部待持久化
+/// outcome 计算的全局最早重试时刻，因此这里以替换语义保存最新计划（不做 UI 侧
+/// min 合并——过期登记被消费后，同一计划会随下一次 drain 重新发布，合并反而让
+/// 过期值遮蔽未来值）。到点只负责唤醒 loop 迭代，重试本身由 loop 顶部的常规
+/// runtime drain 执行，TUI 不直接派发命令。会话切换或 runtime 失效时清除登记；
+/// 到点即消费，防止重试未推进时过期 deadline 让事件泵空转。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AgentPersistRetryState {
+    deadline: Option<Instant>,
+}
+
+impl AgentPersistRetryState {
+    pub(crate) fn register(&mut self, deadline: Instant) {
+        self.deadline = Some(deadline);
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.deadline = None;
+    }
+
+    /// 当前的重试唤醒时刻；空登记返回 `None`。
+    pub(crate) fn next_deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+
+    /// 唤醒已送达：消费登记。重试由 loop 顶部的常规 runtime drain 执行，drain 内的
+    /// 新失败会以新的全局时刻重新登记。
+    pub(crate) fn consume(&mut self) {
+        self.deadline = None;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.deadline.is_none()
+    }
+}

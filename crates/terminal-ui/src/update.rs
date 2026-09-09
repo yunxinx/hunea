@@ -160,6 +160,9 @@ pub enum AppEvent {
     },
     /// settled child 销毁唤醒到点；只消费登记，销毁由常规 runtime drain 执行。
     AgentSettledExpiryTimeout,
+    /// outcome 持久化重试唤醒到点；只消费登记，重试由常规 runtime drain 的
+    /// persist pass 执行，drain 内的新失败会以新的全局时刻重新登记。
+    AgentPersistRetryTimeout,
     StartupReadyTimeout,
 }
 
@@ -321,6 +324,12 @@ impl Model {
                 // （orchestrator 过期清扫）完成。
                 self.agent_settled_expiry
                     .consume_expired(std::time::Instant::now());
+                None
+            }
+            AppEvent::AgentPersistRetryTimeout => {
+                // 唤醒已送达：消费登记，重试由 loop 顶部的常规 runtime drain
+                // （orchestrator persist pass）完成；drain 内的新失败会重新登记。
+                self.agent_persist_retry.consume();
                 None
             }
             AppEvent::StartupReadyTimeout => {

@@ -841,6 +841,13 @@ pub enum AgentProjectionEvent {
     AgentOutcomeFact {
         snapshot: AgentOutcomeSnapshot,
     },
+    /// outcome 持久化尚未收敛时的下次重试计划：`retry_not_before_ms` 之前 orchestrator
+    /// 不会重试 durable append（失败后的退避 gate）。UI 侧据此登记兜底唤醒 deadline，
+    /// 保证空闲应用（没有用户输入驱动 drain）时重试仍会被触发；事件只携带重试时刻，
+    /// 不携带错误正文。
+    AgentPersistRetryScheduled {
+        retry_not_before_ms: i64,
+    },
 }
 
 fn first_non_empty_logical_content(content: &str) -> Option<&str> {

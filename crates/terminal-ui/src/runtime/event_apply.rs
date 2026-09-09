@@ -317,6 +317,8 @@ impl RuntimeEventApply for Model {
                 self.agents_panel_pill_navigation = None;
                 // 旧 generation 的 settled 销毁唤醒不再有对应 child，一并清除。
                 self.agent_settled_expiry.clear();
+                // 旧 generation 的持久化重试计划同样作废。
+                self.agent_persist_retry.clear();
                 if let Some(message) = message {
                     self.show_toast(ToastSeverity::Error, format!("Runtime stopped: {message}"));
                 }
@@ -332,6 +334,13 @@ impl RuntimeEventApply for Model {
                 AgentProjectionEvent::AgentOutcomeFact { snapshot } => {
                     self.flush_runtime_response_buffer();
                     self.append_agent_outcome_fact_from_runtime(snapshot);
+                }
+                AgentProjectionEvent::AgentPersistRetryScheduled {
+                    retry_not_before_ms,
+                } => {
+                    // 持久化重试的兜底唤醒登记：只登记 deadline，重试由 loop 顶部的
+                    // 常规 runtime drain（orchestrator persist pass）执行。
+                    self.register_agent_persist_retry_from_runtime(retry_not_before_ms);
                 }
                 AgentProjectionEvent::AgentsOverviewSnapshotLoaded {
                     request_id,
@@ -415,6 +424,9 @@ impl Model {
         self.agents_panel_pill_navigation = None;
         // 上一会话的 settled child 已随 session transition 清理，销毁唤醒一并作废。
         self.agent_settled_expiry.clear();
+        // 上一会话的持久化重试计划不跨会话存活；仍有待持久化 outcome 时下一次
+        // drain 会重新发布计划。
+        self.agent_persist_retry.clear();
         // 上下文占用描述的是切换前会话的历史;v1 不在 resume 路径恢复
         // 新会话的占用数据,因此切换后先隐藏,等待下一次请求完成再显示。
         self.set_last_context_usage(None);

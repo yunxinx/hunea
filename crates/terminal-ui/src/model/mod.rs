@@ -60,7 +60,10 @@ mod state;
 pub use metrics::RequestMetrics;
 pub use options::{CommandMenuMode, EscRewindMode, KeyboardEnhancementPreference, ModelOptions};
 use runtime_response::{RuntimeResponseBuffer, StreamedRuntimeReasoning};
-use state::{AgentSettledExpiryState, DocumentRuntimeState, NoticeState, SelectionRuntimeState};
+use state::{
+    AgentPersistRetryState, AgentSettledExpiryState, DocumentRuntimeState, NoticeState,
+    SelectionRuntimeState,
+};
 pub(crate) use state::{PendingReasoningToggleClick, SelectedModelState};
 
 /// `Model` 表示交互式 TUI 应用的状态。
@@ -119,6 +122,9 @@ pub struct Model {
     /// settled child 自动销毁的唤醒登记（`AgentOutcomeFact` 驱动）；
     /// 到点唤醒 loop 迭代，销毁由 runtime drain 的过期清扫执行。
     pub(super) agent_settled_expiry: AgentSettledExpiryState,
+    /// outcome 持久化失败后的重试唤醒登记（`AgentPersistRetryScheduled` 驱动）；
+    /// 到点唤醒 loop 迭代，重试由 runtime drain 的 persist pass 执行。
+    pub(super) agent_persist_retry: AgentPersistRetryState,
     pub(super) prompt_assembly: PromptAssemblyManagerSnapshot,
     pub(super) prompt_overlay: Option<crate::prompt_overlay::PromptOverlayState>,
     pub(super) next_session_load_request_id: u64,
@@ -300,6 +306,7 @@ impl Model {
             pending_agent_view_stop_requests: Vec::new(),
             pending_agent_view_observe_requests: Vec::new(),
             agent_settled_expiry: AgentSettledExpiryState::default(),
+            agent_persist_retry: AgentPersistRetryState::default(),
             prompt_assembly,
             prompt_overlay: None,
             next_session_load_request_id: 1,
@@ -480,6 +487,7 @@ impl Model {
             self.selection_runtime.auto_scroll_deadline,
             self.toast_timeout_deadline(),
             self.agent_settled_expiry.next_deadline(),
+            self.agent_persist_retry.next_deadline(),
         ]
         .into_iter()
         .flatten()
@@ -736,6 +744,15 @@ impl Model {
             && now >= deadline
         {
             return Some(super::AppEvent::AgentSettledExpiryTimeout);
+        }
+
+        // persist 重试唤醒到点即消费登记：重试由 loop 顶部的常规 runtime drain
+        // （orchestrator 的 persist pass）执行；drain 内的新失败会以新的全局时刻
+        // 重新登记，这里不清会让事件泵以 0 超时空转。
+        if let Some(deadline) = self.agent_persist_retry.next_deadline()
+            && now >= deadline
+        {
+            return Some(super::AppEvent::AgentPersistRetryTimeout);
         }
 
         None

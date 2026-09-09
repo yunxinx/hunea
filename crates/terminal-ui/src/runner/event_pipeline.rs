@@ -334,4 +334,41 @@ mod tests {
         );
         assert_eq!(loop_wait_plan(&model, Instant::now()), LoopWaitPlan::Block);
     }
+
+    #[test]
+    fn expired_agent_persist_retry_wakes_the_wait_plan_without_render() {
+        use crate::runtime::RuntimeEventApply;
+        use runtime_domain::agent::AgentProjectionEvent;
+        use runtime_domain::session::RuntimeEvent;
+
+        // 重试计划远早于当前（unix epoch 起点）：登记立即到期的兜底唤醒。
+        let mut model = Model::new(StartupBannerOptions::default());
+        model.update(crate::AppEvent::StartupReadyTimeout);
+        model.apply_runtime_event(RuntimeEvent::AgentProjection(Box::new(
+            AgentProjectionEvent::AgentPersistRetryScheduled {
+                retry_not_before_ms: 0,
+            },
+        )));
+
+        // 到点唤醒以 0 超时进入 wait plan；重试由 loop 顶部的常规 runtime drain
+        // （orchestrator persist pass）执行，唤醒本身不强制 render。
+        assert_eq!(
+            loop_wait_plan(&model, Instant::now()),
+            LoopWaitPlan::Wait {
+                duration: Duration::ZERO,
+                render_on_timeout: false,
+            }
+        );
+
+        // timeout_event 在到点后交付唤醒事件，消费登记防止空转。
+        assert_eq!(
+            model.timeout_event(Instant::now()),
+            Some(crate::AppEvent::AgentPersistRetryTimeout)
+        );
+        assert_eq!(
+            model.update(crate::AppEvent::AgentPersistRetryTimeout),
+            None
+        );
+        assert_eq!(loop_wait_plan(&model, Instant::now()), LoopWaitPlan::Block);
+    }
 }

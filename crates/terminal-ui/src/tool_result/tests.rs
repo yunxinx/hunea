@@ -2,6 +2,7 @@ use ratatui::style::Modifier;
 
 use runtime_domain::session::RuntimeToolKind;
 
+use super::approval::PRETTY_JSON_RESULT_MAX_BYTES;
 use super::*;
 use crate::{
     styled_text::line_to_plain_text,
@@ -184,6 +185,55 @@ fn terminal_default_json_result_prettifies_without_foreground_colors() {
             .skip(1)
             .all(|span| span.style.fg.is_none())),
         "terminal default palette must not force syntect foreground colors: {lines:?}"
+    );
+}
+
+#[test]
+fn oversized_json_tool_result_falls_back_to_plain_rendering() {
+    let palette = default_palette();
+    // 超过 pretty 门限的单行合法 JSON：不做 pretty 重排也不走 syntect 高亮，
+    // 按原文折行渲染，避免 resize 热路径上的全量 parse + pretty + 高亮代价。
+    let padding = "a".repeat(PRETTY_JSON_RESULT_MAX_BYTES);
+    let oversized = format!(r#"{{"pad":"{padding}"}}"#);
+    let item = ToolResultItem::new(oversized.as_str(), ToolResultKind::Ran);
+    let lines = item.render_lines(80, palette);
+
+    // plain 回退保留原始紧凑文本（key 与 value 之间没有 pretty 空格）。
+    assert!(
+        lines
+            .iter()
+            .any(|line| line_to_plain_text(line).contains(r#""pad":"a"#)),
+        "oversized JSON should render the raw compact text, first lines: {:?}",
+        &lines[..lines.len().min(2)]
+    );
+    // 未进入 JSON 高亮路径：内容 span 不携带前景色。
+    assert!(
+        lines.iter().all(|line| line
+            .spans
+            .iter()
+            .skip(1)
+            .all(|span| span.style.fg.is_none())),
+        "oversized JSON must fall back to plain rendering, first lines: {:?}",
+        &lines[..lines.len().min(2)]
+    );
+}
+
+#[test]
+fn json_tool_result_at_pretty_byte_limit_still_prettifies() {
+    let palette = default_palette();
+    // 恰好压线（trim 后字节数等于门限）的紧凑 JSON 仍走 pretty 重排。
+    let padding = "a".repeat(PRETTY_JSON_RESULT_MAX_BYTES - r#"{"pad":""}"#.len());
+    let at_limit = format!(r#"{{"pad":"{padding}"}}"#);
+    assert_eq!(at_limit.len(), PRETTY_JSON_RESULT_MAX_BYTES);
+    let item = ToolResultItem::new(at_limit.as_str(), ToolResultKind::Ran);
+    let lines = item.render_lines(80, palette);
+
+    assert!(
+        lines
+            .iter()
+            .any(|line| line_to_plain_text(line).contains(r#""pad": "a"#)),
+        "at-limit JSON should still prettify, first lines: {:?}",
+        &lines[..lines.len().min(2)]
     );
 }
 

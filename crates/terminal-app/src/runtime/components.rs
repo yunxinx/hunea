@@ -7165,26 +7165,19 @@ mod tests {
         assert_eq!(restored_outcome, projected_outcome);
         assert_eq!(restored_outcome.outcome, AgentOutcome::Cancelled);
 
-        // 被回收的 group 不产生成功 completion；等待中的 tool 调用只在 runtime 收敛时
-        // 收到 closed failure。shutdown 顺序先 dispose root context（scope cancellation），
-        // 再释放 group waiter，scoped wrapper 的 biased select 确定性地交付自身的
-        // closed 文案——两种路径都不携带任何 raw 内容。
-        let mut execution = execution;
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), &mut execution)
-                .await
-                .is_err(),
-            "session disposal must not deliver a success completion for the disposed group"
-        );
-        components.shutdown().expect("runtime should shut down");
+        // 被回收的 group 不产生成功 completion；session 切换当场以 closed failure
+        // 结算等待中的 tool 调用（与 suspend / shutdown 的 fail-closed 语义对齐），
+        // 不再依赖 shutdown 兜底，也不携带任何 raw 内容。
+        let execution = execution;
         let tool_result = execution
             .await
-            .expect("runtime shutdown should release the pending spawn tool call");
+            .expect("session transition should fail the pending spawn tool call closed");
         assert_eq!(tool_result.outcome(), ToolResultOutcome::Error);
         assert_eq!(
             tool_result.text_content(),
-            "Agent-scoped tool capability is unavailable"
+            "spawn_agents is unavailable in this Agent context"
         );
+        components.shutdown().expect("runtime should shut down");
     }
 
     #[tokio::test]
